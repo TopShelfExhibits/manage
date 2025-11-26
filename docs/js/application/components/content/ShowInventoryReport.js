@@ -318,10 +318,16 @@ export const ShowInventoryReport = {
 
         // Calculate remaining quantity for a row
         calculateRemaining(row) {
-            if (!row || row.available === null || row.available === undefined) {
+            if (!row) {
                 return null;
             }
             
+            let available = 0;
+            //if row.available is a number, then use it directly
+            if (typeof row.available === 'number') {
+                available = row.available;
+            }
+
             const totalUsed = Object.values(row.shows || {}).reduce(
                 (sum, qty) => sum + (qty || 0), 
                 0
