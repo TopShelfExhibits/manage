@@ -705,23 +705,46 @@ export const TableComponent = {
             this.handleStickyHeaders = () => {
                 const thead = this.$el.querySelector('thead');
                 if (!thead) return;
-                
+
                 const table = this.$el.querySelector('table');
                 if (!table) return;
-                
+
                 // Get CSS variable values
                 const computedStyle = getComputedStyle(document.documentElement);
                 const navbarHeight = parseInt(computedStyle.getPropertyValue('--navbar-height')) || 0;
                 const stickyOffset = navbarHeight;
-                
+
                 // Get positions
                 const tableRect = table.getBoundingClientRect();
                 const theadRect = thead.getBoundingClientRect();
-                
+
+                // Find the closest .container ancestor
+                let containerEl = table.closest('.container');
+                if (!containerEl) {
+                    // Fallback: try parentNode chain for .container
+                    let parent = table.parentNode;
+                    while (parent && parent !== document.body) {
+                        if (parent.classList && parent.classList.contains('container')) {
+                            containerEl = parent;
+                            break;
+                        }
+                        parent = parent.parentNode;
+                    }
+                }
+
                 // Calculate if header should stick
-                const shouldStick = tableRect.top <= stickyOffset && 
+                let shouldStick = tableRect.top <= stickyOffset && 
                                    tableRect.bottom > stickyOffset + theadRect.height;
-                
+
+                // Additional check: hide sticky header if closer than twice its height from bottom of container
+                if (shouldStick && containerEl) {
+                    const containerRect = containerEl.getBoundingClientRect();
+                    const distanceFromBottom = containerRect.bottom - (stickyOffset + theadRect.height);
+                    if (distanceFromBottom < 2 * theadRect.height) {
+                        shouldStick = false;
+                    }
+                }
+
                 if (shouldStick && !this.stickyHeaderClone) {
                     // Create and position the clone
                     this.stickyHeaderClone = thead.cloneNode(true);
