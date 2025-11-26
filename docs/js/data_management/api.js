@@ -708,6 +708,17 @@ class Requests_uncached {
             return null;
         }
     }
+
+    /**
+     * Get full item description from inventory
+     * @param {Object} deps - Dependency decorator for tracking calls
+     * @param {string} itemId - The item identifier
+     * @returns {Promise<string>} Full item description
+     */
+    static async getItemDescription(deps, itemId) {
+        return await deps.call(InventoryUtils.getItemDescription, itemId);
+    }
+
 }
 
 /**

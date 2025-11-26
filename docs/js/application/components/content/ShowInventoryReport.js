@@ -34,6 +34,7 @@ export const ShowInventoryReport = {
                     width: 1,
                 },
                 { key: 'itemId', label: 'Item#' },
+                { key: 'description', label: 'Item Description', details: true },
                 { key: 'available', label: 'Inv Qty.' },
             ];
             
@@ -290,6 +291,17 @@ export const ShowInventoryReport = {
                     null, // Store in AppData, not a column
                     false,
                     Priority.BACKGROUND // Images are visual enhancements, lowest priority
+                ),
+                // get item description
+                createAnalysisConfig(
+                    Requests.getItemDescription,
+                    'description',
+                    'Loading item descriptions...',
+                    ['itemId'],
+                    [],
+                    'description', // Store in description column
+                    false,
+                    Priority.BACKGROUND // Descriptions are visual enhancements, lowest priority
                 )
             ];
             
@@ -357,6 +369,7 @@ export const ShowInventoryReport = {
                 :search-term="initialSearchTerm"
                 :hide-rows-on-search="false"
                 :readonly="true"
+                :allowDetails="true"
                 :is-loading="isLoading"
                 :is-analyzing="isAnalyzing"
                 :loading-message="loadingMessage"
