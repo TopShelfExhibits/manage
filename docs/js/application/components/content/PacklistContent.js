@@ -64,8 +64,7 @@ export const PacklistMenuComponent = {
                     
                     items.push(
                         { label: 'Create Show Packlist', action: 'createNewPacklist' },
-                        { label: 'Create Custom Packlist', action: 'createCustomPacklist' },
-                        { label: 'Refresh', action: 'refresh' }
+                        { label: 'Create Custom Packlist', action: 'createCustomPacklist' }
                         // { label: 'Help', action: 'help' } // Placeholder - not yet implemented
                     );
                     return items;
@@ -96,13 +95,6 @@ export const PacklistMenuComponent = {
                     break;
                 case 'duplicatePacklist':
                     this.openDuplicatePacklistModal();
-                    break;
-                case 'refresh':
-                    if (this.refreshCallback) {
-                        this.refreshCallback();
-                    } else {
-                        this.$modal.alert('Refreshing packlist data...', 'Info');
-                    }
                     break;
                 case 'removeLock':
                     await this.handleRemoveLock();

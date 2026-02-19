@@ -709,12 +709,16 @@ export const InventoryTableComponent = {
             // Only use the store's save method if this is called from the on-save event
             if (this.inventoryTableStore) {
                 console.log('[InventoryTableComponent] Saving data:', JSON.parse(JSON.stringify(this.inventoryTableStore.data)));
-                await this.inventoryTableStore.save('Saving inventory...');            }
+                await this.inventoryTableStore.save('Saving inventory...');
+            }
         },
 
-        handleCategoriesClick() {
+        handleReportsClick() {
             if (this.appContext?.navigateToPath) {
-                this.appContext.navigateToPath('inventory/categories');
+                const path = this.tabTitle 
+                    ? NavigationRegistry.buildPath('inventory/reports', { itemCategoryFilter: this.tabTitle })
+                    : 'inventory/reports';
+                this.appContext.navigateToPath(path);
             }
         }
     },
@@ -750,7 +754,10 @@ export const InventoryTableComponent = {
                 @on-save="handleSave"
             >
                 <template #header-area>
-                    <button @click="handleCategoriesClick" class="purple">Categories</button>
+                    <div class="button-bar">
+                        <button @click="appContext.navigateToPath('inventory/categories')" class="purple">Categories</button>
+                        <button @click="handleReportsClick" class="purple">Reports</button>
+                    </div>
                 </template>
                 <template #default="{ row, column, rowIndex, cellRowIndex, cellColIndex }">
                     <ItemImageComponent 

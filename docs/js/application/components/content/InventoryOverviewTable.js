@@ -123,14 +123,6 @@ export const InventoryOverviewTableComponent = {
             // No save functionality for overview table
             this.$modal.alert('This overview table is read-only. No changes to save.', 'Info');
         },
-        handleCategoryClick(tabName) {
-            // Navigate to the specific category view
-            const categoryName = tabName.toLowerCase();
-            this.$emit('navigate-to-path', `inventory/categories/${categoryName}`);
-        },
-        handleCategoriesClick() {
-            this.$emit('navigate-to-path', 'inventory/categories');
-        },
         formatCategoryLabel(tabName) {
             if (!tabName) return '';
             const lower = tabName.toLowerCase();
@@ -161,12 +153,15 @@ export const InventoryOverviewTableComponent = {
                 @on-save="handleSave"
             >
                 <template #header-area>
-                    <button @click="handleCategoriesClick" class="purple">Categories</button>
+                    <div class="button-bar">
+                        <button @click="$emit('navigate-to-path', 'inventory/categories')" class="purple">Categories</button>
+                        <button @click="$emit('navigate-to-path', 'inventory/reports')" class="purple">Reports</button>
+                    </div>
                 </template>
                 <template #default="{ row, column, rowIndex, cellRowIndex, cellColIndex }">
                     <button 
                         v-if="column.key === 'tab'"
-                        @click="handleCategoryClick(row.tab)"
+                        @click="$emit('navigate-to-path', 'inventory/categories/' + row.tab.toLowerCase())"
                         class="card purple"
                     >
                         {{ formatCategoryLabel(row.tab) }}

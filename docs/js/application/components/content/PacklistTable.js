@@ -719,6 +719,12 @@ export const PacklistTable = {
                             this.onAddEmpty();
                         }
                         this.$emit('close-modal');
+                    },
+                    handleReportsClick() {
+                        const path = this.selectedCategory
+                            ? NavigationRegistry.buildPath('inventory/reports', { itemCategoryFilter: this.selectedCategory })
+                            : 'inventory/reports';
+                        this.$emit('navigate-to-path', path);
                     }
                 },
                 template: html`
@@ -748,6 +754,7 @@ export const PacklistTable = {
                                         {{ cat.title }}
                                     </option>
                                 </select>
+                                <button @click="handleReportsClick" class="purple">Reports</button>
                             </div>
                         </template>
                         <template #default="{ row, column }">
