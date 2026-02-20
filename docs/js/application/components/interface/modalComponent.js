@@ -67,7 +67,7 @@ export const ModalComponent = {
             <div :class="['modal', modalClass]">
                 <div class="modal-header">
                     <h3>{{ title }}</h3>
-                    <button class="close-button" @click="closeModal">×</button>
+                    <button class="close-button" @click="closeModal">🗙</button>
                 </div>
                 <div :class="['content', contentClass]">
                     <div v-if="formattedMessage" v-html="formattedMessage"></div>

@@ -167,9 +167,9 @@ Pack Lists in Web
 - [x] allow packlist text search and filtering
 - [x] Allow packlist item categorization and hiding, ex: select a whole set of hardware and categorize as "BeMatrix Hardware", then move that set to hidden row as a list.
 - [x] Allow categorized item finding, viewing (in row details), checking (integrate into analysis steps), and check/update (via inventor).
-- [ ] !!! allow new packlists from template
-- [ ] allow duplicate packlists from existing packlists (add to main packlist page, and as an action on a packlist)
-- [ ] add category filtering to packlist-details table
+- [x] Allow new packlists from template
+- [x] Allow duplicate packlists from existing packlists (add to main packlist page, and as an action on a packlist)
+- [x] add category filtering to packlist-details table
 - [ ] !!! cut and paste between packlist functionality
 - [ ] !!! automations interface, packlist rules
 - [ ] allow user to configure automations

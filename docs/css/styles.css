@@ -842,7 +842,7 @@ table:has(.dragging):not(:has(table .dragging))>tfoot>tr>.new-row-button:hover {
     background-color: var(--color-red);
 }
 table:has(.dragging):not(:has(table .dragging)) > tfoot > tr > .new-row-button::before {
-    content: "×";
+    content: "🗙";
     display: block;
     text-align: center;
     color: var(--color-text-inverted);

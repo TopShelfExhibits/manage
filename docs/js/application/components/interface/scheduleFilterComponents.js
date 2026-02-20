@@ -915,7 +915,7 @@ export const ScheduleAdvancedFilter = {
                     :disabled="textFilters.length === 1"
                     :title="textFilters.length === 1 ? 'At least one filter required' : 'Remove this filter'"
                 >
-                    ×
+                    🗙
                 </button>
             </div>
             

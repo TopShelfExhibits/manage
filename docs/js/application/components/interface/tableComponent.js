@@ -566,9 +566,15 @@ export const tableRowSelectionState = Vue.reactive({
         this.dragId = dragId;
         this.currentDropTarget = null;
         
-        // Set up global mouse up listener with proper binding
+        // Increment version to trigger reactivity for drag state change
+        this._version++;
+        
+        // Set up global mouse up and touch end listeners with proper binding
         this.handleGlobalMouseUp = this.handleGlobalMouseUp.bind(this);
+        this.handleGlobalTouchEnd = this.handleGlobalTouchEnd.bind(this);
         document.addEventListener('mouseup', this.handleGlobalMouseUp);
+        document.addEventListener('touchend', this.handleGlobalTouchEnd);
+        document.addEventListener('touchcancel', this.handleGlobalTouchEnd);
         return true;
     },
     
@@ -592,6 +598,19 @@ export const tableRowSelectionState = Vue.reactive({
     handleGlobalMouseUp(event) {
         if (!this.findingDropTargets) return;
         
+        
+        // Check if we have a valid drop target
+        if (this.dragTargetArray && this.currentDropTarget && this.currentDropTarget.type) {
+            const result = this.completeDrag(this.currentDropTarget);
+        } else {
+            // No valid drop target, cancel the drag
+            this.stopDrag();
+        }
+    },
+    
+    // Global touch end handler for drag operations
+    handleGlobalTouchEnd(event) {
+        if (!this.findingDropTargets) return;
         
         // Check if we have a valid drop target
         if (this.dragTargetArray && this.currentDropTarget && this.currentDropTarget.type) {
@@ -899,8 +918,13 @@ export const tableRowSelectionState = Vue.reactive({
         this.currentDropTarget = null;
         // Keep onDropOntoCallback registered between drags (managed by component lifecycle)
         
-        // Remove global mouse up listener
+        // Increment version to trigger reactivity for drag state change
+        this._version++;
+        
+        // Remove global mouse up and touch end listeners
         document.removeEventListener('mouseup', this.handleGlobalMouseUp);
+        document.removeEventListener('touchend', this.handleGlobalTouchEnd);
+        document.removeEventListener('touchcancel', this.handleGlobalTouchEnd);
     }
 });
 
@@ -1087,7 +1111,9 @@ export const TableComponent = {
                 hasMoved: false,
                 // Multi-selection state
                 isMultiSelecting: false,
-                lastHoveredRowIndex: null
+                lastHoveredRowIndex: null,
+                // Touch-specific state for table tracking
+                lastTouchTable: null // Track which table element finger was last over
             },
             dropTarget: {
                 type: null, // 'between-rows', 'header', 'footer'
@@ -1153,9 +1179,23 @@ export const TableComponent = {
                 });
             },
             deep: true
+        },
+        // Clear drop targets when drag ends (handles touch where mouseleave doesn't fire)
+        isDraggingGlobally(isActive, wasActive) {
+            if (wasActive && !isActive) {
+                // Drag just ended, clear any lingering drop target highlights
+                this.clearDropTarget();
+            }
         }
     },
     computed: {
+        // Watch for global drag state to clear drop targets when drag ends
+        // Access this computed property in template or via watcher to trigger reactivity
+        isDraggingGlobally() {
+            // Access _version to ensure reactivity
+            tableRowSelectionState._version;
+            return tableRowSelectionState.findingDropTargets;
+        },
         selectedRowCount() {
             // Access _version to create reactive dependency
             tableRowSelectionState._version;
@@ -2089,6 +2129,51 @@ export const TableComponent = {
             // Prevent text selection
             event.preventDefault();
         },
+        
+        handleDragHandleTouchStart(rowIndex, event) {
+            // Extract touch coordinates from the first touch point
+            const touch = event.touches[0];
+            if (!touch) return;
+            
+            // Ensure this is a drag handle
+            if (!event.target.classList.contains('row-drag-handle')) return;
+            
+            this.clickState.isMouseDown = true;
+            this.clickState.startRowIndex = rowIndex;
+            this.clickState.startTime = Date.now();
+            this.clickState.startX = touch.clientX;
+            this.clickState.startY = touch.clientY;
+            this.clickState.hasMoved = false;
+            
+            // Set up long click timer (800ms)
+            this.clickState.longClickTimer = setTimeout(() => {
+                if (this.clickState.isMouseDown && !this.clickState.hasMoved) {
+                    // Capture selection state before multiselection starts
+                    const routeKey = this.appContext?.currentPath?.split('?')[0];
+                    if (routeKey) {
+                        undoRegistry.capture(this.data, routeKey, { 
+                            type: 'multi-selection',
+                            selectionState: tableRowSelectionState
+                        });
+                    }
+                    
+                    // Long touch: add row to selection and enable multi-selection mode
+                    tableRowSelectionState.addRow(rowIndex, this.data, this.dragId);
+                    this.clickState.isMultiSelecting = true;
+                    this.clickState.lastHoveredRowIndex = rowIndex;
+                    this.clickState.longClickTimer = null;
+                }
+            }, 700);
+            
+            // Add global touch move and end listeners
+            document.addEventListener('touchmove', this.handleGlobalTouchMove);
+            document.addEventListener('touchend', this.handleGlobalTouchEnd);
+            document.addEventListener('touchcancel', this.handleGlobalTouchEnd);
+            
+            // Prevent text selection and default touch behavior
+            event.preventDefault();
+        },
+        
         handleGlobalMouseMove(event) {
             if (!this.clickState.isMouseDown) return;
             
@@ -2194,6 +2279,172 @@ export const TableComponent = {
             // Clean up
             this.resetClickState();
         },
+        
+        handleGlobalTouchMove(event) {
+            if (!this.clickState.isMouseDown) return;
+            
+            // Get the first touch point
+            const touch = event.touches[0];
+            if (!touch) return;
+            
+            const deltaX = Math.abs(touch.clientX - this.clickState.startX);
+            const deltaY = Math.abs(touch.clientY - this.clickState.startY);
+            const moveDistance = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
+
+            // If moved more than 8 pixels
+            if (moveDistance > 8 && !this.clickState.hasMoved) {
+                this.clickState.hasMoved = true;
+                
+                // Cancel long click timer
+                if (this.clickState.longClickTimer) {
+                    clearTimeout(this.clickState.longClickTimer);
+                    this.clickState.longClickTimer = null;
+                }
+                
+                // If not in multi-selection mode, handle normal drag logic
+                if (!this.clickState.isMultiSelecting) {
+                    // If dragged row is not in selection, replace entire selection with this row
+                    if (!tableRowSelectionState.hasRow(this.data, this.clickState.startRowIndex)) {
+                        // Capture selection state before clearing for immediate drag
+                        const routeKey = this.appContext?.currentPath?.split('?')[0];
+                        if (routeKey) {
+                            undoRegistry.capture(this.data, routeKey, { 
+                                type: 'drag-start-selection',
+                                selectionState: tableRowSelectionState
+                            });
+                        }
+                        
+                        tableRowSelectionState.clearAll();
+                        tableRowSelectionState.addRow(this.clickState.startRowIndex, this.data, this.dragId);
+                    }
+                    
+                    // Start drag if table is draggable and we have selections
+                    if (this.draggable && tableRowSelectionState.getTotalSelectionCount() > 0) {
+                        tableRowSelectionState.startDrag(this.data, this.dragId);
+                        this.unselectAllEditableCells();
+                    }
+                }
+            }
+            
+            // Dispatch synthetic mousemove event for cross-table drop detection
+            // This allows table @mousemove handlers to fire on whichever table is under the touch
+            if (tableRowSelectionState.findingDropTargets) {
+                const elementUnderTouch = document.elementFromPoint(touch.clientX, touch.clientY);
+                const currentTable = elementUnderTouch?.closest('.dynamic-table');
+                
+                // Detect table transitions and dispatch mouseleave/mouseenter
+                if (currentTable !== this.clickState.lastTouchTable) {
+                    // Dispatch mouseleave to the previous table
+                    if (this.clickState.lastTouchTable) {
+                        const leaveEvent = new MouseEvent('mouseleave', {
+                            clientX: touch.clientX,
+                            clientY: touch.clientY,
+                            bubbles: false,
+                            cancelable: true
+                        });
+                        this.clickState.lastTouchTable.dispatchEvent(leaveEvent);
+                    }
+                    
+                    // Dispatch mouseenter to the new table
+                    if (currentTable) {
+                        const enterEvent = new MouseEvent('mouseenter', {
+                            clientX: touch.clientX,
+                            clientY: touch.clientY,
+                            bubbles: false,
+                            cancelable: true
+                        });
+                        currentTable.dispatchEvent(enterEvent);
+                    }
+                    
+                    // Update tracked table
+                    this.clickState.lastTouchTable = currentTable;
+                }
+                
+                // Dispatch mousemove to current element
+                const syntheticEvent = new MouseEvent('mousemove', {
+                    clientX: touch.clientX,
+                    clientY: touch.clientY,
+                    bubbles: true,
+                    cancelable: true
+                });
+                elementUnderTouch?.dispatchEvent(syntheticEvent);
+            }
+            
+            // Handle multi-selection mode
+            if (this.clickState.isMultiSelecting && this.clickState.hasMoved) {
+                // Find the row index at current touch position
+                const currentRowIndex = this.getRowIndexAtPosition(touch.clientY);
+                
+                if (currentRowIndex !== null && currentRowIndex !== this.clickState.lastHoveredRowIndex) {
+                    // Update the selection range
+                    this.selectRowRange(this.clickState.startRowIndex, currentRowIndex);
+                    this.clickState.lastHoveredRowIndex = currentRowIndex;
+                }
+            }
+            
+            // Prevent scrolling while dragging
+            event.preventDefault();
+        },
+        
+        handleGlobalTouchEnd(event) {
+            if (!this.clickState.isMouseDown) return;
+            
+            // Clear local drop target after drag completion
+            this.clearDropTarget();
+
+            if (tableRowSelectionState.findingDropTargets) {
+                // Clean up and exit early - don't process click logic when dragging
+                this.resetClickState();
+                return;
+            }
+
+            // Get the touch point that ended
+            const touch = event.changedTouches[0];
+            if (!touch) {
+                this.resetClickState();
+                return;
+            }
+            
+            // Check if touch ended on the same drag handle that started the interaction
+            const targetHandle = document.elementFromPoint(touch.clientX, touch.clientY)?.closest('.row-drag-handle');
+            const startHandle = document.elementFromPoint(this.clickState.startX, this.clickState.startY);
+            
+            // Special case: if we were multi-selecting, preserve the selection and exit
+            if (this.clickState.isMultiSelecting) {
+                // Set global timestamp to prevent handleOutsideClick from clearing selection
+                tableRowSelectionState.lastMultiSelectEndTime = Date.now();
+                this.resetClickState();
+                return;
+            }
+
+            // Only process click logic if touch ended on the same handle (or close enough)
+            if (targetHandle && startHandle && targetHandle === startHandle) {
+                // Clear long click timer
+                if (this.clickState.longClickTimer) {
+                    clearTimeout(this.clickState.longClickTimer);
+                    this.clickState.longClickTimer = null;
+                }
+                
+                // Short tap logic (only if no movement occurred)
+                if (!this.clickState.hasMoved && !this.clickState.isMultiSelecting) {
+                    // Capture selection state before toggle
+                    const routeKey = this.appContext?.currentPath?.split('?')[0];
+                    if (routeKey) {
+                        undoRegistry.capture(this.data, routeKey, { 
+                            type: 'selection-toggle',
+                            selectionState: tableRowSelectionState
+                        });
+                    }
+                    
+                    // Toggle selection state of tapped row
+                    tableRowSelectionState.toggleRow(this.clickState.startRowIndex, this.data, this.dragId);
+                }
+            }
+            
+            // Clean up
+            this.resetClickState();
+        },
+        
         resetClickState() {
             if (this.clickState.longClickTimer) {
                 clearTimeout(this.clickState.longClickTimer);
@@ -2208,10 +2459,14 @@ export const TableComponent = {
             this.clickState.hasMoved = false;
             this.clickState.isMultiSelecting = false;
             this.clickState.lastHoveredRowIndex = null;
+            this.clickState.lastTouchTable = null;
             
-            // Remove global listeners
+            // Remove global listeners (both mouse and touch)
             document.removeEventListener('mousemove', this.handleGlobalMouseMove);
             document.removeEventListener('mouseup', this.handleGlobalMouseUp);
+            document.removeEventListener('touchmove', this.handleGlobalTouchMove);
+            document.removeEventListener('touchend', this.handleGlobalTouchEnd);
+            document.removeEventListener('touchcancel', this.handleGlobalTouchEnd);
         },
         handleTableMouseEnter() {
             this.isMouseInTable = true;
@@ -2459,6 +2714,30 @@ export const TableComponent = {
                 }
             }
         },
+        
+        handleTableTouchStart(event) {
+            // Treat touch start similar to mouse enter - indicates finger is in table
+            this.isMouseInTable = true;
+            this.mouseMoveCounter = 0;
+        },
+        
+        handleTableTouchEnd(event) {
+            // Don't clear drop targets if we're in the middle of a drag operation
+            // The global touch end handler will handle that
+            if (tableRowSelectionState.findingDropTargets) {
+                return;
+            }
+            
+            // Treat touch end similar to mouse leave - indicates finger left table
+            this.isMouseInTable = false;
+            // Always clear drop target when leaving table (if not dragging)
+            this.clearDropTarget();
+            tableRowSelectionState.clearDropTargetRegistration(this.data);
+            this.lastKnownMouseX = null;
+            this.lastKnownMouseY = null;
+            this.mouseMoveCounter = 0;
+        },
+        
         updateAllEditableCells() {
             // Set contenteditable text for all editable cells to match data (only on mount or new row)
             if (!Array.isArray(this.data)) return; // <-- guard against null/undefined
@@ -2697,12 +2976,15 @@ export const TableComponent = {
             @mouseenter="handleTableMouseEnter"
             @mouseleave="handleTableMouseLeave"
             @mousemove="handleTableMouseMove"
+            @touchstart="handleTableTouchStart"
+            @touchend="handleTableTouchEnd"
+            @touchcancel="handleTableTouchEnd"
         >
             <!-- Selection Action Bubble (outside table) -->
             <transition name="fade">
                 <div v-if="shouldShowSelectionBubble" :selectedCount="selectedRowCount" class="selection-action-bubble" :style="selectionBubbleStyle">
                     <button v-if="newRow && hasConsecutiveSelection" @click="handleAddRowAbove" class="button-symbol white" title="Add Row Above">+</button>
-                    <button @click="handleDeleteSelected" :class="['button-symbol', areAllSelectedMarkedForDeletion ? 'green' : 'red']" title="Delete Selected">×</button>
+                    <button @click="handleDeleteSelected" :class="['button-symbol', areAllSelectedMarkedForDeletion ? 'green' : 'red']" title="Delete Selected">🗙</button>
                     <button @click="handleMoreOptions" class="button-symbol blue" title="More Options">☰</button>
                     <button v-if="newRow && hasConsecutiveSelection" @click="handleAddRowBelow" class="button-symbol white" title="Add Row Below">+</button>
                     <slot
@@ -2740,7 +3022,7 @@ export const TableComponent = {
                             class="column-button"
                             title="Clear search"
                         >
-                            ×
+                            🗙
                         </button>
                     </div>
                     <button
@@ -2840,7 +3122,7 @@ export const TableComponent = {
                                         class="column-button"
                                         title="Hide this column"
                                     >
-                                        ×
+                                        🗙
                                     </button>
                                 </div>
                             </th>
@@ -2871,6 +3153,7 @@ export const TableComponent = {
                                     class="row-drag-handle"
                                     draggable="true"
                                     @mousedown="handleDragHandleMouseDown(idx, $event)"
+                                    @touchstart="handleDragHandleTouchStart(idx, $event)"
                                 ></td>
                                 <td 
                                     v-for="(column, colIndex) in mainTableColumns" 
@@ -2937,7 +3220,7 @@ export const TableComponent = {
                                         @click="toggleRowDetails(idx)"
                                         :class="['button-symbol', 'details-toggle', isRowExpanded(idx) ? 'expanded' : 'collapsed', hasDetailsSearchMatch(row) ? 'search-match' : '']"
                                     >
-                                        {{ isRowExpanded(idx) ? '×' : '›' }}
+                                        {{ isRowExpanded(idx) ? '🗙' : '›' }}
                                     </button>
                                 </td>
                             </tr>
@@ -3044,7 +3327,7 @@ export const TableComponent = {
                                     class="column-button"
                                     title="Hide this column"
                                 >
-                                    ×
+                                    🗙
                                 </button>
                             </div>
                         </th>
@@ -3072,7 +3355,7 @@ export const TableComponent = {
                     class="card"
                     title="Clear filter"
                 >
-                    × Clear filter
+                    🗙 Clear filter
                 </button>
                 
                 

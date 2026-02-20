@@ -204,7 +204,7 @@ export const CardsComponent = {
                             class="column-button"
                             title="Clear search"
                         >
-                            ×
+                            🗙
                         </button>
                     </div>
                     <button 
