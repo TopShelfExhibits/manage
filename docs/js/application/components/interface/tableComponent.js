@@ -1,4 +1,5 @@
 import { html, parseDate, LoadingBarComponent, NavigationRegistry, undoRegistry, setTableRowSelectionState } from '../../index.js';
+import { useSearch } from '../../utils/useSearch.js';
 
 // Global table row selection state - single source of truth for all selections
 export const tableRowSelectionState = Vue.reactive({
@@ -1050,12 +1051,26 @@ export const TableComponent = {
         }
     },
     emits: ['refresh', 'cell-edit', 'new-row', 'inner-table-dirty', 'show-hamburger-menu', 'search', 'drop-onto'],
+    setup(props, { emit }) {
+        // Initialize search composable
+        const search = useSearch({
+            formatValue: null, // Will be provided via this.formatCellValue in methods
+            syncWithUrl: props.syncSearchWithUrl,
+            navigationRegistry: NavigationRegistry,
+            containerPath: props.containerPath,
+            appContext: Vue.inject('appContext')
+        });
+
+        // Return search properties and methods to be available in component
+        return {
+            search
+        };
+    },
     data() {
         return {
             dirtyCells: {},
             allowSaveEvent: false,
             nestedTableDirtyCells: {}, // Track dirty state for nested tables by [row][col]
-            searchValue: '', // Will be initialized from URL in mounted if syncSearchWithUrl
             sortColumn: null, // Current sort column key
             sortDirection: 'asc', // Current sort direction: 'asc' or 'desc'
             expandedRows: new Set(), // Track which rows are expanded for details
@@ -1089,26 +1104,6 @@ export const TableComponent = {
         };
     },
     watch: {
-        // Watch for URL parameter changes when syncSearchWithUrl is enabled
-        'appContext.currentPath': {
-            handler(newPath, oldPath) {
-                if (!this.syncSearchWithUrl || !oldPath) return;
-                
-                const newParams = NavigationRegistry.getParametersForContainer(
-                    this.containerPath,
-                    newPath
-                );
-                const oldParams = NavigationRegistry.getParametersForContainer(
-                    this.containerPath,
-                    oldPath
-                );
-                
-                // Only update if searchTerm parameter changed
-                if (newParams?.searchTerm !== oldParams?.searchTerm) {
-                    this.searchValue = newParams?.searchTerm || '';
-                }
-            }
-        },
 
         // Watch for changes to originalData prop and recompare dirty state
         originalData: {
@@ -1277,8 +1272,8 @@ export const TableComponent = {
             };
         },
         activeSearchValue() {
-            // Use parentSearchValue if provided, otherwise use local searchValue
-            return this.parentSearchValue || this.searchValue;
+            // Use parentSearchValue if provided, otherwise use composable searchValue
+            return this.parentSearchValue || this.search.searchValue.value;
         },
         showSaveButton() {
             // True if any editable cell or add row button is present
@@ -1363,7 +1358,8 @@ export const TableComponent = {
                     return searchWords.every(word => 
                         visibleColumns.some(column => {
                             const value = row[column.key];
-                            return String(value).toLowerCase().includes(word);
+                            // Skip null/undefined values to prevent matching "undefined" or "null" strings
+                            return value != null && String(value).toLowerCase().includes(word);
                         })
                     );
                 });
@@ -1435,16 +1431,9 @@ export const TableComponent = {
             tableRowSelectionState.setActiveRoute(routeKey);
         }
         
-        // Initialize searchValue from URL if syncSearchWithUrl is enabled
-        if (this.syncSearchWithUrl && this.containerPath && this.appContext?.currentPath) {
-            const params = NavigationRegistry.getParametersForContainer(
-                this.containerPath,
-                this.appContext.currentPath
-            );
-            if (params?.searchTerm) {
-                this.searchValue = params.searchTerm;
-            }
-        }
+        // Initialize search from URL and setup watcher if syncSearchWithUrl is enabled
+        this.search.initializeFromUrl();
+        this.search.setupUrlWatcher();
         
         this.$nextTick(() => {
             this.updateAllEditableCells();
@@ -1553,48 +1542,6 @@ export const TableComponent = {
         }
     },
     methods: {
-        /**
-         * Update searchTerm parameter in URL when syncSearchWithUrl is enabled
-         */
-        updateSearchInURL(searchValue) {
-            if (!this.syncSearchWithUrl || !this.containerPath) {
-                return;
-            }
-            
-            // Use silent parameter update to avoid triggering full navigation
-            // This updates the URL and caches parameters without reloading content
-            NavigationRegistry.updatePathParametersSilently(
-                this.containerPath.split('?')[0],
-                this.appContext?.currentPath,
-                {
-                    searchTerm: (searchValue && searchValue.trim()) ? searchValue : undefined
-                }
-            );
-        },
-        
-        /**
-         * Handle search input blur - only update URL if not clearing
-         */
-        handleSearchBlur() {
-            if (!this.syncSearchWithUrl || this._clearingSearch) return;
-            this.updateSearchInURL(this.searchValue);
-        },
-        
-        /**
-         * Clear the search field and update URL parameter
-         */
-        clearSearch() {
-            this._clearingSearch = true;
-            this.searchValue = '';
-            if (this.syncSearchWithUrl) {
-                this.updateSearchInURL('');
-            }
-            // Reset flag after a brief delay
-            setTimeout(() => {
-                this._clearingSearch = false;
-            }, 100);
-        },
-        
         handleRefresh() {
             // Capture state before discarding changes (when allowSaveEvent is true)
             if (this.allowSaveEvent && undoRegistry.currentRouteKey) {
@@ -1777,24 +1724,26 @@ export const TableComponent = {
             return value;
         },
 
+        // Wrapper method for search highlighting that uses the composable with proper formatting
         highlightSearchText(value, column) {
-            // First format the value
-            const formattedValue = this.formatCellValue(value, column);
+            // Create a temporary formatter that uses this component's formatCellValue
+            const formatter = (val, col) => this.formatCellValue(val, col);
             
-            // If no search value or empty formatted value, return as-is
+            // Call the composable's highlightText with the formatter
+            const formattedValue = formatter(value, column);
+            
+            // If no search, return formatted value
             if (!this.activeSearchValue || !this.activeSearchValue.trim() || !formattedValue) {
                 return formattedValue;
             }
             
+            // Use the composable's escapeHtml and highlighting logic
             const stringValue = String(formattedValue);
+            const words = this.search.splitSearchTerms(this.activeSearchValue);
             
-            // Split search term into individual words for partial matching
-            const searchTerm = this.activeSearchValue.trim();
-            const searchWords = searchTerm.split(/\s+/).filter(word => word.length > 0);
-            
-            // Collect all match positions for all search words
+            // Collect all match positions
             const matches = [];
-            searchWords.forEach(word => {
+            words.forEach(word => {
                 const escapedSearchWord = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
                 const regex = new RegExp(escapedSearchWord, 'gi');
                 let match;
@@ -1818,7 +1767,6 @@ export const TableComponent = {
                 } else {
                     const last = merged[merged.length - 1];
                     if (match.start <= last.end) {
-                        // Overlapping or adjacent - merge them
                         last.end = Math.max(last.end, match.end);
                         last.text = stringValue.substring(last.start, last.end);
                     } else {
@@ -1827,45 +1775,22 @@ export const TableComponent = {
                 }
             }
             
-            // Build the final string with highlights, escaping HTML as we go
+            // Build HTML with highlights
             let result = '';
             let lastIndex = 0;
             
             for (const match of merged) {
-                // Add the non-matching part before this match (escaped)
                 const beforeMatch = stringValue.substring(lastIndex, match.start);
-                result += beforeMatch
-                    .replace(/&/g, '&amp;')
-                    .replace(/</g, '&lt;')
-                    .replace(/>/g, '&gt;')
-                    .replace(/"/g, '&quot;')
-                    .replace(/'/g, '&#039;');
-                
-                // Add the matching part with highlight (escaped)
-                const matchText = match.text
-                    .replace(/&/g, '&amp;')
-                    .replace(/</g, '&lt;')
-                    .replace(/>/g, '&gt;')
-                    .replace(/"/g, '&quot;')
-                    .replace(/'/g, '&#039;');
-                result += `<span class="search-match">${matchText}</span>`;
-                
+                result += this.search.escapeHtml(beforeMatch);
+                result += `<span class="search-match">${this.search.escapeHtml(match.text)}</span>`;
                 lastIndex = match.end;
             }
             
-            // Add any remaining text after the last match (escaped)
-            const afterMatch = stringValue.substring(lastIndex);
-            result += afterMatch
-                .replace(/&/g, '&amp;')
-                .replace(/</g, '&lt;')
-                .replace(/>/g, '&gt;')
-                .replace(/"/g, '&quot;')
-                .replace(/'/g, '&#039;');
-            
+            result += this.search.escapeHtml(stringValue.substring(lastIndex));
             return result;
         },
 
-        // Check if a value contains the search text (for CSS-based highlighting in inputs)
+        // Wrapper method for search match detection
         hasSearchMatch(value, column) {
             if (!this.activeSearchValue || !this.activeSearchValue.trim()) {
                 return false;
@@ -1874,14 +1799,11 @@ export const TableComponent = {
             const formattedValue = this.formatCellValue(value, column);
             if (!formattedValue) return false;
             
-            // Split search term into individual words for partial matching
-            const searchTerm = this.activeSearchValue.trim();
-            const searchWords = searchTerm.split(/\s+/).filter(word => word.length > 0);
-            
             const formattedLower = String(formattedValue).toLowerCase();
+            const words = this.search.splitSearchTerms(this.activeSearchValue);
             
-            // Check if any search word matches (OR logic for highlighting indication)
-            return searchWords.some(word => formattedLower.includes(word.toLowerCase()));
+            // Check if any search word matches (OR logic)
+            return words.some(word => formattedLower.includes(word.toLowerCase()));
         },
 
         // Get color class for date values based on proximity to today
@@ -2756,11 +2678,18 @@ export const TableComponent = {
             if (!this.activeSearchValue || !this.activeSearchValue.trim()) {
                 return false;
             }
-            const searchTerm = this.activeSearchValue.trim().toLowerCase();
-            return this.detailsColumns.some(column => {
-                const value = row[column.key];
-                return value && String(value).toLowerCase().includes(searchTerm);
-            });
+            
+            // Split search term into individual words for partial matching
+            const searchWords = this.search.splitSearchTerms(this.activeSearchValue);
+            
+            // All search words must match somewhere in the details columns (AND logic)
+            return searchWords.every(word => 
+                this.detailsColumns.some(column => {
+                    const value = row[column.key];
+                    // Skip null/undefined values to prevent matching "undefined" or "null" strings
+                    return value != null && String(value).toLowerCase().includes(word.toLowerCase());
+                })
+            );
         },
     },
     template: html `
@@ -2799,15 +2728,15 @@ export const TableComponent = {
                     <div v-if="showSearch" class="input-container">
                         <input
                             type="text"
-                            v-model="searchValue"
-                            @blur="handleSearchBlur"
-                            @keydown.esc="clearSearch"
+                            v-model="search.searchValue.value"
+                            @blur="search.handleBlur"
+                            @keydown.esc="search.clearSearch"
                             placeholder="Find..."
                             class="search-input"
                         />
                         <button
-                            v-if="searchValue"
-                            @mousedown="clearSearch"
+                            v-if="search.searchValue.value"
+                            @mousedown="search.clearSearch"
                             class="column-button"
                             title="Clear search"
                         >
@@ -3139,7 +3068,7 @@ export const TableComponent = {
                 
                 <button
                     v-if="activeSearchValue"
-                    @click="clearSearch"
+                    @click="search.clearSearch"
                     class="card"
                     title="Clear filter"
                 >

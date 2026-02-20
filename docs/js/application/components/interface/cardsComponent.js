@@ -1,4 +1,5 @@
 import { html, LoadingBarComponent, NavigationRegistry } from '../../index.js';
+import { useSearch } from '../../utils/useSearch.js';
 
 // Cards Grid Component: Simple responsive grid layout with clickable cards
 export const CardsComponent = {
@@ -81,33 +82,23 @@ export const CardsComponent = {
             default: false
         }
     },
-    data() {
+    setup(props, { emit }) {
+        // Initialize search composable
+        const search = useSearch({
+            formatValue: null,
+            syncWithUrl: props.syncSearchWithUrl,
+            navigationRegistry: NavigationRegistry,
+            containerPath: props.containerPath,
+            appContext: Vue.inject('appContext')
+        });
+
+        // Return search properties and methods to be available in component
         return {
-            searchValue: '', // Will be initialized from URL in mounted if syncSearchWithUrl
+            search
         };
     },
-    watch: {
-        // Watch for URL parameter changes when syncSearchWithUrl is enabled
-        'appContext.currentPath': {
-            handler(newPath, oldPath) {
-                if (!this.syncSearchWithUrl || !oldPath) return;
-                
-                const newParams = NavigationRegistry.getParametersForContainer(
-                    this.containerPath,
-                    newPath
-                );
-                const oldParams = NavigationRegistry.getParametersForContainer(
-                    this.containerPath,
-                    oldPath
-                );
-                
-                // Only update if searchTerm parameter changed
-                if (newParams?.searchTerm !== oldParams?.searchTerm) {
-                    this.searchValue = newParams?.searchTerm || '';
-                }
-            }
-        },
-
+    data() {
+        return {};
     },
     computed: {
         shouldShowEmpty() {
@@ -125,8 +116,9 @@ export const CardsComponent = {
                 .filter(row => row); // Only filter out null/undefined rows
 
             // Apply search filter if searchValue is provided and hideCardsOnSearch is enabled
-            if (this.searchValue && this.searchValue.trim() && this.hideCardsOnSearch) {
-                const searchTerm = this.searchValue.toLowerCase().trim();
+            if (this.search.hasActiveSearch.value && this.hideCardsOnSearch) {
+                const searchWords = this.search.searchWords.value;
+                
                 filteredData = filteredData.filter(row => {
                     if (!row) return false;
                     // Search in title, content, and contentFooter fields
@@ -135,8 +127,13 @@ export const CardsComponent = {
                         row.content,
                         row.contentFooter
                     ];
-                    return fields.some(field =>
-                        field && String(field).toLowerCase().includes(searchTerm)
+                    
+                    // All search words must match somewhere in the fields (AND logic)
+                    return searchWords.every(word =>
+                        fields.some(field =>
+                            // Skip null/undefined to prevent matching "undefined" or "null" strings
+                            field != null && String(field).toLowerCase().includes(word.toLowerCase())
+                        )
                     );
                 });
             }
@@ -145,73 +142,11 @@ export const CardsComponent = {
         }
     },
     mounted() {
-        // Initialize searchValue from URL if syncSearchWithUrl is enabled
-        if (this.syncSearchWithUrl && this.containerPath && this.appContext?.currentPath) {
-            const params = NavigationRegistry.getParametersForContainer(
-                this.containerPath,
-                this.appContext.currentPath
-            );
-            if (params?.searchTerm) {
-                this.searchValue = params.searchTerm;
-            }
-        }
+        // Initialize search from URL and setup watcher if syncSearchWithUrl is enabled
+        this.search.initializeFromUrl();
+        this.search.setupUrlWatcher();
     },
     methods: {
-        /**
-         * Update searchTerm parameter in URL when syncSearchWithUrl is enabled
-         */
-        updateSearchInURL(searchValue) {
-            if (!this.syncSearchWithUrl || !this.containerPath || !this.navigateToPath) {
-                return;
-            }
-            
-            const isOnDashboard = this.appContext?.currentPath?.split('?')[0].split('/')[0] === 'dashboard';
-            
-            // Set searchTerm or undefined to remove it
-            const params = {
-                searchTerm: (searchValue && searchValue.trim()) ? searchValue : undefined
-            };
-            
-            const newPath = NavigationRegistry.buildPathWithCurrentParams(
-                this.containerPath.split('?')[0],
-                this.appContext?.currentPath,
-                params
-            );
-            
-            if (isOnDashboard) {
-                // Update dashboard registry
-                NavigationRegistry.dashboardRegistry.updatePath(
-                    this.containerPath.split('?')[0],
-                    newPath
-                );
-            } else {
-                // Regular navigation
-                this.navigateToPath(newPath);
-            }
-        },
-        
-        /**
-         * Handle search input blur - only update URL if not clearing
-         */
-        handleSearchBlur() {
-            if (!this.syncSearchWithUrl || this._clearingSearch) return;
-            this.updateSearchInURL(this.searchValue);
-        },
-        
-        /**
-         * Clear the search field and update URL parameter
-         */
-        clearSearch() {
-            this._clearingSearch = true;
-            this.searchValue = '';
-            if (this.syncSearchWithUrl) {
-                this.updateSearchInURL('');
-            }
-            // Reset flag after a brief delay
-            setTimeout(() => {
-                this._clearingSearch = false;
-            }, 100);
-        },
         
         handleCardClick(item) {
             // Call item-specific onClick handler if provided, otherwise use component-level handler
@@ -257,15 +192,15 @@ export const CardsComponent = {
                     <div v-if="showSearch" class="input-container">
                         <input
                             type="text"
-                            v-model="searchValue"
-                            @blur="handleSearchBlur"
-                            @keydown.esc="clearSearch"
+                            v-model="search.searchValue.value"
+                            @blur="search.handleBlur"
+                            @keydown.esc="search.clearSearch"
                             placeholder="Find..."
                             class="search-input"
                         />
                         <button
-                            v-if="searchValue"
-                            @mousedown="clearSearch"
+                            v-if="search.searchValue.value"
+                            @mousedown="search.clearSearch"
                             class="column-button"
                             title="Clear search"
                         >
@@ -302,7 +237,7 @@ export const CardsComponent = {
                     :aria-label="item.title + (item.content ? ': ' + item.content : '')"
                 >
                     <div class="content-header">
-                        <h3>{{ item.title }}</h3>
+                        <h3 v-html="search.highlightRawText(item.title)"></h3>
                         <slot v-if="showPinButtons">
                             <button
                                 @click="handlePinClick($event, item)"
@@ -314,10 +249,10 @@ export const CardsComponent = {
                         </slot>
                     </div>
                     <div class="content" v-if="item.content">
-                        <div v-html="item.content"></div>
+                        <div v-html="search.highlightHtmlContent(item.content)"></div>
                     </div>
                     <div class="content-footer" v-if="item.contentFooter">
-                        <div v-html="item.contentFooter"></div>
+                        <div v-html="search.highlightHtmlContent(item.contentFooter)"></div>
                     </div>
                 </div>
             </div>
