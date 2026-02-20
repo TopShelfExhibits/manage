@@ -1786,23 +1786,83 @@ export const TableComponent = {
                 return formattedValue;
             }
             
-            // Escape HTML in the formatted value to prevent XSS
-            const escapedValue = String(formattedValue)
+            const stringValue = String(formattedValue);
+            
+            // Split search term into individual words for partial matching
+            const searchTerm = this.activeSearchValue.trim();
+            const searchWords = searchTerm.split(/\s+/).filter(word => word.length > 0);
+            
+            // Collect all match positions for all search words
+            const matches = [];
+            searchWords.forEach(word => {
+                const escapedSearchWord = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                const regex = new RegExp(escapedSearchWord, 'gi');
+                let match;
+                while ((match = regex.exec(stringValue)) !== null) {
+                    matches.push({
+                        start: match.index,
+                        end: match.index + match[0].length,
+                        text: match[0]
+                    });
+                }
+            });
+            
+            // Sort matches by start position
+            matches.sort((a, b) => a.start - b.start);
+            
+            // Merge overlapping matches
+            const merged = [];
+            for (const match of matches) {
+                if (merged.length === 0) {
+                    merged.push(match);
+                } else {
+                    const last = merged[merged.length - 1];
+                    if (match.start <= last.end) {
+                        // Overlapping or adjacent - merge them
+                        last.end = Math.max(last.end, match.end);
+                        last.text = stringValue.substring(last.start, last.end);
+                    } else {
+                        merged.push(match);
+                    }
+                }
+            }
+            
+            // Build the final string with highlights, escaping HTML as we go
+            let result = '';
+            let lastIndex = 0;
+            
+            for (const match of merged) {
+                // Add the non-matching part before this match (escaped)
+                const beforeMatch = stringValue.substring(lastIndex, match.start);
+                result += beforeMatch
+                    .replace(/&/g, '&amp;')
+                    .replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;')
+                    .replace(/"/g, '&quot;')
+                    .replace(/'/g, '&#039;');
+                
+                // Add the matching part with highlight (escaped)
+                const matchText = match.text
+                    .replace(/&/g, '&amp;')
+                    .replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;')
+                    .replace(/"/g, '&quot;')
+                    .replace(/'/g, '&#039;');
+                result += `<span class="search-match">${matchText}</span>`;
+                
+                lastIndex = match.end;
+            }
+            
+            // Add any remaining text after the last match (escaped)
+            const afterMatch = stringValue.substring(lastIndex);
+            result += afterMatch
                 .replace(/&/g, '&amp;')
                 .replace(/</g, '&lt;')
                 .replace(/>/g, '&gt;')
                 .replace(/"/g, '&quot;')
                 .replace(/'/g, '&#039;');
             
-            // Escape the search term for regex
-            const searchTerm = this.activeSearchValue.trim();
-            const escapedSearchTerm = searchTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            
-            // Create case-insensitive regex to find matches
-            const regex = new RegExp(`(${escapedSearchTerm})`, 'gi');
-            
-            // Replace matches with highlighted version
-            return escapedValue.replace(regex, '<span class="search-match">$1</span>');
+            return result;
         },
 
         // Check if a value contains the search text (for CSS-based highlighting in inputs)
@@ -1814,8 +1874,14 @@ export const TableComponent = {
             const formattedValue = this.formatCellValue(value, column);
             if (!formattedValue) return false;
             
-            const searchTerm = this.activeSearchValue.trim().toLowerCase();
-            return String(formattedValue).toLowerCase().includes(searchTerm);
+            // Split search term into individual words for partial matching
+            const searchTerm = this.activeSearchValue.trim();
+            const searchWords = searchTerm.split(/\s+/).filter(word => word.length > 0);
+            
+            const formattedLower = String(formattedValue).toLowerCase();
+            
+            // Check if any search word matches (OR logic for highlighting indication)
+            return searchWords.some(word => formattedLower.includes(word.toLowerCase()));
         },
 
         // Get color class for date values based on proximity to today
