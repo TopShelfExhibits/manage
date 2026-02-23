@@ -1501,6 +1501,117 @@ tr:hover > td > .table-cell-container > .table-edit-textarea, tr:hover > td > .t
 
 
 
+/* ============================================================================
+   TOUCH DEVICE STYLES
+   ============================================================================
+   These media queries detect touch-capable devices and adjust the UI for
+   better touch interaction:
+   
+   - @media (pointer: coarse)      = Primary input is touch (phones, tablets)
+   - @media (hover: none)           = Device can't hover (touch-only)
+   - Combined query                 = Optimal touch experience
+   
+   Key improvements for touch:
+   - Larger tap targets (44px minimum per iOS/Android guidelines)
+   - More prominent visual indicators (thicker borders, larger icons)
+   - Disabled hover effects that cause sticky states
+   - Active state feedback instead of hover
+   ============================================================================ */
+
+/* Touch-capable devices (phones, tablets with touch as primary input) */
+@media (pointer: coarse) {
+    /* Larger touch targets for drag handles */
+    td.row-drag-handle {
+        width: 32px;
+        min-width: 32px;
+    }
+    
+    /* Increase tap target size for buttons *
+    .button-symbol,
+    button:not(.column-button),
+    .selection-action-bubble button,
+    input {
+        min-width: 38px;
+        min-height: 38px;
+    }
+    
+
+
+    /* Make drag handle icon more prominent on touch */
+    .row-drag-handle::before {
+        font-size: 14px;
+        font-weight: bold;
+    }
+    
+    /* Larger checkboxes on selected rows */
+    tr.selected > td.row-drag-handle::before {
+        font-size: 1.4rem;
+        left: 4px;
+    }
+    
+    /* Larger unselected checkboxes */
+    :not(:has(.dragging)) table:has(.selected):not(:has(table .selected)) > tbody > tr:not(.selected) > td.row-drag-handle::before,
+    :not(:has(.dragging)) table:has(table .selected) tr tbody > tr:not(.selected) > td.row-drag-handle::before {
+        font-size: 1.4rem;
+    }
+    
+    /* More prominent drop target indicators for touch */
+    .drop-target-above > td::after, 
+    .drop-target-header + tbody > tr:first-child > td::after {
+        border-top-width: 4px;
+    }
+    
+    :last-child.drop-target-below > td::after, 
+    table:has(.drop-target-footer):not(:has(table .drop-target-footer)) > tbody > tr:last-child > td::after {
+        border-bottom-width: 4px;
+    }
+    
+    :has(.dragging) tr:hover > td.empty-message::after, 
+    .drop-target-onto > td::after {
+        opacity: 0.5;
+    }
+    
+    /* Increase spacing in selection bubble for touch */
+    .selection-action-bubble {
+        gap: var(--padding-sm);
+    }
+    
+    /* Stronger visual feedback when dragging on touch */
+    :has(.dragging) tr.selected > td::after {
+        background: var(--color-blue-bg);
+        opacity: 0.7;
+    }
+    
+    /* Remove cursor styles on touch devices */
+    td.row-drag-handle {
+        cursor: default;
+    }
+}
+
+/* Detect devices that can't hover (touch-only devices) */
+@media (hover: none) {
+    /* Remove hover-specific styling to prevent sticky states on touch devices */
+    nav #navbar a:hover {
+        text-decoration: none;
+    }
+    
+    /* Show visual feedback for touch interactions instead of hover */
+    button:active,
+    .button-symbol:active {
+        box-shadow: inset 0 2px 4px var(--color-shadow);
+    }
+
+    /* Remove hover-dependent effects on touch devices */
+    .row-drag-handle:hover,
+    :not(:has(.dragging)) .new-row-button:hover {
+        background-color: var(--color-gray-bg);
+    }
+
+    .column-button {
+        opacity: 1;
+    }
+}
+
 
 
 @media print {

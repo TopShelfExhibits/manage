@@ -55,7 +55,7 @@ For design and project queue:
 - [x] refresh buttons should clear caches
 - [x] fix packlist table header alignment
 - [x] simplify and impliment more url filling and parameter saving in nav and back buttons (for instance breadcrumb nav should cache some url params)
-- [ ] tableComponent finder needs: a clear all button, and a hide rows toggle
+- [x] tableComponent finder needs: a clear all button
 - [ ] make table headers accessible when scrolling
 - [ ] reports column headers percentage based and dynamically abbreviate
 - [ ] basic schedule table needs to have return and show date columns visible
