@@ -119,16 +119,22 @@ class productionUtils_uncached {
                     if (showName && client && year) {
                         const computedIdentifier = await deps.call(ProductionUtils.computeIdentifier, showName, client, year);
                         if (computedIdentifier === value) {
-                            // For overlap logic with identifiers:
-                            // "Ship before" means: row's ship <= identifier's return
-                            // "Return after" means: row's return >= identifier's ship
-                            if (filter.column === 'Ship' && filter.type === 'before') {
-                                const ship = _calculateShipDate(row);
-                                return _calculateReturnDate(row, ship);
-                            } else if (filter.column === 'Return' && filter.type === 'after') {
-                                return _calculateShipDate(row);
+                            // Special overlap logic for identifiers:
+                            // To find shows active during identifier's period:
+                            // - column='Return' + type='after' → check if target returns after identifier ships
+                            // - column='Ship' + type='before' → check if target ships before identifier returns
+                            const ship = _calculateShipDate(row);
+                            const ret = _calculateReturnDate(row, ship);
+                            
+                            if (filter.column === 'Return' && filter.type === 'after') {
+                                // Check if target's return is after identifier's ship
+                                return ship;
+                            } else if (filter.column === 'Ship' && filter.type === 'before') {
+                                // Check if target's ship is before identifier's return
+                                return ret;
                             }
-                            // Default: get the same column from the identifier show
+                            
+                            // Fallback: use the specified column from the identifier show
                             return getRowDate(row, filter.column);
                         }
                     }

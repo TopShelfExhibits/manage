@@ -374,12 +374,18 @@ export const ScheduleAdvancedFilter = {
             const dateFilters = [];
             
             if (this.dateFilterMode === 'overlap' && this.overlapShowIdentifier) {
-                // For overlap mode, add a single filter with the show identifier
-                // The production-utils will extract ship/return dates from this identifier
+                // For overlap mode, create two filters to find shows active during identifier's period:
+                // 1. Return date after identifier ships (show still out when identifier starts)
+                // 2. Ship date before identifier returns (show goes out before identifier ends)
                 dateFilters.push({
-                    column: 'Show Date',
+                    column: 'Return',
                     value: this.overlapShowIdentifier,
-                    type: 'after' // Type doesn't matter for identifiers, but required by format
+                    type: 'after'
+                });
+                dateFilters.push({
+                    column: 'Ship',
+                    value: this.overlapShowIdentifier,
+                    type: 'before'
                 });
             } else if (this.dateFilterMode === 'dateRange') {
                 // For date range mode, build filters from start/end dates
@@ -664,10 +670,16 @@ export const ScheduleAdvancedFilter = {
                 const dateFilters = [];
                 
                 if (this.dateFilterMode === 'overlap' && this.overlapShowIdentifier) {
+                    // For overlap mode, create two filters
                     dateFilters.push({
-                        column: 'Show Date',
+                        column: 'Return',
                         value: this.overlapShowIdentifier,
                         type: 'after'
+                    });
+                    dateFilters.push({
+                        column: 'Ship',
+                        value: this.overlapShowIdentifier,
+                        type: 'before'
                     });
                 } else if (this.dateFilterMode === 'dateRange') {
                     let startValue = null;
@@ -807,11 +819,16 @@ export const ScheduleAdvancedFilter = {
                             const dateFilters = [];
                             
                             if (this.overlapShowIdentifier) {
-                                // Overlap mode - save identifier
+                                // Overlap mode - create two filters to find overlapping shows
                                 dateFilters.push({
-                                    column: 'Show Date',
+                                    column: 'Return',
                                     value: this.overlapShowIdentifier,
                                     type: 'after'
+                                });
+                                dateFilters.push({
+                                    column: 'Ship',
+                                    value: this.overlapShowIdentifier,
+                                    type: 'before'
                                 });
                             } else {
                                 // Date range mode
@@ -923,10 +940,16 @@ export const ScheduleAdvancedFilter = {
             const dateFilters = [];
             
             if (this.dateFilterMode === 'overlap' && this.overlapShowIdentifier) {
+                // For overlap mode, create two filters to find overlapping shows
                 dateFilters.push({
-                    column: 'Show Date',
+                    column: 'Return',
                     value: this.overlapShowIdentifier,
                     type: 'after'
+                });
+                dateFilters.push({
+                    column: 'Ship',
+                    value: this.overlapShowIdentifier,
+                    type: 'before'
                 });
             } else if (this.dateFilterMode === 'dateRange') {
                 let startValue = null;
