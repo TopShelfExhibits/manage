@@ -434,7 +434,7 @@ export class FakeGoogleSheetsService {
                 ,['User Conference','Softwriters','2025','', 'San Diego, CA','20x30','N/A','9/15','9/17','9/2/2025','','','','','Alliance','ELITE','','X','X','X','','9/1/2025','','8/1','','','','','','','','','','']
                 ,['HR Tech','PayActiv','2025','', 'Las Vegas','10x20','6708','9/16','9/18','9/2/2025','','','','','The Expo Gp','ELITE','','','','9/1/2025','','','','','','','','','','','','','','']
                 ,['ASNE FMMS','Austal','2025','', 'San Diego, CA','10x10','','9/23','9/25','','','','','','','','X','','','','','','','','','','','','','','','','','','']
-                // --- Test data for byShowDate filtering: Shows with dates crossing year boundaries ---
+                // --- Test data for Show Date filtering: Shows with dates crossing year boundaries ---
                 // Early 2026 shows with 2025 ship dates (ship in Dec 2025, show in Jan 2026)
                 ,['CES','TechCorp','2026','TECHCORP 2026 CES', 'Las Vegas, NV','20x30','1001','1/7','1/10','12/28/2025','X','X','X','','1/15/2026','Freeman','Top Shelf','','X','X','X','X','X','X','X','','12/1','12/20','X','X','','X','X','X','X','X','','','X','X','','']
                 ,['Winter Summit','DataInc','2026','DATAINC 2026 WINTER SUMMIT', 'Denver, CO','10x20','2002','1/15','1/18','1/8/2026','X','X','X','','1/25/2026','Freeman','ELITE','','X','X','X','X','','','X','','12/20','1/5','X','X','','X','X','','','','','','X','X','','']
@@ -520,16 +520,16 @@ export class FakeGoogleSheetsService {
                 ['VISMEC', '', ''],
                 ['VUZIX', '', ''],
                 ['WORKLIO', '', ''],
-                // Test data clients for byShowDate filtering
-                ['TECHCORP', '', 'Test client for byShowDate filtering'],
-                ['DATAINC', '', 'Test client for byShowDate filtering'],
-                ['BIZSOFT', '', 'Test client for byShowDate filtering'],
-                ['GADGETPRO', '', 'Test client for byShowDate filtering'],
-                ['CLOUDVENTURES', '', 'Test client for byShowDate filtering'],
-                ['INNOVATECO', '', 'Test client for byShowDate filtering'],
-                ['SYSTEMSINC', '', 'Test client for byShowDate filtering'],
-                ['MEGATECH', '', 'Test client for byShowDate filtering'],
-                ['PROSYSTEMS', '', 'Test client for byShowDate filtering'],
+                // Test data clients for Show Date filtering
+                ['TECHCORP', '', 'Test client for Show Date filtering'],
+                ['DATAINC', '', 'Test client for Show Date filtering'],
+                ['BIZSOFT', '', 'Test client for Show Date filtering'],
+                ['GADGETPRO', '', 'Test client for Show Date filtering'],
+                ['CLOUDVENTURES', '', 'Test client for Show Date filtering'],
+                ['INNOVATECO', '', 'Test client for Show Date filtering'],
+                ['SYSTEMSINC', '', 'Test client for Show Date filtering'],
+                ['MEGATECH', '', 'Test client for Show Date filtering'],
+                ['PROSYSTEMS', '', 'Test client for Show Date filtering'],
                 ['AMBIGUOUSCO', '', 'Test client for ambiguous date handling'],
                 ['LATESHOWINC', '', 'Test client for ambiguous date handling']
             ],

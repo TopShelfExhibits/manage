@@ -805,7 +805,7 @@ class packListUtils_uncached {
      * @param {Object|string} filter - Filter parameters:
      *   - null: returns empty array (no filter selected)
      *   - { type: 'show-all' }: returns all packlists
-     *   - { startDate, endDate, byShowDate, overlapShowIdentifier }: filters by schedule overlap
+     *   - { dateFilters }: filters by schedule overlap using dateFilters array
      * @returns {Promise<Array>} Array of packlist tab objects with title, sheetId
      */
     static async getPacklists(deps, filter = null) {

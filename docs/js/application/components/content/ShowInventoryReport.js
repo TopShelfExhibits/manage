@@ -1,4 +1,5 @@
-import { html, TableComponent, Requests, getReactiveStore, createAnalysisConfig, NavigationRegistry, ItemImageComponent, ScheduleFilterSelect, InventoryCategoryFilter, parsedateFilterParameter, findMatchingStores, Priority, invalidateCache } from '../../index.js';
+import { html, TableComponent, Requests, getReactiveStore, createAnalysisConfig, NavigationRegistry, ItemImageComponent, ScheduleFilterSelect, InventoryCategoryFilter, findMatchingStores, Priority, invalidateCache } from '../../index.js';
+import { normalizeFilterValues } from '../../../data_management/utils/helpers.js';
 
 /**
  * Component for displaying inventory report across multiple shows
@@ -137,7 +138,7 @@ export const ShowInventoryReport = {
                 this.containerPath || 'inventory/reports/show-inventory',
                 this.appContext?.currentPath
             );
-            const hasSearchParams = params && (params.dateFilter || params.textFilters || params.view);
+            const hasSearchParams = params && (params.dateFilters || params.textFilters || params.view);
             
             // If we have search params but no shows and not loading, it means no shows were found
             if (hasSearchParams && this.showIdentifiers.length === 0 && !this.isLoadingShows) {
@@ -171,28 +172,22 @@ export const ShowInventoryReport = {
             this.error = null;
             this.reportStore = null; // Clear previous store
             
-            // Parse search to get date filter and search params
+            // Parse search to get date filters and search params
             const filter = {};
             const searchParams = {};
             
-            if (searchData.dateFilter) {
-                const dateFilter = parsedateFilterParameter(searchData.dateFilter);
-                
-                // Check if this is an overlap search (has overlapShowIdentifier)
-                if (dateFilter.overlapShowIdentifier) {
-                    // Convert overlapShowIdentifier to identifier for API
-                    filter.identifier = dateFilter.overlapShowIdentifier;
-                } else {
-                    // Regular date filter
-                    Object.assign(filter, dateFilter);
-                }
+            if (searchData.dateFilters && searchData.dateFilters.length > 0) {
+                filter.dateFilters = searchData.dateFilters;
             }
             
             // Apply text filters
             if (searchData.textFilters && searchData.textFilters.length > 0) {
                 searchData.textFilters.forEach(textFilter => {
-                    if (textFilter.column && textFilter.value) {
-                        searchParams[textFilter.column] = textFilter.value;
+                    if (textFilter.column && (textFilter.values || textFilter.value)) {
+                        searchParams[textFilter.column] = {
+                            values: normalizeFilterValues(textFilter),
+                            type: textFilter.type || 'contains'
+                        };
                     }
                 });
             }

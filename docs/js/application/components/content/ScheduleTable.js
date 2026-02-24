@@ -120,6 +120,36 @@ export const ScheduleTableComponent = {
                     day: 'numeric'
                 });
             }
+            // Check for dateFilters array format
+            if (this.filter && this.filter.dateFilters && this.filter.dateFilters.length > 0) {
+                const afterFilter = this.filter.dateFilters.find(f => f.type === 'after');
+                const beforeFilter = this.filter.dateFilters.find(f => f.type === 'before');
+                
+                if (afterFilter && beforeFilter) {
+                    // Handle date range with both start and end
+                    const startVal = afterFilter.value;
+                    const endVal = beforeFilter.value;
+                    
+                    // If values are offsets (numbers), convert to dates
+                    if (typeof startVal === 'number' && typeof endVal === 'number') {
+                        const today = new Date();
+                        const startDate = new Date(today.getTime() + startVal * 86400000);
+                        const endDate = new Date(today.getTime() + endVal * 86400000);
+                        const start = startDate.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+                        const end = endDate.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+                        return `Shows between ${start} and ${end}`;
+                    } else if (typeof startVal === 'string' && typeof endVal === 'string') {
+                        // If values are date strings
+                        const start = formatDate(startVal);
+                        const end = formatDate(endVal);
+                        return `Shows between ${start} and ${end}`;
+                    } else if (typeof startVal === 'string' && !/^\d{4}-\d{2}-\d{2}$/.test(startVal)) {
+                        // If it's a show identifier
+                        return `Shows during ${startVal}`;
+                    }
+                }
+            }
+            // Legacy format support (will be removed eventually)
             if (this.filter && typeof this.filter === 'object' && this.filter.startDate && this.filter.endDate) {
                 const start = formatDate(this.filter.startDate);
                 const end = formatDate(this.filter.endDate);

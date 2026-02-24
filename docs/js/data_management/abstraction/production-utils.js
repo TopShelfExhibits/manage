@@ -43,8 +43,9 @@ class productionUtils_uncached {
     /**
      * Get overlapping shows based on parameters
      * @param {Object} deps - Dependency decorator for tracking calls
-     * @param {string|Object} parameters - Project identifier or date range parameters
-     * @returns {Promise<string[]>} Array of overlapping project identifiers
+     * @param {Object} parameters - Filter parameters with dateFilters array
+     * @param {Object} searchParams - Text search parameters
+     * @returns {Promise<Array>} Array of filtered show data
      */
     static async getOverlappingShows(deps, parameters = null, searchParams = null) {
         console.log('[production-utils] getOverlappingShows called with:', parameters);
@@ -56,129 +57,140 @@ class productionUtils_uncached {
         let data = await deps.call(Database.getData, 'PROD_SCHED', tabName, mapping);
         console.log('[production-utils] Loaded schedule data:', data);
 
+        // Apply text filters first
         if (searchParams) {
             data = searchFilter(data, searchParams);
         }
 
-        if (!parameters) {
-            console.log('[production-utils] No parameters provided, returning all data');
+        // If no parameters or no date filters, return all data
+        if (!parameters || !parameters.dateFilters || parameters.dateFilters.length === 0) {
+            console.log('[production-utils] No date filters provided, returning all data');
             return data;
         }
-        let year, startDate, endDate;
-        if (typeof parameters === "string" || parameters.identifier) {
-            const identifier = parameters.identifier || parameters;
-            let foundRow = null;
-            for (const row of data) {
-                const showName = row.Show;
-                const client = row.Client;
-                const yearVal = row.Year;
-                if (showName && client && yearVal) {
-                    const computedIdentifier = await deps.call(ProductionUtils.computeIdentifier, showName, client, yearVal);
-                    if (computedIdentifier === identifier) {
-                        foundRow = row;
-                        break;
-                    }
-                }
-            }
-            if (!foundRow) {
-                console.log('[production-utils] No row found for identifier:', identifier);
-                return [];
-            }
-            year = foundRow.Year;
-            // Use shared date calculation helpers
-            let ship = _calculateShipDate(foundRow);
-            let ret = _calculateReturnDate(foundRow, ship);
-            
-            // Ensure return date is after ship date
-            if (ship && ret && ret <= ship) {
-                ret.setFullYear(ret.getFullYear() + 1);
-            }
-            
-            startDate = ship;
-            endDate = ret;
-            console.log(`[production-utils] Identifier mode: year=${year}, startDate=${startDate}, endDate=${endDate}`);
-            // If startDate exists but no endDate, assume 30 days after startDate
-            if (startDate && !endDate) {
-                endDate = new Date(startDate.getTime() + 30 * 86400000);
-                console.log(`[production-utils] No endDate found, assuming 30 days after startDate: endDate=${endDate}`);
-            }
-        } else {
-            // Handle relative day offsets (e.g., startDateOffset: -30 means 30 days ago)
-            if (typeof parameters.startDateOffset === 'number') {
-                const today = new Date();
-                startDate = new Date(today.getTime() + parameters.startDateOffset * 86400000);
-                console.log(`[production-utils] Using startDateOffset ${parameters.startDateOffset}: startDate=${startDate}`);
-            } else {
-                startDate = parseDate(parameters.startDate, true, parameters.year);
-            }
-            
-            if (typeof parameters.endDateOffset === 'number') {
-                const today = new Date();
-                endDate = new Date(today.getTime() + parameters.endDateOffset * 86400000);
-                console.log(`[production-utils] Using endDateOffset ${parameters.endDateOffset}: endDate=${endDate}`);
-            } else {
-                endDate = parseDate(parameters.endDate, true, parameters.year);
-            }
-            
-            year = parameters.year || startDate?.getFullYear();
-            // If startDate exists but no endDate, assume 30 days after startDate
-            if (startDate && !endDate) {
-                endDate = new Date(startDate.getTime() + 30 * 86400000);
-                console.log(`[production-utils] No endDate found, assuming 30 days after startDate: endDate=${endDate}`);
-            }
-            console.log(`[production-utils] Date range mode: year=${year}, startDate=${startDate}, endDate=${endDate}`);
-        }
-        
-        if (!startDate || !endDate) {
-            console.log('[production-utils] Missing startDate/endDate, returning empty array');
-            return [];
-        }
-        
-        // When using offsets, we need to check multiple years
-        const startYear = startDate.getFullYear();
-        const endYear = endDate.getFullYear();
-        const yearsToCheck = [];
-        for (let y = startYear; y <= endYear; y++) {
-            yearsToCheck.push(y);
-        }
-        
-        // Filter data for overlapping shows
-        const filtered = data.filter(row => {
-            if (!row.Year || !yearsToCheck.includes(parseInt(row.Year))) return false;
-            
-            // If byShowDate flag is set, filter by exact show date instead of overlap range
-            if (parameters.byShowDate) {
+
+        const dateFilters = parameters.dateFilters;
+        console.log('[production-utils] Processing date filters:', dateFilters);
+
+        // Helper to get date from row based on column
+        const getRowDate = (row, column) => {
+            if (column === 'Ship') {
+                return _calculateShipDate(row);
+            } else if (column === 'Return') {
+                const ship = _calculateShipDate(row);
+                return _calculateReturnDate(row, ship);
+            } else if (column === 'Show Date') {
                 // Try to get show date from S. Start field
                 let showDate = parseDate(row['S. Start'], true, row.Year);
                 
                 // If show date not available, try other date fields to infer it
                 if (!showDate) {
-                    // Try ship date and work backwards
                     const ship = _calculateShipDate(row);
                     if (ship) {
                         // Typical show is ~7-14 days after ship
                         showDate = new Date(ship.getTime() + 10 * 86400000);
                     }
                 }
-                
-                if (!showDate) return false;
-                
-                // Show date must fall within the specified date range
-                return (showDate >= startDate && showDate <= endDate);
+                return showDate;
+            }
+            return null;
+        };
+
+        // Helper to resolve filter value to a date
+        const resolveFilterValue = async (filter, data) => {
+            const value = filter.value;
+            
+            // If it's a number, treat as offset from today
+            if (typeof value === 'number') {
+                const today = new Date();
+                return new Date(today.getTime() + value * 86400000);
             }
             
-            // Default: Use overlap logic (ship to return range)
-            let ship = _calculateShipDate(row);
-            let ret = _calculateReturnDate(row, ship);
-            
-            // Ensure return date is after ship date
-            if (ship && ret && ret <= ship) {
-                ret.setFullYear(ret.getFullYear() + 1);
+            // If it looks like a date string (YYYY-MM-DD), parse it
+            if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)) {
+                return new Date(value + 'T00:00:00');
             }
             
-            if (!ship || !ret) return false;
-            return (ret >= startDate && ship <= endDate);
+            // Otherwise, treat as identifier - find the show and get its date
+            if (typeof value === 'string') {
+                for (const row of data) {
+                    const showName = row.Show;
+                    const client = row.Client;
+                    const year = row.Year;
+                    if (showName && client && year) {
+                        const computedIdentifier = await deps.call(ProductionUtils.computeIdentifier, showName, client, year);
+                        if (computedIdentifier === value) {
+                            // For overlap logic with identifiers:
+                            // "Ship before" means: row's ship <= identifier's return
+                            // "Return after" means: row's return >= identifier's ship
+                            if (filter.column === 'Ship' && filter.type === 'before') {
+                                const ship = _calculateShipDate(row);
+                                return _calculateReturnDate(row, ship);
+                            } else if (filter.column === 'Return' && filter.type === 'after') {
+                                return _calculateShipDate(row);
+                            }
+                            // Default: get the same column from the identifier show
+                            return getRowDate(row, filter.column);
+                        }
+                    }
+                }
+                console.warn('[production-utils] No show found for identifier:', value);
+                return null;
+            }
+            
+            return null;
+        };
+
+        // Calculate year range to check (needed for year filter optimization)
+        const filterDates = await Promise.all(
+            dateFilters.map(f => resolveFilterValue(f, data))
+        );
+        const validDates = filterDates.filter(d => d !== null);
+        
+        if (validDates.length === 0) {
+            console.log('[production-utils] Could not resolve any filter dates');
+            return [];
+        }
+
+        const years = validDates.map(d => d.getFullYear());
+        const minYear = Math.min(...years);
+        const maxYear = Math.max(...years);
+        const yearsToCheck = [];
+        for (let y = minYear; y <= maxYear; y++) {
+            yearsToCheck.push(y);
+        }
+
+        // Filter data
+        const filtered = data.filter(row => {
+            // Year optimization
+            if (!row.Year || !yearsToCheck.includes(parseInt(row.Year))) {
+                return false;
+            }
+
+            // Apply all date filters (AND logic - must pass all)
+            return dateFilters.every(filter => {
+                const rowDate = getRowDate(row, filter.column);
+                if (!rowDate) {
+                    return false; // If we can't get the date, filter out the row
+                }
+
+                const filterDateIndex = dateFilters.indexOf(filter);
+                const filterDate = filterDates[filterDateIndex];
+                if (!filterDate) {
+                    return false; // If we can't resolve filter value, filter out the row
+                }
+
+                // Apply filter type
+                if (filter.type === 'after') {
+                    return rowDate >= filterDate;
+                } else if (filter.type === 'before') {
+                    return rowDate <= filterDate;
+                }
+                
+                return true;
+            });
         });
+
+        console.log(`[production-utils] Filtered ${data.length} shows to ${filtered.length} matching date filters`);
         return filtered;
     }
     

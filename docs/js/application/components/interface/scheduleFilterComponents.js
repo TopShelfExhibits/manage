@@ -1,4 +1,4 @@
-import { html, getReactiveStore, Requests, authState, NavigationRegistry, buildTextFilterParameters, parsedateFilterParameter, parseTextFilterParameters, LoadingBarComponent, builddateFilterParameter, createAnalysisConfig } from '../../index.js';
+import { html, getReactiveStore, Requests, authState, NavigationRegistry, buildTextFilterParameters, parseTextFilterParameters, LoadingBarComponent, createAnalysisConfig, parseDateFilterParameters, buildDateFilterParameters } from '../../index.js';
 
 // Date preset offset constants
 const START_DATE_OFFSETS = { today: 0, monthAgo: -30, yearAgo: -365 };
@@ -11,18 +11,76 @@ function matchUrlToSavedSearch(savedSearches, urlSearchData) {
     if (!savedSearches || savedSearches.length === 0) return -1;
     
     return savedSearches.findIndex(search => {
-        if (search.dateFilter !== urlSearchData.dateFilter) return false;
-        if ((search.byShowDate || false) !== urlSearchData.byShowDate) return false;
+        // Compare date filters arrays
+        const searchDateFilters = search.dateFilters || [];
+        const urlDateFilters = urlSearchData.dateFilters || [];
+        if (searchDateFilters.length !== urlDateFilters.length) return false;
         
+        // Check if all date filters match
+        const dateFiltersMatch = searchDateFilters.every(sf => 
+            urlDateFilters.some(uf => 
+                uf.column === sf.column && 
+                uf.value === sf.value &&
+                (uf.type || 'after') === (sf.type || 'after')
+            )
+        ) && urlDateFilters.every(uf => 
+            searchDateFilters.some(sf => 
+                sf.column === uf.column && 
+                sf.value === uf.value &&
+                (sf.type || 'after') === (uf.type || 'after')
+            )
+        );
+        
+        if (!dateFiltersMatch) return false;
+        
+        // Compare text filters arrays
         const searchFilters = search.textFilters || [];
         const urlFilters = urlSearchData.textFilters || [];
         if (searchFilters.length !== urlFilters.length) return false;
         
         return searchFilters.every(sf => 
-            urlFilters.some(uf => uf.column === sf.column && uf.value === sf.value)
+            urlFilters.some(uf => {
+                const sfValues = normalizeValues(sf);
+                const ufValues = normalizeValues(uf);
+                return uf.column === sf.column && 
+                    JSON.stringify(sfValues.sort()) === JSON.stringify(ufValues.sort()) &&
+                    (uf.type || 'contains') === (sf.type || 'contains');
+            })
         ) && urlFilters.every(uf => 
-            searchFilters.some(sf => sf.column === uf.column && sf.value === uf.value)
+            searchFilters.some(sf => {
+                const sfValues = normalizeValues(sf);
+                const ufValues = normalizeValues(uf);
+                return sf.column === uf.column && 
+                    JSON.stringify(sfValues.sort()) === JSON.stringify(ufValues.sort()) &&
+                    (sf.type || 'contains') === (uf.type || 'contains');
+            })
         );
+    });
+}
+
+// Shared utility: Normalize filter values for backward compatibility
+function normalizeValues(filter) {
+    return filter.values || (filter.value ? [filter.value] : []);
+}
+
+// Shared utility: Validate and clean text filters
+function getValidTextFilters(textFilters) {
+    return textFilters
+        .filter(f => f.column && f.values && f.values.some(v => v.trim()))
+        .map(f => ({ 
+            column: f.column, 
+            values: f.values.filter(v => v.trim()),
+            type: f.type || 'contains' 
+        }));
+}
+
+// Shared utility: Clean filter objects by removing AppData and other metadata
+function cleanFilters(filters) {
+    if (!filters || !Array.isArray(filters)) return filters;
+    
+    return filters.map(filter => {
+        const { AppData, ...cleanFilter } = filter;
+        return cleanFilter;
     });
 }
 
@@ -38,26 +96,6 @@ function initializeSavedSearchesStore() {
         null,
         true
     );
-}
-
-// Shared utility: Build date filter value from component state
-function buildDateFilterFromState(dateFilterMode, overlapShowIdentifier, startDatePreset, endDatePreset, startDate, endDate) {
-    if (dateFilterMode === 'overlap' && overlapShowIdentifier) {
-        return overlapShowIdentifier;
-    }
-    
-    const startOffset = START_DATE_OFFSETS[startDatePreset] ?? null;
-    const endOffset = END_DATE_OFFSETS[endDatePreset] ?? null;
-    
-    if (startOffset !== null) {
-        return `${startOffset},${endOffset !== null ? endOffset : ''}`;
-    }
-    
-    if (startDate || endDate) {
-        return `${startDate || ''},${endDate || ''}`;
-    }
-    
-    return null;
 }
 
 // Advanced Search Component for Schedule - Filter Creation UI Only
@@ -84,12 +122,9 @@ export const ScheduleAdvancedFilter = {
             
             // Dynamic text search filters
             textFilters: [
-                { id: 1, column: '', value: '' }
+                { id: 1, column: '', values: [''], type: 'contains' }
             ],
             nextFilterId: 2,
-            
-            // Flag to prevent watchers from clearing during programmatic updates
-            isApplyingFilters: false,
             
             // Reactive store for saved searches
             savedSearchesStore: null,
@@ -251,13 +286,9 @@ export const ScheduleAdvancedFilter = {
                 return;
             }
             
-            // Set flag to prevent watchers from clearing during URL load
-            this.isApplyingFilters = true;
-            
             const filter = {
-                dateFilter: params.dateFilter || null,
+                dateFilters: params.dateFilters || [],
                 textFilters: params.textFilters || [],
-                byShowDate: params.byShowDate || false,
                 view: params.view || null
             };
             
@@ -268,45 +299,60 @@ export const ScheduleAdvancedFilter = {
             }
             
             // Load URL parameters into filter fields
-            // Parse dateFilter to extract dates and offsets
-            if (filter.dateFilter) {
-                const dateFilter = parsedateFilterParameter(filter.dateFilter);
+            // Parse dateFilters array - for now, UI only supports one date filter
+            if (filter.dateFilters && filter.dateFilters.length > 0) {
+                // Take the first date filter (UI limitation)
+                const firstDateFilter = filter.dateFilters[0];
                 
-                // Handle offsets - map back to presets if they match known values
-                if (dateFilter.startDateOffset !== undefined) {
-                    this.startDatePreset = OFFSET_TO_START_PRESET[dateFilter.startDateOffset] || '';
-                    this.startDatePreset && this.setStartDatePreset(this.startDatePreset);
-                }
-                
-                if (dateFilter.endDateOffset !== undefined) {
-                    this.endDatePreset = OFFSET_TO_END_PRESET[dateFilter.endDateOffset] || '';
-                    this.endDatePreset && this.setEndDatePreset(this.endDatePreset);
-                }
-                
-                // Handle explicit dates
-                if (dateFilter.startDate) {
-                    this.startDate = dateFilter.startDate;
-                }
-                if (dateFilter.endDate) {
-                    this.endDate = dateFilter.endDate;
-                }
-                
-                // Handle show identifier for overlap
-                if (dateFilter.overlapShowIdentifier) {
-                    // Extract year from identifier format: "ClientMatch Year ShowMatch"
-                    // Split by spaces and find the year (4-digit number)
-                    const parts = dateFilter.overlapShowIdentifier.split(' ');
+                // Check if it's a show identifier (for overlap mode)
+                if (typeof firstDateFilter.value === 'string' && !/^\d{4}-\d{2}-\d{2}$/.test(firstDateFilter.value) && isNaN(Number(firstDateFilter.value))) {
+                    // This is a show identifier for overlap mode
+                    const parts = firstDateFilter.value.split(' ');
                     const yearMatch = parts.find(part => /^\d{4}$/.test(part));
                     
-                    // Set year filter first so filteredShows will include the target show
                     if (yearMatch) {
                         this.overlapShowYearFilter = yearMatch;
                     }
                     
-                    // Then set the show identifier
-                    this.overlapShowIdentifier = dateFilter.overlapShowIdentifier;
+                    this.overlapShowIdentifier = firstDateFilter.value;
                     this.dateFilterMode = 'overlap';
-                } else if (dateFilter.startDate || dateFilter.endDate || dateFilter.startDateOffset !== undefined || dateFilter.endDateOffset !== undefined) {
+                } else {
+                    // This is a date range filter
+                    // Look for both "after" and "before" filters on the same column
+                    const sameColumnFilters = filter.dateFilters.filter(f => f.column === firstDateFilter.column);
+                    const afterFilter = sameColumnFilters.find(f => f.type === 'after');
+                    const beforeFilter = sameColumnFilters.find(f => f.type === 'before');
+                    
+                    // Handle "after" filter as start date
+                    if (afterFilter) {
+                        const value = afterFilter.value;
+                        if (typeof value === 'number') {
+                            // It's an offset
+                            this.startDatePreset = OFFSET_TO_START_PRESET[value] || '';
+                            if (this.startDatePreset) {
+                                this.setStartDatePreset(this.startDatePreset);
+                            }
+                        } else if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)) {
+                            // It's an explicit date
+                            this.startDate = value;
+                        }
+                    }
+                    
+                    // Handle "before" filter as end date
+                    if (beforeFilter) {
+                        const value = beforeFilter.value;
+                        if (typeof value === 'number') {
+                            // It's an offset
+                            this.endDatePreset = OFFSET_TO_END_PRESET[value] || '';
+                            if (this.endDatePreset) {
+                                this.setEndDatePreset(this.endDatePreset);
+                            }
+                        } else if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)) {
+                            // It's an explicit date
+                            this.endDate = value;
+                        }
+                    }
+                    
                     this.dateFilterMode = 'dateRange';
                 }
             }
@@ -317,39 +363,77 @@ export const ScheduleAdvancedFilter = {
                 this.textFilters = filter.textFilters.map((filter, index) => ({
                     id: index + 1,
                     column: filter.column,
-                    value: filter.value
+                    values: normalizeValues(filter),
+                    type: filter.type || 'contains'
                 }));
                 this.nextFilterId = filter.textFilters.length + 1;
             }
-            
-            // Reset flag after loading completes
-            this.isApplyingFilters = false;
         },
         saveFiltersToURL() {
-            const dateFilterValue = buildDateFilterFromState(
-                this.dateFilterMode, this.overlapShowIdentifier,
-                this.startDatePreset, this.endDatePreset,
-                this.startDate, this.endDate
-            );
+            // Build dateFilters array from UI state
+            const dateFilters = [];
+            
+            if (this.dateFilterMode === 'overlap' && this.overlapShowIdentifier) {
+                // For overlap mode, add a single filter with the show identifier
+                // The production-utils will extract ship/return dates from this identifier
+                dateFilters.push({
+                    column: 'Show Date',
+                    value: this.overlapShowIdentifier,
+                    type: 'after' // Type doesn't matter for identifiers, but required by format
+                });
+            } else if (this.dateFilterMode === 'dateRange') {
+                // For date range mode, build filters from start/end dates
+                let startValue = null;
+                let endValue = null;
+                
+                // Get start date value (offset or explicit date)
+                const startOffset = START_DATE_OFFSETS[this.startDatePreset] ?? null;
+                if (startOffset !== null) {
+                    startValue = startOffset;
+                } else if (this.startDate) {
+                    startValue = this.startDate;
+                }
+                
+                // Get end date value (offset or explicit date)
+                const endOffset = END_DATE_OFFSETS[this.endDatePreset] ?? null;
+                if (endOffset !== null) {
+                    endValue = endOffset;
+                } else if (this.endDate) {
+                    endValue = this.endDate;
+                }
+                
+                // Add "after" filter for start date
+                if (startValue !== null && startValue !== '') {
+                    dateFilters.push({
+                        column: 'Show Date',
+                        value: startValue,
+                        type: 'after'
+                    });
+                }
+                
+                // Add "before" filter for end date
+                if (endValue !== null && endValue !== '') {
+                    dateFilters.push({
+                        column: 'Show Date',
+                        value: endValue,
+                        type: 'before'
+                    });
+                }
+            }
             
             // Build parameters object directly
             const params = {};
             
-            if (dateFilterValue) {
-                params.dateFilter = dateFilterValue;
+            if (dateFilters.length > 0) {
+                params.dateFilters = dateFilters;
             }
             
             // Add text filters (strip id property)
-            const validTextFilters = this.textFilters
-                .filter(f => f.column && f.value)
-                .map(f => ({ column: f.column, value: f.value }));
+            const validTextFilters = getValidTextFilters(this.textFilters);
             
             if (validTextFilters.length > 0) {
                 params.textFilters = validTextFilters;
             }
-            
-            // ScheduleAdvancedFilter always uses overlap mode
-            params.byShowDate = false;
             
             // Use containerPath prop instead of hardcoded path
             const targetPath = this.containerPath || 'schedule/advanced-search';
@@ -373,8 +457,6 @@ export const ScheduleAdvancedFilter = {
             this.emitSearchSelected();
         },
         clearAllFilters() {
-            this.isApplyingFilters = true;
-            
             // Clear date filters
             this.startDate = '';
             this.endDate = '';
@@ -384,17 +466,50 @@ export const ScheduleAdvancedFilter = {
             this.dateFilterMode = 'dateRange';
             
             // Clear text filters
-            this.textFilters = [{ id: 1, column: '', value: '' }];
+            this.textFilters = [{ id: 1, column: '', values: [''], type: 'contains' }];
             this.nextFilterId = 2;
-            
-            this.isApplyingFilters = false;
         },
         addTextFilter() {
             this.textFilters.push({
                 id: this.nextFilterId++,
                 column: '',
-                value: ''
+                values: [''],
+                type: 'contains'
             });
+        },
+        handleValueInput(filter, valueIndex, event) {
+            const value = event.target.value;
+            
+            // Check if comma was typed
+            if (value.includes(',')) {
+                // Split by comma and trim
+                const parts = value.split(',').map(v => v.trim()).filter(v => v);
+                
+                // Replace current value with parts and add an empty field for next input
+                filter.values.splice(valueIndex, 1, ...parts, '');
+                
+                // Focus the new empty field after DOM updates
+                this.$nextTick(() => {
+                    // Find all inputs for this filter and focus the last one (newly created)
+                    const filterElement = event.target.closest('.card');
+                    if (filterElement) {
+                        const inputs = filterElement.querySelectorAll('input[type="text"]');
+                        if (inputs.length > 0) {
+                            inputs[inputs.length - 1].focus();
+                        }
+                    }
+                });
+            } else {
+                // Just update the current value, don't add new fields
+                filter.values[valueIndex] = value;
+            }
+        },
+        removeValue(filter, valueIndex) {
+            if (filter.values.length > 1) {
+                filter.values.splice(valueIndex, 1);
+            } else {
+                filter.values[0] = '';
+            }
         },
         removeTextFilter(filterId) {
             // Keep at least one filter
@@ -447,8 +562,7 @@ export const ScheduleAdvancedFilter = {
                 card: true,
                 green: isActive && hasValues,
                 white: !isActive || (isActive && !hasValues),
-                clickable: !isActive,
-                analyzing: this.isApplyingFilters
+                clickable: !isActive
             };
         },
         handleScheduleFilterSelection() {
@@ -461,39 +575,60 @@ export const ScheduleAdvancedFilter = {
             const search = this.selectedSavedSearch;
             if (!search) return;
             
-            // Set flag to prevent watchers from clearing
-            this.isApplyingFilters = true;
-            
-            // Parse and load the saved search
-            if (search.dateFilter) {
-                const dateFilter = parsedateFilterParameter(search.dateFilter);
+            // Parse and load the saved search dateFilters
+            if (search.dateFilters && search.dateFilters.length > 0) {
+                const firstFilter = search.dateFilters[0];
                 
-                // Handle offsets
-                if (dateFilter.startDateOffset !== undefined) {
-                    this.startDatePreset = OFFSET_TO_START_PRESET[dateFilter.startDateOffset] || '';
-                    this.startDatePreset && this.setStartDatePreset(this.startDatePreset);
-                }
-                
-                if (dateFilter.endDateOffset !== undefined) {
-                    this.endDatePreset = OFFSET_TO_END_PRESET[dateFilter.endDateOffset] || '';
-                    this.endDatePreset && this.setEndDatePreset(this.endDatePreset);
-                }
-                
-                // Handle explicit dates
-                if (dateFilter.startDate) {
-                    this.startDate = dateFilter.startDate;
-                    this.startDatePreset = '';
-                }
-                if (dateFilter.endDate) {
-                    this.endDate = dateFilter.endDate;
-                    this.endDatePreset = '';
-                }
-                
-                // Handle show identifier for overlap
-                if (dateFilter.overlapShowIdentifier) {
-                    this.overlapShowIdentifier = dateFilter.overlapShowIdentifier;
+                // Check if it's an overlap identifier
+                if (typeof firstFilter.value === 'string' && !/^\d{4}-\d{2}-\d{2}$/.test(firstFilter.value) && isNaN(Number(firstFilter.value))) {
+                    // Overlap mode
+                    this.overlapShowIdentifier = firstFilter.value;
                     this.dateFilterMode = 'overlap';
-                } else if (dateFilter.startDate || dateFilter.endDate || dateFilter.startDateOffset !== undefined || dateFilter.endDateOffset !== undefined) {
+                    
+                    // Extract year from identifier
+                    const parts = firstFilter.value.split(' ');
+                    const yearMatch = parts.find(part => /^\d{4}$/.test(part));
+                    if (yearMatch) {
+                        this.overlapShowYearFilter = yearMatch;
+                    }
+                } else {
+                    // Date range mode
+                    const sameColumnFilters = search.dateFilters.filter(f => f.column === firstFilter.column);
+                    const afterFilter = sameColumnFilters.find(f => f.type === 'after');
+                    const beforeFilter = sameColumnFilters.find(f => f.type === 'before');
+                    
+                    // Handle "after" filter as start date
+                    if (afterFilter) {
+                        const value = afterFilter.value;
+                        if (typeof value === 'number') {
+                            // It's an offset
+                            this.startDatePreset = OFFSET_TO_START_PRESET[value] || '';
+                            if (this.startDatePreset) {
+                                this.setStartDatePreset(this.startDatePreset);
+                            }
+                        } else if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)) {
+                            // It's an explicit date
+                            this.startDate = value;
+                            this.startDatePreset = '';
+                        }
+                    }
+                    
+                    // Handle "before" filter as end date
+                    if (beforeFilter) {
+                        const value = beforeFilter.value;
+                        if (typeof value === 'number') {
+                            // It's an offset
+                            this.endDatePreset = OFFSET_TO_END_PRESET[value] || '';
+                            if (this.endDatePreset) {
+                                this.setEndDatePreset(this.endDatePreset);
+                            }
+                        } else if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)) {
+                            // It's an explicit date
+                            this.endDate = value;
+                            this.endDatePreset = '';
+                        }
+                    }
+                    
                     this.dateFilterMode = 'dateRange';
                 }
             }
@@ -503,16 +638,14 @@ export const ScheduleAdvancedFilter = {
                 this.textFilters = search.textFilters.map((filter, index) => ({
                     id: index + 1,
                     column: filter.column,
-                    value: filter.value
+                    values: normalizeValues(filter),
+                    type: filter.type || 'contains'
                 }));
                 this.nextFilterId = search.textFilters.length + 1;
             } else {
-                this.textFilters = [{ id: 1, column: '', value: '' }];
+                this.textFilters = [{ id: 1, column: '', values: [''], type: 'contains' }];
                 this.nextFilterId = 2;
             }
-            
-            // Reset flag
-            this.isApplyingFilters = false;
             
             // Note: Don't call saveFiltersToURL here - let user click Apply Filters to update URL
         },
@@ -527,27 +660,59 @@ export const ScheduleAdvancedFilter = {
             }
             
             try {
-                const dateFilterValue = buildDateFilterFromState(
-                    this.dateFilterMode, this.overlapShowIdentifier,
-                    this.startDatePreset, this.endDatePreset,
-                    this.startDate, this.endDate
-                );
+                // Build dateFilters array from UI state (reuse logic from saveFiltersToURL)
+                const dateFilters = [];
+                
+                if (this.dateFilterMode === 'overlap' && this.overlapShowIdentifier) {
+                    dateFilters.push({
+                        column: 'Show Date',
+                        value: this.overlapShowIdentifier,
+                        type: 'after'
+                    });
+                } else if (this.dateFilterMode === 'dateRange') {
+                    let startValue = null;
+                    let endValue = null;
+                    
+                    const startOffset = START_DATE_OFFSETS[this.startDatePreset] ?? null;
+                    if (startOffset !== null) {
+                        startValue = startOffset;
+                    } else if (this.startDate) {
+                        startValue = this.startDate;
+                    }
+                    
+                    const endOffset = END_DATE_OFFSETS[this.endDatePreset] ?? null;
+                    if (endOffset !== null) {
+                        endValue = endOffset;
+                    } else if (this.endDate) {
+                        endValue = this.endDate;
+                    }
+                    
+                    if (startValue !== null && startValue !== '') {
+                        dateFilters.push({
+                            column: 'Show Date',
+                            value: startValue,
+                            type: 'after'
+                        });
+                    }
+                    
+                    if (endValue !== null && endValue !== '') {
+                        dateFilters.push({
+                            column: 'Show Date',
+                            value: endValue,
+                            type: 'before'
+                        });
+                    }
+                }
                 
                 const searchData = {
                     name: this.selectedSavedSearch.name,
-                    dateFilter: dateFilterValue,
-                    textFilters: [],
-                    byShowDate: false
+                    dateFilters: dateFilters,
+                    textFilters: []
                 };
                 
                 // Add text filters
                 if (this.textFilters && this.textFilters.length > 0) {
-                    searchData.textFilters = this.textFilters
-                        .filter(filter => filter.column && filter.value)
-                        .map(filter => ({
-                            column: filter.column,
-                            value: filter.value
-                        }));
+                    searchData.textFilters = getValidTextFilters(this.textFilters);
                 }
                 
                 // Update in store
@@ -638,23 +803,59 @@ export const ScheduleAdvancedFilter = {
                         try {
                             this.isSaving = true;
                             
-                            const dateFilterValue = this.overlapShowIdentifier || 
-                                (this.startDateOffset !== null ? `${this.startDateOffset},${this.endDateOffset !== null ? this.endDateOffset : ''}` : null) ||
-                                (this.startDate || this.endDate ? `${this.startDate || ''},${this.endDate || ''}` : null);
+                            // Build dateFilters array
+                            const dateFilters = [];
+                            
+                            if (this.overlapShowIdentifier) {
+                                // Overlap mode - save identifier
+                                dateFilters.push({
+                                    column: 'Show Date',
+                                    value: this.overlapShowIdentifier,
+                                    type: 'after'
+                                });
+                            } else {
+                                // Date range mode
+                                let startValue = null;
+                                let endValue = null;
+                                
+                                if (this.startDateOffset !== null) {
+                                    startValue = this.startDateOffset;
+                                } else if (this.startDate) {
+                                    startValue = this.startDate;
+                                }
+                                
+                                if (this.endDateOffset !== null) {
+                                    endValue = this.endDateOffset;
+                                } else if (this.endDate) {
+                                    endValue = this.endDate;
+                                }
+                                
+                                if (startValue !== null && startValue !== '') {
+                                    dateFilters.push({
+                                        column: 'Show Date',
+                                        value: startValue,
+                                        type: 'after'
+                                    });
+                                }
+                                
+                                if (endValue !== null && endValue !== '') {
+                                    dateFilters.push({
+                                        column: 'Show Date',
+                                        value: endValue,
+                                        type: 'before'
+                                    });
+                                }
+                            }
                             
                             const searchData = {
                                 name: this.searchName.trim(),
-                                dateFilter: dateFilterValue,
-                                textFilters: [],
-                                byShowDate: false
+                                dateFilters: dateFilters,
+                                textFilters: []
                             };
                             
-                            // Add text filters (strip IDs, just keep column/value)
+                            // Add text filters (strip IDs)
                             if (this.textFilters && this.textFilters.length > 0) {
-                                searchData.textFilters = this.textFilters.map(filter => ({
-                                    column: filter.column,
-                                    value: filter.value
-                                }));
+                                searchData.textFilters = getValidTextFilters(this.textFilters);
                             }
                             
                             // Save using reactive store (passed as prop)
@@ -718,22 +919,54 @@ export const ScheduleAdvancedFilter = {
             }, 'Save Filter');
         },
         emitSearchSelected() {
-            const dateFilterValue = buildDateFilterFromState(
-                this.dateFilterMode, this.overlapShowIdentifier,
-                this.startDatePreset, this.endDatePreset,
-                this.startDate, this.endDate
-            );
+            // Build dateFilters array from UI state
+            const dateFilters = [];
+            
+            if (this.dateFilterMode === 'overlap' && this.overlapShowIdentifier) {
+                dateFilters.push({
+                    column: 'Show Date',
+                    value: this.overlapShowIdentifier,
+                    type: 'after'
+                });
+            } else if (this.dateFilterMode === 'dateRange') {
+                let startValue = null;
+                let endValue = null;
+                
+                const startOffset = START_DATE_OFFSETS[this.startDatePreset] ?? null;
+                if (startOffset !== null) {
+                    startValue = startOffset;
+                } else if (this.startDate) {
+                    startValue = this.startDate;
+                }
+                
+                const endOffset = END_DATE_OFFSETS[this.endDatePreset] ?? null;
+                if (endOffset !== null) {
+                    endValue = endOffset;
+                } else if (this.endDate) {
+                    endValue = this.endDate;
+                }
+                
+                if (startValue !== null && startValue !== '') {
+                    dateFilters.push({
+                        column: 'Show Date',
+                        value: startValue,
+                        type: 'after'
+                    });
+                }
+                
+                if (endValue !== null && endValue !== '') {
+                    dateFilters.push({
+                        column: 'Show Date',
+                        value: endValue,
+                        type: 'before'
+                    });
+                }
+            }
             
             // Build search data in the same format as ScheduleFilterSelect
             const searchData = {
-                dateFilter: dateFilterValue,
-                textFilters: this.textFilters
-                    .filter(filter => filter.column && filter.value)
-                    .map(filter => ({
-                        column: filter.column,
-                        value: filter.value
-                    })),
-                byShowDate: false
+                dateFilters: dateFilters,
+                textFilters: getValidTextFilters(this.textFilters)
             };
             
             // Call callback if in modal mode, otherwise emit to parent
@@ -882,51 +1115,80 @@ export const ScheduleAdvancedFilter = {
             <div 
                 v-for="filter in textFilters" 
                 :key="filter.id"
-                :class="'card' + (filter.value ? ' green' : ' white') + (isApplyingFilters ? ' analyzing' : '')"
-                style="display: flex; flex-wrap: wrap; gap: var(--padding-md); align-items: center;"
+                :class="'card' + (filter.values.some(v => v.trim()) ? ' green' : ' white')"
+                style="display: flex; flex-direction: column; gap: var(--padding-md);"
             >
-                <span>Column Filter:</span>
-                <select 
-                    v-model="filter.column"
-                >
-                    <option value="">Select column...</option>
-                    <option 
-                        v-for="col in availableColumns" 
-                        :key="col" 
-                        :value="col"
+                <div style="display: flex; flex-wrap: wrap; gap: var(--padding-md); align-items: center;">
+                    <span>Column Filter:</span>
+                    <select 
+                        v-model="filter.column"
                     >
-                        {{ col }}
-                    </option>
-                </select>
-            
-                <span :class="{ 'hide-when-narrow': !filter.column }">Search Text:</span>
-                <input 
-                    type="text" 
-                    v-model="filter.value" 
-                    :placeholder="filter.column ? 'Search in ' + filter.column : 'Select a column first'"
-                    :disabled="!filter.column"
-                    :class="{ 'hide-when-narrow': !filter.column }"
-                    style="flex: 1;"
-                />
+                        <option value="">Select column...</option>
+                        <option 
+                            v-for="col in availableColumns" 
+                            :key="col" 
+                            :value="col"
+                        >
+                            {{ col }}
+                        </option>
+                    </select>
                 
-                <button 
-                    @click="removeTextFilter(filter.id)"
-                    class="button-symbol red"
-                    :disabled="textFilters.length === 1"
-                    :title="textFilters.length === 1 ? 'At least one filter required' : 'Remove this filter'"
-                >
-                    🗙
-                </button>
+                    <select 
+                        v-model="filter.type"
+                        :disabled="!filter.column"
+                        :class="{ 'hide-when-narrow': !filter.column }"
+                        style="min-width: 120px; width: unset;"
+                    >
+                        <option value="contains">Contains</option>
+                        <option value="excludes">Excludes</option>
+                    </select>
+                    <!-- Multiple value inputs -->
+                    <div 
+                        v-for="(value, valueIndex) in filter.values" 
+                        :key="valueIndex"
+                        class="input-container"
+                        style="min-width: 120px;"
+                    >
+                        <input 
+                            type="text" 
+                            :value="value"
+                            @input="handleValueInput(filter, valueIndex, $event)"
+                            :placeholder="filter.column ? (valueIndex === 0 ? 'Search text...' : 'Additional value...') : 'Select column first'"
+                            :disabled="!filter.column"
+                        />
+                        <button 
+                            v-if="filter.values.length > 1 && value.trim()"
+                            @click="removeValue(filter, valueIndex)"
+                            class="column-button"
+                            title="Remove this value"
+                        >
+                            ✕
+                        </button>
+                    </div>
+                    <div class="spacer"></div>
+                    <button 
+                        @click="removeTextFilter(filter.id)"
+                        class="button-symbol red"
+                        :disabled="textFilters.length === 1"
+                        :title="textFilters.length === 1 ? 'At least one filter required' : 'Remove this filter'"
+                    >
+                        🗙
+                    </button>
+                </div>
+                
+                
             </div>
-            
-            <button 
-                v-if="textFilters.length > 0 && textFilters.every(filter => filter.column && filter.value)"
-                @click="addTextFilter" 
-                class="card white"
-                :disabled="isLoadingColumns"
-            >
-                Add Another Text Filter
-            </button>
+            <transition name="expand">
+                <button 
+                    v-if="textFilters.length > 0 && textFilters.every(filter => filter.column && filter.values.some(v => v.trim()))"
+                    @click="addTextFilter" 
+                    class="card white"
+                    style="width: 100%;"
+                    :disabled="isLoadingColumns"
+                >
+                    Add Another Text Filter
+                </button>
+            </transition>
         </slot>
 
         <!-- Action Buttons -->
@@ -1148,9 +1410,8 @@ export const ScheduleFilterSelect = {
                 this.$emit('search-selected', null);
                 // Clear all schedule filter parameters by setting them to undefined
                 this.updateURL({ 
-                    dateFilter: undefined, 
+                    dateFilters: undefined, 
                     textFilters: undefined, 
-                    byShowDate: undefined, 
                     view: undefined 
                 });
                 return;
@@ -1173,18 +1434,22 @@ export const ScheduleFilterSelect = {
                     year: year,
                     startDate: `${year}-01-01`,
                     endDate: `${year}-12-31`,
-                    byShowDate: true
+                    dateFilters: [
+                        { column: 'Show Date', value: `${year}-01-01`, type: 'after' },
+                        { column: 'Show Date', value: `${year}-12-31`, type: 'before' }
+                    ]
                 };
                 this.$emit('search-selected', searchData);
                 this.updateURL({
                     view: undefined, // Clear show-all view parameter
-                    dateFilter: `${year}-01-01,${year}-12-31`,
-                    byShowDate: true
+                    dateFilters: searchData.dateFilters
                 });
             } else if (option.type === 'search') {
                 const searchData = {
                     type: 'search',
-                    ...option.searchData
+                    name: option.searchData.name,
+                    dateFilters: cleanFilters(option.searchData.dateFilters) || [],
+                    textFilters: cleanFilters(option.searchData.textFilters) || []
                 };
                 this.$emit('search-selected', searchData);
                 this.updateURLFromSearch(option.searchData);
@@ -1222,9 +1487,9 @@ export const ScheduleFilterSelect = {
             const params = {
                 view: undefined // Clear show-all view parameter
             };
-            if (searchData.dateFilter) params.dateFilter = searchData.dateFilter;
-            if (searchData.textFilters?.length) params.textFilters = searchData.textFilters;
-            if (searchData.byShowDate !== undefined) params.byShowDate = searchData.byShowDate;
+            // Clean filters to remove AppData before passing to URL
+            if (searchData.dateFilters?.length) params.dateFilters = cleanFilters(searchData.dateFilters);
+            if (searchData.textFilters?.length) params.textFilters = cleanFilters(searchData.textFilters);
             
             this.updateURL(params);
         },
@@ -1265,9 +1530,8 @@ export const ScheduleFilterSelect = {
             }
             
             const filter = {
-                dateFilter: params.dateFilter || null,
+                dateFilters: params.dateFilters || [],
                 textFilters: params.textFilters || [],
-                byShowDate: params.byShowDate || false,
                 view: params.view || null
             };
             
@@ -1278,24 +1542,30 @@ export const ScheduleFilterSelect = {
                 return;
             }
             
-            // Try to match year selection
-            if (this.includeYears && filter.dateFilter && !filter.textFilters.length && filter.byShowDate) {
-                const dateFilterMatch = filter.dateFilter.match(/^(\d{4})-01-01,(\d{4})-12-31$/);
+            // Try to match year selection (2 date filters on Show Date column with year start/end)
+            if (this.includeYears && filter.dateFilters.length === 2 && !filter.textFilters.length) {
+                const afterFilter = filter.dateFilters.find(f => f.type === 'after' && f.column === 'Show Date');
+                const beforeFilter = filter.dateFilters.find(f => f.type === 'before' && f.column === 'Show Date');
                 
-                if (dateFilterMatch && dateFilterMatch[1] === dateFilterMatch[2]) {
-                    const year = dateFilterMatch[1];
-                    const yearOption = this.availableOptions.find(opt => opt.value === year && opt.type === 'year');
+                if (afterFilter && beforeFilter) {
+                    const afterMatch = String(afterFilter.value).match(/^(\d{4})-01-01$/);
+                    const beforeMatch = String(beforeFilter.value).match(/^(\d{4})-12-31$/);
                     
-                    if (yearOption) {
-                        this.selectedValue = year;
-                        this.$emit('search-selected', {
-                            type: 'year',
-                            year: parseInt(year),
-                            startDate: `${year}-01-01`,
-                            endDate: `${year}-12-31`,
-                            byShowDate: true
-                        });
-                        return;
+                    if (afterMatch && beforeMatch && afterMatch[1] === beforeMatch[1]) {
+                        const year = afterMatch[1];
+                        const yearOption = this.availableOptions.find(opt => opt.value === year && opt.type === 'year');
+                        
+                        if (yearOption) {
+                            this.selectedValue = year;
+                            this.$emit('search-selected', {
+                                type: 'year',
+                                year: parseInt(year),
+                                startDate: `${year}-01-01`,
+                                endDate: `${year}-12-31`,
+                                dateFilters: filter.dateFilters
+                            });
+                            return;
+                        }
                     }
                 }
             }
@@ -1310,9 +1580,8 @@ export const ScheduleFilterSelect = {
                 this.$emit('search-selected', {
                     type: 'search',
                     name: matchedSearch.name,
-                    dateFilter: matchedSearch.dateFilter,
-                    textFilters: matchedSearch.textFilters || [],
-                    byShowDate: matchedSearch.byShowDate || false
+                    dateFilters: cleanFilters(matchedSearch.dateFilters) || [],
+                    textFilters: cleanFilters(matchedSearch.textFilters) || []
                 });
                 return;
             }
@@ -1322,9 +1591,8 @@ export const ScheduleFilterSelect = {
             this.$emit('search-selected', {
                 type: 'url',
                 name: 'Custom',
-                dateFilter: filter.dateFilter,
-                textFilters: filter.textFilters,
-                byShowDate: filter.byShowDate
+                dateFilters: filter.dateFilters,
+                textFilters: filter.textFilters
             });
         },
         

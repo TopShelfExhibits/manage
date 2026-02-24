@@ -154,7 +154,7 @@ div#app-content > div.empty-message {
     padding: 0;
     margin: 0;
     font-style: italic;
-    flex: 1 0 calc(100vh - var(--navbar-height) * 2 - var(--padding-lg) * 2);
+    flex: 1 0 calc(100vh - var(--navbar-height) * 2 - var(--padding-lg) * 2 - var(--padding-md));
     grid-column: 1 / -1;
 }
 
@@ -304,7 +304,9 @@ div#app-content > div.empty-message {
 .content-footer:only-of-type, .content-header:only-of-type {
     border-radius: var(--radius-lg);
 }
-
+.spacer {
+    flex: 1 0 auto;
+}
 
 
 
@@ -367,7 +369,7 @@ div#app-content > div.empty-message {
     /*width: 100%;*/
     border-radius: var(--radius-lg);
     align-content: center;
-    overflow: hidden;
+    /*overflow: hidden;*/
 }
 
 .card:has(.content-header) {
@@ -767,6 +769,10 @@ td:has(img) {
 }
 .input-container .column-button {
     margin-right: .3em;
+}
+.input-container input {
+    /*width: 100%;*/
+    min-width: unset;
 }
 
 .content-header > .column-button {

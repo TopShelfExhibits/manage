@@ -1,4 +1,5 @@
-import { Requests, html, hamburgerMenuRegistry, PacklistTable, CardsComponent, NavigationRegistry, DashboardToggleComponent, getReactiveStore, findMatchingStores, createAnalysisConfig, generateStoreKey, authState, ScheduleFilterSelect, parsedateFilterParameter, invalidateCache } from '../../index.js';
+import { Requests, html, hamburgerMenuRegistry, PacklistTable, CardsComponent, NavigationRegistry, DashboardToggleComponent, getReactiveStore, findMatchingStores, createAnalysisConfig, generateStoreKey, authState, ScheduleFilterSelect, invalidateCache } from '../../index.js';
+import { normalizeFilterValues } from '../../../data_management/utils/helpers.js';
 import { PacklistItemsSummary } from './PacklistItemsSummary.js';
 import { ScheduleTableComponent } from './ScheduleTable.js';
 
@@ -180,7 +181,7 @@ export const PacklistMenuComponent = {
                     };
                 },
                 computed: {
-                    // Split filter into dateFilter and searchParams for table
+                    // Split filter into dateFilters and searchParams for table
                     dateFilter() {
                         if (!this.filter) return null;
                         const { searchParams, ...dateFilter } = this.filter;
@@ -199,11 +200,12 @@ export const PacklistMenuComponent = {
                         }
                         
                         if (searchData.type === 'year') {
-                            // Handle year selection
+                            // Handle year selection - use dateFilters array
                             this.filter = { 
-                                startDate: searchData.startDate, 
-                                endDate: searchData.endDate,
-                                year: searchData.year
+                                dateFilters: searchData.dateFilters || [
+                                    { column: 'Show Date', value: searchData.startDate, type: 'after' },
+                                    { column: 'Show Date', value: searchData.endDate, type: 'before' }
+                                ]
                             };
                         } else {
                             // Handle saved search or URL params
@@ -216,30 +218,19 @@ export const PacklistMenuComponent = {
                             searchParams: {}
                         };
                         
-                        // Parse dateFilter from saved search
-                        if (searchData.dateFilter) {
-                            const dateFilter = parsedateFilterParameter(searchData.dateFilter);
-                            
-                            // Check if this is an overlap search (has overlapShowIdentifier)
-                            if (dateFilter.overlapShowIdentifier) {
-                                // Convert overlapShowIdentifier to identifier for API
-                                filter.identifier = dateFilter.overlapShowIdentifier;
-                            } else {
-                                // Regular date filter
-                                Object.assign(filter, dateFilter);
-                            }
-                        }
-                        
-                        // Add byShowDate flag if present
-                        if (searchData.byShowDate) {
-                            filter.byShowDate = true;
+                        // Use dateFilters array from saved search
+                        if (searchData.dateFilters && searchData.dateFilters.length > 0) {
+                            filter.dateFilters = searchData.dateFilters;
                         }
                         
                         // Apply text filters
                         if (searchData.textFilters && searchData.textFilters.length > 0) {
                             searchData.textFilters.forEach(textFilter => {
-                                if (textFilter.column && textFilter.value) {
-                                    filter.searchParams[textFilter.column] = textFilter.value;
+                                if (textFilter.column && (textFilter.values || textFilter.value)) {
+                                    filter.searchParams[textFilter.column] = {
+                                        values: normalizeFilterValues(textFilter),
+                                        type: textFilter.type || 'contains'
+                                    };
                                 }
                             });
                         }
@@ -652,20 +643,15 @@ export const PacklistContent = {
             const filter = {};
             
             if (searchData.type === 'year') {
-                // Handle year selection
-                filter.startDate = searchData.startDate;
-                filter.endDate = searchData.endDate;
-                filter.byShowDate = true;
+                // Handle year selection - use dateFilters array
+                filter.dateFilters = searchData.dateFilters || [
+                    { column: 'Show Date', value: searchData.startDate, type: 'after' },
+                    { column: 'Show Date', value: searchData.endDate, type: 'before' }
+                ];
             } else {
-                // Handle saved search - parse dateFilter parameter
-                if (searchData.dateFilter) {
-                    const dateFilter = parsedateFilterParameter(searchData.dateFilter);
-                    Object.assign(filter, dateFilter);
-                }
-                
-                // Add byShowDate flag if present
-                if (searchData.byShowDate) {
-                    filter.byShowDate = true;
+                // Handle saved search - use dateFilters array
+                if (searchData.dateFilters) {
+                    filter.dateFilters = searchData.dateFilters;
                 }
             }
             

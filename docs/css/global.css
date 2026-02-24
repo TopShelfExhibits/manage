@@ -113,7 +113,7 @@ select {
 input[type="number"] {
     min-width: 30px;
 }
-input[type="text"] {
+input[type="text"], .input-container {
     min-width: 200px;
 }
 textarea {
@@ -142,7 +142,7 @@ button {
     line-height: 1.5;
     border-radius: var(--radius-md);
     box-shadow: 2px 2px 8px -4px var(--color-shadow);
-    overflow: hidden;
+    /*overflow: hidden;*/
 }
 
 input[type="submit"]:hover,
