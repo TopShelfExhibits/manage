@@ -311,7 +311,7 @@ export const ScheduleTableComponent = {
             return dateKeywords.some(keyword => key.includes(keyword));
         },
         isNumberColumn(key) {
-            const numberKeywords = ['year', 'count', 'quantity', 'id'];
+            const numberKeywords = ['count', 'quantity', 'id'];
             return numberKeywords.some(keyword => key.includes(keyword)) || /^\d+$/.test(key);
         },
         isCurrencyColumn(key) {
