@@ -1,16 +1,6 @@
 // Dynamic Google Sheets Service selection
+import { isLocalhost } from '../../google_sheets_services/FakeGoogle.js';
 let GoogleSheetsService, GoogleSheetsAuth;
-
-function isLocalhost() {
-    return (
-        typeof window !== 'undefined' &&
-        (
-            window.location.hostname === 'localhost' ||
-            window.location.hostname === '127.0.0.1' ||
-            window.location.protocol === 'file:'
-        )
-    );
-}
 
 if (isLocalhost()) {
     // Dynamically import fake services
@@ -25,7 +15,7 @@ if (isLocalhost()) {
     ({ GoogleSheetsService, GoogleSheetsAuth } = await import('../../google_sheets_services/index.js'));
 }
 
-import { wrapMethods, invalidateCache, MetaDataUtils } from '../index.js';
+import { wrapMethods, invalidateCache, EditHistoryUtils } from '../index.js';
 
 class database_uncached {
     /**
@@ -44,7 +34,7 @@ class database_uncached {
         
         // If mapping provided, transform to JS objects
         if (mapping) {
-            const transformedData = GoogleSheetsService.transformSheetData(rawData, mapping);
+            const transformedData = GoogleSheetsService.transformSheetData(rawData, mapping, tabName);
             console.log('[Database] Transformed data:', transformedData);
             return transformedData;
         }
@@ -95,7 +85,7 @@ class database_uncached {
     static async getItemImageUrl(deps, itemNumber, folderId = '1rvWRUB38BsQJQyOPtF1JEG20qJPvTjZM') {
         // Defensive: handle null, undefined, or non-string values
         if (!itemNumber || itemNumber === null || itemNumber === undefined) {
-            console.warn('[Database.getItemImageUrl] No itemNumber provided, returning empty string');
+            //console.warn('[Database.getItemImageUrl] No itemNumber provided, returning empty string');
             return '';
         }
         
@@ -103,11 +93,11 @@ class database_uncached {
         const itemNumberStr = String(itemNumber).trim();
         
         if (!itemNumberStr) {
-            console.warn('[Database.getItemImageUrl] Empty itemNumber after trim, returning empty string');
+            //console.warn('[Database.getItemImageUrl] Empty itemNumber after trim, returning empty string');
             return '';
         }
         
-        console.log('[Database.getItemImageUrl] Searching for image:', itemNumberStr);
+        //console.log('[Database.getItemImageUrl] Searching for image:', itemNumberStr);
                 
         // Try different file extensions
         const extensions = ['jpg', 'jpeg', 'png'];
@@ -117,7 +107,7 @@ class database_uncached {
             const file = await GoogleSheetsService.searchDriveFileInFolder(fileName, folderId);
             
             if (file && file.directImageUrl) {
-                console.log(`[Database.getItemImageUrl] Found image for ${itemNumberStr}: ${file.directImageUrl}`);
+                //console.log(`[Database.getItemImageUrl] Found image for ${itemNumberStr}: ${file.directImageUrl}`);
                 return file.directImageUrl;
             }
         }
@@ -145,9 +135,9 @@ class database_uncached {
      * @param {string} tabName - Tab name or logical identifier
      * @param {Array<Object>} updates - Array of JS objects to save
      * @param {Object} [mapping] - Optional mapping for object keys to sheet headers
-     * @param {Object} [options] - Optional parameters for metadata tracking
+     * @param {Object} [options] - Optional parameters for edithistory tracking
      * @param {string} [options.username] - Username making the change
-     * @param {boolean} [options.skipMetadata] - Skip metadata generation (for MetaData table itself)
+     * @param {boolean} [options.skipMetadata] - Skip edithistory generation (for EditHistory table itself)
      * @param {string} [options.identifierKey] - Key to identify rows (for deletion tracking)
      * @returns {Promise<boolean>} - Success status
      */
@@ -160,13 +150,13 @@ class database_uncached {
 
         let updatesWithMetadata = updates;
 
-        // Add metadata tracking if not skipped
-        if (!skipMetadata && mapping && mapping.metadata) {
+        // Add edithistory tracking if not skipped
+        if (!skipMetadata && mapping && mapping.edithistory) {
             try {
                 // Get original data for comparison (use Database.getData to leverage cache)
                 const transformedOriginal = await Database.getData(tableId, tabName, mapping);
 
-                // Add metadata to updated rows
+                // Add edithistory to updated rows
                 updatesWithMetadata = await _addMetadataToRows(
                     transformedOriginal,
                     updates,
@@ -176,7 +166,7 @@ class database_uncached {
 
                 // Detect and archive deleted rows
                 if (identifierKey) {
-                    const deletedRows = MetaDataUtils.detectDeletedRows(
+                    const deletedRows = EditHistoryUtils.detectDeletedRows(
                         transformedOriginal,
                         updates,
                         identifierKey
@@ -192,8 +182,8 @@ class database_uncached {
                     }
                 }
             } catch (error) {
-                console.warn('Failed to add metadata, continuing with save:', error);
-                // Continue with save even if metadata fails
+                console.warn('Failed to add edithistory, continuing with save:', error);
+                // Continue with save even if edithistory fails
             }
         }
 
@@ -215,7 +205,7 @@ class database_uncached {
      * @param {string} tabName - Tab name or logical identifier
      * @param {Object} update - JS object representing the row to update
      * @param {Object} [mapping] - Optional mapping for object keys to sheet headers
-     * @param {Object} [options] - Optional parameters for metadata tracking
+     * @param {Object} [options] - Optional parameters for edithistory tracking
      * @param {string} [options.username] - Username making the change
      * @returns {Promise<boolean>} - Success status
      */
@@ -225,7 +215,7 @@ class database_uncached {
         const existingData = await GoogleSheetsService.getSheetData(tableId, tabName);
 
         const transformedData = mapping
-            ? GoogleSheetsService.transformSheetData(existingData, mapping)
+            ? GoogleSheetsService.transformSheetData(existingData, mapping, tabName)
             : GoogleSheetsService.sheetArrayToObjects(existingData);
 
         const rowIndex = transformedData.findIndex(row => {
@@ -240,15 +230,15 @@ class database_uncached {
 
         const originalRow = transformedData[rowIndex];
 
-        // Calculate changes and add metadata if mapping includes it
+        // Calculate changes and add edithistory if mapping includes it
         let updatedRow = { ...originalRow, ...update };
-        if (mapping && mapping.metadata && username) {
-            const changes = MetaDataUtils.calculateRowDiff(originalRow, update);
+        if (mapping && mapping.edithistory && username) {
+            const changes = EditHistoryUtils.calculateRowDiff(originalRow, update);
             if (changes.length > 0) {
-                const metaEntry = MetaDataUtils.createMetaDataEntry(username, changes);
-                const existingMetadata = originalRow.metadata || originalRow.MetaData || '';
-                const newMetadata = MetaDataUtils.appendToMetaData(existingMetadata, metaEntry);
-                updatedRow.metadata = newMetadata;
+                const metaEntry = EditHistoryUtils.createEditHistoryEntry(username, changes);
+                const existingMetadata = originalRow.edithistory || originalRow.EditHistory || '';
+                const newMetadata = EditHistoryUtils.appendToEditHistory(existingMetadata, metaEntry);
+                updatedRow.edithistory = newMetadata;
             }
         }
 
@@ -312,11 +302,18 @@ class database_uncached {
     }
 }
 
-export const Database = wrapMethods(database_uncached, 'database', ['createTab', 'hideTabs', 'showTabs', 'setData', 'updateRow']);
+// Wrap and export the class with caching, excluding mutation methods
+// Image URLs get infinite cache since they rarely change and are expensive Google Drive API calls
+export const Database = wrapMethods(
+    database_uncached, 
+    'database', 
+    ['createTab', 'hideTabs', 'showTabs', 'setData', 'updateRow'],
+    ['getItemImageUrl'] // Infinite cache for image URLs
+);
 
 
 /**
- * Add metadata to rows that have changed
+ * Add edithistory to rows that have changed
  * @private
  */
 async function _addMetadataToRows(originalRows, updatedRows, username, mapping) {
@@ -328,16 +325,16 @@ async function _addMetadataToRows(originalRows, updatedRows, username, mapping) 
         const originalRow = originalRows[index];
 
         // Calculate changes for this row
-        const changes = MetaDataUtils.calculateRowDiff(originalRow, updatedRow);
+        const changes = EditHistoryUtils.calculateRowDiff(originalRow, updatedRow);
 
-        // If changes exist, append to metadata
+        // If changes exist, append to edithistory
         if (changes.length > 0 && username) {
-            const metaEntry = MetaDataUtils.createMetaDataEntry(username, changes);
-            const existingMetadata = updatedRow.metadata || '';
-            const newMetadata = MetaDataUtils.appendToMetaData(existingMetadata, metaEntry);
+            const metaEntry = EditHistoryUtils.createEditHistoryEntry(username, changes);
+            const existingMetadata = updatedRow.edithistory || '';
+            const newMetadata = EditHistoryUtils.appendToEditHistory(existingMetadata, metaEntry);
 
-            // Update the metadata field using the mapping key (always 'metadata')
-            return { ...updatedRow, metadata: newMetadata };
+            // Update the edithistory field using the mapping key (always 'edithistory')
+            return { ...updatedRow, edithistory: newMetadata };
         }
 
         return updatedRow;
@@ -345,16 +342,16 @@ async function _addMetadataToRows(originalRows, updatedRows, username, mapping) 
 }
 
 /**
- * Archive deleted rows to MetaData table
+ * Archive deleted rows to EditHistory table
  * @private
  */
 async function _archiveDeletedRows(sourceTable, sourceTab, deletedRows, username) {
     try {
-        // Get existing metadata table data (use Database to leverage cache if available)
-        let metadataTableData = [];
+        // Get existing edithistory table data (use Database to leverage cache if available)
+        let edithistoryTableData = [];
         try {
             // Try to get with mapping first
-            const metadataMapping = {
+            const edithistoryMapping = {
                 SourceTable: 'SourceTable',
                 SourceTab: 'SourceTab',
                 RowIdentifier: 'RowIdentifier',
@@ -364,16 +361,16 @@ async function _archiveDeletedRows(sourceTable, sourceTab, deletedRows, username
                 RowData: 'RowData'
             };
             
-            metadataTableData = await Database.getData(sourceTable, 'MetaData', metadataMapping);
+            edithistoryTableData = await Database.getData(sourceTable, 'EditHistory', edithistoryMapping);
         } catch (error) {
-            // MetaData tab doesn't exist yet, will be created
-            console.log('MetaData tab does not exist yet, will create');
-            metadataTableData = [];
+            // EditHistory tab doesn't exist yet, will be created
+            console.log('EditHistory tab does not exist yet, will create');
+            edithistoryTableData = [];
         }
 
         // Create archive entries for deleted rows
         const archiveEntries = deletedRows.map(deleted => 
-            MetaDataUtils.createArchiveEntry(
+            EditHistoryUtils.createArchiveEntry(
                 sourceTable,
                 sourceTab,
                 deleted.identifier,
@@ -382,11 +379,11 @@ async function _archiveDeletedRows(sourceTable, sourceTab, deletedRows, username
             )
         );
 
-        // Append to existing metadata
-        const updatedMetadata = [...metadataTableData, ...archiveEntries];
+        // Append to existing edithistory
+        const updatedMetadata = [...edithistoryTableData, ...archiveEntries];
 
-        // Save to MetaData table (skip metadata for this table itself)
-        const metadataMapping = {
+        // Save to EditHistory table (skip edithistory for this table itself)
+        const edithistoryMapping = {
             SourceTable: 'SourceTable',
             SourceTab: 'SourceTab',
             RowIdentifier: 'RowIdentifier',
@@ -398,12 +395,12 @@ async function _archiveDeletedRows(sourceTable, sourceTab, deletedRows, username
 
         await GoogleSheetsService.setSheetData(
             sourceTable,
-            'MetaData',
+            'EditHistory',
             updatedMetadata,
-            metadataMapping
+            edithistoryMapping
         );
 
-        console.log(`Archived ${deletedRows.length} deleted rows to MetaData table`);
+        console.log(`Archived ${deletedRows.length} deleted rows to EditHistory table`);
     } catch (error) {
         console.error('Failed to archive deleted rows:', error);
         // Don't throw - archival failure shouldn't block the main save

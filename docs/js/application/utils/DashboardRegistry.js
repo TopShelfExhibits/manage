@@ -6,6 +6,7 @@ import { Requests } from '../../data_management/api.js';
 export const DashboardRegistry = {
     store: null,
     saveTimeout: null,
+    isSaving: false, // Track save state to prevent invalidation-triggered reloads
     SAVE_DELAY_MS: 5000, // 5 seconds
     
     /**
@@ -17,12 +18,23 @@ export const DashboardRegistry = {
         }
         
         try {
-            // Use existing reactive store system
+            // Use existing reactive store system with custom save wrapper
             this.store = getReactiveStore(
                 Requests.getUserData,
-                Requests.storeUserData,
+                null, // No automatic save call - we'll handle it manually
                 [authState.user.email, 'dashboard_containers']
             );
+            
+            // Override handleInvalidation to prevent reloads during save
+            const originalHandleInvalidation = this.store.handleInvalidation.bind(this.store);
+            this.store.handleInvalidation = async () => {
+                // Skip reload if we're in the middle of saving
+                if (this.isSaving) {
+                    console.log('[DashboardRegistry] Skipping reload during save operation');
+                    return;
+                }
+                await originalHandleInvalidation();
+            };
 
         } catch (error) {
             console.error('Failed to initialize dashboard registry:', error);
@@ -68,28 +80,34 @@ export const DashboardRegistry = {
 
     /**
      * Check if a container is on the dashboard
+     * Compares clean paths (without parameters) for matching
      */
-    has(containerId) {
-        return this.containerIds.includes(containerId);
+    has(containerPathWithParams) {
+        const cleanPathToCheck = containerPathWithParams.split('?')[0];
+        return this.containerIds.some(id => id.split('?')[0] === cleanPathToCheck);
     },
 
     /**
-     * Get container metadata (for classes like wide/tall)
+     * Get container edithistory (for classes like wide/tall)
+     * Compares clean paths (without parameters) for matching
      */
-    getContainer(containerId) {
-        return this.containers.find(container => 
-            (typeof container === 'string' ? container : container.path) === containerId
-        );
+    getContainer(containerPathWithParams) {
+        const cleanPathToCheck = containerPathWithParams.split('?')[0];
+        return this.containers.find(container => {
+            const containerPath = typeof container === 'string' ? container : container.path;
+            return containerPath.split('?')[0] === cleanPathToCheck;
+        });
     },
 
     /**
      * Add container to dashboard
+     * Stores full path including parameters
      */
-    async add(containerId) {
-        if (!this.has(containerId)) {
-            // Add as object with metadata
+    async add(containerPathWithParams) {
+        if (!this.has(containerPathWithParams)) {
+            // Add as object with edithistory
             const newContainer = {
-                path: containerId,
+                path: containerPathWithParams,
                 classes: ''
             };
             this.store.data.push(newContainer);
@@ -98,12 +116,47 @@ export const DashboardRegistry = {
     },
 
     /**
-     * Remove container from dashboard
+     * Update existing container's path with new parameters
+     * This allows dashboard containers to preserve parameter state
      */
-    async remove(containerId) {
-        const index = this.store.data.findIndex(container => 
-            (typeof container === 'string' ? container : container.path) === containerId
-        );
+    async updatePath(cleanPath, newPathWithParams) {
+        console.log('[DashboardRegistry] updatePath called:', { cleanPath, newPathWithParams });
+        
+        const index = this.store.data.findIndex(container => {
+            const containerPath = typeof container === 'string' ? container : container.path;
+            return containerPath.split('?')[0] === cleanPath;
+        });
+        
+        if (index > -1) {
+            const oldPath = typeof this.store.data[index] === 'string' 
+                ? this.store.data[index] 
+                : this.store.data[index].path;
+            
+            console.log('[DashboardRegistry] Updating path from:', oldPath, 'to:', newPathWithParams);
+            
+            if (typeof this.store.data[index] === 'string') {
+                this.store.data[index] = newPathWithParams;
+            } else {
+                this.store.data[index].path = newPathWithParams;
+            }
+            await this.save();
+            
+            console.log('[DashboardRegistry] Path updated successfully');
+        } else {
+            console.warn('[DashboardRegistry] Container not found for path:', cleanPath);
+        }
+    },
+
+    /**
+     * Remove container from dashboard
+     * Compares clean paths (without parameters) for matching
+     */
+    async remove(containerPathWithParams) {
+        const cleanPathToRemove = containerPathWithParams.split('?')[0];
+        const index = this.store.data.findIndex(container => {
+            const containerPath = typeof container === 'string' ? container : container.path;
+            return containerPath.split('?')[0] === cleanPathToRemove;
+        });
         if (index > -1) {
             this.store.data.splice(index, 1);
             await this.save();
@@ -113,20 +166,24 @@ export const DashboardRegistry = {
     /**
      * Toggle a CSS class on a container
      */
-    async toggleClass(containerId, className) {
-        const container = this.getContainer(containerId);
+    async toggleClass(containerPathWithParams, className) {
+        const cleanPath = containerPathWithParams.split('?')[0];
+        const container = this.getContainer(containerPathWithParams);
         if (!container) return;
 
         // Ensure container is an object with classes property
         if (typeof container === 'string') {
             // Convert string ID to object
-            const index = this.store.data.findIndex(c => c === containerId);
+            const index = this.store.data.findIndex(c => {
+                const path = typeof c === 'string' ? c : c.path;
+                return path.split('?')[0] === cleanPath;
+            });
             if (index > -1) {
-                this.store.data[index] = { path: containerId, classes: '' };
+                this.store.data[index] = { path: containerPathWithParams, classes: '' };
             }
         }
 
-        const containerObj = this.getContainer(containerId);
+        const containerObj = this.getContainer(containerPathWithParams);
         if (!containerObj) return;
 
         const classes = new Set(containerObj.classes ? containerObj.classes.split(' ').filter(c => c.length > 0) : []);
@@ -186,25 +243,19 @@ export const DashboardRegistry = {
      * Save dashboard state with debouncing
      */
     async save() {
-        if (this.store && typeof this.store.save === 'function') {
-            // Clear any existing timeout
-            if (this.saveTimeout) {
-                clearTimeout(this.saveTimeout);
-            }
-            
-            // Set new timeout for delayed save
-            this.saveTimeout = setTimeout(async () => {
-                try {
-                    await this.store.save();
-                    console.log('[DashboardRegistry] Dashboard saved successfully');
-                } catch (error) {
-                    console.error('[DashboardRegistry] Failed to save dashboard:', error);
-                }
-                this.saveTimeout = null;
-            }, this.SAVE_DELAY_MS);
-            
-            console.log('[DashboardRegistry] Dashboard save queued for', this.SAVE_DELAY_MS, 'ms');
+        if (!this.store) return;
+        
+        // Clear any existing timeout
+        if (this.saveTimeout) {
+            clearTimeout(this.saveTimeout);
         }
+        
+        // Set new timeout for delayed save
+        this.saveTimeout = setTimeout(async () => {
+            await this._performSave();
+        }, this.SAVE_DELAY_MS);
+        
+        console.log('[DashboardRegistry] Dashboard save queued for', this.SAVE_DELAY_MS, 'ms');
     },
 
     /**
@@ -216,13 +267,40 @@ export const DashboardRegistry = {
             this.saveTimeout = null;
         }
         
-        if (this.store && typeof this.store.save === 'function') {
-            try {
-                await this.store.save();
-                console.log('[DashboardRegistry] Dashboard saved immediately');
-            } catch (error) {
-                console.error('[DashboardRegistry] Failed to save dashboard immediately:', error);
-            }
+        await this._performSave();
+    },
+    
+    /**
+     * Internal save implementation that updates originalData without reloading
+     */
+    async _performSave() {
+        if (!this.store) return;
+        
+        this.isSaving = true;
+        this.store.setLoading(true, 'Saving dashboard...');
+        this.store.setError(null);
+        
+        try {
+            // Save current data to user storage
+            const dataToSave = JSON.parse(JSON.stringify(this.store.data));
+            await Requests.storeUserData(
+                dataToSave,
+                authState.user.email, 
+                'dashboard_containers'
+            );
+            
+            // Update originalData to match current data (split-data pattern)
+            // This makes the store "clean" without reloading from server
+            this.store.setOriginalData(dataToSave);
+            
+            console.log('[DashboardRegistry] Dashboard saved successfully');
+        } catch (error) {
+            console.error('[DashboardRegistry] Failed to save dashboard:', error);
+            this.store.setError(error.message || 'Failed to save dashboard');
+        } finally {
+            this.store.setLoading(false, '');
+            this.isSaving = false;
+            this.saveTimeout = null;
         }
     },
 

@@ -1,11 +1,11 @@
-# MetaData System Implementation Documentation
+# EditHistory System Implementation Documentation
 
 **Date:** November 6, 2025  
 **Implementation Phase:** Phase 1 - Core Infrastructure (Complete)
 
 ## Overview
 
-The MetaData system has been implemented to track row changes, store modification history, and archive deleted rows across all spreadsheet tables. This system operates transparently at the Database layer, requiring no changes to UI components.
+The EditHistory system has been implemented to track row changes, store modification history, and archive deleted rows across all spreadsheet tables. This system operates transparently at the Database layer, requiring no changes to UI components.
 
 ---
 
@@ -17,28 +17,28 @@ The implementation follows the recommended Database Layer approach, providing:
 
 - **Single point of control** - All saves flow through Database.setData()
 - **Automatic tracking** - Works for all tables without code changes
-- **Transparent operation** - Upper layers unaware of metadata tracking
-- **Consistent format** - Uniform metadata structure across all data types
+- **Transparent operation** - Upper layers unaware of edithistory tracking
+- **Consistent format** - Uniform edithistory structure across all data types
 
 ---
 
 ## Components Implemented
 
-### 1. MetaData Utilities (`data_management/utils/metadata-utils.js`)
+### 1. EditHistory Utilities (`data_management/utils/edithistory-utils.js`)
 
-Core utility class providing metadata operations:
+Core utility class providing edithistory operations:
 
 **Key Methods:**
 
-- `createMetaDataEntry(username, changes)` - Creates new metadata entry
-- `appendToMetaData(existingMetaData, newEntry, maxHistory)` - Appends to history
+- `createEditHistoryEntry(username, changes)` - Creates new edithistory entry
+- `appendToEditHistory(existingEditHistory, newEntry, maxHistory)` - Appends to history
 - `calculateRowDiff(oldRow, newRow, ignoredColumns)` - Detects changes
 - `calculateBatchDiff(originalRows, updatedRows)` - Batch change detection
 - `detectDeletedRows(originalRows, updatedRows, identifierKey)` - Finds deleted rows
 - `createArchiveEntry(...)` - Prepares row for archival
-- `parseMetaData(metadata)` - Parses metadata from various formats
-- `setCachedAnalytic(metadata, key, value)` - Stores cached analytics
-- `setUserSetting(metadata, key, value)` - Stores user settings
+- `parseEditHistory(edithistory)` - Parses edithistory from various formats
+- `setCachedAnalytic(edithistory, key, value)` - Stores cached analytics
+- `setUserSetting(edithistory, key, value)` - Stores user settings
 
 ### 2. Enhanced Database Layer (`abstraction/database.js`)
 
@@ -46,23 +46,23 @@ Core utility class providing metadata operations:
 
 - Accepts `options` parameter with:
   - `username` - User making the change
-  - `skipMetadata` - Skip metadata generation (for special tables)
+  - `skipMetadata` - Skip edithistory generation (for special tables)
   - `identifierKey` - Key for row identification (e.g., 'itemNumber')
 - Automatically fetches original data for comparison
-- Calculates diffs and appends to metadata column
-- Detects and archives deleted rows to MetaData table
-- Graceful fallback if metadata operations fail
+- Calculates diffs and appends to edithistory column
+- Detects and archives deleted rows to EditHistory table
+- Graceful fallback if edithistory operations fail
 
 **Database.updateRow() Enhancements:**
 
 - Accepts `options` parameter with username
 - Calculates single-row diff
-- Appends metadata for changed fields
+- Appends edithistory for changed fields
 
 **Private Helper Methods:**
 
-- `_addMetadataToRows(originalRows, updatedRows, username, mapping)` - Adds metadata to changed rows
-- `_archiveDeletedRows(sourceTable, sourceTab, deletedRows, username)` - Archives to MetaData table
+- `_addMetadataToRows(originalRows, updatedRows, username, mapping)` - Adds edithistory to changed rows
+- `_archiveDeletedRows(sourceTable, sourceTab, deletedRows, username)` - Archives to EditHistory table
 
 ### 3. Updated Abstraction Layer
 
@@ -75,7 +75,7 @@ Core utility class providing metadata operations:
 **PackListUtils.savePackList():**
 
 - Accepts `username` parameter
-- Currently skips metadata (pack lists use special 2D array format)
+- Currently skips edithistory (pack lists use special 2D array format)
 - Tagged with comment for future enhancement
 
 **ApplicationUtils.storeUserData():**
@@ -96,9 +96,9 @@ Core utility class providing metadata operations:
 
 ## Data Structures
 
-### MetaData Column Format
+### EditHistory Column Format
 
-Stored as JSON string in the `MetaData` column of each table (minimized format):
+Stored as JSON string in the `EditHistory` column of each table (minimized format):
 
 ```json
 {
@@ -144,9 +144,9 @@ Decisecond integers (1/10th second precision) reduce size by 54% vs ISO strings:
 
 - ISO string: `"2025-11-05T10:15:00Z"` (24 chars)
 - Deciseconds: `17309064000` (11 chars)
-- Convert to Date: `new Date(timestamp * 100)` or `MetaDataUtils.decisecondToDate(timestamp)`
-- Convert to ISO: `MetaDataUtils.formatTimestamp(timestamp)`
-- Human readable: `MetaDataUtils.formatTimestampHuman(timestamp)`
+- Convert to Date: `new Date(timestamp * 100)` or `EditHistoryUtils.decisecondToDate(timestamp)`
+- Convert to ISO: `EditHistoryUtils.formatTimestamp(timestamp)`
+- Human readable: `EditHistoryUtils.formatTimestampHuman(timestamp)`
 
 **Design Rationale:**
 
@@ -159,7 +159,7 @@ Decisecond integers (1/10th second precision) reduce size by 54% vs ISO strings:
 **Backwards Compatibility:**
 The system automatically migrates old format keys (`history`, `user`, etc.) to new format when reading.
 
-### MetaData Table Structure
+### EditHistory Table Structure
 
 Dedicated tab in each spreadsheet storing deleted rows:
 
@@ -173,13 +173,13 @@ Dedicated tab in each spreadsheet storing deleted rows:
 | Operation     | Action type                   | "delete"                                    |
 | RowData       | Full row as JSON              | {"itemNumber":"F-123", "quantity":"5", ...} |
 
-**Note:** MetaData table uses decisecond integers for Timestamp. Convert with `MetaDataUtils.decisecondToDate(timestamp)`.
+**Note:** EditHistory table uses decisecond integers for Timestamp. Convert with `EditHistoryUtils.decisecondToDate(timestamp)`.
 
 ---
 
 ## How It Works
 
-### Save Flow with MetaData
+### Save Flow with EditHistory
 
 1. **User Initiates Save** (e.g., clicks Save in InventoryTable)
 2. **ReactiveStore.save()** strips AppData and target columns
@@ -187,11 +187,11 @@ Dedicated tab in each spreadsheet storing deleted rows:
 4. **InventoryUtils.saveInventoryTabData()** passes username with options
 5. **Database.setData()** receives username and identifierKey
 6. **Database Fetches Original Data** from Google Sheets for comparison
-7. **Calculate Diffs** using MetaDataUtils.calculateRowDiff()
-8. **Append Metadata** to changed rows using MetaDataUtils.appendToMetaData()
-9. **Detect Deletions** using MetaDataUtils.detectDeletedRows()
-10. **Archive Deleted Rows** to MetaData table
-11. **Save Updated Data** to Google Sheets (includes metadata column)
+7. **Calculate Diffs** using EditHistoryUtils.calculateRowDiff()
+8. **Append Metadata** to changed rows using EditHistoryUtils.appendToEditHistory()
+9. **Detect Deletions** using EditHistoryUtils.detectDeletedRows()
+10. **Archive Deleted Rows** to EditHistory table
+11. **Save Updated Data** to Google Sheets (includes edithistory column)
 12. **Invalidate Cache** triggers reactive store reload
 
 ### Example: Inventory Item Update
@@ -204,7 +204,7 @@ Dedicated tab in each spreadsheet storing deleted rows:
   quantity: "5",
   description: "Blue table",
   notes: "In good condition",
-  metadata: ""
+  edithistory: ""
 }
 ```
 
@@ -218,7 +218,7 @@ Dedicated tab in each spreadsheet storing deleted rows:
   quantity: "10",
   description: "Blue table",
   notes: "Ready for show",
-  metadata: '{"h":[{"u":"dan","t":17309064000,"c":[{"n":"quantity","o":"5"},{"n":"notes","o":"In good condition"}]}]}'
+  edithistory: '{"h":[{"u":"dan","t":17309064000,"c":[{"n":"quantity","o":"5"},{"n":"notes","o":"In good condition"}]}]}'
 }
 ```
 
@@ -245,7 +245,7 @@ Dedicated tab in each spreadsheet storing deleted rows:
 ]
 ```
 
-**MetaData Table Entry Created:**
+**EditHistory Table Entry Created:**
 
 ```javascript
 {
@@ -259,7 +259,7 @@ Dedicated tab in each spreadsheet storing deleted rows:
 }
 ```
 
-**Note:** MetaData table stores full username (not truncated) and uses decisecond integer timestamps.
+**Note:** EditHistory table stores full username (not truncated) and uses decisecond integer timestamps.
 
 ---
 
@@ -267,14 +267,14 @@ Dedicated tab in each spreadsheet storing deleted rows:
 
 ### Inventory Tables
 
-- ✅ **Enabled** - Full metadata tracking
-- Mapping includes: `metadata: 'MetaData'`
+- ✅ **Enabled** - Full edithistory tracking
+- Mapping includes: `edithistory: 'EditHistory'`
 - Identifier key: `'itemNumber'`
 
 ### Pack Lists
 
 - ⚠️ **Partially Disabled** - Uses special 2D array format
-- Currently skips metadata with `skipMetadata: true`
+- Currently skips edithistory with `skipMetadata: true`
 - Future enhancement: Convert to mapped format
 
 ### Production Schedule
@@ -294,7 +294,7 @@ Dedicated tab in each spreadsheet storing deleted rows:
 ### Basic Save (Automatic)
 
 ```javascript
-// No changes needed - metadata is automatic!
+// No changes needed - edithistory is automatic!
 await Requests.saveInventoryTabData(updatedData, "FURNITURE");
 // Metadata is automatically added based on authState.user.email
 ```
@@ -302,18 +302,18 @@ await Requests.saveInventoryTabData(updatedData, "FURNITURE");
 ### Retrieve Metadata History
 
 ```javascript
-import { MetaDataUtils } from "./data_management/index.js";
+import { EditHistoryUtils } from "./data_management/index.js";
 
 // Get item data
 const items = await Requests.getInventoryTabData("FURNITURE");
 const item = items[0];
 
-// Parse metadata
-const metadata = MetaDataUtils.parseMetaData(item.metadata);
-console.log("Change history:", metadata.h); // Note: 'h' not 'history'
+// Parse edithistory
+const edithistory = EditHistoryUtils.parseEditHistory(item.edithistory);
+console.log("Change history:", edithistory.h); // Note: 'h' not 'history'
 
 // Get most recent change
-const lastChange = MetaDataUtils.getMostRecentChange(item.metadata);
+const lastChange = EditHistoryUtils.getMostRecentChange(item.edithistory);
 console.log("Last modified by:", lastChange.u); // Short username
 console.log("Last modified at:", lastChange.t);
 console.log("Fields changed:", lastChange.c); // Array of {n: name, o: oldValue}
@@ -322,18 +322,18 @@ console.log("Fields changed:", lastChange.c); // Array of {n: name, o: oldValue}
 ### Store Cached Analytics
 
 ```javascript
-import { MetaDataUtils } from "./data_management/index.js";
+import { EditHistoryUtils } from "./data_management/index.js";
 
 // Update cached analytic
-item.metadata = MetaDataUtils.setCachedAnalytic(
-  item.metadata,
+item.edithistory = EditHistoryUtils.setCachedAnalytic(
+  item.edithistory,
   "lastInventoryCheck",
   new Date().toISOString()
 );
 
 // Retrieve cached value
-const lastCheck = MetaDataUtils.getCachedAnalytic(
-  item.metadata,
+const lastCheck = EditHistoryUtils.getCachedAnalytic(
+  item.edithistory,
   "lastInventoryCheck"
 );
 ```
@@ -341,13 +341,17 @@ const lastCheck = MetaDataUtils.getCachedAnalytic(
 ### Store User Settings
 
 ```javascript
-import { MetaDataUtils } from "./data_management/index.js";
+import { EditHistoryUtils } from "./data_management/index.js";
 
 // Mark item as starred
-item.metadata = MetaDataUtils.setUserSetting(item.metadata, "starred", true);
+item.edithistory = EditHistoryUtils.setUserSetting(
+  item.edithistory,
+  "starred",
+  true
+);
 
 // Get starred status
-const isStarred = MetaDataUtils.getUserSetting(item.metadata, "starred");
+const isStarred = EditHistoryUtils.getUserSetting(item.edithistory, "starred");
 ```
 
 ---
@@ -375,12 +379,12 @@ The system works with FakeGoogle.js for local development:
 ### Phase 3: Pack List Metadata
 
 - [ ] Convert pack lists to mapped format
-- [ ] Enable metadata for crate info
+- [ ] Enable edithistory for crate info
 - [ ] Track item-level changes within crates
 
 ### Phase 4: Production Schedule
 
-- [ ] Add metadata tracking to schedule
+- [ ] Add edithistory tracking to schedule
 - [ ] Track show date changes
 - [ ] Track assignment changes
 
@@ -390,37 +394,37 @@ The system works with FakeGoogle.js for local development:
 - [ ] Conflict resolution for concurrent edits
 - [ ] Metadata search/filter
 - [ ] Export change reports
-- [ ] Retention policies (archive old metadata)
+- [ ] Retention policies (archive old edithistory)
 
 ---
 
 ## Known Limitations
 
-1. **Pack Lists** - Currently skip metadata due to special 2D array format
+1. **Pack Lists** - Currently skip edithistory due to special 2D array format
 2. **Nested Arrays** - Items within crates not individually tracked (yet)
 3. **Performance** - Each save fetches original data for comparison (could optimize with caching)
-4. **Storage** - No automatic cleanup of old metadata (manual maintenance needed)
-5. **Sheet Limits** - Google Sheets has 10M cell limit; monitor MetaData table growth
+4. **Storage** - No automatic cleanup of old edithistory (manual maintenance needed)
+5. **Sheet Limits** - Google Sheets has 10M cell limit; monitor EditHistory table growth
 
 ---
 
 ## Error Handling
 
-The system is designed to **never block saves** even if metadata fails:
+The system is designed to **never block saves** even if edithistory fails:
 
 ```javascript
 try {
-    // Add metadata tracking
+    // Add edithistory tracking
     updatesWithMetadata = await this._addMetadataToRows(...);
 } catch (error) {
-    console.warn('Failed to add metadata, continuing with save:', error);
-    // Continue with save even if metadata fails
+    console.warn('Failed to add edithistory, continuing with save:', error);
+    // Continue with save even if edithistory fails
 }
 ```
 
 **Graceful Degradation:**
 
-- Metadata parsing errors → Returns empty metadata
+- Metadata parsing errors → Returns empty edithistory
 - Archive failures → Logs error but doesn't throw
 - Missing username → Records as 'unknown'
 - Missing identifier → Uses positional tracking
@@ -429,46 +433,46 @@ try {
 
 ## Maintenance
 
-### Viewing MetaData Table
+### Viewing EditHistory Table
 
-Each spreadsheet now has (or will have) a **MetaData** tab:
+Each spreadsheet now has (or will have) a **EditHistory** tab:
 
 1. Open spreadsheet (INVENTORY, PACK_LISTS, PROD_SCHED)
-2. Look for "MetaData" tab
+2. Look for "EditHistory" tab
 3. View deleted rows with full history
 
-### Manually Creating MetaData Tab
+### Manually Creating EditHistory Tab
 
 If the tab doesn't exist, it will be created automatically on first deletion. To create manually:
 
-1. Add new tab named "MetaData"
+1. Add new tab named "EditHistory"
 2. Add headers: `SourceTable`, `SourceTab`, `RowIdentifier`, `Username`, `Timestamp`, `Operation`, `RowData`
 
 ### Cleaning Up Old Metadata
 
-To prevent metadata from growing indefinitely:
+To prevent edithistory from growing indefinitely:
 
 **Option 1: Reduce maxHistory**
 
 ```javascript
-// In metadata-utils.js, change default
-static appendToMetaData(existingMetaData, newEntry, maxHistory = 5) {
+// In edithistory-utils.js, change default
+static appendToEditHistory(existingEditHistory, newEntry, maxHistory = 5) {
 ```
 
 **Option 2: Manual Cleanup Script**
 
 ```javascript
-// Clear metadata older than 90 days
+// Clear edithistory older than 90 days
 const cutoffDate = new Date();
 cutoffDate.setDate(cutoffDate.getDate() - 90);
 
 items.forEach((item) => {
-  const metadata = MetaDataUtils.parseMetaData(item.metadata);
-  if (metadata && metadata.history) {
-    metadata.history = metadata.history.filter(
+  const edithistory = EditHistoryUtils.parseEditHistory(item.edithistory);
+  if (edithistory && edithistory.history) {
+    edithistory.history = edithistory.history.filter(
       (entry) => new Date(entry.timestamp) > cutoffDate
     );
-    item.metadata = JSON.stringify(metadata);
+    item.edithistory = JSON.stringify(edithistory);
   }
 });
 ```
@@ -477,10 +481,10 @@ items.forEach((item) => {
 
 ## Summary
 
-✅ **Phase 1 Complete** - Core metadata infrastructure implemented
+✅ **Phase 1 Complete** - Core edithistory infrastructure implemented
 
-- MetaData column tracking change history
-- MetaData table archiving deleted rows
+- EditHistory column tracking change history
+- EditHistory table archiving deleted rows
 - Username attribution from authState
 - Transparent operation at Database layer
 - Extensible format for future features
@@ -496,10 +500,10 @@ items.forEach((item) => {
 
 ## Questions & Support
 
-For questions about the metadata system:
+For questions about the edithistory system:
 
 1. Review this documentation
-2. Check `metadata-utils.js` for utility methods
+2. Check `edithistory-utils.js` for utility methods
 3. Examine `database.js` for implementation details
 4. Test locally with FakeGoogle.js
 5. Refer to copilot-instructions.md for architecture patterns

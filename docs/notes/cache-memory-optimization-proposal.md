@@ -205,7 +205,7 @@ class CacheManager {
         cleanedKey ? 1 : 0
       } entries, ${expiredCount} remaining expired, next cleanup in ${
         this.nextCleanupDelay / 1000
-      }s`
+      }s`,
     );
 
     // Schedule next cleanup with new interval
@@ -278,7 +278,7 @@ function createReactiveStore(
   apiCall = null,
   saveCall = null,
   apiArgs = [],
-  analysisConfig = null
+  analysisConfig = null,
 ) {
   const store = Vue.reactive({
     data: [],
@@ -330,7 +330,7 @@ function createReactiveStore(
       // Safety check 1: Active components currently viewing this data
       if (this._activeComponents.size > 0) {
         console.log(
-          `[ReactiveStore] ${this._activeComponents.size} active components, reloading`
+          `[ReactiveStore] ${this._activeComponents.size} active components, reloading`,
         );
         await this.load("Reloading data due to invalidation...");
         return;
@@ -340,7 +340,7 @@ function createReactiveStore(
       const timeSinceAccess = Date.now() - this.lastAccessTime;
       if (timeSinceAccess < 60 * 1000) {
         console.log(
-          `[ReactiveStore] Recently accessed (${timeSinceAccess}ms ago), reloading`
+          `[ReactiveStore] Recently accessed (${timeSinceAccess}ms ago), reloading`,
         );
         await this.load("Reloading data due to invalidation...");
         return;
@@ -355,7 +355,7 @@ function createReactiveStore(
 
       // All safety checks passed - safe to mark inactive
       console.log(
-        `[ReactiveStore] No active viewers or recent access, marking inactive`
+        `[ReactiveStore] No active viewers or recent access, marking inactive`,
       );
       this.markInactive();
     },
@@ -397,7 +397,7 @@ function setupCacheInvalidationListeners(
   store,
   apiCall,
   apiArgs,
-  analysisConfig
+  analysisConfig,
 ) {
   const mainMethodName = extractMethodName(apiCall);
   if (mainMethodName) {
@@ -431,7 +431,7 @@ export default {
       Requests.getPackList,
       Requests.savePackList,
       [this.tabName],
-      analysisConfig
+      analysisConfig,
     );
 
     // Register this component as active viewer
@@ -589,8 +589,8 @@ export default {
 - `docs/js/application/components/content/ShowInventoryReport.js`
 - `docs/js/application/components/content/PacklistItemsSummary.js`
 - `docs/js/application/components/content/InventoryOverviewTable.js`
-- `docs/js/application/components/content/ScheduleAdvancedSearch.js`
-- `docs/js/application/components/interface/SavedSearchSelect.js`
+- `docs/js/application/components/content/ScheduleAdvancedFilter.js`
+- `docs/js/application/components/interface/ScheduleFilterSelect.js`
 - (All components using `getReactiveStore()`)
 
 **Changes:**
@@ -876,25 +876,21 @@ test('handleInvalidation reloads if components active', async () => {
 ### Phase 2 Features (After Initial Deployment)
 
 1. **TTL Configuration by Method**
-
    - Allow different TTLs for different API methods
    - High-frequency data: 5 minutes
    - Static data: 24 hours
    - Implementation in `wrapMethods()` call sites
 
 2. **Cache Statistics Dashboard**
-
    - Show cache size, hit rate, cleanup activity
    - Display inactive store count
    - Memory usage graphs
 
 3. **CacheInvalidationBus.off() Method**
-
    - Remove listeners when stores deleted
    - Complete lifecycle cleanup
 
 4. **Smart Prefetching**
-
    - Predict which stores user will access next
    - Preload in background
 

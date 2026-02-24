@@ -6,6 +6,8 @@ import { Auth, authState } from './index.js';
 import { NavigationRegistry } from './index.js';
 import { PacklistContent, InventoryContent, ScheduleContent} from './index.js';
 import { hamburgerMenuRegistry } from './index.js';
+import { undoRegistry } from './index.js';
+import { Requests, getReactiveStore } from './index.js';
 
 const { createApp } = Vue;
 
@@ -32,13 +34,18 @@ const App = {
             appLoadingMessage: 'Loading application...',
             isMenuOpen: false,
             navigationItems: NavigationRegistry.primaryNavigation,
-            currentPage: 'dashboard',
             currentPath: 'dashboard',
             modals: [],
-            currentYear: new Date().getFullYear()
+            currentYear: new Date().getFullYear(),
+            globalLocksStore: null // Global reactive store for ALL locks
         };
     },
     computed: {
+        // Derive current page from currentPath (strip query params first)
+        currentPage() {
+            const cleanPath = this.currentPath.split('?')[0];
+            return cleanPath.split('/')[0];
+        },
         // Make auth state reactive in the component
         isAuthenticated() {
             return authState.isAuthenticated;
@@ -106,8 +113,8 @@ const App = {
         // Initialize URL routing system
         NavigationRegistry.initializeURLRouting(this);
         
-        // Add ESC key support for closing modals
-        document.addEventListener('keydown', this.handleKeyDown);
+        // Add keyboard shortcuts for undo/redo
+        document.addEventListener('keydown', this.handleGlobalKeyDown);
 
         // Pass the reactive modals array to modalManager for all modal operations
         modalManager.setReactiveModals(this.modals);
@@ -115,6 +122,19 @@ const App = {
         if (this.isAuthenticated) {
             // Initialize dashboard registry if authenticated
             NavigationRegistry.initializeDashboard();
+            
+            // Initialize global locks store
+            this.globalLocksStore = getReactiveStore(
+                Requests.getAllLocks,
+                null,
+                []
+            );
+            //console.log('[App] Initialized global locks store');
+            
+            // Watch for locks data changes
+            this.$watch(() => this.globalLocksStore?.data, (locks) => {
+                //console.log('[App] Global locks data:', locks);
+            }, { immediate: true, deep: true });
             
             // Apply current URL state if user is already authenticated
             const currentUrl = NavigationRegistry.urlRouter.getCurrentURLPath();
@@ -131,6 +151,21 @@ const App = {
             if (newVal) {
                 NavigationRegistry.initializeDashboard();
                 
+                // Initialize global locks store on login
+                if (!this.globalLocksStore) {
+                    this.globalLocksStore = getReactiveStore(
+                        Requests.getAllLocks,
+                        null,
+                        []
+                    );
+                    //console.log('[App] Initialized global locks store on login');
+                    
+                    // Watch for locks data changes
+                    this.$watch(() => this.globalLocksStore?.data, (locks) => {
+                        //console.log('[App] Global locks data:', locks);
+                    }, { immediate: true, deep: true });
+                }
+                
                 // Apply current URL when user logs in
                 const currentUrl = NavigationRegistry.urlRouter.getCurrentURLPath();
                 if (currentUrl && currentUrl !== 'dashboard') {
@@ -142,16 +177,21 @@ const App = {
             }
         });
 
-        // Watch for page/path changes to reset scroll position
-        this.$watch(() => [this.currentPage, this.currentPath], ([newPage, newPath], [oldPage, oldPath]) => {
+        // Watch for path changes to reset scroll position
+        this.$watch(() => this.currentPath, (newPath, oldPath) => {
             this.$nextTick(() => {
                 const appContent = document.querySelector('#app-content');
                 if (!appContent) return;
                 
+                // Strip query parameters for page comparison
+                const newCleanPath = newPath.split('?')[0];
+                const oldCleanPath = oldPath.split('?')[0];
+                const newPage = newCleanPath.split('/')[0];
+                const oldPage = oldCleanPath.split('/')[0];
+                
                 // Check if navigating TO dashboard FROM a page that's ON the dashboard
-                // Use oldPath from watcher since it captures the previous state before change
-                if (newPage === 'dashboard' && oldPage !== 'dashboard' && oldPath && oldPath !== 'dashboard') {
-                    const isOnDashboard = NavigationRegistry.dashboardRegistry.has(oldPath);
+                if (newPage === 'dashboard' && oldPage !== 'dashboard' && oldCleanPath && oldCleanPath !== 'dashboard') {
+                    const isOnDashboard = NavigationRegistry.dashboardRegistry.has(oldCleanPath);
                     
                     if (isOnDashboard) {
                         const containerType = NavigationRegistry.getTypeFromPath(oldPath);
@@ -185,7 +225,7 @@ const App = {
     },
     beforeUnmount() {
         // Clean up event listener
-        document.removeEventListener('keydown', this.handleKeyDown);
+        document.removeEventListener('keydown', this.handleGlobalKeyDown);
         
         // Save any pending dashboard changes before unmounting
         NavigationRegistry.dashboardRegistry.saveNow();
@@ -212,26 +252,17 @@ const App = {
                 modalManager.error('Failed to log out. Please try again or refresh the page.', 'Logout Error');
             }
         },
-        navigateToPath(pathOrData) {
-            // Handle both string paths and navigation data objects
-            const targetPath = typeof pathOrData === 'string' ? pathOrData : pathOrData.targetPath;
+        navigateToPath(targetPath) {
+            // Only accept string paths for simplicity
             // Don't await - let navigation happen asynchronously
             NavigationRegistry.handleNavigateToPath({ targetPath }, this);
         },
         
         // Handle container expansion by navigating to its path
         expandContainer(containerData) {
+            // containerPath already contains the full path with parameters
             const targetPath = containerData.containerPath || containerData.path;
-            
-            // Get current navigation parameters for this container path
-            const params = NavigationRegistry.getNavigationParameters(targetPath);
-            
-            // Build path with parameters if they exist
-            const fullPath = Object.keys(params).length > 0 
-                ? NavigationRegistry.buildPath(targetPath, params)
-                : targetPath;
-            
-            this.navigateToPath(fullPath);
+            this.navigateToPath(targetPath);
         },
 
         async toggleDashboardPresence(containerData) {
@@ -239,6 +270,19 @@ const App = {
                 await NavigationRegistry.dashboardRegistry.remove(containerData.containerPath);
             } else {
                 await NavigationRegistry.dashboardRegistry.add(containerData.containerPath);
+            }
+        },
+        
+        handleGlobalKeyDown(event) {
+            // Ctrl+Z or Cmd+Z for undo
+            if ((event.ctrlKey || event.metaKey) && event.key === 'z' && !event.shiftKey) {
+                event.preventDefault();
+                undoRegistry.undo();
+            }
+            // Ctrl+Y or Ctrl+Shift+Z or Cmd+Shift+Z for redo
+            else if ((event.ctrlKey || event.metaKey) && (event.key === 'y' || (event.shiftKey && event.key === 'z'))) {
+                event.preventDefault();
+                undoRegistry.redo();
             }
         },
     },
@@ -251,7 +295,7 @@ const App = {
             <primary-nav
                 :is-menu-open="isMenuOpen"
                 :navigation-items="navigationItems"
-                :current-page="currentPage"
+                :current-path="currentPath"
                 :is-authenticated="isAuthenticated"
                 :is-auth-loading="isAuthLoading"
                 :current-user="currentUser"
@@ -354,6 +398,9 @@ const App = {
                         :title="modal.title"
                         :is-visible="modal.isVisible"
                         :components="modal.components"
+                        :modal-class="modal.modalClass"
+                        :message="modal.message"
+                        :content-class="modal.contentClass"
                         :component-props="modal.componentProps"
                         @close-modal="modalManager.removeModal(modal.id)"
                     ></app-modal>
@@ -366,3 +413,55 @@ const App = {
 // Initialize the app
 const app = createApp(App);
 app.mount('body');
+
+// Expose rate limit testing utility to console
+// Import GoogleSheetsService dynamically to access the rate limit flag
+import('../google_sheets_services/GoogleSheetsData.js').then(module => {
+    const GoogleSheetsService = module.GoogleSheetsService;
+    
+    /**
+     * Toggle rate limit simulation for testing
+     * @param {boolean} [enabled] - If provided, sets the state. If omitted, toggles current state.
+     * @returns {boolean} - Current state after toggle
+     * 
+     * Usage:
+     *   window.toggleRateLimitTest()      // Toggle on/off
+     *   window.toggleRateLimitTest(true)  // Force enable
+     *   window.toggleRateLimitTest(false) // Force disable
+     */
+    window.toggleRateLimitTest = function(enabled) {
+        if (enabled === undefined) {
+            GoogleSheetsService._simulateRateLimit = !GoogleSheetsService._simulateRateLimit;
+        } else {
+            GoogleSheetsService._simulateRateLimit = !!enabled;
+        }
+        
+        const state = GoogleSheetsService._simulateRateLimit;
+        console.log(
+            `%c🚨 Rate Limit Simulation: ${state ? 'ENABLED' : 'DISABLED'}`,
+            `font-size: 14px; font-weight: bold; color: ${state ? '#ff4444' : '#44ff44'}`
+        );
+        
+        if (state) {
+            console.warn(
+                '%cAll Google Sheets API calls will now throw 429 errors!\n' +
+                'To disable: toggleRateLimitTest(false)',
+                'font-size: 12px; color: #ff8800'
+            );
+        }
+        
+        return state;
+    };
+    
+    console.log(
+        '%c💡 Rate Limit Testing Available',
+        'font-size: 12px; color: #4488ff; font-weight: bold'
+    );
+    console.log(
+        'Use window.toggleRateLimitTest() to simulate 429 rate limit errors\n' +
+        'Usage:\n' +
+        '  toggleRateLimitTest()       - Toggle on/off\n' +
+        '  toggleRateLimitTest(true)   - Enable simulation\n' +
+        '  toggleRateLimitTest(false)  - Disable simulation'
+    );
+});

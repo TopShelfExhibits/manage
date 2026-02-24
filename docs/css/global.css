@@ -60,7 +60,7 @@ body, div, span, p, h1, h2, h3, h4, h5, h6,
 th, td, ::after, ::before,
 input[type="submit"], input[type="button"], select, button {
     position: relative;
-    transition: background-color 0.1s ease-in-out, color 0.1s ease-in-out, opacity 0.05s ease-in-out, max-width 0.2s ease-in-out !important;
+    transition: background-color 0.15s ease-in-out, color 0.15s ease-in-out, opacity 0.15s ease-in-out;
 }
 
 
@@ -89,24 +89,36 @@ h6 {
 }
 
 input[type="text"],
-input[type="date"],
 input[type="number"],
+input[type="date"],
+textarea,
 select {
+    font-family: unset;
+    font-size: 1rem;
     color: unset;
     outline: none;
-    border: 1px solid var(--color-text);
+    border: 1px solid var(--color-gray);
     border-radius: var(--radius-md);
     background-color: var(--background-color);
     padding: .5rem;
     box-sizing: border-box;
 }
 
-input[type="text"],
+input,
+textarea,
 select {
-    min-width: 100px;
+    width: 120px;
+    flex: 0 1 auto;
 }
 input[type="number"] {
     min-width: 30px;
+}
+input[type="text"], .input-container {
+    min-width: 200px;
+}
+textarea {
+    resize: vertical;
+    min-height: 2.5em;
 }
 
 /* Button styles */
@@ -122,7 +134,7 @@ button {
     min-width: 100px;
     height: 38px;*/
     width: 120px;
-    flex-grow: 2;
+    flex-grow: 0;
     flex-shrink: 1;
 
     padding: 0.375rem 0.75rem;
@@ -130,7 +142,7 @@ button {
     line-height: 1.5;
     border-radius: var(--radius-md);
     box-shadow: 2px 2px 8px -4px var(--color-shadow);
-    overflow: hidden;
+    /*overflow: hidden;*/
 }
 
 input[type="submit"]:hover,
@@ -142,7 +154,7 @@ input[type="submit"]:disabled,
 input[type="button"]:disabled,
 button:disabled {
     pointer-events: none;
-    opacity: .3;
+    opacity: .2;
     /*overflow: visible;*/
 }
 
@@ -250,7 +262,7 @@ button.white, input[type="button"].white, input[type="submit"].white, .button.wh
 }
 button.gray, input[type="button"].gray, input[type="submit"].gray, .button.gray, thead.gray > tr > th {
     background-color: var(--color-gray);
-    color: var(--color-text);
+    color: var(--color-text-inverted);
     border: 1px solid var(--color-border);
 }
 button.purple, input[type="button"].purple, input[type="submit"].purple, .button.purple, thead.purple > tr > th {
@@ -367,4 +379,85 @@ table.blue th, td.blue th, th.blue, td.blue {
 table.green th, td.green th, th.green, td.green {
     background-color: var(--color-green);
     color: var(--color-text-inverted);
+}
+
+/* Form styling for modals and inputs */
+.form-group {
+    margin-bottom: 1rem;
+}
+
+.form-group label {
+    display: block;
+    margin-bottom: 0.25rem;
+    font-weight: bold;
+}
+
+.form-group input,
+.form-group textarea,
+.form-group select {
+    width: 100%;
+    padding: 0.5rem;
+    border: 1px solid var(--color-border);
+    border-radius: 4px;
+    background-color: var(--background-color);
+    color: var(--color-text);
+}
+
+.form-group input.error {
+    border-color: var(--color-red);
+}
+
+.error-message {
+    color: var(--color-red);
+    font-size: 0.875rem;
+    margin-top: 0.25rem;
+    display: block;
+}
+
+.helper-text {
+    color: var(--color-text-light);
+    font-size: 0.875rem;
+    margin-top: 0.25rem;
+    display: block;
+    font-style: italic;
+}
+
+.input-group {
+    display: flex;
+    gap: 0.5rem;
+}
+
+.input-group input {
+    flex: 1;
+}
+
+/* Autocomplete ghost text styling */
+.autocomplete-wrapper {
+    position: relative;
+    width: 100%;
+}
+
+.autocomplete-wrapper input {
+    position: relative;
+    z-index: 2;
+    background: transparent;
+}
+
+.ghost-text {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    padding: 0.5rem;
+    pointer-events: none;
+    color: transparent;
+    white-space: pre;
+    overflow: hidden;
+    z-index: 1;
+    border: 1px solid transparent; /* Match input border to align text */
+}
+
+.ghost-text .ghost {
+    color: var(--color-text);
+    opacity: 0.4;
 }

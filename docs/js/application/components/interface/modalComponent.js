@@ -1,50 +1,45 @@
 import { html } from '../../index.js';
 
-// Simple alert component
-const AlertComponent = {
-    props: ['message'],
-    mounted() {
-        setTimeout(() => this.$emit('close-modal'), 3000);
+// Auto-close handler component (no template, just behavior)
+const AutoCloseComponent = {
+    props: {
+        autoClose: { type: Boolean, default: true }
     },
-    template: html`<div style="text-align: center; padding: 1rem;"><div v-html="message"></div></div>`
+    mounted() {
+        if (this.autoClose) {
+            setTimeout(() => this.$emit('close-modal'), 3000);
+        }
+    },
+    template: html``
 };
 
-// Simple confirm component
-const ConfirmComponent = {
-    props: ['message', 'onConfirm', 'onCancel', 'confirmText', 'cancelText'],
+// Confirm buttons component (just buttons, no message)
+const ConfirmButtonsComponent = {
+    props: ['onConfirm', 'onCancel', 'confirmText', 'cancelText'],
     methods: {
         confirm() { this.onConfirm?.(); this.$emit('close-modal'); },
         cancel() { this.onCancel?.(); this.$emit('close-modal'); }
     },
     template: html`
-        <div style="text-align: center; padding: 1rem;">
-            <div v-html="message"></div>
-            <div style="margin-top: 1rem;" class="button-bar">
-                <button @click="confirm">{{ confirmText || 'Ok' }}</button>
-                <button @click="cancel">{{ cancelText || 'Cancel' }}</button>
-            </div>
+        <div class="button-bar">
+            <button v-if="onConfirm" @click="confirm">{{ confirmText || 'Ok' }}</button>
+            <button v-if="onCancel || cancelText" @click="cancel" class="gray">{{ cancelText || 'Cancel' }}</button>
         </div>
     `
 };
 
-// Simple image component
-const ImageComponent = {
+// Image content component
+const ImageContentComponent = {
     props: ['imageUrl'],
     template: html`
-        <div style="text-align: center; padding: 1rem;">
-            <img :src="imageUrl" alt="Image" style="max-width: 90vw; max-height: 80vh; object-fit: contain;" />
-        </div>
+        <img :src="imageUrl" alt="Image" style="max-width: 90vw; max-height: 80vh; object-fit: contain;" />
     `
 };
 
-// Error component with icon and no auto-dismiss
-const ErrorComponent = {
-    props: ['message'],
+// Error icon component
+const ErrorIconComponent = {
     template: html`
-        <div style="text-align: center; padding: 1rem;">
-            <img src="images/error.png" alt="Error" style="width: 64px; height: 64px; margin-bottom: 1rem;" />
-            <div v-html="message" style="color: var(--color-red); font-weight: 500;"></div>
-        </div>
+        <img src="images/error.png" alt="Error" style="width: 64px; height: 64px; margin-bottom: 1rem;" />
     `
 };
 
@@ -53,20 +48,29 @@ export const ModalComponent = {
         modalId: { type: String, required: true },
         title: { type: String, default: '' },
         isVisible: { type: Boolean, default: false },
-        components: { type: Array, required: true },
+        components: { type: Array, default: () => [] },
+        modalClass: { type: String, default: '' },
+        message: { type: String, default: '' },
+        contentClass: { type: String, default: '' },
         componentProps: { type: Object, default: () => ({}) }
+    },
+    computed: {
+        formattedMessage() {
+            return this.message ? this.message.replace(/\n/g, '<br>') : '';
+        }
     },
     methods: {
         closeModal() { this.$emit('close-modal', this.modalId); }
     },
     template: html`
         <div v-if="isVisible" class="modal-overlay" @click.self="closeModal">
-            <div class="modal">
+            <div :class="['modal', modalClass]">
                 <div class="modal-header">
                     <h3>{{ title }}</h3>
-                    <button class="close-button" @click="closeModal">✖</button>
+                    <button class="close-button" @click="closeModal">🗙</button>
                 </div>
-                <div class="modal-content">
+                <div :class="['content', contentClass]">
+                    <div v-if="formattedMessage" v-html="formattedMessage"></div>
                     <component v-for="(comp, idx) in components" :is="comp" :key="idx" 
                                v-bind="componentProps" @close-modal="closeModal"></component>
                 </div>
@@ -87,12 +91,18 @@ export class ModalManager {
     }
 
     _create(title, components, props) {
+        // Extract modal-level props from component props
+        const { modalClass, message, contentClass, ...componentProps } = props || {};
+        
         const modal = {
             id: `modal-${this.nextId++}`,
             title,
             isVisible: true,
-            components: Array.isArray(components) ? components : [components],
-            componentProps: props || {}
+            components: Array.isArray(components) ? components : (components ? [components] : []),
+            modalClass: modalClass || '',
+            message: message || '',
+            contentClass: contentClass || '',
+            componentProps
         };
         this.modals.push(modal);
         return modal;
@@ -104,20 +114,34 @@ export class ModalManager {
     }
 
     // Core methods that are actually used
-    alert(message, title = 'Alert') {
-        return this._create(title, AlertComponent, { message });
+    alert(message, title = 'Alert', autoClose = true) {
+        return this._create(title, autoClose ? AutoCloseComponent : null, { 
+            message, 
+            autoClose, 
+            modalClass: 'reading-menu' 
+        });
     }
 
     confirm(message, onConfirm, onCancel = null, title = 'Confirm', confirmText = null, cancelText = null) {
-        return this._create(title, ConfirmComponent, { message, onConfirm, onCancel, confirmText, cancelText });
+        return this._create(title, ConfirmButtonsComponent, { 
+            message, 
+            onConfirm, 
+            onCancel, 
+            confirmText, 
+            cancelText, 
+            modalClass: 'reading-menu' 
+        });
     }
 
     image(imageUrl, title = 'Image') {
-        return this._create(title, ImageComponent, { imageUrl });
+        return this._create(title, ImageContentComponent, { imageUrl, modalClass: 'reading-menu' });
     }
 
     error(message, title = 'Error') {
-        return this._create(title, ErrorComponent, { message });
+        return this._create(title, ErrorIconComponent, { 
+            message, 
+            modalClass: 'reading-menu red' 
+        });
     }
 
     custom(components, props = {}, title = '') {

@@ -1,11 +1,11 @@
-import { html, TableComponent, Requests, getReactiveStore, createAnalysisConfig, NavigationRegistry, ItemImageComponent, Priority, invalidateCache } from '../../index.js';
+import { html, TableComponent, Requests, getReactiveStore, createAnalysisConfig, NavigationRegistry, ItemImageComponent, InventoryCategoryFilter, Priority, invalidateCache } from '../../index.js';
 
 /**
  * Component for displaying item quantities summary with progressive analysis
  * Shows: Item ID, Quantity, Available, Remaining, Overlapping Shows
  */
 export const PacklistItemsSummary = {
-    components: { TableComponent, ItemImageComponent },
+    components: { TableComponent, ItemImageComponent, InventoryCategoryFilter },
     props: {
         projectIdentifier: { type: String, required: true },
         containerPath: { type: String, default: '' },
@@ -20,6 +20,7 @@ export const PacklistItemsSummary = {
             itemsSummaryStore: null,
             showDetails: null, // Production schedule show details
             error: null,
+            selectedCategoryFilter: null, // Filter by inventory category
             NavigationRegistry // Make NavigationRegistry available in template
         };
     },
@@ -30,37 +31,34 @@ export const PacklistItemsSummary = {
                     key: 'image', 
                     label: 'IMG',
                     width: 1,
+                    sortable: false
                 },
-                { key: 'itemId', label: 'Item#'},
-                { key: 'quantity', label: 'Quantity'},
-                { key: 'available', label: 'Inv. Qty.'},
-                { key: 'tabName', label: 'Tab'},
+                { key: 'itemId', label: 'Item#', sortable: true},
+                { key: 'quantity', label: 'Quantity', sortable: true},
+                { key: 'available', label: 'Inv. Qty.', sortable: true},
+                { key: 'tabName', label: 'Tab', sortable: true},
                 { 
                     key: 'remaining', 
                     label: 'Remaining', 
                     format: 'number',
-                    autoColor: true
+                    autoColor: true,
+                    sortable: true
                 },
-                { key: 'overlappingShows', label: 'Overlapping Shows'}
+                { key: 'overlappingShows', label: 'Overlapping Shows', sortable: false}
             ];
         },
         isLoading() {
             return this.itemsSummaryStore ? this.itemsSummaryStore.isLoading : false;
         },
         tableData() {
-            return this.itemsSummaryStore ? this.itemsSummaryStore.data : [];
-        },
-        // Navigation-based parameters from NavigationRegistry
-        navParams() {
-            let path = this.containerPath;
-            if (!path && this.projectIdentifier) {
-                path = `packlist/${this.projectIdentifier}/details`;
+            const data = this.itemsSummaryStore ? this.itemsSummaryStore.data : [];
+            
+            // Apply category filter if selected
+            if (this.selectedCategoryFilter) {
+                return data.filter(item => item.tabName === this.selectedCategoryFilter);
             }
-            return NavigationRegistry.getNavigationParameters(path || '');
-        },
-        // Get search term from URL parameters
-        initialSearchTerm() {
-            return this.navParams?.searchTerm || '';
+            
+            return data;
         }
     },
     watch: {
@@ -143,10 +141,23 @@ export const PacklistItemsSummary = {
             ], true);
         },
 
+        handleCategorySelected(categoryName) {
+            this.selectedCategoryFilter = categoryName;
+        },
+
         navigateBackToPacklist() {
-            if (this.projectIdentifier && this.appContext?.navigateToPath) {
-                this.appContext.navigateToPath(`packlist/${this.projectIdentifier}`);
+            if (!this.projectIdentifier || !this.appContext?.navigateToPath) return;
+            
+            // Guard: Only navigate if we're still on the details page
+            const currentPath = this.appContext.currentPath?.split('?')[0] || '';
+            const expectedPath = `packlist/${this.projectIdentifier}/details`;
+            
+            if (!currentPath.includes(expectedPath)) {
+                console.log('[PacklistItemsSummary] Skipping navigation - user already navigated away');
+                return;
             }
+            
+            this.appContext.navigateToPath(`packlist/${this.projectIdentifier}`);
         },
 
         async loadShowDetails() {
@@ -161,14 +172,13 @@ export const PacklistItemsSummary = {
         }
     },
     template: html`
-        <div class="packlist-items-summary">
-            <div class="content">
-                <div class="details-grid">
-                    <div v-for="key in showDetailsVisible" :key="key" class="detail-item">
-                        <label>{{ key }}:</label>
-                        <span v-if="showDetails">{{ showDetails[key] || '—' }}</span>
-                        <span v-else>...</span>
-                    </div>
+        <slot class="packlist-items-summary">
+            <button @click="navigateBackToPacklist">Back to View</button>
+            <div class="details-grid">
+                <div v-for="key in showDetailsVisible" :key="key" class="detail-item">
+                    <label>{{ key }}:</label>
+                    <span v-if="showDetails">{{ showDetails[key] || '—' }}</span>
+                    <span v-else>...</span>
                 </div>
             </div>
             
@@ -177,7 +187,10 @@ export const PacklistItemsSummary = {
                 :columns="tableColumns"
                 :hide-columns="['tabName']"
                 :show-search="true"
-                :search-term="initialSearchTerm"
+                :showRefresh="false"
+                :sync-search-with-url="true"
+                :container-path="containerPath || 'packlist/' + projectIdentifier + '/details'"
+                :navigate-to-path="appContext.navigateToPath"
                 :hide-rows-on-search="false"
                 :readonly="true"
                 :is-loading="itemsSummaryStore ? itemsSummaryStore.isLoading : false"
@@ -189,7 +202,11 @@ export const PacklistItemsSummary = {
                 @refresh="handleRefresh"
             >
                 <template #header-area>
-                    
+                    <InventoryCategoryFilter
+                        :container-path="containerPath || ('packlist/' + projectIdentifier + '/details')"
+                        :navigate-to-path="appContext.navigateToPath"
+                        @category-selected="handleCategorySelected"
+                    />
                 </template>
                 <template #default="{ row, column }">
                     <slot v-if="column.key === 'image'">
@@ -215,7 +232,7 @@ export const PacklistItemsSummary = {
                         <slot v-else class="overlapping-shows-buttons">
                             <button v-for="packlistId in row.overlappingShows" 
                                     :key="packlistId"
-                                    @click="appContext.navigateToPath('packlist/' + packlistId)"
+                                    @click="appContext.navigateToPath('packlist/' + packlistId + '/details')"
                                     class="card white">
                                 {{ packlistId }}
                             </button>
@@ -235,6 +252,6 @@ export const PacklistItemsSummary = {
                     </div>
                 </template>
             </TableComponent>
-        </div>
+        </slot>
         `
 };

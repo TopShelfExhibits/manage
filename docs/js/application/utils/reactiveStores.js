@@ -69,13 +69,13 @@ export { Priority };
  */
 
 /**
- * Generate a clean identifier for a function, using cache metadata when available
+ * Generate a clean identifier for a function, using cache edithistory when available
  * @param {Function} fn - The function to identify
  * @returns {string} A clean identifier string
  */
 function getMethodIdentifier(fn) {
     if (!fn) return '';
-    // If function has cache wrapper metadata, use it for a clean identifier
+    // If function has cache wrapper edithistory, use it for a clean identifier
     if (fn._namespace && fn._methodName) {
         return `${fn._namespace}.${fn._methodName}`;
     }
@@ -101,7 +101,7 @@ export function generateStoreKey(apiCall, saveCall, apiArgs, analysisConfig) {
  * @returns {Set} Set of column names to exclude
  */
 function getExcludedColumns(analysisConfig = null) {
-    const excludedColumns = new Set(['AppData', 'MetaData']);
+    const excludedColumns = new Set(['AppData']); // EditHistory should persist, only AppData is ephemeral
     if (analysisConfig && Array.isArray(analysisConfig)) {
         analysisConfig.forEach(config => {
             if (config.targetColumn) {
@@ -128,7 +128,13 @@ function shouldExcludeColumn(key, excludedColumns) {
  * @returns {boolean} True if marked for deletion
  */
 function isMarkedForDeletion(obj) {
-    return isValidObject(obj) && obj.AppData && obj.AppData['marked-for-deletion'];
+    if (!isValidObject(obj) || !obj.MetaData) return false;
+    try {
+        const metadata = typeof obj.MetaData === 'string' ? JSON.parse(obj.MetaData) : obj.MetaData;
+        return metadata?.deletion?.marked === true;
+    } catch (e) {
+        return false;
+    }
 }
 
 /**
@@ -327,7 +333,8 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
             if (this.analysisConfig) {
                 clearAnalysisResults(processedData, this.analysisConfig);
             }
-            this.data = processedData;
+            // Mutate existing array in place to preserve references (critical for undo system)
+            this.data.splice(0, this.data.length, ...processedData);
             // Clear auto-save hash when data changes
             this.lastAutoSaveHash = null;
             
@@ -342,7 +349,9 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
         },
         setOriginalData(newOriginalData) {
             // Deep clone and initialize AppData
-            this.originalData = appDataInit(deepClone(newOriginalData));
+            const processedData = appDataInit(deepClone(newOriginalData));
+            // Mutate existing array in place to preserve references
+            this.originalData.splice(0, this.originalData.length, ...processedData);
         },
         setError(err) {
             this.error = err;
@@ -352,8 +361,9 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
             this.loadingMessage = message;
         },
         reset() {
-            this.data = [];
-            this.originalData = [];
+            // Clear arrays in place to preserve references for undo system
+            this.data.splice(0, this.data.length);
+            this.originalData.splice(0, this.originalData.length);
             this.isLoading = false;
             this.loadingMessage = '';
             this.error = null;
@@ -404,7 +414,7 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
                 this.isReloadingMainData = false;
             }
         },
-        async save(message = 'Saving data...') {
+        async save(message = 'Saving data...', options = {}) {
             if (typeof saveCall !== 'function') {
                 this.setError('No save API call provided');
                 return;
@@ -415,9 +425,10 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
                 // Remove all objects marked for deletion and analysis target columns before saving
                 const cleanData = removeAppData(this.data, this.analysisConfig);
                 // Use priority queue for save operations (highest priority)
+                // Pass options as the last parameter to save functions that support it
                 const result = await PriorityQueue.enqueue(
                     saveCall,
-                    [cleanData, ...apiArgs],
+                    [...(cleanData ? [cleanData] : []), ...apiArgs, options],
                     priorities.save,
                     { label: message, type: 'save', store: 'reactive' }
                 );
@@ -438,17 +449,36 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
                 this.setLoading(false, '');
             }
         },
-        // Mark/unmark for deletion by index using AppData
+        // Mark/unmark for deletion by index using MetaData
         markRowForDeletion(idx, value = true) {
             if (this.data[idx]) {
-                if (!this.data[idx].AppData) this.data[idx].AppData = {};
-                this.data[idx].AppData['marked-for-deletion'] = value;
+                const row = this.data[idx];
+                
+                // Parse existing MetaData
+                let metadata = {};
+                if (row.MetaData) {
+                    try {
+                        metadata = typeof row.MetaData === 'string' ? JSON.parse(row.MetaData) : row.MetaData;
+                    } catch (e) {
+                        console.warn('Failed to parse MetaData:', e);
+                    }
+                }
+                
+                // Set or remove deletion flag
+                if (value) {
+                    metadata.deletion = { marked: true };
+                } else {
+                    delete metadata.deletion;
+                }
+                
+                // Save back to MetaData
+                row.MetaData = Object.keys(metadata).length > 0 ? JSON.stringify(metadata) : null;
+                
                 // If marking for deletion and row is empty, remove immediately
                 if (value) {
-                    const row = this.data[idx];
-                    // Check if all fields (except 'AppData') are empty/falsy
+                    // Check if all fields (except 'AppData' and 'MetaData') are empty/falsy
                     const hasContent = Object.keys(row).some(
-                        key => key !== 'AppData' && !!row[key]
+                        key => key !== 'AppData' && key !== 'MetaData' && !!row[key]
                     );
                     if (!hasContent) {
                         this.data.splice(idx, 1);
@@ -458,7 +488,24 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
         },
         // Remove all rows marked for deletion (and nested arrays)
         removeMarkedRows() {
-            this.data = removeAppData(this.data, this.analysisConfig);
+            // Filter in place to preserve array reference for undo system
+            const filteredData = this.data.filter(obj => !isMarkedForDeletion(obj));
+            
+            // Recursively filter nested arrays in place too
+            filteredData.forEach(obj => {
+                if (isValidObject(obj)) {
+                    Object.keys(obj).forEach(key => {
+                        if (Array.isArray(obj[key])) {
+                            // Filter nested array in place
+                            const filteredNested = obj[key].filter(nestedObj => !isMarkedForDeletion(nestedObj));
+                            obj[key].splice(0, obj[key].length, ...filteredNested);
+                        }
+                    });
+                }
+            });
+            
+            // Replace data array contents in place (preserves reference)
+            this.data.splice(0, this.data.length, ...filteredData);
         },
         addRow(row, fieldNames = null) {
             // Ensure AppData is set and nested arrays are initialized
@@ -476,8 +523,9 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
             }
             this.data.push(row);
         },
-        addNestedRow(parentIdx, key, row, fieldNames = null) {
+        addNestedRow(parentIdx, key, row, fieldNames = null, position = null) {
             // Add a row to a nested array (e.g., Items)
+            // position: { position: 'above'|'below', targetIndex: number } or null for append
             if (
                 Array.isArray(this.data) &&
                 this.data[parentIdx] &&
@@ -495,7 +543,17 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
                         }
                     });
                 }
-                this.data[parentIdx][key].push(row);
+                
+                // Insert at specific position if provided
+                if (position && typeof position.targetIndex === 'number') {
+                    const insertIndex = position.position === 'above' 
+                        ? position.targetIndex 
+                        : position.targetIndex + 1;
+                    this.data[parentIdx][key].splice(insertIndex, 0, row);
+                } else {
+                    // Default: append to end
+                    this.data[parentIdx][key].push(row);
+                }
             }
         },
         // Clear specific analysis results by result key or target column
@@ -816,7 +874,7 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
         }
     });
 
-    // Helper to strip AppData, MetaData, and analysis target columns from objects (including filtering out items marked for deletion)
+    // Helper to strip AppData, EditHistory, and analysis target columns from objects (including filtering out items marked for deletion)
     function removeAppData(arr, analysisConfig = null) {
         if (!Array.isArray(arr)) return arr;
         
@@ -868,7 +926,7 @@ const AUTO_SAVE_INTERVAL_MS = 2 * 60 * 1000; // 2 minutes
  * Calculate diff between original and current data recursively
  * Only stores row indices with their changed fields for efficiency
  * Handles nested arrays recursively
- * Excludes AppData, MetaData, and analysis target columns
+ * Excludes AppData, EditHistory, and analysis target columns
  * @param {Array} originalData - Original data
  * @param {Array} currentData - Current modified data
  * @param {Array} analysisConfig - Analysis configuration to identify columns to exclude
@@ -954,27 +1012,41 @@ function calculateStoreDiff(originalData, currentData, analysisConfig = null) {
 /**
  * Save dirty stores to user data
  * Each store is saved as a separate user data entry with the storeKey as ID and diff as Value
+ * @param {Object} options - Configuration options
+ * @param {boolean} options.skipAuthCheck - If true, skip auth check (used during logout)
  */
-async function saveDirtyStoresToUserData() {
-    if (Auth.authPromptPending) {
-        console.log('[ReactiveStore AutoSave] Auth prompt pending, skipping auto-save');
-        return;
-    }
+export async function saveDirtyStoresToUserData(options = {}) {
+    const { skipAuthCheck = false } = options;
     
-    // Check authentication before attempting to save (with prompt if expired)
-    const isAuthenticated = await Auth.checkAuthWithPrompt({
-        context: 'auto-save',
-        message: 'Your session has expired.'
-    });
-    
-    if (!isAuthenticated) {
-        console.log('[ReactiveStore AutoSave] Auth check failed, skipping auto-save');
-        return;
-    }
-    
-    if (!authState.user?.email) {
-        console.log('[ReactiveStore AutoSave] No user email available, skipping auto-save');
-        return;
+    // If called during logout, skip auth checks entirely
+    if (skipAuthCheck) {
+        console.log('[ReactiveStore AutoSave] Skipping auth check (logout in progress)');
+        if (!authState.user?.email) {
+            console.log('[ReactiveStore AutoSave] No user email available, skipping auto-save');
+            return;
+        }
+    } else {
+        // Normal auto-save flow - check if auth prompt is showing
+        if (Auth.authPromptShowing) {
+            console.log('[ReactiveStore AutoSave] Auth prompt showing, skipping auto-save');
+            return;
+        }
+        
+        // Check authentication before attempting to save (with prompt if expired)
+        const isAuthenticated = await Auth.checkAuthWithPrompt({
+            context: 'auto-save',
+            message: 'Your session has expired.'
+        });
+        
+        if (!isAuthenticated) {
+            console.log('[ReactiveStore AutoSave] Auth check failed, skipping auto-save');
+            return;
+        }
+        
+        if (!authState.user?.email) {
+            console.log('[ReactiveStore AutoSave] No user email available, skipping auto-save');
+            return;
+        }
     }
     
     try {
@@ -1323,7 +1395,6 @@ function setupCacheInvalidationListeners(store, apiCall, apiArgs, analysisConfig
             const cachedArgs = eventData.argsString;
             
             if (cachedArgs === storeArgs) {
-                console.log(`[ReactiveStore] Cache invalidation received for ${mainMethodName} with matching args, reloading data`);
                 store.handleInvalidation();
             }
         });
@@ -1386,8 +1457,12 @@ export function createAnalysisConfig(apiFunction, resultKey, label, sourceColumn
 /**
  * Clear all reactive stores from the registry
  * Useful for logout or when switching users
+ * @param {Object} options - Configuration options
+ * @param {boolean} options.skipSave - If true, skip auto-save during cleanup (used during logout)
  */
-export async function clearAllReactiveStores() {
+export async function clearAllReactiveStores(options = {}) {
+    const { skipSave = false } = options;
+    
     console.log('[ReactiveStore] Starting cleanup of all stores');
     
     // Get count before clearing
@@ -1398,16 +1473,20 @@ export async function clearAllReactiveStores() {
     PriorityQueue.stopProcessing();
     PriorityQueue.clearAll();
     
-    // Step 2: Stop the autosave timer and run autosaving on all stores
-    console.log('[ReactiveStore] Step 2: Stopping auto-save timer and saving dirty stores');
+    // Step 2: Stop the autosave timer
+    console.log('[ReactiveStore] Step 2: Stopping auto-save timer');
     stopAutoSaveTimer();
     
-    // Run auto-save directly (bypassing Priority Queue since it's stopped)
-    // This ensures all unsaved changes are preserved before clearing stores
-    await saveDirtyStoresToUserData();
+    // Step 3: Optionally save dirty stores (skip during logout since we save separately)
+    if (!skipSave) {
+        console.log('[ReactiveStore] Step 3: Saving dirty stores');
+        await saveDirtyStoresToUserData({ skipAuthCheck: true });
+    } else {
+        console.log('[ReactiveStore] Step 3: Skipping save (skipSave=true)');
+    }
     
-    // Step 3: Remove all reactive stores from registry
-    console.log('[ReactiveStore] Step 3: Clearing all stores from registry');
+    // Step 4: Remove all reactive stores from registry
+    console.log('[ReactiveStore] Step 4: Clearing all stores from registry');
     Object.keys(reactiveStoreRegistry).forEach(key => {
         delete reactiveStoreRegistry[key];
     });

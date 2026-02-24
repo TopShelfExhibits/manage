@@ -15,10 +15,10 @@ class CacheInvalidationBus {
      * @param {Function} callback - Function to call with {key, namespace, methodName, args}
      */
     static on(pattern, callback) {
-        if (!this.listeners.has(pattern)) {
-            this.listeners.set(pattern, []);
+        if (!CacheInvalidationBus.listeners.has(pattern)) {
+            CacheInvalidationBus.listeners.set(pattern, []);
         }
-        this.listeners.get(pattern).push(callback);
+        CacheInvalidationBus.listeners.get(pattern).push(callback);
     }
     
     /**
@@ -33,14 +33,14 @@ class CacheInvalidationBus {
         
         // Emit to exact pattern matches: 'namespace:methodName'
         const pattern = `${namespace}:${methodName}`;
-        const callbacks = this.listeners.get(pattern) || [];
+        const callbacks = CacheInvalidationBus.listeners.get(pattern) || [];
         
         if (callbacks.length > 0) {
             callbacks.forEach(cb => cb(eventData));
         }
         
         // Also emit to wildcard namespace listeners
-        const wildcardCallbacks = this.listeners.get(namespace) || [];
+        const wildcardCallbacks = CacheInvalidationBus.listeners.get(namespace) || [];
         if (wildcardCallbacks.length > 0) {
             wildcardCallbacks.forEach(cb => cb(eventData));
         }
@@ -58,14 +58,14 @@ class CacheManager {
      * @returns {*|null} - Cached value or null if not found/expired
      */
     static get(key) {
-        const entry = this.cache.get(key);
+        const entry = CacheManager.cache.get(key);
         if (!entry) {
             return null;
         }
         
         // Check expiration
         if (entry.expire && entry.expire < Date.now()) {
-            this.invalidate(key); // Invalidate the cache entry before deletion
+            CacheManager.invalidate(key); // Invalidate the cache entry before deletion
             return null;
         }
         
@@ -90,7 +90,7 @@ class CacheManager {
             return;
         }
         
-        this.cache.set(key, {
+        CacheManager.cache.set(key, {
             value,
             expire: expirationMs ? Date.now() + expirationMs : null
         });
@@ -141,10 +141,10 @@ class CacheManager {
      * @param {string} dependencyKey - The cache key that is depended upon
      */
     static addDependency(dependentKey, dependencyKey) {
-        if (!this.dependencies.has(dependentKey)) {
-            this.dependencies.set(dependentKey, new Set());
+        if (!CacheManager.dependencies.has(dependentKey)) {
+            CacheManager.dependencies.set(dependentKey, new Set());
         }
-        this.dependencies.get(dependentKey).add(dependencyKey);
+        CacheManager.dependencies.get(dependentKey).add(dependencyKey);
     }
     
     /**
@@ -162,38 +162,42 @@ class CacheManager {
         invalidationStack.add(key);
         
         // Remove the cache entry
-        this.cache.delete(key);
+        CacheManager.cache.delete(key);
         
         // Also clean up any pending calls for this key DO NOT CLEAR PENDING CALLS HERE
-        //if (this.pendingCalls.has(key)) {
-        //    this.pendingCalls.delete(key);
+        //if (CacheManager.pendingCalls.has(key)) {
+        //    CacheManager.pendingCalls.delete(key);
         //}
         
         // Find and invalidate all dependent entries
         const dependents = [];
-        for (const [depKey, deps] of this.dependencies.entries()) {
+        for (const [depKey, deps] of CacheManager.dependencies.entries()) {
             if (deps.has && deps.has(key)) {
                 dependents.push(depKey);
             }
         }
         
-        // Log only when there are dependents (useful for debugging cascades)
-        if (dependents.length > 0) {
-            console.log(`[CacheManager] Invalidating ${key} → cascading to ${dependents.length} dependents`);
-        }
-        
         // Recursively invalidate dependents with the same invalidation stack
         for (const depKey of dependents) {
-            this.invalidate(depKey, invalidationStack);
+            CacheManager.invalidate(depKey, invalidationStack);
         }
         
         // Clean up dependency registration
-        this.dependencies.delete(key);
+        CacheManager.dependencies.delete(key);
         
         
         // Emit invalidation event for reactive stores (only for 'api' namespace)
         // THIS MUST HAPPEN LAST to avoid incorrect cache hits during cascading invalidation
-        const [namespace, methodName, argsString] = key.split(':', 3);
+        // Extract namespace, methodName, and argsString from key
+        // Key format: "namespace:methodName:argsString"
+        // Note: argsString may contain colons (e.g., JSON with {"type":"value"})
+        // So we need to split only on the first two colons
+        const firstColonIndex = key.indexOf(':');
+        const secondColonIndex = key.indexOf(':', firstColonIndex + 1);
+        const namespace = key.substring(0, firstColonIndex);
+        const methodName = key.substring(firstColonIndex + 1, secondColonIndex);
+        const argsString = key.substring(secondColonIndex + 1);
+        
         if (namespace === 'api') {
             CacheInvalidationBus.emit(key, namespace, methodName, argsString);
         }
@@ -209,7 +213,7 @@ class CacheManager {
     static invalidateByPrefix(prefix) {
         // Find all cache keys that start with the prefix
         const keysToInvalidate = [];
-        for (const key of this.cache.keys()) {
+        for (const key of CacheManager.cache.keys()) {
             if (key.startsWith(prefix)) {
                 keysToInvalidate.push(key);
             }
@@ -217,7 +221,7 @@ class CacheManager {
         
         // Invalidate each matching key (this will also handle dependents)
         for (const key of keysToInvalidate) {
-            this.invalidate(key);
+            CacheManager.invalidate(key);
         }
     }
     
@@ -274,9 +278,10 @@ class CacheManager {
      * @param {Object} targetClass - The class to wrap
      * @param {string} namespace - Cache namespace
      * @param {Array<string>} [mutationKeys] - Array of method names to skip wrapping (mutation methods)
+     * @param {Array<string>} [infiniteCacheMethods] - Array of method names that should have infinite cache (no expiration)
      * @returns {Object} - Wrapped class with caching and dependency tracking
      */
-    static wrapMethods(targetClass, namespace, mutationKeys = []) {
+    static wrapMethods(targetClass, namespace, mutationKeys = [], infiniteCacheMethods = [], customCacheDurations = {}) {
         const wrappedClass = {};
         wrappedClass._namespace = namespace;
         
@@ -304,32 +309,56 @@ class CacheManager {
                     return cached;
                 }
                 
-                // Atomic check-and-set: if pending call exists, await it; otherwise create and store new promise
+                // Check if there's already a pending call - if so, wait for it
                 let promise = CacheManager.pendingCalls.get(cacheKey);
                 if (promise) {
                     return await promise;
                 }
                 
-                // Create new promise and store it immediately (atomic operation)
-                promise = (async () => {
-                    try {
-                        // Create dependency decorator for this function call
-                        const deps = CacheManager.createDependencyDecorator(cacheKey);
-                        
-                        // Execute method with dependency decorator as first parameter
-                        const result = await targetClass[methodName](deps, ...args);
-                        CacheManager.set(cacheKey, result);
-                        
-                        return result;
-                    } finally {
-                        // Always clean up the pending call when done
-                        CacheManager.pendingCalls.delete(cacheKey);
-                    }
-                })();
+                // Create promise resolver/rejecter that we can store synchronously
+                let promiseResolve, promiseReject;
+                const pendingPromise = new Promise((resolve, reject) => {
+                    promiseResolve = resolve;
+                    promiseReject = reject;
+                });
                 
-                // Store the promise immediately and return it
-                CacheManager.pendingCalls.set(cacheKey, promise);
-                return await promise;
+                // Store the promise IMMEDIATELY before any async work starts (atomic)
+                CacheManager.pendingCalls.set(cacheKey, pendingPromise);
+                
+                // Now execute the actual async work
+                try {
+                    // Create dependency decorator for this function call
+                    const deps = CacheManager.createDependencyDecorator(cacheKey);
+                    
+                    // Execute method with dependency decorator as first parameter
+                    const result = await targetClass[methodName](deps, ...args);
+                    
+                    // Determine expiration time:
+                    // 1. Custom duration if specified for this method
+                    // 2. Infinite cache (null) if in infiniteCacheMethods
+                    // 3. Default duration otherwise (undefined = use DEFAULT_CACHE_EXPIRATION_MS)
+                    let expirationMs;
+                    if (customCacheDurations[methodName] !== undefined) {
+                        expirationMs = customCacheDurations[methodName];
+                    } else if (infiniteCacheMethods.includes(methodName)) {
+                        expirationMs = null;
+                    } else {
+                        expirationMs = undefined;
+                    }
+                    
+                    CacheManager.set(cacheKey, result, expirationMs);
+                    
+                    // Resolve the promise for all waiters
+                    promiseResolve(result);
+                    return result;
+                } catch (error) {
+                    // Reject the promise for all waiters
+                    promiseReject(error);
+                    throw error;
+                } finally {
+                    // Always clean up the pending call when done
+                    CacheManager.pendingCalls.delete(cacheKey);
+                }
             };
             
             // Store the method name on the wrapped function for extractMethodName to retrieve

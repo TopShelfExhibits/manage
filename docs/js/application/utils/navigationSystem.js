@@ -52,9 +52,6 @@ export const NavigationRegistry = {
     // URL Router integration
     urlRouter: null,
 
-    // Central navigation parameters store (reactive)
-    navigationParameters: Vue.reactive({}),
-
     /**
      * Initialize dashboard registry
      */
@@ -107,6 +104,32 @@ export const NavigationRegistry = {
     },
 
     /**
+     * Parse JSON segment from path
+     * @param {string} jsonString - The JSON string from path
+     * @returns {Object|null} Parsed JSON object or null
+     */
+    parseJsonPathSegment(jsonString) {
+        if (!jsonString) return null;
+        
+        try {
+            return JSON.parse(jsonString);
+        } catch (e) {
+            console.warn('[NavigationRegistry] Failed to parse JSON path segment:', e);
+            return null;
+        }
+    },
+
+    /**
+     * Build JSON path segment from parameters
+     * @param {Object} parameters - Parameters to encode as JSON
+     * @returns {string} JSON string for path segment
+     */
+    buildJsonPathSegment(parameters) {
+        if (!parameters || Object.keys(parameters).length === 0) return '';
+        return JSON.stringify(parameters);
+    },
+
+    /**
      * Get route configuration by path
      * @param {string} path - The route path (e.g., 'inventory/categories')
      * @returns {Object|null} Route configuration or null if not found
@@ -126,24 +149,40 @@ export const NavigationRegistry = {
     },
 
     /**
-     * Parse path with parameters (supports query string parameters)
-     * @param {string} path - The path with potential parameters (e.g., 'inventory/categories?searchTerm=item&hideRowsOnSearch=false')
+     * Parse path with parameters (supports JSON path segments)
+     * @param {string} path - The path with potential JSON parameters (e.g., 'schedule?DCol1=Show Date&DVal1=0&DType1=after')
      * @returns {Object} Object with path, parameters, and route information
      */
     parsePath(path) {
-        // Split path from query parameters
-        const [cleanPath, queryString] = path.split('?');
-        const parameters = {};
+        let cleanPath = path;
+        let parameters = {};
         
-        // Parse query string parameters
-        if (queryString) {
-            const searchParams = new URLSearchParams(queryString);
-            for (const [key, value] of searchParams) {
-                // Try to parse boolean and number values
-                if (value === 'true') parameters[key] = true;
-                else if (value === 'false') parameters[key] = false;
-                else if (!isNaN(value) && !isNaN(parseFloat(value))) parameters[key] = parseFloat(value);
-                else parameters[key] = value;
+        // Split on ? to separate route from parameters
+        if (path.includes('?')) {
+            const [pathPart, paramPart] = path.split('?');
+            cleanPath = pathPart;
+            
+            if (paramPart) {
+                // Decode URL-encoded parameter string
+                const decodedParamPart = decodeURIComponent(paramPart);
+                
+                // Check if decoded paramPart is JSON
+                if (decodedParamPart.startsWith('{') || decodedParamPart.startsWith('[')) {
+                    const parsedJson = this.parseJsonPathSegment(decodedParamPart);
+                    if (parsedJson) {
+                        parameters = parsedJson;
+                    }
+                } else {
+                    // Fallback: old query string format for backwards compatibility
+                    const searchParams = new URLSearchParams(paramPart);
+                    for (const [key, value] of searchParams) {
+                        // Try to parse boolean and number values
+                        if (value === 'true') parameters[key] = true;
+                        else if (value === 'false') parameters[key] = false;
+                        else if (!isNaN(value) && !isNaN(parseFloat(value))) parameters[key] = parseFloat(value);
+                        else parameters[key] = value;
+                    }
+                }
             }
         }
         
@@ -159,58 +198,127 @@ export const NavigationRegistry = {
     },
 
     /**
-     * Build path with parameters
-     * @param {string} path - The base path
-     * @param {Object} parameters - Parameters to append as query string
-     * @returns {string} Full path with parameters
+     * Build path with parameters as JSON segment
+     * @param {string} path - The base path (may include existing JSON segment or query parameters)
+     * @param {Object} parameters - Parameters to add/replace
+     * @returns {string} Full path with JSON segment
      */
     buildPath(path, parameters = {}) {
-        if (!parameters || Object.keys(parameters).length === 0) {
-            return path;
+        // Parse existing path to extract clean path and existing parameters
+        const pathInfo = this.parsePath(path);
+        const cleanPath = pathInfo.path;
+        
+        // Merge existing parameters with new ones (new ones take precedence)
+        const mergedParameters = { ...pathInfo.parameters, ...parameters };
+        
+        // Return clean path if no parameters
+        if (Object.keys(mergedParameters).length === 0) {
+            return cleanPath;
         }
         
-        const queryString = new URLSearchParams();
-        Object.entries(parameters).forEach(([key, value]) => {
-            queryString.append(key, String(value));
-        });
+        // Build JSON segment
+        const jsonSegment = this.buildJsonPathSegment(mergedParameters);
         
-        return `${path}?${queryString.toString()}`;
+        return `${cleanPath}?${jsonSegment}`;
     },
 
     /**
-     * Set navigation parameters for a specific path
-     * @param {string} path - The path to set parameters for
-     * @param {Object} parameters - The parameters to set
-     */
-    setNavigationParameters(path, parameters) {
-        this.navigationParameters[path] = { ...parameters };
-    },
-
-    /**
-     * Get navigation parameters for a specific path
-     * @param {string} path - The path to get parameters for
+     * Get navigation parameters from a path (parses query string)
+     * @param {string} path - The path with potential parameters
      * @returns {Object} The parameters object
      */
     getNavigationParameters(path) {
-        return this.navigationParameters[path] || {};
+        const pathInfo = this.parsePath(path);
+        return pathInfo.parameters;
     },
 
     /**
-     * Get current navigation parameters based on app context
-     * @param {Object} appContext - The app context object
-     * @returns {Object} Current navigation parameters
+     * Get parameters for a container, respecting context (dashboard vs regular navigation)
+     * This is the preferred method for components to retrieve their parameters
+     * @param {string} containerPath - The container's path
+     * @param {string} currentPath - The app's current path (from appContext.currentPath)
+     * @returns {Object} The parameters object for this container
      */
-    getCurrentNavigationParameters(appContext) {
-        const currentPath = appContext.currentPath || appContext.currentPage || 'dashboard';
-        return this.getNavigationParameters(currentPath);
+    getParametersForContainer(containerPath, currentPath) {
+        if (!currentPath) return {};
+        
+        const currentCleanPath = currentPath.split('?')[0];
+        const containerCleanPath = containerPath.split('?')[0];
+        const isOnDashboard = currentCleanPath.split('/')[0] === 'dashboard';
+        
+        if (isOnDashboard) {
+            // On dashboard: get parameters from dashboard registry
+            const dashboardContainer = this.dashboardRegistry.getContainer(containerPath);
+            if (dashboardContainer) {
+                const containerFullPath = typeof dashboardContainer === 'string' 
+                    ? dashboardContainer 
+                    : dashboardContainer.path;
+                return this.getNavigationParameters(containerFullPath);
+            }
+            return {};
+        } else {
+            // Not on dashboard: check if current path matches container path
+            if (currentCleanPath === containerCleanPath) {
+                return this.getNavigationParameters(currentPath);
+            }
+            return {};
+        }
     },
 
     /**
-     * Clear navigation parameters for a specific path
-     * @param {string} path - The path to clear parameters for
+     * Build path with updated parameters, preserving existing ones
+     * Convenience method that gets current parameters and merges with new ones
+     * Parameters with undefined, null, or empty string values are removed
+     * @param {string} containerPath - The container's clean path
+     * @param {string} currentPath - The app's current path (from appContext.currentPath)
+     * @param {Object} newParams - Parameters to add/update (use undefined/null/'' to remove)
+     * @returns {string} Full path with merged parameters
      */
-    clearNavigationParameters(path) {
-        delete this.navigationParameters[path];
+    buildPathWithCurrentParams(containerPath, currentPath, newParams = {}) {
+        const cleanPath = containerPath.split('?')[0];
+        const currentParams = this.getParametersForContainer(containerPath, currentPath);
+        
+        console.log('[NavigationRegistry] buildPathWithCurrentParams:', {
+            cleanPath,
+            currentParams,
+            newParams
+        });
+        
+        const mergedParams = { ...currentParams, ...newParams };
+        
+        // Remove parameters with undefined, null, or empty string values
+        const keysToRemove = [];
+        Object.keys(mergedParams).forEach(key => {
+            if (mergedParams[key] === undefined || mergedParams[key] === null || mergedParams[key] === '') {
+                keysToRemove.push(key);
+                delete mergedParams[key];
+            }
+        });
+        
+        if (keysToRemove.length > 0) {
+            console.log('[NavigationRegistry] Removed parameters:', keysToRemove);
+        }
+        
+        const finalPath = this.buildPath(cleanPath, mergedParams);
+        console.log('[NavigationRegistry] Built final path:', finalPath);
+        
+        // If we removed parameters, update caches immediately to prevent stale cached params from being reapplied
+        if (keysToRemove.length > 0) {
+            // Update route's lastParameters cache (for non-dashboard navigation)
+            const route = this.getRoute(cleanPath);
+            if (route) {
+                route.lastParameters = Object.keys(mergedParams).length > 0 ? { ...mergedParams } : {};
+                console.log('[NavigationRegistry] Updated route cache after removing params:', route.lastParameters);
+            }
+            
+            // Update dashboard registry cache (for dashboard navigation)
+            if (this.dashboardRegistry) {
+                this.dashboardRegistry.updatePath(cleanPath, finalPath);
+                console.log('[NavigationRegistry] Updated dashboard cache after removing params');
+            }
+        }
+        
+        return finalPath;
     },
 
     /**
@@ -220,7 +328,9 @@ export const NavigationRegistry = {
      * @returns {string} Display name or dashboard title
      */
     getDisplayName(path, preferDashboardTitle = false) {
-        const route = this.getRoute(path);
+        // Strip query parameters before processing
+        const cleanPath = path.split('?')[0];
+        const route = this.getRoute(cleanPath);
         if (route) {
             if (preferDashboardTitle && route.dashboardTitle) {
                 return route.dashboardTitle;
@@ -229,7 +339,7 @@ export const NavigationRegistry = {
         }
         
         // Fallback: generate from last segment
-        const segments = path.split('/').filter(segment => segment.length > 0);
+        const segments = cleanPath.split('/').filter(segment => segment.length > 0);
         const lastSegment = segments[segments.length - 1];
         return lastSegment ? lastSegment.charAt(0).toUpperCase() + lastSegment.slice(1) : 'Unknown';
     },
@@ -269,43 +379,14 @@ export const NavigationRegistry = {
     },
 
     /**
-     * Get all available paths (for dashboard container configuration)
-     * @param {boolean} [subPathsOnly=false] - If true, only return paths with sub-sections (containing '/')
-     * @returns {Array} Array of available paths
-     */
-    getAllPaths(subPathsOnly = false) {
-        const paths = [];
-        
-        const collectPaths = (routeObj, currentPath = '') => {
-            if (routeObj.path && currentPath !== routeObj.path) {
-                paths.push(routeObj.path);
-            }
-            
-            if (routeObj.children) {
-                Object.values(routeObj.children).forEach(child => {
-                    collectPaths(child, routeObj.path);
-                });
-            }
-        };
-        
-        Object.values(this.routes).forEach(route => {
-            collectPaths(route);
-        });
-        
-        return subPathsOnly ? paths.filter(path => path.includes('/')) : paths;
-    },
-
-
-
-
-
-    /**
      * Get container type from path - consolidated logic
      * @param {string} path - The container path
      * @returns {string} Container type
      */
     getTypeFromPath(path) {
-        const segments = path.split('/').filter(segment => segment.length > 0);
+        // Strip query parameters before processing
+        const cleanPath = path.split('?')[0];
+        const segments = cleanPath.split('/').filter(segment => segment.length > 0);
         const firstSegment = segments[0];
         if (this.routes[firstSegment] && this.routes[firstSegment].isMainSection) {
             return firstSegment;
@@ -317,91 +398,112 @@ export const NavigationRegistry = {
      * Navigation handlers - consolidated
      */
     async handleNavigateToPath(navigationData, appContext) {
-        const { targetPath, isBrowserNavigation } = navigationData;
+        let { targetPath, isBrowserNavigation } = navigationData;
         
         // Parse the target path to get the clean path
-        const pathInfo = this.parsePath(targetPath);
+        let pathInfo = this.parsePath(targetPath);
         
-        // GUARD: Check if this navigation is for the current active path
-        // This prevents stale async operations from navigating away from where the user currently is
-        // Only apply this guard for programmatic navigation (not browser back/forward)
-        // if (!isBrowserNavigation && appContext.currentPath && appContext.currentPath !== pathInfo.path) {
-        //     // Check if the target path is a parent or child of current path
-        //     const currentSegments = appContext.currentPath.split('/').filter(s => s);
-        //     const targetSegments = pathInfo.path.split('/').filter(s => s);
-            
-        //     // Allow navigation if target is parent (going up) or sibling/unrelated (intentional navigation)
-        //     // Block if target appears to be the same page/section the user left
-        //     const isSameBaseSection = currentSegments[0] === targetSegments[0];
-        //     const targetIsCurrentOrChild = pathInfo.path.startsWith(appContext.currentPath) || 
-        //                                   appContext.currentPath.startsWith(pathInfo.path);
-            
-        //     // Only block if we're trying to navigate to a different path within the same section
-        //     // This catches the case where async operations try to navigate back to where they started
-        //     if (isSameBaseSection && !targetIsCurrentOrChild && targetSegments.length > 1) {
-        //         console.log('[NavigationRegistry] Ignoring stale navigation request to:', pathInfo.path, '(current:', appContext.currentPath + ')');
-        //         return { action: 'navigation_ignored', reason: 'stale_request', targetPath: pathInfo.path, currentPath: appContext.currentPath };
-        //     }
-        // }
+        // Apply cached parameters if no explicit parameters provided
+        if (!pathInfo.hasParameters) {
+            const route = this.getRoute(pathInfo.path);
+            if (route?.lastParameters && Object.keys(route.lastParameters).length > 0) {
+                // Build path with cached parameters
+                targetPath = this.buildPath(pathInfo.path, route.lastParameters);
+                pathInfo = this.parsePath(targetPath); // Re-parse with cached params
+                console.log('[NavigationRegistry] Applied cached parameters:', route.lastParameters);
+            }
+        }
         
-        // Check authentication before allowing navigation
-        const isAuthenticated = await Auth.checkAuthWithPrompt({
-            context: 'navigation',
-            message: 'Your session has expired. Would you like to re-authenticate to continue navigating?'
-        });
+        const currentPathInfo = this.parsePath(appContext.currentPath || '');
+        
+        // Check if we're navigating to the same base path (just parameter change)
+        const isSameBasePath = pathInfo.path === currentPathInfo.path;
+        
+        // Check authentication - if not authenticated, just show prompt but don't block
+        // Let data operations trigger reauth when they fail
+        const isAuthenticated = await Auth.checkAuth();
         
         if (!isAuthenticated) {
-            console.log('[NavigationRegistry] Navigation blocked - authentication failed');
-            return { action: 'navigation_blocked', reason: 'authentication_failed' };
+            console.log('[NavigationRegistry] Not authenticated, showing login prompt');
+            
+            // Show auth prompt (non-blocking - user can login when ready)
+            Auth.checkAuthWithPrompt({
+                context: 'navigation',
+                message: 'Please log in to view content.'
+            });
+            
+            // Still update path so user sees the auth prompt in context
+            appContext.currentPath = pathInfo.fullPath;
+            
+            return { action: 'navigation_blocked', reason: 'not_authenticated' };
         }
         
-        const basePage = pathInfo.path.split('/')[0];
+        console.log('[NavigationRegistry] Navigation to:', pathInfo.fullPath, isSameBasePath ? '(parameter change)' : '(new location)');
         
-        console.log('[NavigationRegistry] Navigation to:', pathInfo.path);
+        // Update app state
+        appContext.currentPath = pathInfo.fullPath;
         
-        // Handle dashboard navigation
-        if (pathInfo.path === 'dashboard') {
-            this.navigateToPage('dashboard', appContext);
-            // Clear parameters for dashboard
-            this.clearNavigationParameters('dashboard');
-            return { action: 'navigate_to_dashboard', targetPage: 'dashboard', parameters: pathInfo.parameters };
+        // Cache parameters for future navigation (only if not on dashboard)
+        const isOnDashboard = pathInfo.path.split('/')[0] === 'dashboard';
+        if (!isOnDashboard && pathInfo.hasParameters) {
+            const route = this.getRoute(pathInfo.path);
+            if (route) {
+                route.lastParameters = { ...pathInfo.parameters };
+                console.log('[NavigationRegistry] Cached parameters for', pathInfo.path, ':', route.lastParameters);
+            }
         }
         
-        // Navigate to base page WITHOUT updating URL to preserve the full path
-        this.navigateToPage(basePage, appContext, false);
-        
-        // Set the full path for the container to use
-        appContext.currentPath = pathInfo.path;
-        
-        // Store navigation parameters for the current path
-        if (pathInfo.hasParameters) {
-            this.setNavigationParameters(pathInfo.path, pathInfo.parameters);
-            console.log('[NavigationRegistry] Set navigation parameters for', pathInfo.path, ':', pathInfo.parameters);
-        } else {
-            // Clear parameters if none provided
-            this.clearNavigationParameters(pathInfo.path);
+        // Only close menu if navigating to a different base path
+        if (!isSameBasePath) {
+            appContext.isMenuOpen = false;
         }
         
-        // Update URL with full path if not browser navigation
+        // Update URL if not browser navigation
         if (!isBrowserNavigation && this.urlRouter) {
-            this.urlRouter.updateURL(pathInfo.path, pathInfo.parameters);
+            this.urlRouter.updateURL(pathInfo.fullPath);
         }
         
-        return { action: 'navigate_to_page', targetPage: basePage, parameters: pathInfo.parameters };
+        return { 
+            action: isSameBasePath ? 'parameter_change' : 'navigate', 
+            path: pathInfo.fullPath, 
+            parameters: pathInfo.parameters 
+        };
     },
 
-    navigateToPage(pagePath, appContext, updateURL = true) {
-        appContext.currentPage = pagePath;
-        appContext.currentPath = pagePath; // Set to same as page for base navigation
-        appContext.isMenuOpen = false;
-        console.log(`Navigating to: ${pagePath}`);
+    /**
+     * Update URL parameters without triggering full navigation
+     * This is used for filter changes that should update the URL but not reload content
+     * @param {string} basePath - The base path (without parameters)
+     * @param {string} currentFullPath - The current full path (for dashboard detection)
+     * @param {Object} newParams - The new parameters to apply
+     */
+    updatePathParametersSilently(basePath, currentFullPath, newParams) {
+        const cleanPath = basePath.split('?')[0];
+        const isOnDashboard = currentFullPath?.split('?')[0].split('/')[0] === 'dashboard';
         
-        // Update URL when navigation occurs - only if explicitly requested
-        if (updateURL && this.urlRouter) {
-            console.log('[NavigationRegistry] Updating URL via URLRouter to:', pagePath);
-            this.urlRouter.updateURL(pagePath, {});
-        } else if (!this.urlRouter) {
-            console.warn('[NavigationRegistry] URLRouter not initialized, cannot update URL');
+        // Build new path with parameters
+        const newPath = this.buildPathWithCurrentParams(cleanPath, currentFullPath, newParams);
+        
+        console.log('[NavigationRegistry] Silently updating parameters:', { cleanPath, newPath, isOnDashboard });
+        
+        // Update URL without pushState ( using replaceState to avoid history pollution)
+        if (this.urlRouter) {
+            this.urlRouter.updateURL(newPath, false); // false = use replaceState
         }
-    }
+        
+        // Cache parameters for this route
+        const route = this.getRoute(cleanPath);
+        if (route && newParams && Object.keys(newParams).length > 0) {
+            route.lastParameters = { ...(route.lastParameters || {}), ...newParams };
+            console.log('[NavigationRegistry] Cached parameters for', cleanPath, ':', route.lastParameters);
+        }
+        
+        // For dashboard, also update the stored container path
+        if (isOnDashboard) {
+            this.dashboardRegistry.updatePath(cleanPath, newPath);
+        }
+        
+        return newPath;
+    },
+
 };

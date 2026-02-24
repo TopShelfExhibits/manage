@@ -1,4 +1,5 @@
-import { html, ScheduleTableComponent, hamburgerMenuRegistry, DashboardToggleComponent, NavigationRegistry, Requests, parseDateSearchParameter, SavedSearchSelect, AdvancedSearchComponent } from '../../index.js';
+import { html, ScheduleTableComponent, hamburgerMenuRegistry, DashboardToggleComponent, NavigationRegistry, Requests, ScheduleFilterSelect } from '../../index.js';
+import { normalizeFilterValues } from '../../../data_management/utils/helpers.js';
 
 // Schedule Hamburger Menu Component
 export const ScheduleMenuComponent = {
@@ -14,16 +15,12 @@ export const ScheduleMenuComponent = {
         menuItems() {
             const items = [];
             
-            // Only show Advanced Search if not already on advanced search page
-            if (this.containerPath !== 'schedule/advanced-search') {
-                items.push({ label: 'Advanced Search', action: 'advancedSearch' });
-            }
-            
-            items.push(
-                { label: 'Calendar View', action: 'showCalendarView', disabled: true },
-                { label: 'Chart View', action: 'showChartView', disabled: true },
-                { label: 'Set Current As Default', action: 'setAsDefault', disabled: true }
-            );
+            // Placeholder items - not yet implemented
+            // items.push(
+            //     { label: 'Calendar View', action: 'showCalendarView', disabled: true },
+            //     { label: 'Chart View', action: 'showChartView', disabled: true },
+            //     { label: 'Set Current As Default', action: 'setAsDefault', disabled: true }
+            // );
             
             return items;
         }
@@ -61,9 +58,9 @@ export const ScheduleMenuComponent = {
 export const ScheduleContent = {
     components: {
         ScheduleTableComponent,
-        AdvancedSearchComponent,
-        SavedSearchSelect
+        ScheduleFilterSelect
     },
+    inject: ['$modal'],
     props: {
         navigateToPath: Function,
         containerPath: {
@@ -77,10 +74,7 @@ export const ScheduleContent = {
         };
     },
     computed: {
-        isAdvancedSearchView() {
-            return this.containerPath === 'schedule/advanced-search';
-        },
-        // Split filter into dateFilter and searchParams for table
+        // Split filter into dateFilters and searchParams for table
         dateFilter() {
             if (!this.filter) return null;
             const { searchParams, ...dateFilter } = this.filter;
@@ -94,11 +88,11 @@ export const ScheduleContent = {
         // Register schedule navigation routes
         NavigationRegistry.registerNavigation('schedule', {
             routes: {
-                'advanced-search': {
-                    displayName: 'Advanced Search',
-                    dashboardTitle: 'Schedule Advanced Search',
-                    icon: 'search'
-                }
+                //advanced-search': {
+                //    displayName: 'Advanced Search',
+                //    dashboardTitle: 'Schedule Advanced Search',
+                //    icon: 'search'
+                //}
             }
         });
 
@@ -119,11 +113,12 @@ export const ScheduleContent = {
             }
             
             if (searchData.type === 'year') {
-                // Handle year selection
+                // Handle year selection - use dateFilters array
                 this.filter = { 
-                    startDate: searchData.startDate, 
-                    endDate: searchData.endDate,
-                    year: searchData.year
+                    dateFilters: searchData.dateFilters || [
+                        { column: 'Show Date', value: searchData.startDate, type: 'after' },
+                        { column: 'Show Date', value: searchData.endDate, type: 'before' }
+                    ]
                 };
             } else {
                 // Handle saved search or URL params
@@ -136,30 +131,19 @@ export const ScheduleContent = {
                 searchParams: {}
             };
             
-            // Parse DateSearch from saved search
-            if (searchData.dateSearch) {
-                const dateFilter = parseDateSearchParameter(searchData.dateSearch);
-                
-                // Check if this is an overlap search (has overlapShowIdentifier)
-                if (dateFilter.overlapShowIdentifier) {
-                    // Convert overlapShowIdentifier to identifier for API
-                    filter.identifier = dateFilter.overlapShowIdentifier;
-                } else {
-                    // Regular date filter
-                    Object.assign(filter, dateFilter);
-                }
-            }
-            
-            // Add byShowDate flag if present
-            if (searchData.byShowDate) {
-                filter.byShowDate = true;
+            // Use dateFilters array from saved search
+            if (searchData.dateFilters && searchData.dateFilters.length > 0) {
+                filter.dateFilters = searchData.dateFilters;
             }
             
             // Apply text filters
             if (searchData.textFilters && searchData.textFilters.length > 0) {
                 searchData.textFilters.forEach(textFilter => {
-                    if (textFilter.column && textFilter.value) {
-                        filter.searchParams[textFilter.column] = textFilter.value;
+                    if (textFilter.column && (textFilter.values || textFilter.value)) {
+                        filter.searchParams[textFilter.column] = {
+                            values: normalizeFilterValues(textFilter),
+                            type: textFilter.type || 'contains'
+                        };
                     }
                 });
             }
@@ -169,38 +153,28 @@ export const ScheduleContent = {
     },
     template: html`
         <slot>
-            <!-- Main Schedule View (Year Selector) -->
-            <div v-if="containerPath === 'schedule'" class="schedule-page">
+            <!-- Main Schedule View (Year Selector & Results Table) -->
+            <div class="schedule-page">
                 <ScheduleTableComponent 
                     :filter="dateFilter"
                     :search-params="tableSearchParams"
-                    @navigate-to-path="(event) => navigateToPath(event.targetPath)"
+                    @navigate-to-path="navigateToPath"
                 >
                     <template #header-area>
                         <div class="button-bar">
-                            <SavedSearchSelect
+                            <ScheduleFilterSelect
                                 container-path="schedule"
                                 :include-years="true"
                                 :start-year="2023"
                                 :navigate-to-path="navigateToPath"
+                                :show-advanced-button="true"
                                 default-search="Upcoming"
                                 @search-selected="handleSearchSelected"
                             />
-                            <button @click="navigateToPath('schedule/advanced-search')">
-                                Advanced
-                            </button>
                         </div>
                     </template>
                 </ScheduleTableComponent>
             </div>
-
-            <!-- Advanced Search View -->
-            <AdvancedSearchComponent 
-                v-else-if="isAdvancedSearchView"
-                :container-path="containerPath"
-                :navigate-to-path="navigateToPath"
-                @navigate-to-path="(event) => navigateToPath(event.targetPath)"
-            />
         </slot>
     `
 };

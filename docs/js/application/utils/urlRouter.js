@@ -7,7 +7,6 @@ export class URLRouter {
         this.navigationRegistry = navigationRegistry;
         this.appContext = appContext;
         this.isInitialized = false;
-        this.isHandlingBrowserNavigation = false; // Flag to prevent URL updates during browser navigation
     }
 
     /**
@@ -49,37 +48,22 @@ export class URLRouter {
     async handlePopState(event) {
         const path = this.getCurrentURLPath();
         if (path) {
-            // Set flag to prevent URL updates during browser navigation
-            this.isHandlingBrowserNavigation = true;
-            
             // Let NavigationSystem handle the actual navigation, mark as browser navigation
             await this.navigationRegistry.handleNavigateToPath({ 
                 targetPath: path, 
                 isBrowserNavigation: true 
             }, this.appContext);
-            
-            // Reset flag after a short delay to allow navigation to complete
-            setTimeout(() => {
-                this.isHandlingBrowserNavigation = false;
-            }, 100);
         }
     }
 
     /**
      * Update URL from application navigation
-     * If no parameters provided, automatically gets current state from app context
      */
-    updateURL(path = null, parameters = null, pushToHistory = true) {
-        if (!this.isInitialized || this.isHandlingBrowserNavigation) return;
+    updateURL(path, pushToHistory = true) {
+        if (!this.isInitialized) return;
         
         try {
-            // Auto-get current state if not provided
-            const currentPath = path || this.getCurrentPath();
-            const currentParameters = parameters || this.getCurrentParameters();
-            
-            const fullPath = Object.keys(currentParameters).length > 0 
-                ? this.navigationRegistry.buildPath(currentPath, currentParameters) 
-                : currentPath;
+            const fullPath = path || this.getCurrentPath();
             const encodedPath = this.encodePath(fullPath);
             const url = `#${encodedPath}`;
             
@@ -97,14 +81,6 @@ export class URLRouter {
      * Get current path from app context
      */
     getCurrentPath() {
-        return this.appContext.currentPath || this.appContext.currentPage || 'dashboard';
-    }
-
-    /**
-     * Get current navigation parameters from NavigationRegistry
-     */
-    getCurrentParameters() {
-        const currentPath = this.getCurrentPath();
-        return this.navigationRegistry.getNavigationParameters(currentPath);
+        return this.appContext.currentPath || 'dashboard';
     }
 }

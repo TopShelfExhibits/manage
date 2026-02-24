@@ -10,7 +10,7 @@ export const PrimaryNavComponent = {
             type: Array,
             default: () => []
         },
-        currentPage: {
+        currentPath: {
             type: String,
             default: 'dashboard'
         },
@@ -40,17 +40,27 @@ export const PrimaryNavComponent = {
         };
     },
     computed: {
+        currentPage() {
+            const cleanPath = this.currentPath.split('?')[0];
+            return cleanPath.split('/')[0];
+        },
         isDarkMode() {
             // Use matchMedia to detect dark mode
             return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
         },
         logoSrc() {
             return this.isDarkMode ? 'images/logoW.png' : 'images/logo.png';
+        },
+        isMobileView() {
+            // Mobile view is max-width: 800px
+            return window.innerWidth <= 800;
         }
     },
     methods: {
         handleNavClick(item) {
-            if (this.currentPage === item.path && !this.isMenuOpen) {
+            // In mobile view: if menu is closed, open it first; if open, then navigate
+            // In desktop view: always navigate
+            if (this.isMobileView && !this.isMenuOpen) {
                 this.$emit('toggle-menu');
             } else {
                 this.$emit('navigate-to-path', item.path);
@@ -115,7 +125,7 @@ export const PrimaryNavComponent = {
                 </span>
                 
                 <button class="button-symbol white" @click="$emit('toggle-menu')">
-                    {{ isMenuOpen ? '×' : '≡' }}
+                    {{ isMenuOpen ? '🗙' : '≡' }}
                 </button>
             </nav>
         </header>
@@ -148,9 +158,14 @@ export const BreadcrumbComponent = {
         };
     },
     computed: {
+        // Extract clean path without query parameters for breadcrumb display
+        cleanPath() {
+            if (!this.containerPath) return '';
+            return this.containerPath.split('?')[0];
+        },
         pathSegments() {
-            if (!this.containerPath) return [];
-            return this.containerPath.split('/').filter(segment => segment.length > 0);
+            if (!this.cleanPath) return [];
+            return this.cleanPath.split('/').filter(segment => segment.length > 0);
         },
         pathSegmentsWithNames() {
             if (!this.pathSegments.length) return [];
@@ -178,10 +193,6 @@ export const BreadcrumbComponent = {
                 }
             }
             return this.title;
-        },
-        currentPage() {
-            if (this.pathSegments.length === 0) return '';
-            return this.pathSegments[0];
         },
         canGoBack() {
             if (this.pathSegments.length <= 1) return false;
@@ -218,10 +229,8 @@ export const BreadcrumbComponent = {
             if (index < this.pathSegments.length - 1) {
                 const targetPath = this.pathSegments.slice(0, index + 1).join('/');
                 
-                // Emit simple path-based navigation
-                this.$emit('navigate-to-path', {
-                    targetPath: targetPath
-                });
+                // Emit string path for navigation
+                this.$emit('navigate-to-path', targetPath);
             }
         },
         showHoverBreadcrumb() {
@@ -352,25 +361,25 @@ export const DashboardToggleComponent = {
     template: html`
         <div>
             <!-- Dashboard card styling controls (only show on dashboard page) -->
-            <div v-if="(this.appContext.currentPage === 'dashboard') && isOnDashboard" class="button-bar">
-                <button @click="toggleDashboardClass('wide');" :disabled="isLoading" 
+            <div v-if="(this.appContext.currentPath?.split('/')[0] === 'dashboard') && isOnDashboard" class="button-bar">
+                <button @click="toggleDashboardClass('wide');" 
                         :class="{ 'green': containerClasses.has('wide'), 'blue': !containerClasses.has('wide') }">
                     Wide
                 </button>
-                <button @click="toggleDashboardClass('tall');" :disabled="isLoading" 
+                <button @click="toggleDashboardClass('tall');" 
                         :class="{ 'green': containerClasses.has('tall'), 'blue': !containerClasses.has('tall') }">
                     Tall
                 </button>
             </div>
             
             <!-- Dashboard ordering controls (only show on dashboard page) -->
-            <div v-if="(this.appContext.currentPage === 'dashboard') && isOnDashboard" class="button-bar">
-                <button @click="moveLeft" :disabled="isLoading || !canMoveLeft" 
-                        :class="{ 'blue': canMoveLeft && !isLoading, 'disabled': !canMoveLeft || isLoading }">
+            <div v-if="(this.appContext.currentPath?.split('/')[0] === 'dashboard') && isOnDashboard" class="button-bar">
+                <button @click="moveLeft" :disabled="!canMoveLeft" 
+                        :class="{ 'blue': canMoveLeft, 'disabled': !canMoveLeft }">
                     ← Move Left
                 </button>
-                <button @click="moveRight" :disabled="isLoading || !canMoveRight" 
-                        :class="{ 'blue': canMoveRight && !isLoading, 'disabled': !canMoveRight || isLoading }">
+                <button @click="moveRight" :disabled="!canMoveRight" 
+                        :class="{ 'blue': canMoveRight, 'disabled': !canMoveRight }">
                     Move Right →
                 </button>
             </div>
@@ -378,9 +387,8 @@ export const DashboardToggleComponent = {
             <!-- Add/Remove from dashboard -->
             <button 
                 @click="toggleDashboardPresence"
-                :disabled="isLoading"
-                :class="{ 'red': isOnDashboard && !isLoading, 'green': !isOnDashboard && !isLoading, 'disabled': isLoading }">
-                {{ isLoading ? loadingMessage : (isOnDashboard ? 'Remove from Dashboard' : 'Add to Dashboard') }}
+                :class="{ 'red': isOnDashboard, 'green': !isOnDashboard }">
+                {{ isOnDashboard ? 'Remove from Dashboard' : 'Add to Dashboard' }}
             </button>
         </div>
     `

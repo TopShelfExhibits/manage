@@ -18,35 +18,41 @@ export const InventoryOverviewTableComponent = {
                 { 
                     key: 'tab', 
                     label: 'Category',
-                    width: 120
+                    width: 120,
+                    sortable: true
                 },
                 { 
                     key: 'image', 
                     label: 'I',
                     width: 1,
+                    sortable: false
                 },
                 { 
                     key: 'itemNumber', 
                     label: 'ITEM#',
+                    sortable: true
                 },
                 { 
                     key: 'description', 
                     label: 'Description',
                     editable: false,
-                    details: true
+                    details: true,
+                    sortable: true
                 },
                 { 
                     key: 'notes', 
                     label: 'Notes',
                     editable: false,
-                    details: true
+                    details: true,
+                    sortable: false
                 },
                 { 
                     key: 'quantity', 
                     label: 'QTY',
                     format: 'number',
                     editable: false,
-                    autoColor: true
+                    autoColor: true,
+                    sortable: true
                 }
             ],
             inventoryStore: null, // Reactive store for aggregated inventory
@@ -117,11 +123,6 @@ export const InventoryOverviewTableComponent = {
             // No save functionality for overview table
             this.$modal.alert('This overview table is read-only. No changes to save.', 'Info');
         },
-        handleCategoryClick(tabName) {
-            // Navigate to the specific category view
-            const categoryName = tabName.toLowerCase();
-            this.$emit('navigate-to-path', { targetPath: `inventory/categories/${categoryName}` });
-        },
         formatCategoryLabel(tabName) {
             if (!tabName) return '';
             const lower = tabName.toLowerCase();
@@ -140,9 +141,8 @@ export const InventoryOverviewTableComponent = {
                 :isLoading="isLoading"
                 :isAnalyzing="isAnalyzing"
                 :error="error"
-                :showRefresh="true"
+                :showRefresh="false"
                 :showSearch="true"
-                :sortable="true"
                 :showHeader="true"
                 :showFooter="true"
                 :allowDetails="true"
@@ -152,10 +152,16 @@ export const InventoryOverviewTableComponent = {
                 @cell-edit="handleCellEdit"
                 @on-save="handleSave"
             >
+                <template #header-area>
+                    <div class="button-bar">
+                        <button @click="$emit('navigate-to-path', 'inventory/categories')" class="purple">Categories</button>
+                        <button @click="$emit('navigate-to-path', 'inventory/reports')" class="purple">Reports</button>
+                    </div>
+                </template>
                 <template #default="{ row, column, rowIndex, cellRowIndex, cellColIndex }">
                     <button 
                         v-if="column.key === 'tab'"
-                        @click="handleCategoryClick(row.tab)"
+                        @click="$emit('navigate-to-path', 'inventory/categories/' + row.tab.toLowerCase())"
                         class="card purple"
                     >
                         {{ formatCategoryLabel(row.tab) }}

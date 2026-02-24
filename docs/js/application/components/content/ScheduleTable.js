@@ -16,9 +16,14 @@ export const ScheduleTableComponent = {
         hideRowsOnSearch: {
             type: Boolean,
             default: true
+        },
+        templateName: {
+            type: String,
+            default: 'TEMPLATE'
         }
     },
     inject: ['$modal'],
+    emits: ['navigate-to-path', 'packlist-created'],
     data() {
         return {
             scheduleTableStore: null
@@ -52,6 +57,16 @@ export const ScheduleTableComponent = {
                     column.details = true;
                 }
 
+                // Add sortable configuration for useful columns
+                const sortableColumns = ['Show', 'Client', 'Ship', 'City', 'Size'];
+                const dateColumns = ['Start Date', 'End Date', 'Load In', 'Load Out', 'Event Start', 'Event End'];
+                
+                if (sortableColumns.includes(header) || dateColumns.includes(header)) {
+                    column.sortable = true;
+                } else {
+                    column.sortable = false;
+                }
+
                 // Apply rational formatting based on column name patterns
                 this.applyColumnFormatting(column, header);
 
@@ -62,7 +77,8 @@ export const ScheduleTableComponent = {
             dynamicColumns.push({
                 key: 'packlist',
                 label: 'Packlist',
-                width: 120
+                width: 120,
+                sortable: false
             });
 
             return dynamicColumns;
@@ -104,6 +120,36 @@ export const ScheduleTableComponent = {
                     day: 'numeric'
                 });
             }
+            // Check for dateFilters array format
+            if (this.filter && this.filter.dateFilters && this.filter.dateFilters.length > 0) {
+                const afterFilter = this.filter.dateFilters.find(f => f.type === 'after');
+                const beforeFilter = this.filter.dateFilters.find(f => f.type === 'before');
+                
+                if (afterFilter && beforeFilter) {
+                    // Handle date range with both start and end
+                    const startVal = afterFilter.value;
+                    const endVal = beforeFilter.value;
+                    
+                    // If values are offsets (numbers), convert to dates
+                    if (typeof startVal === 'number' && typeof endVal === 'number') {
+                        const today = new Date();
+                        const startDate = new Date(today.getTime() + startVal * 86400000);
+                        const endDate = new Date(today.getTime() + endVal * 86400000);
+                        const start = startDate.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+                        const end = endDate.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+                        return `Shows between ${start} and ${end}`;
+                    } else if (typeof startVal === 'string' && typeof endVal === 'string') {
+                        // If values are date strings
+                        const start = formatDate(startVal);
+                        const end = formatDate(endVal);
+                        return `Shows between ${start} and ${end}`;
+                    } else if (typeof startVal === 'string' && !/^\d{4}-\d{2}-\d{2}$/.test(startVal)) {
+                        // If it's a show identifier
+                        return `Shows during ${startVal}`;
+                    }
+                }
+            }
+            // Legacy format support (will be removed eventually)
             if (this.filter && typeof this.filter === 'object' && this.filter.startDate && this.filter.endDate) {
                 const start = formatDate(this.filter.startDate);
                 const end = formatDate(this.filter.endDate);
@@ -265,7 +311,7 @@ export const ScheduleTableComponent = {
             return dateKeywords.some(keyword => key.includes(keyword));
         },
         isNumberColumn(key) {
-            const numberKeywords = ['year', 'count', 'quantity', 'id'];
+            const numberKeywords = ['count', 'quantity', 'id'];
             return numberKeywords.some(keyword => key.includes(keyword)) || /^\d+$/.test(key);
         },
         isCurrencyColumn(key) {
@@ -312,7 +358,57 @@ export const ScheduleTableComponent = {
                 return;
             }
             
-            this.$emit('navigate-to-path', { targetPath: `packlist/${packlistInfo.identifier}` });
+            this.$emit('navigate-to-path', `packlist/${packlistInfo.identifier}`);
+        },
+        async handleCreatePacklist(identifier, scheduleRow) {
+            try {
+                // Validate identifier exists
+                if (!identifier) {
+                    this.$modal.error('Cannot create packlist: Invalid identifier', 'Error');
+                    return;
+                }
+                
+                // Confirm with user (show client, show, year info)
+                const client = scheduleRow.Client || '';
+                const show = scheduleRow.Show || '';
+                const year = scheduleRow.Year || '';
+                const startDate = scheduleRow['S. Start'] || 'TBD';
+                
+                const isDuplicate = this.templateName !== 'TEMPLATE';
+                const confirmMessage = isDuplicate 
+                    ? `Duplicate "${this.templateName}" and attach to:\n\nClient: ${client}\nShow: ${show}\nYear: ${year}\nStart Date: ${startDate}\n\nNew packlist will be named: ${identifier}`
+                    : `Create new empty packlist for:\n\nClient: ${client}\nShow: ${show}\nYear: ${year}\nStart Date: ${startDate}`;
+                
+                this.$modal.confirm(
+                    confirmMessage,
+                    async () => {
+                        try {
+                            // Create the tab from template
+                            await Requests.createNewTab('PACK_LISTS', this.templateName, identifier);
+                            
+                            // Success message
+                            this.$modal.alert(`Packlist "${identifier}" created successfully!`, 'Success');
+                            
+                            // Emit event for parent to handle (e.g., close modal)
+                            this.$emit('packlist-created', identifier);
+                            
+                            // Trigger re-analysis to update button
+                            if (this.scheduleTableStore) {
+                                this.scheduleTableStore.runConfiguredAnalysis();
+                            }
+                        } catch (createError) {
+                            console.error('Error in create confirmation:', createError);
+                            this.$modal.error(`Failed to create packlist: ${createError.message}`, 'Error');
+                        }
+                    },
+                    null,
+                    'Create Packlist',
+                    'Create'
+                );
+            } catch (error) {
+                console.error('Error creating packlist:', error);
+                this.$modal.error(`Failed to create packlist: ${error.message}`, 'Error');
+            }
         },
         getShipDateCards(row, columnKey) {
             // Only show estimated ship date cards in the ship column
@@ -355,12 +451,14 @@ export const ScheduleTableComponent = {
                 return [{
                     message: 'View Packlist',
                     disabled: false,
+                    class: 'white',
                     action: () => this.handlePacklistClick(packlistInfo)
                 }];
             } else {
                 return [{
-                    message: 'No Packlist',
-                    disabled: true
+                    message: 'Create Packlist',
+                    disabled: false,
+                    action: () => this.handleCreatePacklist(packlistInfo.identifier, row)
                 }];
             }
         }
@@ -381,7 +479,6 @@ export const ScheduleTableComponent = {
             :loading-message="loadingMessage"
             :showSearch="true"
             :hideRowsOnSearch="hideRowsOnSearch"
-            :sortable="true"
             :allowDetails="true"
             @refresh="handleRefresh"
         >
@@ -401,7 +498,7 @@ export const ScheduleTableComponent = {
                 <!-- Add packlist cards based on AppData -->
                 <template v-for="card in getPacklistCards(row, column.key)" :key="card.message">
                     <button 
-                        class="card"
+                        :class="['card', card.class]"
                         :disabled="card.disabled"
                         @click="!card.disabled ? card.action() : null"
                         v-html="card.message"

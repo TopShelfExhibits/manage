@@ -11,13 +11,13 @@
     --control-height-sm: 24px;
     
     /* Padding defaults */
-    --padding-sm: 12px;
-    --padding-md: 20px;
+    --padding-sm: 2px;
+    --padding-md: 12px;
     --padding-lg: 30px;
 
     /* Border Radius */
     --radius-md: 4px;
-    --radius-lg: 16px;
+    --radius-lg: 2px;/*16px;*/
     
     /* Primary Brand Colors */
     --color-primary: #156bcc;
@@ -89,10 +89,11 @@
 /* Responsive: Reduce padding on small screens */
 @media (max-width: 800px) {
     :root {
-        --padding-sm: 8px;
+        --padding-sm: 2px;
         --padding-md: 8px;
         --padding-lg: 16px;
         --page-width-card: calc(100vw - 16px);
+        --page-width-small: calc(100vw - 16px);
         --navbar-height: 50px;
     }
 }

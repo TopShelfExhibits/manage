@@ -34,6 +34,7 @@ export class HamburgerMenuRegistry {
             containerType,
             currentView: this.getCurrentView(containerPath),
             title: NavigationRegistry.getDisplayName(containerPath, true), // Use centralized display logic
+            modalClass: 'hamburger-menu',
             // Merge with menu-specific props
             ...menu.props
         };
@@ -52,7 +53,9 @@ export class HamburgerMenuRegistry {
 
         // Check for path-based matches
         if (containerPath) {
-            const segments = containerPath.split('/').filter(s => s.length > 0);
+            // Strip query parameters before splitting
+            const cleanPath = containerPath.split('?')[0];
+            const segments = cleanPath.split('/').filter(s => s.length > 0);
             const basePath = segments[0];
             
             if (this.menus.has(basePath)) {
@@ -66,7 +69,9 @@ export class HamburgerMenuRegistry {
 
     getCurrentView(containerPath) {
         if (!containerPath) return '';
-        const segments = containerPath.split('/').filter(s => s.length > 0);
+        // Strip query parameters before splitting
+        const cleanPath = containerPath.split('?')[0];
+        const segments = cleanPath.split('/').filter(s => s.length > 0);
         return segments.length > 0 ? segments[segments.length - 1] : '';
     }
 }

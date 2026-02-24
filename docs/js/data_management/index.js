@@ -10,4 +10,4 @@ export { ProductionUtils } from './abstraction/production-utils.js';
 
 // Utility classes
 export { parseDate, searchFilter, GetTopFuzzyMatch, GetParagraphMatchRating } from './utils/helpers.js';
-export { MetaDataUtils } from './utils/metadata-utils.js';
+export { EditHistoryUtils } from './utils/metadata-utils.js';

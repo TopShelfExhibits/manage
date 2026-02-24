@@ -1,8 +1,10 @@
-import { html, LoadingBarComponent } from '../../index.js';
+import { html, LoadingBarComponent, NavigationRegistry } from '../../index.js';
+import { useSearch } from '../../utils/useSearch.js';
 
 // Cards Grid Component: Simple responsive grid layout with clickable cards
 export const CardsComponent = {
     components: { LoadingBarComponent },
+    inject: ['appContext'],
     props: {
         items: {
             type: Array,
@@ -51,25 +53,52 @@ export const CardsComponent = {
             type: Boolean,
             default: false
         },
-        searchTerm: {
+        syncSearchWithUrl: {
+            type: Boolean,
+            default: false
+        },
+        containerPath: {
             type: String,
             default: ''
+        },
+        navigateToPath: {
+            type: Function,
+            default: null
         },
         hideCardsOnSearch: {
             type: Boolean,
             default: true
+        },
+        showPinButtons: {
+            type: Boolean,
+            default: false
+        },
+        pinnedItems: {
+            type: Set,
+            default: () => new Set()
+        },
+        showPinnedOnly: {
+            type: Boolean,
+            default: false
         }
     },
-    data() {
+    setup(props, { emit }) {
+        // Initialize search composable
+        const search = useSearch({
+            formatValue: null,
+            syncWithUrl: props.syncSearchWithUrl,
+            navigationRegistry: NavigationRegistry,
+            containerPath: props.containerPath,
+            appContext: Vue.inject('appContext')
+        });
+
+        // Return search properties and methods to be available in component
         return {
-            searchValue: this.searchTerm || '', // Initialize with searchTerm prop
+            search
         };
     },
-    watch: {
-        // Watch for changes to searchTerm prop and update internal searchValue
-        searchTerm(newValue) {
-            this.searchValue = newValue || '';
-        }
+    data() {
+        return {};
     },
     computed: {
         shouldShowEmpty() {
@@ -87,8 +116,9 @@ export const CardsComponent = {
                 .filter(row => row); // Only filter out null/undefined rows
 
             // Apply search filter if searchValue is provided and hideCardsOnSearch is enabled
-            if (this.searchValue && this.searchValue.trim() && this.hideCardsOnSearch) {
-                const searchTerm = this.searchValue.toLowerCase().trim();
+            if (this.search.hasActiveSearch.value && this.hideCardsOnSearch) {
+                const searchWords = this.search.searchWords.value;
+                
                 filteredData = filteredData.filter(row => {
                     if (!row) return false;
                     // Search in title, content, and contentFooter fields
@@ -97,8 +127,13 @@ export const CardsComponent = {
                         row.content,
                         row.contentFooter
                     ];
-                    return fields.some(field =>
-                        field && String(field).toLowerCase().includes(searchTerm)
+                    
+                    // All search words must match somewhere in the fields (AND logic)
+                    return searchWords.every(word =>
+                        fields.some(field =>
+                            // Skip null/undefined to prevent matching "undefined" or "null" strings
+                            field != null && String(field).toLowerCase().includes(word.toLowerCase())
+                        )
                     );
                 });
             }
@@ -106,7 +141,13 @@ export const CardsComponent = {
             return filteredData;
         }
     },
+    mounted() {
+        // Initialize search from URL and setup watcher if syncSearchWithUrl is enabled
+        this.search.initializeFromUrl();
+        this.search.setupUrlWatcher();
+    },
     methods: {
+        
         handleCardClick(item) {
             // Call item-specific onClick handler if provided, otherwise use component-level handler
             if (item.onClick && typeof item.onClick === 'function') {
@@ -125,38 +166,47 @@ export const CardsComponent = {
         handleRefresh() {
             console.log('CardsComponent: Refresh requested');
             this.$emit('refresh');
+        },
+        isCardAnalyzing(cardIndex) {
+            // Check if this card is currently being analyzed
+            const card = this.visibleCards[cardIndex];
+            return card && card.AppData && card.AppData._analyzing === true;
+        },
+        handlePinClick(event, item) {
+            // Prevent card click event from firing
+            event.stopPropagation();
+            this.$emit('toggle-pin', item.title || item.id);
+        },
+        isPinned(item) {
+            return this.pinnedItems.has(item.title || item.id);
         }
     },
     template: html`
-        <div class="cards-component content">
-            
-            <!-- Initial Loading State (no items yet) -->
-            <div v-if="!showHeader && isLoading" class="loading-message">
-                <img src="images/loading.gif" alt="Loading..."/>
-                <p>{{ loadingMessage }}</p>
-            </div>
-            
-            <!-- Empty State -->
-            <div v-else-if="!showHeader && shouldShowEmpty" class="empty-message">
-                <p>{{ emptyMessage }}</p>
-            </div>
-            
+        <slot>
             <div key="content-header" v-if="showHeader" class="content-header">
-                <!--h3 v-if="title">{{ title }}</h3-->
                 <slot 
                     name="header-area" 
                 ></slot>
-                <p v-if="isLoading || isAnalyzing">{{ loadingMessage }}</p>
-                <p v-else-if="shouldShowEmpty" class="empty-message">{{ emptyMessage }}</p>
                 
                 <div v-if="showRefresh || showSearch" class="button-bar">
-                    <input
-                        v-if="showSearch"
-                        type="text"
-                        v-model="searchValue"
-                        placeholder="Find..."
-                        class="search-input"
-                    />
+                    <div v-if="showSearch" class="input-container">
+                        <input
+                            type="text"
+                            v-model="search.searchValue.value"
+                            @blur="search.handleBlur"
+                            @keydown.esc="search.clearSearch"
+                            placeholder="Find..."
+                            class="search-input"
+                        />
+                        <button
+                            v-if="search.searchValue.value"
+                            @mousedown="search.clearSearch"
+                            class="column-button"
+                            title="Clear search"
+                        >
+                            🗙
+                        </button>
+                    </div>
                     <button 
                         v-if="showRefresh" 
                         @click="handleRefresh" 
@@ -178,25 +228,42 @@ export const CardsComponent = {
             <!-- Cards Grid (shows during analysis with progressive updates) -->
             <div v-if="shouldShowCards" class="cards-grid">
                 <div
-                    v-for="item in visibleCards"
+                    v-for="(item, idx) in visibleCards"
                     :key="item.id || item.title"
-                    :class="['card', 'clickable', item.cardClass || defaultCardClass]"
+                    :class="['card', 'clickable', { 'analyzing': isCardAnalyzing(idx) }, item.cardClass || defaultCardClass]"
                     @click="handleCardClick(item)"
                     @keydown="handleKeyDown($event, item)"
                     :title="item.title"
                     :aria-label="item.title + (item.content ? ': ' + item.content : '')"
                 >
                     <div class="content-header">
-                        <h3>{{ item.title }}</h3>
+                        <h3 v-html="search.highlightRawText(item.title)"></h3>
+                        <slot v-if="showPinButtons">
+                            <button
+                                @click="handlePinClick($event, item)"
+                                :class="['column-button', { 'active': isPinned(item) }]"
+                                :title="isPinned(item) ? 'Unpin' : 'Pin'"
+                            >
+                                <span class="material-symbols-outlined">{{ isPinned(item) ? 'keep_off' : 'keep' }}</span>
+                            </button>
+                        </slot>
                     </div>
                     <div class="content" v-if="item.content">
-                        <div v-html="item.content"></div>
+                        <div v-html="search.highlightHtmlContent(item.content)"></div>
                     </div>
                     <div class="content-footer" v-if="item.contentFooter">
-                        <div v-html="item.contentFooter"></div>
+                        <div v-html="search.highlightHtmlContent(item.contentFooter)"></div>
                     </div>
                 </div>
             </div>
-        </div>
+
+            
+            <!-- Initial Loading State (no items yet) -->
+            <div v-if="isLoading || isAnalyzing" class="loading-message">
+                <img v-if="!showHeader && !shouldShowCards" src="images/loading.gif" alt="Loading..."/>
+                <p>{{ loadingMessage || 'Loading...' }}</p>
+            </div>
+            <p v-else-if="shouldShowEmpty" class="empty-message">{{ emptyMessage }}</p>
+        </slot>
     `
 };

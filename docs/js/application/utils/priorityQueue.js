@@ -47,6 +47,7 @@ class PriorityQueueManager {
         // Processing state
         this.isProcessing = false;
         this.processingIntervalId = null;
+        this.isDisabled = false; // Permanently disabled during logout
         
         console.log(`[PriorityQueue] Initialized with ${this.cpuCount} CPU cores, max concurrent: ${this.maxConcurrent}`);
     }
@@ -60,6 +61,11 @@ class PriorityQueueManager {
      * @returns {Promise} - Resolves with function result or rejects with error
      */
     enqueue(apiFunction, args = [], priority = 5, metadata = {}) {
+        // If queue is disabled (during logout), silently reject
+        if (this.isDisabled) {
+            return Promise.resolve(null); // Return resolved promise with null instead of rejecting
+        }
+        
         // Validate priority
         priority = Math.max(0, Math.min(9, priority));
 
@@ -68,28 +74,14 @@ class PriorityQueueManager {
         const argsKey = JSON.stringify(args);
         const dedupeKey = `${fnKey}:${argsKey}`;
 
-        // Cancel any pending identical calls in this priority bucket
-        const queue = this.queues[priority];
-        for (let i = queue.length - 1; i >= 0; i--) {
-            const entry = queue[i];
-            const entryFnKey = entry.apiFunction && entry.apiFunction._methodName ? entry.apiFunction._methodName : entry.apiFunction.toString();
-            const entryArgsKey = JSON.stringify(entry.args);
-            const entryDedupeKey = `${entryFnKey}:${entryArgsKey}`;
-            if (entryDedupeKey === dedupeKey) {
-                // Cancel earlier entry
-                entry.reject(new Error('Cancelled due to newer identical call'));
-                queue.splice(i, 1);
-            }
-        }
-
-        // Create a deferred promise
+        // Create a deferred promise for the new call
         let resolveCallback, rejectCallback;
         const promise = new Promise((resolve, reject) => {
             resolveCallback = resolve;
             rejectCallback = reject;
         });
 
-        // Create queue entry
+        // Create queue entry with subscribers array
         const entry = {
             id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
             apiFunction,
@@ -99,8 +91,38 @@ class PriorityQueueManager {
             resolve: resolveCallback,
             reject: rejectCallback,
             enqueuedAt: Date.now(),
-            dedupeKey
+            dedupeKey,
+            subscribers: [] // Will hold resolve/reject callbacks from cancelled calls
         };
+
+        // Find and cancel any pending identical calls in this priority bucket
+        // Cancelled calls will subscribe to the new call's result
+        const queue = this.queues[priority];
+        let subscriberCount = 0;
+        for (let i = queue.length - 1; i >= 0; i--) {
+            const oldEntry = queue[i];
+            const entryFnKey = oldEntry.apiFunction && oldEntry.apiFunction._methodName ? oldEntry.apiFunction._methodName : oldEntry.apiFunction.toString();
+            const entryArgsKey = JSON.stringify(oldEntry.args);
+            const entryDedupeKey = `${entryFnKey}:${entryArgsKey}`;
+            if (entryDedupeKey === dedupeKey) {
+                // Transfer the old call's promise callbacks to the new call's subscribers
+                entry.subscribers.push({
+                    resolve: oldEntry.resolve,
+                    reject: oldEntry.reject
+                });
+                // Also transfer any subscribers the old call had accumulated
+                if (oldEntry.subscribers && oldEntry.subscribers.length > 0) {
+                    entry.subscribers.push(...oldEntry.subscribers);
+                }
+                queue.splice(i, 1);
+                subscriberCount++;
+            }
+        }
+        
+        if (subscriberCount > 0) {
+            const totalSubscribers = entry.subscribers.length;
+            console.log(`[PriorityQueue] ${subscriberCount} older call(s) subscribed to newer call (${totalSubscribers} total subscribers, priority ${priority})`);
+        }
 
         // Add to appropriate priority queue
         queue.push(entry);
@@ -140,6 +162,26 @@ class PriorityQueueManager {
             this.processingIntervalId = null;
         }
         console.log('[PriorityQueue] Stopped queue processor');
+    }
+    
+    /**
+     * Disable the queue (for logout)
+     * Prevents new tasks from being enqueued
+     */
+    disable() {
+        this.isDisabled = true;
+        this.stopProcessing();
+        this.clearAll();
+        console.log('[PriorityQueue] Queue disabled');
+    }
+    
+    /**
+     * Re-enable the queue (for login)
+     * Allows tasks to be enqueued again
+     */
+    enable() {
+        this.isDisabled = false;
+        console.log('[PriorityQueue] Queue enabled');
     }
     
     /**
@@ -201,19 +243,34 @@ class PriorityQueueManager {
             // Execute the API function
             const result = await entry.apiFunction(...entry.args);
             
-            // Resolve the promise
+            // Resolve the main promise
             entry.resolve(result);
+            
+            // Resolve all subscriber promises (cancelled calls)
+            if (entry.subscribers && entry.subscribers.length > 0) {
+                entry.subscribers.forEach(subscriber => {
+                    subscriber.resolve(result);
+                });
+                console.log(`[PriorityQueue] Notified ${entry.subscribers.length} subscriber(s) with result`);
+            }
             
             // Update statistics
             this.stats.totalCompleted++;
             this.stats.byPriority[entry.priority].completed++;
             
             const duration = Date.now() - startTime;
-            console.log(`[PriorityQueue] Completed priority ${entry.priority} call in ${duration}ms (${entry.metadata.label || entry.id})`);
+            //console.log(`[PriorityQueue] Completed priority ${entry.priority} call in ${duration}ms (${entry.metadata.label || entry.id})`);
             
         } catch (error) {
-            // Reject the promise
+            // Reject the main promise
             entry.reject(error);
+            
+            // Reject all subscriber promises (cancelled calls)
+            if (entry.subscribers && entry.subscribers.length > 0) {
+                entry.subscribers.forEach(subscriber => {
+                    subscriber.reject(error);
+                });
+            }
             
             // Update statistics
             this.stats.totalErrors++;

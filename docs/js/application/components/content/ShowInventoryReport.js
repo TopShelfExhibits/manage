@@ -1,12 +1,13 @@
-import { html, TableComponent, Requests, getReactiveStore, createAnalysisConfig, NavigationRegistry, ItemImageComponent, SavedSearchSelect, parseDateSearchParameter, findMatchingStores, Priority, invalidateCache } from '../../index.js';
+import { html, TableComponent, Requests, getReactiveStore, createAnalysisConfig, NavigationRegistry, ItemImageComponent, ScheduleFilterSelect, InventoryCategoryFilter, findMatchingStores, Priority, invalidateCache } from '../../index.js';
+import { normalizeFilterValues } from '../../../data_management/utils/helpers.js';
 
 /**
  * Component for displaying inventory report across multiple shows
  * Shows: Item ID, Inventory Qty, quantities for each show, Remaining
  */
 export const ShowInventoryReport = {
-    components: { TableComponent, ItemImageComponent, SavedSearchSelect },
-    inject: ['$modal'],
+    components: { TableComponent, ItemImageComponent, ScheduleFilterSelect, InventoryCategoryFilter },
+    inject: ['$modal', 'appContext'],
     props: {
         containerPath: { type: String, default: '' },
         navigateToPath: Function
@@ -14,8 +15,7 @@ export const ShowInventoryReport = {
     data() {
         return {
             reportStore: null,
-            inventoryCategoriesStore: null,
-            itemCategoryFilter: undefined, // Optional filter for item categories
+            itemCategoryFilter: null, // Optional filter for item categories (string or null)
             showIdentifiers: [], // List of show IDs from search
             error: null,
             isLoadingShows: false, // Loading state for fetching shows before store creation
@@ -32,10 +32,11 @@ export const ShowInventoryReport = {
                     key: 'image', 
                     label: 'IMG',
                     width: 1,
+                    sortable: false
                 },
-                { key: 'itemId', label: 'Item#' },
-                { key: 'description', label: 'Item Description', details: true },
-                { key: 'available', label: 'Inv Qty.' },
+                { key: 'itemId', label: 'Item#', sortable: true },
+                { key: 'description', label: 'Item Description', details: true, sortable: true },
+                { key: 'available', label: 'Inv Qty.', sortable: true },
             ];
             
             // Add remaining column with custom cellClass function (before show columns)
@@ -44,9 +45,10 @@ export const ShowInventoryReport = {
                 label: 'Remaining',
                 format: 'number',
                 columnClass: 'green',
+                sortable: true,
                 cellClass: (value, row) => {
-                    // Compute remaining on the fly
-                    const remaining = this.calculateRemaining(row);
+                    // Use the pre-computed remaining value from row data
+                    const remaining = row.remaining;
                     if (remaining === null || remaining === undefined) return '';
                     if (remaining < 0) return 'red';
                     if (remaining < 5) return 'orange';
@@ -84,7 +86,8 @@ export const ShowInventoryReport = {
                     format: 'number',
                     font: 'narrow',
                     columnClass: 'striped gray', // Every other column gets gray background
-                    allowHide: true // Enable hide button for show columns
+                    allowHide: true, // Enable hide button for show columns
+                    sortable: true
                 };
             });
             
@@ -100,7 +103,26 @@ export const ShowInventoryReport = {
         },
         
         tableData() {
-            return this.reportStore?.data || [];
+            const data = this.reportStore?.data || [];
+            // Enhance each row with computed remaining value and flattened show data for sorting
+            return data.map(row => {
+                const enhancedRow = {
+                    ...row,
+                    remaining: this.calculateRemaining(row)
+                };
+                
+                // Flatten show data for sorting - add show quantities as direct properties
+                if (row.shows) {
+                    this.showIdentifiers.forEach(showId => {
+                        const showValue = row.shows[showId];
+                        // Only set the value if it exists and is not null/undefined
+                        // This allows proper sorting while maintaining dashes for display
+                        enhancedRow[`show_${showId}`] = (showValue !== null && showValue !== undefined) ? showValue : null;
+                    });
+                }
+                
+                return enhancedRow;
+            });
         },
         
         loadingMessage() {
@@ -109,39 +131,29 @@ export const ShowInventoryReport = {
             }
             return this.reportStore?.loadingMessage || 'Loading...';
         },
-
-        // Navigation-based parameters from NavigationRegistry
-        navParams() {
-            return NavigationRegistry.getNavigationParameters(this.containerPath || 'inventory/reports/show-inventory');
-        },
-
-        // Get search term from URL parameters
-        initialSearchTerm() {
-            return this.navParams?.searchTerm || '';
-        },
-        initialItemCategoryFilter() {
-            // Get item category filter from URL parameters as a single string in an array
-            const filterParam = this.navParams?.itemCategoryFilter || null;
-            if (filterParam) {
-                return [filterParam];
+        
+        emptyMessage() {
+            // Check if a search has been performed by looking at URL parameters
+            const params = NavigationRegistry.getParametersForContainer(
+                this.containerPath || 'inventory/reports/show-inventory',
+                this.appContext?.currentPath
+            );
+            const hasSearchParams = params && (params.dateFilters || params.textFilters || params.view);
+            
+            // If we have search params but no shows and not loading, it means no shows were found
+            if (hasSearchParams && this.showIdentifiers.length === 0 && !this.isLoadingShows) {
+                return 'No shows found for the selected search criteria';
             }
-            return undefined;
+            
+            // If we have shows selected but no items in the data, it means the category has no items
+            if (this.showIdentifiers.length > 0 && this.tableData.length === 0 && !this.isLoading && !this.isAnalyzing) {
+                return 'No items were found in this category.';
+            }
+            
+            return 'Select a schedule filter to load shows and generate report';
         }
     },
     watch: {
-        // watch for isLoading state of inventoryCategoriesStore to apply url filter
-        'inventoryCategoriesStore.isLoading': {
-            handler(isLoading, wasLoading) {
-                // When loading completes (isLoading goes from true to false)
-                if (wasLoading && !isLoading && this.inventoryCategoriesStore.data && this.inventoryCategoriesStore.data.length > 0) {
-                    this.$nextTick(() => {
-                        // ensure the select box changes
-                        this.itemCategoryFilter = this.initialItemCategoryFilter;
-                        this.initializeReportStore();
-                    });
-                }
-            }
-        }
     },
     methods: {
         async loadShowsFromSearch(searchData) {
@@ -160,34 +172,28 @@ export const ShowInventoryReport = {
             this.error = null;
             this.reportStore = null; // Clear previous store
             
-            // Parse search to get date filter and search params
+            // Parse search to get date filters and search params
             const filter = {};
             const searchParams = {};
             
-            if (searchData.dateSearch) {
-                const dateFilter = parseDateSearchParameter(searchData.dateSearch);
-                
-                // Check if this is an overlap search (has overlapShowIdentifier)
-                if (dateFilter.overlapShowIdentifier) {
-                    // Convert overlapShowIdentifier to identifier for API
-                    filter.identifier = dateFilter.overlapShowIdentifier;
-                } else {
-                    // Regular date filter
-                    Object.assign(filter, dateFilter);
-                }
+            if (searchData.dateFilters && searchData.dateFilters.length > 0) {
+                filter.dateFilters = searchData.dateFilters;
             }
             
             // Apply text filters
             if (searchData.textFilters && searchData.textFilters.length > 0) {
                 searchData.textFilters.forEach(textFilter => {
-                    if (textFilter.column && textFilter.value) {
-                        searchParams[textFilter.column] = textFilter.value;
+                    if (textFilter.column && (textFilter.values || textFilter.value)) {
+                        searchParams[textFilter.column] = {
+                            values: normalizeFilterValues(textFilter),
+                            type: textFilter.type || 'contains'
+                        };
                     }
                 });
             }
             
             try {
-                // Try to find existing schedule store from ScheduleAdvancedSearch
+                // Try to find existing schedule store from ScheduleAdvancedFilter
                 const existingStores = findMatchingStores(
                     Requests.getProductionScheduleData,
                     []
@@ -238,16 +244,17 @@ export const ShowInventoryReport = {
                 }
                 
                 console.log('[ShowInventoryReport] Loaded shows:', this.showIdentifiers);
+                console.log('[ShowInventoryReport] Current itemCategoryFilter at this point:', this.itemCategoryFilter);
                 
                 // Clear the loading state now that we have identifiers
                 this.isLoadingShows = false;
                 
                 // Initialize report store with these shows
                 if (this.showIdentifiers.length > 0) {
+                    console.log('[ShowInventoryReport] Calling initializeReportStore from loadShowsFromSearch');
                     this.initializeReportStore();
-                } else {
-                    this.error = 'No shows found for the selected search criteria';
                 }
+                // If no shows found, the computed emptyMessage will handle displaying appropriate message
             } catch (err) {
                 console.error('[ShowInventoryReport] Error loading shows:', err);
                 this.error = 'Failed to load shows: ' + err.message;
@@ -257,7 +264,15 @@ export const ShowInventoryReport = {
         },
 
         initializeReportStore() {
-            if (this.showIdentifiers.length === 0) return;
+            console.log('[ShowInventoryReport] initializeReportStore called', {
+                showIdentifiersCount: this.showIdentifiers.length,
+                itemCategoryFilter: this.itemCategoryFilter
+            });
+            
+            if (this.showIdentifiers.length === 0) {
+                console.log('[ShowInventoryReport] Skipping store initialization - no show identifiers yet');
+                return;
+            }
             
             // Build analysis config (only for tab name and inventory quantity)
             const analysisConfig = [
@@ -308,7 +323,7 @@ export const ShowInventoryReport = {
             this.reportStore = getReactiveStore(
                 Requests.getMultipleShowsItemsSummary,
                 null,
-                [this.showIdentifiers, this.itemCategoryFilter],
+                [this.showIdentifiers, this.itemCategoryFilter ? [this.itemCategoryFilter] : undefined],
                 analysisConfig,
                 true // Auto-load
             );
@@ -337,7 +352,8 @@ export const ShowInventoryReport = {
         },
 
         async handleSearchSelected(searchData) {
-            // Called when SavedSearchSelect emits search-selected event
+            // Called when ScheduleFilterSelect emits search-selected event
+            console.log('[ShowInventoryReport] handleSearchSelected called with:', searchData);
             await this.loadShowsFromSearch(searchData);
         },
 
@@ -348,22 +364,40 @@ export const ShowInventoryReport = {
                 { namespace: 'database', methodName: 'getData', args: ['PACK_LISTS'] },
                 { namespace: 'database', methodName: 'getTabs', args: ['PACK_LISTS'] }
             ], true);
+        },
+
+        handleCategorySelected(categoryName) {
+            console.log('[ShowInventoryReport] handleCategorySelected called with:', categoryName);
+            console.log('[ShowInventoryReport] Current state:', {
+                showIdentifiers: this.showIdentifiers,
+                itemCategoryFilter: this.itemCategoryFilter,
+                hasReportStore: !!this.reportStore
+            });
+            
+            // Update filter and reinitialize store
+            this.itemCategoryFilter = categoryName;
+            console.log('[ShowInventoryReport] Calling initializeReportStore()');
+            this.initializeReportStore();
         }
     },
     mounted() {
+        console.log('[ShowInventoryReport] Component mounted', {
+            containerPath: this.containerPath,
+            currentPath: this.appContext?.currentPath
+        });
         
-        this.inventoryCategoriesStore = getReactiveStore(
-            Requests.getAvailableTabs,
-            null, // No save function
-            ['INVENTORY'], // Arguments
-            null // No analysis config
+        // Get URL parameters to check what should be initialized
+        const params = NavigationRegistry.getParametersForContainer(
+            this.containerPath || 'inventory/reports/show-inventory',
+            this.appContext?.currentPath
         );
         
-        this.itemCategoryFilter = this.initialItemCategoryFilter;
+        console.log('[ShowInventoryReport] Initial URL parameters:', params);
+        console.log('[ShowInventoryReport] Waiting for child components (ScheduleFilterSelect and InventoryCategoryFilter) to sync with URL and emit events...');
     },
     template: html`
         <div :class="(tableColumns && tableColumns.length > 10) ? 'wide-table' : ''">
-            <div v-if="error" class="error-message">
+            <div v-if="error" class="card red">
                 <p>{{ error }}</p>
             </div>
 
@@ -372,7 +406,9 @@ export const ShowInventoryReport = {
                 :columns="tableColumns"
                 :hide-columns="['tabName']"
                 :show-search="true"
-                :search-term="initialSearchTerm"
+                :sync-search-with-url="true"
+                :container-path="containerPath || 'inventory/reports/show-inventory'"
+                :navigate-to-path="navigateToPath"
                 :hide-rows-on-search="false"
                 :readonly="true"
                 :allowDetails="true"
@@ -380,35 +416,22 @@ export const ShowInventoryReport = {
                 :is-analyzing="isAnalyzing"
                 :loading-message="loadingMessage"
                 :loading-progress="reportStore && isAnalyzing ? reportStore.analysisProgress : -1"
-                empty-message="Select a saved search to load shows and generate report"
+                :empty-message="emptyMessage"
                 @refresh="handleRefresh"
             >
                 <template #header-area>
                     <div class="button-bar">
-                        <SavedSearchSelect
+                        <ScheduleFilterSelect
                             :container-path="containerPath || 'inventory/reports/show-inventory'"
                             :navigate-to-path="navigateToPath"
+                            :show-advanced-button="true"
                             @search-selected="handleSearchSelected"
                         />
-                        <span v-if="showIdentifiers.length > 0 || isLoading" class="card gray">
-                            {{ showIdentifiers.length }} show{{ showIdentifiers.length !== 1 ? 's' : '' }} {{isLoading ? 'loading...' : 'loaded'}}
-                        </span>
-                        <select 
-                            :value="itemCategoryFilter ? itemCategoryFilter[0] : ''" 
-                            :disabled="inventoryCategoriesStore && inventoryCategoriesStore.isLoading"
-                            @change="itemCategoryFilter = $event.target.value ? [$event.target.value] : undefined; initializeReportStore();"
-                            >
-                            <option v-for="category in inventoryCategoriesStore?.data || []" 
-                                    v-show= "category.title != 'INDEX'"
-                                    :key="category.title"
-                                    :value="category.title"
-                                    @click="itemCategoryFilter = [category.title]; initializeReportStore();">
-                                {{ category.title }}
-                            </option>
-                            <option value="" @click="itemCategoryFilter = undefined; initializeReportStore();">
-                                All Items
-                            </option>
-                        </select>
+                        <InventoryCategoryFilter
+                            :container-path="containerPath || 'inventory/reports/show-inventory'"
+                            :navigate-to-path="navigateToPath"
+                            @category-selected="handleCategorySelected"
+                        />
                     </div>
                 </template>
 
@@ -430,11 +453,11 @@ export const ShowInventoryReport = {
                         <span v-else>{{ row.itemId }}</span>
                     </slot>
                     <slot v-else-if="column.key === 'remaining'">
-                        {{ calculateRemaining(row) !== null ? calculateRemaining(row) : '—' }}
+                        {{ row.remaining !== null ? row.remaining : '—' }}
                     </slot>
                     <slot v-else-if="column.key.startsWith('show_')">
-                        <span v-if="row.shows && row.shows[column.key.replace('show_', '')]">
-                            {{ row.shows[column.key.replace('show_', '')] }}
+                        <span v-if="row[column.key] !== undefined && row[column.key] !== null && row[column.key] !== 0">
+                            {{ row[column.key] }}
                         </span>
                         <span v-else>—</span>
                     </slot>

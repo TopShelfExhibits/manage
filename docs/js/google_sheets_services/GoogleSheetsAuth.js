@@ -6,6 +6,37 @@ const API_KEY = window.APP_CONFIG.API_KEY;
 const CLIENT_ID = window.APP_CONFIG.CLIENT_ID;
 const SCOPES = window.APP_CONFIG.SCOPES;
 
+/**
+ * Base token management functionality shared between real and fake implementations
+ */
+export class BaseTokenManager {
+    static tokenKey = 'gapi_token';
+    static emailKey = 'last_email';
+    
+    static storeToken(token) {
+        if (!token) return;
+        token.timestamp = new Date().getTime();
+        localStorage.setItem(this.tokenKey, JSON.stringify(token));
+    }
+    
+    static getStoredToken() {
+        const tokenStr = localStorage.getItem(this.tokenKey);
+        return tokenStr ? JSON.parse(tokenStr) : null;
+    }
+    
+    static isTokenExpired(token) {
+        if (!token || !token.timestamp) return true;
+        const tokenAge = (new Date().getTime() - token.timestamp) / 1000;
+        // Tokens typically expire after 1 hour (3600 seconds)
+        return tokenAge > 3500; // Check slightly before actual expiration
+    }
+    
+    static clearStoredToken() {
+        localStorage.removeItem(this.tokenKey);
+        localStorage.removeItem(this.emailKey);
+    }
+}
+
 export class GoogleSheetsAuth {
     static userEmail = null;
 
@@ -25,8 +56,8 @@ export class GoogleSheetsAuth {
             await this.initializeGAPI();
             
             // Try to restore previous session
-            const savedToken = this.getStoredToken();
-            if (savedToken && !this.isTokenExpired(savedToken)) {
+            const savedToken = BaseTokenManager.getStoredToken();
+            if (savedToken && !BaseTokenManager.isTokenExpired(savedToken)) {
                 gapi.client.setToken(savedToken);
                 return true;
             }
@@ -87,7 +118,7 @@ export class GoogleSheetsAuth {
 
     static async authenticate() {
         if (!gapiInited || !gisInited) {
-            throw new Error('Google API not properly initialized');
+            throw new Error('[GoogleSheetsAuth.authenticate] INIT_ERROR: Google API not properly initialized');
         }
 
         try {
@@ -101,19 +132,19 @@ export class GoogleSheetsAuth {
             return new Promise((resolve, reject) => {
                 tokenClient.callback = async (resp) => {
                     if (resp.error !== undefined) {
-                        console.error('Authentication error:', resp);
+                        console.error('[GoogleSheetsAuth.authenticate] AUTH_FAILED: Authentication error:', resp);
                         reject(resp);
                         return;
                     }
                     
                     const token = gapi.client.getToken();
                     if (!token) {
-                        console.error('No access token obtained');
-                        reject(new Error('Authentication failed - no token obtained'));
+                        console.error('[GoogleSheetsAuth.authenticate] AUTH_FAILED: No access token obtained');
+                        reject(new Error('[GoogleSheetsAuth.authenticate] AUTH_FAILED: Authentication failed - no token obtained'));
                         return;
                     }
                     
-                    this.storeToken(token);
+                    BaseTokenManager.storeToken(token);
                     
                     // Store email for future reference
                     const email = await this.getUserEmail();
@@ -142,8 +173,8 @@ export class GoogleSheetsAuth {
     static async checkAuth() {
         const token = gapi.client.getToken();
         if (!token) {
-            const savedToken = this.getStoredToken();
-            if (savedToken && !this.isTokenExpired(savedToken)) {
+            const savedToken = BaseTokenManager.getStoredToken();
+            if (savedToken && !BaseTokenManager.isTokenExpired(savedToken)) {
                 gapi.client.setToken(savedToken);
                 return true;
             }
@@ -153,39 +184,15 @@ export class GoogleSheetsAuth {
         }
         
         // Token exists in gapi.client - verify it's not expired
-        const savedToken = this.getStoredToken();
-        if (savedToken && this.isTokenExpired(savedToken)) {
+        const savedToken = BaseTokenManager.getStoredToken();
+        if (savedToken && BaseTokenManager.isTokenExpired(savedToken)) {
             // Token is expired - clear it
             gapi.client.setToken(null);
-            this.clearStoredToken();
+            BaseTokenManager.clearStoredToken();
             return false;
         }
         
         return true;
-    }
-
-    // Token storage methods
-    static storeToken(token) {
-        if (!token) return;
-        token.timestamp = new Date().getTime();
-        localStorage.setItem('gapi_token', JSON.stringify(token));
-    }
-
-    static getStoredToken() {
-        const tokenStr = localStorage.getItem('gapi_token');
-        return tokenStr ? JSON.parse(tokenStr) : null;
-    }
-
-    static isTokenExpired(token) {
-        if (!token || !token.timestamp) return true;
-        const tokenAge = (new Date().getTime() - token.timestamp) / 1000;
-        // Tokens typically expire after 1 hour (3600 seconds)
-        return tokenAge > 3500; // Check slightly before actual expiration
-    }
-
-    static clearStoredToken() {
-        localStorage.removeItem('gapi_token');
-        localStorage.removeItem('last_email');
     }
 
     static isAuthenticated() {
@@ -236,7 +243,7 @@ export class GoogleSheetsAuth {
             gapi.client.setToken(null);
             
             // Clear stored token
-            this.clearStoredToken();
+            BaseTokenManager.clearStoredToken();
         }
     }
 }

@@ -1,4 +1,4 @@
-import { html, InventoryTableComponent, hamburgerMenuRegistry, NavigationRegistry, Requests, CardsComponent, DashboardToggleComponent, getReactiveStore, findMatchingStores, generateStoreKey, authState } from '../../index.js';
+import { html, InventoryTableComponent, hamburgerMenuRegistry, NavigationRegistry, Requests, CardsComponent, DashboardToggleComponent, getReactiveStore, findMatchingStores, createAnalysisConfig, generateStoreKey, authState, invalidateCache } from '../../index.js';
 import { InventoryOverviewTableComponent } from './InventoryOverviewTable.js';
 import { ShowInventoryReport } from './ShowInventoryReport.js';
 
@@ -8,117 +8,160 @@ export const InventoryMenuComponent = {
         containerPath: String,
         containerType: String, 
         currentView: String,
-        title: String
+        title: String,
+        refreshCallback: Function,
+        getLockInfo: Function,
+        navigateToPath: Function,
+        tabTitle: String
     },
     inject: ['$modal'],
+    data() {
+        return {
+            lockInfo: null,
+            isLoadingLockInfo: true,
+            isRemovingLock: false
+        };
+    },
+    async mounted() {
+        await this.fetchLockInfo();
+    },
     computed: {
+        lockOwnerUsername() {
+            if (!this.lockInfo || !this.lockInfo.user) return null;
+            const email = this.lockInfo.user;
+            return email.includes('@') ? email.split('@')[0] : email;
+        },
         menuItems() {
-            switch (this.currentView) {
-                case 'inventory':
-                    return [
-                        { label: 'Refresh Inventory', action: 'refreshInventory' },
-                        { label: 'Add New Item', action: 'addInventoryItem' },
-                        { label: 'Export All Items', action: 'exportInventory' },
-                        { label: 'Inventory Settings', action: 'inventorySettings' }
-                    ];
-                case 'categories':
-                    return [
-                        { label: 'Add New Category', action: 'addNewCategory' },
-                        { label: 'Manage Category Order', action: 'manageCategoryOrder' },
-                        { label: 'Export Category Report', action: 'exportCategoryReport' },
-                        { label: 'Category Settings', action: 'categorySettings' }
-                    ];
-                case 'search':
-                    return [
-                        { label: 'Save Search Criteria', action: 'saveSearchCriteria' },
-                        { label: 'Load Saved Search', action: 'loadSavedSearch' },
-                        { label: 'Export Search Results', action: 'exportSearchResults' },
-                        { label: 'Clear Search History', action: 'clearSearchHistory' }
-                    ];
-                case 'reports':
-                    return [
-                        { label: 'Schedule Automatic Reports', action: 'scheduleReport' },
-                        { label: 'Custom Report Builder', action: 'customReportBuilder' },
-                        { label: 'Email Reports', action: 'emailReports' },
-                        { label: 'Report Settings', action: 'reportSettings' }
-                    ];
-                default:
-                    return [
-                        { label: 'Refresh', action: 'refreshInventory' },
-                        { label: 'Help', action: 'inventoryHelp' }
-                    ];
+            const items = [];
+            
+            // Add lock removal option if lock exists and fully loaded
+            if (!this.isLoadingLockInfo && this.lockInfo) {
+                items.push({ 
+                    label: this.isRemovingLock ? 'Removing lock...' : `Remove lock: ${this.lockOwnerUsername}`, 
+                    action: 'removeLock',
+                    class: this.isRemovingLock ? 'analyzing' : 'warning',
+                    disabled: this.isRemovingLock
+                });
             }
+            
+            // Navigation items
+            items.push(
+                { label: 'Inventory Overview', action: 'navigateHome' },
+                { label: 'Categories', action: 'navigateCategories' },
+                { label: 'Reports', action: 'navigateReports' }
+            );
+            
+            return items;
         }
     },
     methods: {
-        handleAction(action) {
+        async fetchLockInfo() {
+            this.isLoadingLockInfo = true;
+            try {
+                if (this.getLockInfo) {
+                    this.lockInfo = await this.getLockInfo();
+                    //console.log('[InventoryMenu] Fetched lock info:', this.lockInfo);
+                }
+            } catch (error) {
+                console.error('[InventoryMenu] Error fetching lock info:', error);
+            } finally {
+                this.isLoadingLockInfo = false;
+            }
+        },
+        async handleAction(action) {
             switch (action) {
-                case 'refreshInventory':
-                    this.$modal.alert('Refreshing inventory...', 'Info');
+                case 'navigateHome':
+                    if (this.navigateToPath) {
+                        this.navigateToPath('inventory');
+                        this.$emit('close-modal');
+                    }
                     break;
-                case 'addInventoryItem':
-                    this.$modal.confirm(
-                        'Do you want to add a new inventory item?',
-                        () => this.$modal.alert('Item added!', 'Success'),
-                        () => this.$modal.alert('Add cancelled.', 'Info'),
-                        'Add Item'
-                    );
+                case 'removeLock':
+                    await this.handleRemoveLock();
                     break;
-                case 'exportInventory':
-                    this.$modal.alert('Export all items functionality coming soon!', 'Info');
+                case 'navigateCategories':
+                    if (this.navigateToPath) {
+                        this.navigateToPath('inventory/categories');
+                        this.$emit('close-modal');
+                    }
                     break;
-                case 'inventorySettings':
-                    this.$modal.alert('Inventory settings functionality coming soon!', 'Info');
-                    break;
-                case 'addNewCategory':
-                    this.$modal.alert('Add new category functionality coming soon!', 'Info');
-                    break;
-                case 'manageCategoryOrder':
-                    this.$modal.alert('Manage category order functionality coming soon!', 'Info');
-                    break;
-                case 'exportCategoryReport':
-                    this.$modal.alert('Export category report functionality coming soon!', 'Info');
-                    break;
-                case 'categorySettings':
-                    this.$modal.alert('Category settings functionality coming soon!', 'Info');
-                    break;
-                case 'saveSearchCriteria':
-                    this.$modal.alert('Save search criteria functionality coming soon!', 'Info');
-                    break;
-                case 'loadSavedSearch':
-                    this.$modal.alert('Load saved search functionality coming soon!', 'Info');
-                    break;
-                case 'exportSearchResults':
-                    this.$modal.alert('Export search results functionality coming soon!', 'Info');
-                    break;
-                case 'clearSearchHistory':
-                    this.$modal.alert('Clear search history functionality coming soon!', 'Info');
-                    break;
-                case 'scheduleReport':
-                    this.$modal.alert('Schedule automatic reports functionality coming soon!', 'Info');
-                    break;
-                case 'customReportBuilder':
-                    this.$modal.alert('Custom report builder functionality coming soon!', 'Info');
-                    break;
-                case 'emailReports':
-                    this.$modal.alert('Email reports functionality coming soon!', 'Info');
-                    break;
-                case 'reportSettings':
-                    this.$modal.alert('Report settings functionality coming soon!', 'Info');
-                    break;
-                case 'inventoryHelp':
-                    this.$modal.alert('Inventory help functionality coming soon!', 'Info');
+                case 'navigateReports':
+                    if (this.navigateToPath) {
+                        // If on a specific category, pass it as a filter
+                        if (this.tabTitle) {
+                            const reportsPath = NavigationRegistry.buildPath(
+                                'inventory/reports',
+                                { itemCategoryFilter: this.tabTitle }
+                            );
+                            this.navigateToPath(reportsPath);
+                        } else {
+                            this.navigateToPath('inventory/reports');
+                        }
+                        this.$emit('close-modal');
+                    }
                     break;
                 default:
                     this.$modal.alert(`Action ${action} not implemented yet.`, 'Info');
             }
+        },
+        async handleRemoveLock() {
+            if (!this.lockInfo) {
+                this.$modal.alert('No lock to remove.', 'Info');
+                return;
+            }
+            
+            const username = this.lockOwnerUsername;
+            const tabName = this.lockInfo.tab; // Use the actual tab name from lock info
+            
+            this.$modal.confirm(
+                `Are you sure you want to force unlock ${tabName}?\n${username} may have unsaved changes.`,
+                async () => {
+                    this.isRemovingLock = true;
+                    try {
+                        //console.log(`[InventoryContent.removeLock] About to call forceUnlockSheet for ${tabName}`);
+                        const result = await Requests.forceUnlockSheet('INVENTORY', tabName, 'User requested via hamburger menu');
+                        //console.log(`[InventoryContent.removeLock] forceUnlockSheet returned:`, result);
+                        
+                        if (result.success) {
+                            // Cache is automatically invalidated by the mutation method
+                            // Just refresh the UI to fetch fresh data
+    
+                            this.$modal.alert(
+                                `Lock removed successfully.\n\nPreviously locked by: ${username}\nAutosave entries backed up: ${result.backupCount}\nAutosave entries deleted: ${result.deletedCount}`,
+                                'Success',
+                                false
+                            );
+                            
+                            // Refresh lock info in the menu
+                            await this.fetchLockInfo();
+                            
+                            // Refresh page data and lock state via callback
+                            if (this.refreshCallback) {
+                                await this.refreshCallback();
+                            }
+                        } else {
+                            this.$modal.error(`Failed to remove lock: ${result.message}`, 'Error');
+                        }
+                    } catch (error) {
+                        console.error('[InventoryMenu] Error removing lock:', error);
+                        this.$modal.error(`Error removing lock: ${error.message}`, 'Error');
+                    } finally {
+                        this.isRemovingLock = false;
+                    }
+                },
+                () => {},
+                'Confirm Force Unlock',
+                'Force Unlock'
+            );
         }
     },
     template: html`
         <ul>
             <li v-for="item in menuItems" :key="item.action">
                 <button 
-                    @click="handleAction(item.action)">
+                    @click="handleAction(item.action)"
+                    :disabled="item.disabled"
+                    :class="item.class">
                     {{ item.label }}
                 </button>
             </li>
@@ -148,17 +191,19 @@ export const InventoryContent = {
         };
     },
     computed: {
-        // Direct navigation options for inventory
-        inventoryNavigation() {
-            return [
-                { id: 'categories', label: 'Categories', path: 'inventory/categories' },
-                { id: 'reports', label: 'Reports', path: 'inventory/reports' },
-                { id: 'new', label: 'New Item', path: 'inventory/new' }
-            ];
+        // Centralized clean path without parameters
+        cleanContainerPath() {
+            return this.containerPath.split('?')[0];
         },
         categoryList() {
             // Return loaded categories from store with formatted title
             const categories = this.categoriesStore?.data || [];
+            
+            // Add explicit dependency on analysis state to trigger reactivity
+            // when analysis completes (including lock info analysis)
+            const isAnalyzing = this.categoriesStore?.isAnalyzing;
+            const analysisProgress = this.categoriesStore?.analysisProgress;
+            
             return categories
                 .filter(cat => cat.title !== 'INDEX')
                 .map(cat => {
@@ -176,26 +221,41 @@ export const InventoryContent = {
                         ? matchingStores.some(match => match.isModified)
                         : this.autoSavedCategories.has(cat.title);
                     
-                    // Determine card styling based on store state
-                    const cardClass = hasUnsavedChanges ? 'button red' : 'button purple';
-                    const contentFooter = hasUnsavedChanges ? 'Unsaved changes' : undefined;
+                    // Check if the category is locked
+                    const isLocked = cat.lockInfo && cat.lockInfo !== null;
+                    
+                    // Determine card styling based on lock state and unsaved changes
+                    // Priority: locked (white) > unsaved changes (red) > normal (purple)
+                    const cardClass = isLocked ? 'button white' : (hasUnsavedChanges ? 'button red' : 'button purple');
+                    
+                    // Build content footer
+                    let contentFooter = undefined;
+                    if (isLocked) {
+                        const lockOwner = cat.lockInfo.user || 'Unknown';
+                        const username = lockOwner.includes('@') ? lockOwner.split('@')[0] : lockOwner;
+                        contentFooter = `Locked for edit by: ${username}`;
+                    } else if (hasUnsavedChanges) {
+                        contentFooter = 'Unsaved changes';
+                    }
                     
                     return {
                         id: cat.sheetId,
                         title: categoryTitle,
+                        originalTitle: cat.title, // Keep original uppercase tab name
                         cardClass: cardClass,
-                        contentFooter: contentFooter
+                        contentFooter: contentFooter,
+                        AppData: cat.AppData // Pass through AppData for analyzing state
                     };
                 });
         },
         // Get current category name from path for specific category views
         currentCategoryName() {
-            if (this.containerPath.startsWith('inventory/categories/')) {
-                const categorySlug = this.containerPath.replace('inventory/categories/', '');
+            if (this.cleanContainerPath.startsWith('inventory/categories/')) {
+                const categorySlug = this.cleanContainerPath.replace('inventory/categories/', '');
                 const match = this.categoryList.find(c => {
                     return c.title.toLowerCase() === categorySlug.toLowerCase();
                 });
-                return match ? match.title : (categorySlug.charAt(0).toUpperCase() + categorySlug.slice(1).toLowerCase());
+                return match ? match.originalTitle : categorySlug.toUpperCase();
             }
             return '';
         },
@@ -248,15 +308,38 @@ export const InventoryContent = {
         },
         handleCategorySelect(categoryTitle) {
             this.navigateToPath('inventory/categories/' + categoryTitle.toLowerCase());
+        },
+        async handleRefresh() {
+            console.log('InventoryContent: Refresh requested');
+            // Invalidate the categories store cache to force reload with fresh lock status
+            invalidateCache([
+                { namespace: 'database', methodName: 'getTabs', args: ['INVENTORY'] }
+            ], true);
+            
+            // If viewing an inventory table, refresh its lock status
+            if (this.$refs.inventoryTable) {
+                await this.$refs.inventoryTable.checkLockStatus();
+            }
         }
     },
     async mounted() {
-        // Initialize categories store
+        // Initialize categories store with lock analysis
+        const analysisConfig = [
+            createAnalysisConfig(
+                Requests.getInventoryLock,
+                'lockInfo',
+                'Checking lock status...',
+                ['title'], // Extract tab name from 'title' column
+                [authState.user?.email], // Pass current user to filter out their own locks
+                'lockInfo' // Store lock info in 'lockInfo' column
+            )
+        ];
+        
         this.categoriesStore = getReactiveStore(
             Requests.getAvailableTabs,
             null, // No save function
             ['INVENTORY'], // Arguments
-            null // No analysis config
+            analysisConfig
         );
         
         // Note: checkAutoSavedCategories will be called by the watcher when data loads
@@ -276,11 +359,6 @@ export const InventoryContent = {
                     dashboardTitle: 'Inventory Reports',
                     icon: 'assessment',
                     children: {}
-                },
-                new: {
-                    displayName: 'New Item',
-                    dashboardTitle: 'Add New Item',
-                    icon: 'add'
                 }
             }
         });
@@ -288,61 +366,67 @@ export const InventoryContent = {
         // Register hamburger menu for inventory
         hamburgerMenuRegistry.registerMenu('inventory', {
             components: [InventoryMenuComponent, DashboardToggleComponent],
-            props: {}
+            props: {
+                refreshCallback: this.handleRefresh,
+                navigateToPath: this.navigateToPath,
+                getLockInfo: async () => {
+                    // Get lock info from the current category if we're viewing one
+                    const categoryName = this.currentCategoryName;
+                    //console.log('[InventoryContent] getLockInfo called:', { 
+                    //    categoryName,
+                    //    cleanPath: this.cleanContainerPath,
+                    //    hasStore: !!this.categoriesStore,
+                    //    storeData: this.categoriesStore?.data?.length
+                    //});
+                    
+                    if (!categoryName) return null;
+                    
+                    // Always fetch directly from API to ensure fresh lock status
+                    // (bypasses store which may have stale analysis data)
+                    //console.log('[InventoryContent] Fetching lock info directly for:', categoryName);
+                    const lockInfo = await Requests.getInventoryLock(categoryName.toUpperCase());
+                    //console.log('[InventoryContent] Lock info from API:', lockInfo);
+                    return lockInfo;
+                },
+                tabTitle: this.currentCategoryName
+            }
         });
     },
     template: html `
         <slot>
             <!-- Main Inventory View -->
-            <slot v-if="containerPath === 'inventory'">
-                <div class="content"><div class="button-bar">
-                    <button 
-                        v-for="nav in inventoryNavigation" 
-                        :key="nav.id"
-                        class="purple"
-                        @click="navigateToPath(nav.path)">
-                        {{ nav.label }}
-                    </button>
-                </div></div>
+            <slot v-if="cleanContainerPath === 'inventory'">
                 <inventory-overview-table
                     :container-path="containerPath"
-                    @navigate-to-path="(event) => navigateToPath(event.targetPath)"
+                    @navigate-to-path="navigateToPath"
                 />
             </slot>
             
             <!-- Categories View -->
             <cards-grid
-                v-else-if="containerPath === 'inventory/categories'"
+                v-else-if="cleanContainerPath === 'inventory/categories'"
                 :items="categoryList"
                 :on-item-click="handleCategorySelect"
                 :is-loading="isLoadingCategories"
-                loading-message="Loading categories..."
+                loading-message="Loading..."
                 empty-message="No categories available"
             />
             
             <!-- Specific Category View -->
             <inventory-table
+                ref="inventoryTable"
                 v-else-if="containerPath.startsWith('inventory/categories/') && currentCategoryName"
                 :container-path="containerPath"
                 :inventory-name="'Inventory: ' + currentCategoryName.toLowerCase()"
-                :tab-title="currentCategoryName.toUpperCase()"
+                :tab-title="currentCategoryName"
             ></inventory-table>
 
             <!-- Show Inventory Report View -->
             <show-inventory-report
-                v-else-if="containerPath === 'inventory/reports'"
+                v-else-if="cleanContainerPath === 'inventory/reports'"
                 :container-path="containerPath"
                 :navigate-to-path="navigateToPath"
             />
-
-            <!-- New Item View -->
-            <div v-else-if="containerPath === 'inventory/new'" class="content">
-                <h3>Add New Item</h3>
-                <p>Add a new item to the inventory.</p>
-                <div style="margin: 1rem 0;">
-                    <button @click="$modal.alert('Add new item functionality coming soon!', 'Info')">Create New Item</button>
-                </div>
-            </div>
         </slot>
     `
 };

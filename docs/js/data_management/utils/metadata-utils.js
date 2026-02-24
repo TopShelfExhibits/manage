@@ -1,10 +1,10 @@
 /**
- * MetaData Management Utilities
+ * EditHistory Management Utilities
  * 
  * Provides core functions for tracking row changes, managing history,
- * and archiving deleted rows to MetaData table.
+ * and archiving deleted rows to EditHistory table.
  * 
- * MetaData Column Format (minimized):
+ * EditHistory Column Format (minimized):
  * {
  *   "h": [
  *     {
@@ -30,14 +30,14 @@
  * s = userSettings
  */
 
-export class MetaDataUtils {
+export class EditHistoryUtils {
     /**
-     * Create a new metadata entry for a row change
+     * Create a new edithistory entry for a row change
      * @param {string} username - User email making the change
      * @param {Array<{column: string, old: any, new: any}>} changes - List of changes
      * @returns {Object} Metadata entry object
      */
-    static createMetaDataEntry(username, changes) {
+    static createEditHistoryEntry(username, changes) {
         // Extract username before @ symbol
         const shortUser = username ? username.split('@')[0] : 'unknown';
         
@@ -55,53 +55,53 @@ export class MetaDataUtils {
     }
 
     /**
-     * Append a new entry to existing metadata history
-     * @param {string|Object} existingMetaData - Existing metadata (JSON string or object)
-     * @param {Object} newEntry - New metadata entry to append
+     * Append a new entry to existing edithistory history
+     * @param {string|Object} existingEditHistory - Existing edithistory (JSON string or object)
+     * @param {Object} newEntry - New edithistory entry to append
      * @param {number} maxHistory - Maximum history entries to keep (default: 10)
-     * @returns {string} Updated metadata as JSON string
+     * @returns {string} Updated edithistory as JSON string
      */
-    static appendToMetaData(existingMetaData, newEntry, maxHistory = 10) {
-        let metadata;
+    static appendToEditHistory(existingEditHistory, newEntry, maxHistory = 10) {
+        let edithistory;
         
-        // Parse existing metadata
-        if (typeof existingMetaData === 'string') {
+        // Parse existing edithistory
+        if (typeof existingEditHistory === 'string') {
             try {
-                metadata = existingMetaData ? JSON.parse(existingMetaData) : { h: [] };
+                edithistory = existingEditHistory ? JSON.parse(existingEditHistory) : { h: [] };
             } catch (error) {
-                console.warn('Failed to parse existing metadata, creating new:', error);
-                metadata = { h: [] };
+                console.warn('Failed to parse existing edithistory, creating new:', error);
+                edithistory = { h: [] };
             }
-        } else if (typeof existingMetaData === 'object' && existingMetaData !== null) {
-            metadata = { ...existingMetaData };
+        } else if (typeof existingEditHistory === 'object' && existingEditHistory !== null) {
+            edithistory = { ...existingEditHistory };
         } else {
-            metadata = { h: [] };
+            edithistory = { h: [] };
         }
 
         // Ensure history array exists (support both old 'history' and new 'h' format)
-        if (!Array.isArray(metadata.h)) {
-            metadata.h = [];
+        if (!Array.isArray(edithistory.h)) {
+            edithistory.h = [];
         }
 
         // Add new entry at the beginning (most recent first)
-        metadata.h.unshift(newEntry);
+        edithistory.h.unshift(newEntry);
 
         // Trim to max history length
-        if (metadata.h.length > maxHistory) {
-            metadata.h = metadata.h.slice(0, maxHistory);
+        if (edithistory.h.length > maxHistory) {
+            edithistory.h = edithistory.h.slice(0, maxHistory);
         }
 
-        return JSON.stringify(metadata);
+        return JSON.stringify(edithistory);
     }
 
     /**
      * Calculate differences between two row objects
      * @param {Object} oldRow - Original row data
      * @param {Object} newRow - Updated row data
-     * @param {Array<string>} ignoredColumns - Columns to ignore (e.g., 'metadata', 'AppData')
+     * @param {Array<string>} ignoredColumns - Columns to ignore (e.g., 'edithistory', 'AppData')
      * @returns {Array<{column: string, old: any, new: any}>} Array of changes
      */
-    static calculateRowDiff(oldRow, newRow, ignoredColumns = ['metadata', 'MetaData', 'AppData']) {
+    static calculateRowDiff(oldRow, newRow, ignoredColumns = ['edithistory', 'EditHistory', 'AppData']) {
         const changes = [];
 
         if (!oldRow || !newRow) {
@@ -167,7 +167,7 @@ export class MetaDataUtils {
      * @param {Array<string>} ignoredColumns - Columns to ignore
      * @returns {Array<{index: number, changes: Array}>} Array of row indices with their changes
      */
-    static calculateBatchDiff(originalRows, updatedRows, ignoredColumns = ['metadata', 'MetaData', 'AppData']) {
+    static calculateBatchDiff(originalRows, updatedRows, ignoredColumns = ['edithistory', 'EditHistory', 'AppData']) {
         const results = [];
 
         if (!Array.isArray(originalRows) || !Array.isArray(updatedRows)) {
@@ -244,7 +244,7 @@ export class MetaDataUtils {
     }
 
     /**
-     * Create a metadata object for archiving a deleted row
+     * Create a edithistory object for archiving a deleted row
      * @param {string} sourceTable - Table identifier (e.g., 'INVENTORY', 'PACK_LISTS')
      * @param {string} sourceTab - Tab name
      * @param {string} rowIdentifier - Row identifier
@@ -292,24 +292,24 @@ export class MetaDataUtils {
     }
 
     /**
-     * Parse metadata from a row (handles both string and object formats)
-     * @param {string|Object} metadata - Metadata to parse
-     * @returns {Object|null} Parsed metadata object or null if invalid
+     * Parse edithistory from a row (handles both string and object formats)
+     * @param {string|Object} edithistory - Metadata to parse
+     * @returns {Object|null} Parsed edithistory object or null if invalid
      */
-    static parseMetaData(metadata) {
-        if (!metadata) {
+    static parseEditHistory(edithistory) {
+        if (!edithistory) {
             return null;
         }
 
-        if (typeof metadata === 'object') {
-            return metadata;
+        if (typeof edithistory === 'object') {
+            return edithistory;
         }
 
-        if (typeof metadata === 'string') {
+        if (typeof edithistory === 'string') {
             try {
-                return JSON.parse(metadata);
+                return JSON.parse(edithistory);
             } catch (error) {
-                console.warn('Failed to parse metadata:', error);
+                console.warn('Failed to parse edithistory:', error);
                 return null;
             }
         }
@@ -318,12 +318,12 @@ export class MetaDataUtils {
     }
 
     /**
-     * Get the most recent change from metadata
-     * @param {string|Object} metadata - Metadata to parse
+     * Get the most recent change from edithistory
+     * @param {string|Object} edithistory - Metadata to parse
      * @returns {Object|null} Most recent change entry or null
      */
-    static getMostRecentChange(metadata) {
-        const parsed = this.parseMetaData(metadata);
+    static getMostRecentChange(edithistory) {
+        const parsed = this.parseEditHistory(edithistory);
         if (!parsed) return null;
         
         const history = parsed.h;
@@ -334,32 +334,32 @@ export class MetaDataUtils {
     }
 
     /**
-     * Add or update cached analytics in metadata
-     * @param {string|Object} existingMetaData - Existing metadata
+     * Add or update cached analytics in edithistory
+     * @param {string|Object} existingEditHistory - Existing edithistory
      * @param {string} analyticKey - Key for the cached analytic
      * @param {any} analyticValue - Value to cache
-     * @returns {string} Updated metadata as JSON string
+     * @returns {string} Updated edithistory as JSON string
      */
-    static setCachedAnalytic(existingMetaData, analyticKey, analyticValue) {
-        let metadata = this.parseMetaData(existingMetaData) || { h: [] };
+    static setCachedAnalytic(existingEditHistory, analyticKey, analyticValue) {
+        let edithistory = this.parseEditHistory(existingEditHistory) || { h: [] };
 
-        if (!metadata.a) {
-            metadata.a = {};
+        if (!edithistory.a) {
+            edithistory.a = {};
         }
 
-        metadata.a[analyticKey] = analyticValue;
+        edithistory.a[analyticKey] = analyticValue;
 
-        return JSON.stringify(metadata);
+        return JSON.stringify(edithistory);
     }
 
     /**
-     * Get cached analytic from metadata
-     * @param {string|Object} metadata - Metadata to parse
+     * Get cached analytic from edithistory
+     * @param {string|Object} edithistory - Metadata to parse
      * @param {string} analyticKey - Key for the cached analytic
      * @returns {any|null} Cached value or null if not found
      */
-    static getCachedAnalytic(metadata, analyticKey) {
-        const parsed = this.parseMetaData(metadata);
+    static getCachedAnalytic(edithistory, analyticKey) {
+        const parsed = this.parseEditHistory(edithistory);
         if (!parsed) return null;
         
         const analytics = parsed.a;
@@ -369,32 +369,32 @@ export class MetaDataUtils {
     }
 
     /**
-     * Add or update user setting in metadata
-     * @param {string|Object} existingMetaData - Existing metadata
+     * Add or update user setting in edithistory
+     * @param {string|Object} existingEditHistory - Existing edithistory
      * @param {string} settingKey - Key for the user setting
      * @param {any} settingValue - Value to set
-     * @returns {string} Updated metadata as JSON string
+     * @returns {string} Updated edithistory as JSON string
      */
-    static setUserSetting(existingMetaData, settingKey, settingValue) {
-        let metadata = this.parseMetaData(existingMetaData) || { h: [] };
+    static setUserSetting(existingEditHistory, settingKey, settingValue) {
+        let edithistory = this.parseEditHistory(existingEditHistory) || { h: [] };
 
-        if (!metadata.s) {
-            metadata.s = {};
+        if (!edithistory.s) {
+            edithistory.s = {};
         }
 
-        metadata.s[settingKey] = settingValue;
+        edithistory.s[settingKey] = settingValue;
 
-        return JSON.stringify(metadata);
+        return JSON.stringify(edithistory);
     }
 
     /**
-     * Get user setting from metadata
-     * @param {string|Object} metadata - Metadata to parse
+     * Get user setting from edithistory
+     * @param {string|Object} edithistory - Metadata to parse
      * @param {string} settingKey - Key for the user setting
      * @returns {any|null} Setting value or null if not found
      */
-    static getUserSetting(metadata, settingKey) {
-        const parsed = this.parseMetaData(metadata);
+    static getUserSetting(edithistory, settingKey) {
+        const parsed = this.parseEditHistory(edithistory);
         if (!parsed) return null;
         
         // Support both old 'userSettings' and new 's' format

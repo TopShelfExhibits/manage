@@ -78,19 +78,95 @@ export function searchFilter(data, searchParams) {
         throw new Error('Invalid arguments: data must be an array and searchParams must be an object.');
     }
 
+    /**
+     * Extract search value from config (handles backward compatibility)
+     */
+    function extractSearchValue(searchConfig) {
+        if (typeof searchConfig === 'string') {
+            return searchConfig;
+        }
+        if (searchConfig.values && Array.isArray(searchConfig.values)) {
+            return searchConfig.values;
+        }
+        return searchConfig.value;
+    }
+
+    /**
+     * Helper function to apply match type to a value comparison
+     * @param {string} itemValue - The value from the data item
+     * @param {string|Array} searchValue - The search value(s) to match against
+     * @param {string} type - The type of match to perform
+     * @returns {boolean} Whether the match succeeds
+     */
+    function applyMatchType(itemValue, searchValue, type) {
+        const itemStr = String(itemValue).toLowerCase();
+        
+        // Handle array of values (list search)
+        if (Array.isArray(searchValue)) {
+            const searchStrings = searchValue.map(v => String(v).toLowerCase());
+            
+            if (type === 'excludes') {
+                // Item passes filter if it doesn't contain ANY of the excluded values
+                // Each exclude value independently triggers exclusion (AND logic)
+                return !searchStrings.some(searchStr => itemStr.includes(searchStr));
+            }
+            // Default to contains: Item matches if it contains ANY of the search values (OR logic)
+            return searchStrings.some(searchStr => itemStr.includes(searchStr));
+        }
+        
+        // Handle single value (backward compatibility)
+        const searchStr = String(searchValue).toLowerCase();
+        
+        if (type === 'excludes') {
+            return !itemStr.includes(searchStr);
+        }
+        // Default to contains
+        return itemStr.includes(searchStr);
+    }
+
     return data.filter(item => {
         // If $any is present, search all keys for the value
         if (searchParams.hasOwnProperty('$any')) {
-            const searchValue = String(searchParams['$any']).toLowerCase();
-            return Object.values(item).some(val => String(val).toLowerCase().includes(searchValue));
+            const searchConfig = searchParams['$any'];
+            const searchValue = extractSearchValue(searchConfig);
+            const type = typeof searchConfig === 'object' ? searchConfig.type : 'contains';
+            
+            return Object.values(item).some(val => 
+                applyMatchType(val, searchValue, type)
+            );
         }
-        // Otherwise, search by specific keys
-        return Object.keys(searchParams).every(key => {
-            if (!item.hasOwnProperty(key)) return false;
-            const itemValue = String(item[key]).toLowerCase();
-            const searchValue = String(searchParams[key]).toLowerCase();
-            return itemValue.includes(searchValue);
+        
+        // Separate filters by type for different combining logic
+        const excludeFilters = [];
+        const otherFilters = [];
+        
+        Object.keys(searchParams).forEach(key => {
+            if (!item.hasOwnProperty(key)) return;
+            
+            const searchConfig = searchParams[key];
+            const searchValue = extractSearchValue(searchConfig);
+            const type = typeof searchConfig === 'object' ? searchConfig.type : 'contains';
+            
+            const filterInfo = { key, searchValue, type };
+            
+            if (type === 'excludes') {
+                excludeFilters.push(filterInfo);
+            } else {
+                otherFilters.push(filterInfo);
+            }
         });
+        
+        // For exclude filters: each filter independently excludes items
+        // Item passes if it passes ALL exclude filters (doesn't match any excluded term)
+        const passesExcludeFilters = excludeFilters.length === 0 || 
+            excludeFilters.every(f => applyMatchType(item[f.key], f.searchValue, f.type));
+        
+        // For other filters: Item passes if it matches ANY filter (OR logic)
+        const passesOtherFilters = otherFilters.length === 0 || 
+            otherFilters.some(f => applyMatchType(item[f.key], f.searchValue, f.type));
+        
+        // Item must pass both filter groups
+        return passesExcludeFilters && passesOtherFilters;
     });
 }
 
@@ -338,86 +414,65 @@ export function GetParagraphMatchRating(text1, text2) {
 }
 
 /**
- * Parse a DateSearch URL parameter into a filter object
- * Format: 'offset,offset' or 'date,date' or 'showIdentifier'
+ * Parse date filter parameters from URL params object
+ * Format: DCol1, DVal1, DType1, DCol2, DVal2, DType2, etc.
  * 
- * @param {string} dateSearch - The DateSearch parameter from URL
- * @returns {Object} Filter object with startDate, endDate, startDateOffset, endDateOffset, or overlapShowIdentifier
+ * @param {Object} params - URL parameters object
+ * @returns {Array} Array of date filters with {column, value, type}
  */
-export function parseDateSearchParameter(dateSearch) {
-    const filter = {};
+export function parseDateFilterParameters(params) {
+    const dateFilters = [];
+    let filterIndex = 1;
     
-    if (!dateSearch) return filter;
-    
-    // Check if it's an offset (starts with + or - or is a number followed by comma)
-    if (dateSearch.startsWith('+') || dateSearch.startsWith('-') || /^-?\d+,/.test(dateSearch)) {
-        // Format: offset,offset (e.g., '-30,365' or '0,30')
-        const [start, end] = dateSearch.split(',');
+    while (params[`DCol${filterIndex}`] || params[`DVal${filterIndex}`]) {
+        const column = params[`DCol${filterIndex}`] || '';
+        const valueString = params[`DVal${filterIndex}`] || '';
+        const type = params[`DType${filterIndex}`] || 'after';
         
-        if (start !== undefined && start !== '') {
-            filter.startDateOffset = parseInt(start);
+        if (column || valueString) {
+            // Try to parse as number (offset), otherwise keep as string (date or identifier)
+            let value = valueString;
+            const numValue = Number(valueString);
+            if (!isNaN(numValue) && valueString.trim() !== '') {
+                value = numValue;
+            }
+            dateFilters.push({ column, value, type });
         }
-        if (end !== undefined && end !== '') {
-            filter.endDateOffset = parseInt(end);
-        }
-    } else if (dateSearch.includes(',')) {
-        // Format: date,date (e.g., '2025-01-01,2025-12-31')
-        const [start, end] = dateSearch.split(',');
-        
-        if (start && start !== '') {
-            filter.startDate = start;
-        }
-        if (end && end !== '') {
-            filter.endDate = end;
-        }
-    } else {
-        // Just a show identifier for overlap
-        filter.overlapShowIdentifier = dateSearch;
+        filterIndex++;
     }
     
-    return filter;
+    return dateFilters;
 }
 
 /**
- * Build a DateSearch URL parameter from filter components
+ * Build date filter URL parameters
  * 
- * @param {Object} options - Filter options
- * @param {number} options.startDateOffset - Start date offset in days
- * @param {number} options.endDateOffset - End date offset in days
- * @param {string} options.startDate - Start date string (YYYY-MM-DD)
- * @param {string} options.endDate - End date string (YYYY-MM-DD)
- * @param {string} options.overlapShowIdentifier - Show identifier for overlap
- * @returns {string|null} DateSearch parameter string or null if no date criteria
+ * @param {Array} dateFilters - Array of date filters with {column, value, type}
+ * @returns {Object} Object with DCol1, DVal1, DType1, DCol2, DVal2, DType2, etc.
  */
-export function buildDateSearchParameter(options) {
-    const { startDateOffset, endDateOffset, startDate, endDate, overlapShowIdentifier } = options;
+export function buildDateFilterParameters(dateFilters) {
+    const params = {};
     
-    // If there's an overlap identifier, return it directly
-    if (overlapShowIdentifier) {
-        return overlapShowIdentifier;
-    }
+    if (!dateFilters || !Array.isArray(dateFilters)) return params;
     
-    // If we have offsets, use them
-    if (startDateOffset !== null && startDateOffset !== undefined) {
-        const start = startDateOffset;
-        const end = endDateOffset !== null && endDateOffset !== undefined ? endDateOffset : '';
-        return `${start},${end}`;
-    }
+    dateFilters.forEach((filter, index) => {
+        if (filter.column || filter.value !== undefined) {
+            params[`DCol${index + 1}`] = filter.column || '';
+            params[`DVal${index + 1}`] = String(filter.value);
+            params[`DType${index + 1}`] = filter.type || 'after';
+        }
+    });
     
-    // If we have explicit dates, use them
-    if (startDate || endDate) {
-        return `${startDate || ''},${endDate || ''}`;
-    }
-    
-    return null;
+    return params;
 }
 
 /**
  * Parse text filter parameters from URL params object
- * Format: Col1, Val1, Col2, Val2, etc.
+ * Format: Col1, Val1, Type1, Col2, Val2, Type2, etc.
+ * Values can be pipe-separated for list search (val1|val2|val3)
  * 
  * @param {Object} params - URL parameters object
- * @returns {Array} Array of text filters with {column, value}
+ * @returns {Array} Array of text filters with {column, values, type}
  */
 export function parseTextFilterParameters(params) {
     const textFilters = [];
@@ -425,10 +480,13 @@ export function parseTextFilterParameters(params) {
     
     while (params[`Col${filterIndex}`] || params[`Val${filterIndex}`]) {
         const column = params[`Col${filterIndex}`] || '';
-        const value = params[`Val${filterIndex}`] || '';
+        const valueString = params[`Val${filterIndex}`] || '';
+        const type = params[`Type${filterIndex}`] || 'contains';
         
-        if (column || value) {
-            textFilters.push({ column, value });
+        if (column || valueString) {
+            // Split pipe-separated values
+            const values = valueString.split('|').map(v => v.trim()).filter(v => v);
+            textFilters.push({ column, values, type });
         }
         filterIndex++;
     }
@@ -437,10 +495,21 @@ export function parseTextFilterParameters(params) {
 }
 
 /**
+ * Normalize filter values for backward compatibility
+ * Converts old {value: string} format to new {values: array} format
+ * 
+ * @param {Object} filter - Filter object that may have 'value' or 'values'
+ * @returns {Array} Array of values
+ */
+export function normalizeFilterValues(filter) {
+    return filter.values || (filter.value ? [filter.value] : []);
+}
+
+/**
  * Build text filter URL parameters
  * 
- * @param {Array} textFilters - Array of text filters with {column, value}
- * @returns {Object} Object with Col1, Val1, Col2, Val2, etc.
+ * @param {Array} textFilters - Array of text filters with {column, values, type}
+ * @returns {Object} Object with Col1, Val1, Type1, Col2, Val2, Type2, etc.
  */
 export function buildTextFilterParameters(textFilters) {
     const params = {};
@@ -448,9 +517,12 @@ export function buildTextFilterParameters(textFilters) {
     if (!textFilters || !Array.isArray(textFilters)) return params;
     
     textFilters.forEach((filter, index) => {
-        if (filter.column || filter.value) {
+        const values = normalizeFilterValues(filter);
+        if (filter.column || values.length > 0) {
             params[`Col${index + 1}`] = filter.column || '';
-            params[`Val${index + 1}`] = filter.value || '';
+            // Join multiple values with pipe separator
+            params[`Val${index + 1}`] = values.join('|');
+            params[`Type${index + 1}`] = filter.type || 'contains';
         }
     });
     
@@ -459,29 +531,33 @@ export function buildTextFilterParameters(textFilters) {
 
 /**
  * Parse all search parameters from URL params object
- * Combines DateSearch and text filter parsing
+ * Combines date filter and text filter parsing
  * 
  * @param {Object} params - URL parameters object
- * @returns {Object} Object with {dateFilter, searchParams}
+ * @returns {Object} Object with {dateFilters, searchParams}
  */
 export function parseSearchParameters(params) {
     const result = {
-        dateFilter: {},
+        dateFilters: [],
         searchParams: {}
     };
     
-    // Parse DateSearch parameter
-    if (params.DateSearch) {
-        result.dateFilter = parseDateSearchParameter(params.DateSearch);
-    }
+    // Parse date filters
+    result.dateFilters = parseDateFilterParameters(params);
     
     // Parse text filters into searchParams
     const textFilters = parseTextFilterParameters(params);
     textFilters.forEach(filter => {
-        if (filter.column && filter.value) {
-            result.searchParams[filter.column] = filter.value;
+        if (filter.column && filter.values && filter.values.length > 0) {
+            // Store as object with values and type for advanced matching
+            result.searchParams[filter.column] = {
+                values: filter.values,
+                type: filter.type || 'contains'
+            };
         }
     });
     
     return result;
 }
+
+
