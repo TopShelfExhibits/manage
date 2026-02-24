@@ -772,7 +772,7 @@ td:has(img) {
 }
 .input-container input {
     /*width: 100%;*/
-    min-width: unset;
+    min-width: inherit;
 }
 
 .content-header > .column-button {
