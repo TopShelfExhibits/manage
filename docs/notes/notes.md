@@ -64,6 +64,7 @@ For design and project queue:
 
 **problems**
 
+- [ ] !!! fix thumbnails again: Consider a thumbnail table? make the analysis step invalidation ignore repeat invalidations: analysis invalidation reruns need to have a delay timer built in that gets pushed out, and cancelled if main data invalidates, and don't listen for analysis invalidation during main data load
 - [ ] autosave backup is currently broken, probably because of failure to identify user tab or backup entries correctly
 - [ ] some group dragging breaks the group
 - [ ] packlist print from dashboard will not print correctly if not on packlist page first
@@ -73,7 +74,6 @@ For design and project queue:
 - [ ] fix 45 degree curved panels
 - [x] navigation is not clearing prompt variable when the user selects logout or clicks out of the modal
 - [x] make navigation auth modal logout on cancel
-- [ ] fix thumbnails again: make the analysis step invalidation ignore repeat invalidations: analysis invalidation reruns need to have a delay timer built in that gets pushed out, and cancelled if main data invalidates, and don't listen for analysis invalidation during main data load
 - [?] error causing unsyncing of packlist saves, especially when data or rows are deleted
 - [x] clicking primary nav in desktop view should always nav to base page instead of doing so only every other click
 - [x] buttons dont work on reports
@@ -181,13 +181,14 @@ Pack Lists in Web
 
 show management system
 
+- [ ] we need to support packlist transshipping in schedule and doing packlist merges when transship shows overlap
 - [ ] we may need a workzone integration
 - [x] link shows to pack lists
 - [x] advanced search and preset system
 - [x] default schedule ship date as analytics step
 - [ ] advanced search needs to filter columns available to search types by data type. Data types need to be more strictly defined in the show data system
 - [ ] advanced search should allow user to filter based on type: by date, text-match, show overlap (special type), and boolean flags (future)
-- [ ] text-match needs to have a dropdown to determine type of match (includes, excludes, etc.)
+- [x] text-match needs to have a dropdown to determine type of match (includes, excludes, etc.)
 - [ ] date search needs to have a dropdown to determine type of match (before, after, before inclusive, after inclusive, etc.)
 - [ ] allow text field omission in advanced search (ex: return results that do not have a certain client name, or location, etc)
 - [ ] !!! add "views" system to show different columns and layouts for different purposes
@@ -225,6 +226,7 @@ analysis of pack list against current inventory
 - [x] using inventory/reports endpoint, and loading the saved searches into the table, build a report table
 - [x] make url param updates correctly propegate into components, and fix report url generation
 - [x] allow report text filtering
+- [ ] allow showing quantity errors in a special schedule view, or always run this as an analysis step in schedule view. This needs to not explode computers. May need analysis caching first.
       increase the filtering options in reports
       link to quick reports from other locations (ex: advanced-search, or from inventory for upcoming shows, or from packlist details, etc)
 

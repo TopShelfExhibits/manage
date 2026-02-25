@@ -255,6 +255,16 @@ export const CardsComponent = {
                         <div v-html="search.highlightHtmlContent(item.contentFooter)"></div>
                     </div>
                 </div>
+                
+                <button
+                    v-if="search.hasActiveSearch.value"
+                    @click="search.clearSearch"
+                    class="card"
+                    style="height: auto; width: auto; align-self: flex-start; padding: var(--padding-sm);"
+                    title="Clear filter"
+                >
+                    🗙 Clear filter
+                </button>
             </div>
 
             

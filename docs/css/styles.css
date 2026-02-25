@@ -366,7 +366,7 @@ div#app-content > div.empty-message {
     box-sizing: border-box;
     border: 1px solid var(--color-border);
     padding: var(--padding-md);
-    /*width: 100%;*/
+    width: 100%;
     border-radius: var(--radius-lg);
     align-content: center;
     /*overflow: hidden;*/
@@ -756,7 +756,7 @@ td:has(img) {
     margin-left: 4px;
     background: var(--color-gray-bg);
     cursor: pointer;
-    font-size: 18px;
+    font-size: 14px;
     border-radius: var(--radius-md);
     color: var(--color-text-light);
     opacity: 0;

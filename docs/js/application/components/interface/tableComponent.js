@@ -3353,6 +3353,7 @@ export const TableComponent = {
                     v-if="activeSearchValue"
                     @click="search.clearSearch"
                     class="card"
+                    style="width: auto;"
                     title="Clear filter"
                 >
                     🗙 Clear filter
