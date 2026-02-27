@@ -46,8 +46,13 @@ For design and project queue:
 
 **chores**
 
-      make the calls to user data automatically cancel and show a screen alert if the user hasnt given permissions.
-
+- [ ] clickable and highlightable (can copy contents) table cells instead of cell buttons
+- [ ] unify the styling of cards and buttons
+- [ ] make table headers accessible when scrolling
+- [ ] reports column headers percentage based and dynamically abbreviate
+- [ ] basic schedule table needs to have return and show date columns visible
+- [ ] basic schedule table needs to allow wide table
+- [ ] packlist interface somehow show "was previously" during edits
 - [x] Inject the sheet ids and the api-key via github soas not to expose them
 - [x] remove hamburger buttons that do nothing
 - [x] packlist print titleblock??
@@ -56,17 +61,16 @@ For design and project queue:
 - [x] fix packlist table header alignment
 - [x] simplify and impliment more url filling and parameter saving in nav and back buttons (for instance breadcrumb nav should cache some url params)
 - [x] tableComponent finder needs: a clear all button
-- [ ] make table headers accessible when scrolling
-- [ ] reports column headers percentage based and dynamically abbreviate
-- [ ] basic schedule table needs to have return and show date columns visible
-- [ ] basic schedule table needs to allow wide table
-- [ ] packlist interface somehow show "was previously" during edits
 
 **problems**
 
+- [ ] make the calls to user data automatically cancel and show a screen alert if the user hasnt given permissions.
 - [ ] !!! fix thumbnails again: Consider a thumbnail table? make the analysis step invalidation ignore repeat invalidations: analysis invalidation reruns need to have a delay timer built in that gets pushed out, and cancelled if main data invalidates, and don't listen for analysis invalidation during main data load
 - [ ] autosave backup is currently broken, probably because of failure to identify user tab or backup entries correctly
 - [ ] some group dragging breaks the group
+- [ ] adding an item within a group needs to add the item to the group
+- [ ] items currently can't be rearranged if they are grouped
+- [ ] if there are duplicate shows on the production schedule, they are duplicated in reports
 - [ ] packlist print from dashboard will not print correctly if not on packlist page first
 - [ ] redundancy and overcomplexity in navigation still must be reduced
 - [x] canceled due to newer identical call shouldn't cancel but should pass the promise around to avoid failed analysis

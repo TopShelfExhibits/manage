@@ -1196,7 +1196,7 @@ export const PacklistTable = {
                                     :title="!lockCheckComplete ? 'Checking lock status...' : (lockedByOther ? 'Locked by ' + (lockOwner.includes('@') ? lockOwner.split('@')[0] : lockOwner) : 'Edit this pack list')"
                                 >
                                     Edit Packlist
-                                </button>
+                                </button> 
                             </template>
                             <template v-else>
                                 <button 
