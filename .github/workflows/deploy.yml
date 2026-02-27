@@ -1,5 +1,5 @@
 # ensure github is set up to deploy to pages using "actions" not "from a branch"
-name: TopShelf Deploy to Github Pages live
+name: TopShelf Deploy to Github Pages testing
 on:
   push:
     branches: ["main"]
@@ -29,8 +29,6 @@ jobs:
           echo "window.APP_CONFIG = { API_KEY: '${API_KEY}', CLIENT_ID: '${CLIENT_ID}', SCOPES: '${SCOPES}' };" > docs/js/google_sheets_services/config.js
           echo "window.SPREADSHEET_IDS = { INVENTORY: '${INVENTORY}', PACK_LISTS: '${PACK_LISTS}', PROD_SCHED: '${PROD_SCHED}', CACHE: '${CACHE}' };" >> docs/js/google_sheets_services/config.js
           echo "// Build timestamp: $(date -u +%Y%m%d%H%M%S)" >> docs/js/google_sheets_services/config.js
-      - name: Add CNAME for custom domain
-        run: echo "manage.topshelfexhibits.com" > docs/CNAME
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
