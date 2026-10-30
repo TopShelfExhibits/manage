@@ -18,6 +18,35 @@ function normalizeItemSortWords(value) {
         .filter(Boolean);
 }
 
+/**
+ * Sort key for one value, parsed once per sort (same ordering as the former pairwise compare):
+ * missing values last; item type by words; two dates by time; two numbers numerically; else text.
+ */
+function sortKeyFor(value, column) {
+    if (value === null || value === undefined) return { missing: true };
+    const type = String(column.type || '').toLowerCase();
+    if (type === 'item') return { item: value };
+    const date = parseDate(value);
+    const num = parseFloat(value);
+    return { raw: value, time: date ? date.getTime() : null, num: isNaN(num) ? null : num };
+}
+
+function compareSortKeys(a, b, direction) {
+    if (a.missing) return 1;
+    if (b.missing) return -1;
+    let comparison;
+    if (a.item !== undefined || b.item !== undefined) {
+        comparison = compareItemLikeValues(a.item ?? a.raw, b.item ?? b.raw);
+    } else if (a.time !== null && b.time !== null) {
+        comparison = a.time - b.time;
+    } else if (a.num !== null && b.num !== null) {
+        comparison = a.num - b.num;
+    } else {
+        comparison = String(a.raw).localeCompare(String(b.raw));
+    }
+    return direction === 'desc' ? -comparison : comparison;
+}
+
 function compareItemLikeValues(aValue, bValue) {
     const aWords = normalizeItemSortWords(aValue);
     const bWords = normalizeItemSortWords(bValue);
@@ -37,6 +66,17 @@ function compareItemLikeValues(aValue, bValue) {
     }
 
     return String(aValue).localeCompare(String(bValue), undefined, { numeric: true, sensitivity: 'base' });
+}
+
+/**
+ * Root drag flag: <html class="row-dragging"> while any mounted table shows a dragging row.
+ * Stylesheets key drag-time styles on it instead of :has(.dragging), which made every DOM change
+ * on a large table page re-check the whole document's styles (~100ms per change at 1,000 rows).
+ */
+let tablesWithDraggingRows = 0;
+function adjustRootDragging(delta) {
+    tablesWithDraggingRows = Math.max(0, tablesWithDraggingRows + delta);
+    document.documentElement.classList.toggle('row-dragging', tablesWithDraggingRows > 0);
 }
 
 // Global table row selection state - single source of truth for all selections
@@ -1673,7 +1713,8 @@ export const TableComponent = {
                 this._scrollToActiveSearchResult();
             }
         },
-        activeSearchValue(newValue, oldValue) {
+        // Follows the effective search (activeSearchKey), so ineffective keystrokes do no re-matching
+        activeSearchKey(newValue, oldValue) {
             const newTerm = String(newValue || '').trim();
             const oldTerm = String(oldValue || '').trim();
 
@@ -1821,6 +1862,10 @@ export const TableComponent = {
             if (newValue === oldValue) return;
             this.syncHideRowsModeToUrl(newValue);
         },
+        // Keep the root drag flag in step with this table's dragging rows
+        hasDraggingRow(now, before) {
+            if (now !== before) adjustRootDragging(now ? 1 : -1);
+        },
         // Clear drop targets when drag ends (handles touch where mouseleave doesn't fire)
         isDraggingGlobally(isActive, wasActive) {
             if (wasActive && !isActive) {
@@ -1867,6 +1912,11 @@ export const TableComponent = {
             // Access _version to ensure reactivity
             tableRowSelectionState._version;
             return tableRowSelectionState.findingDropTargets;
+        },
+        // True while a rendered row of this table carries the dragging class
+        hasDraggingRow() {
+            if (!this.isDraggingGlobally) return false;
+            return this.visibleRows.some(({ idx }) => this.isRowDragging(idx));
         },
 
         selectedRowCount() {
@@ -2052,12 +2102,25 @@ export const TableComponent = {
             };
         },
         activeSearchValue() {
-            // Use parentSearchValue if provided, otherwise use composable searchValue
-            return this.parentSearchValue || this.search.searchValue.value;
+            // Use parentSearchValue if provided, otherwise the composable's debounced search value
+            return this.parentSearchValue || this.search.debouncedValue.value;
         },
-        // Search words after the app-wide minimum term length (§4.5)
+        // The effective search as a stable string (words after the minimum term length, §4.5).
+        // Keystrokes that don't change the effective words (e.g. a single character) don't
+        // invalidate anything downstream, because an equal string doesn't trigger dependents.
+        activeSearchKey() {
+            return toSearchWords(this.activeSearchValue).join(' ');
+        },
         activeSearchWords() {
-            return toSearchWords(this.activeSearchValue);
+            return this.activeSearchKey ? this.activeSearchKey.split(' ') : [];
+        },
+        // Search term handed to cells (navigation cells pass it on); stable like activeSearchKey
+        cellSearchTerm() {
+            return this.activeSearchKey;
+        },
+        // One compiled regex per search word, built once per search instead of once per cell
+        highlightRegexes() {
+            return this.activeSearchWords.map(w => new RegExp(w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'));
         },
         theme() {
             return this.resolved?.theme || '';
@@ -2271,10 +2334,10 @@ export const TableComponent = {
         theadRow1Columns() {
             return this.columnModel.slots.map(s => s.primary);
         },
-        visibleRows() {
-            // Filter rows based on search value but keep all rows including marked for deletion
+        // Rows after group visibility and sorting (independent of search, so typing doesn't re-sort)
+        sortedRows() {
             if (!Array.isArray(this.data)) return [];
-            
+
             let filteredData = this.data
                 .map((row, idx) => ({ row, idx }))
                 .filter(({ row }) => row); // Only filter out null/undefined rows
@@ -2289,20 +2352,16 @@ export const TableComponent = {
                 });
             }
 
-            // Apply search filter (hide-rows mode). An aborted broad search leaves the set unfiltered.
-            if (this.searchActive && this.hideRowsOnSearchLocal) {
-                const results = this.searchResult.results;
-                filteredData = filteredData.filter(({ row, idx }) => row && !!results[idx]);
-            }
-
             const sortCriteria = this.isUsingDefaultSort
                 ? this.getDefaultSortCriteria()
                 : this.getCurrentSortCriteria();
 
             if (sortCriteria.length > 0) {
+                // Parse each row's sort values once (not on every comparison)
+                const keyed = sortCriteria.map(c => new Map(filteredData.map(e => [e.row, sortKeyFor(e.row[c.column.key], c.column)])));
                 filteredData.sort((a, b) => {
-                    for (const criterion of sortCriteria) {
-                        const comparison = this.compareRowsByColumn(a.row, b.row, criterion.column, criterion.direction);
+                    for (let i = 0; i < sortCriteria.length; i++) {
+                        const comparison = compareSortKeys(keyed[i].get(a.row), keyed[i].get(b.row), sortCriteria[i].direction);
                         if (comparison !== 0) return comparison;
                     }
                     return 0;
@@ -2310,6 +2369,15 @@ export const TableComponent = {
             }
 
             return filteredData;
+        },
+        visibleRows() {
+            // Hide-rows mode filters the sorted rows; an aborted broad search leaves the set unfiltered.
+            // Otherwise the sorted array is returned as is, so a search doesn't re-render every row.
+            if (this.searchActive && this.hideRowsOnSearchLocal) {
+                const results = this.searchResult.results;
+                return this.sortedRows.filter(({ row, idx }) => row && !!results[idx]);
+            }
+            return this.sortedRows;
         },
         
         canUndo() {
@@ -2444,6 +2512,7 @@ export const TableComponent = {
         }
     },
     beforeUnmount() {
+        if (this.hasDraggingRow) adjustRootDragging(-1);
         document.removeEventListener('click', this.handleOutsideClick);
         document.removeEventListener('keydown', this.handleEscapeKey);
 
@@ -2896,41 +2965,6 @@ export const TableComponent = {
             return [{ column, direction: this.sortDirection }];
         },
 
-        compareRowsByColumn(aRow, bRow, column, direction) {
-            const aValue = aRow[column.key];
-            const bValue = bRow[column.key];
-
-            if (aValue === null || aValue === undefined) return 1;
-            if (bValue === null || bValue === undefined) return -1;
-
-            const columnType = String(column.type || '').toLowerCase();
-            if (columnType === 'item') {
-                const comparison = compareItemLikeValues(aValue, bValue);
-                return direction === 'desc' ? -comparison : comparison;
-            }
-
-            const aDate = parseDate(aValue);
-            const bDate = parseDate(bValue);
-            if (aDate && bDate) {
-                const comparison = aDate.getTime() - bDate.getTime();
-                return direction === 'desc' ? -comparison : comparison;
-            }
-
-            const aNum = parseFloat(aValue);
-            const bNum = parseFloat(bValue);
-            const isANum = !isNaN(aNum);
-            const isBNum = !isNaN(bNum);
-
-            let comparison = 0;
-            if (isANum && isBNum) {
-                comparison = aNum - bNum;
-            } else {
-                comparison = String(aValue).localeCompare(String(bValue));
-            }
-
-            return direction === 'desc' ? -comparison : comparison;
-        },
-
         applyDefaultSortColumn(options = {}) {
             const { force = false } = options;
             const defaultSortCriteria = this.getDefaultSortCriteria();
@@ -2977,13 +3011,11 @@ export const TableComponent = {
             }
 
             const stringValue = String(formattedValue);
-            const words = this.activeSearchWords;
-            
-            // Collect all match positions
+
+            // Collect all match positions (regexes are compiled once per search)
             const matches = [];
-            words.forEach(word => {
-                const escapedSearchWord = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                const regex = new RegExp(escapedSearchWord, 'gi');
+            this.highlightRegexes.forEach(regex => {
+                regex.lastIndex = 0;
                 let match;
                 while ((match = regex.exec(stringValue)) !== null) {
                     matches.push({
@@ -4913,7 +4945,7 @@ export const TableComponent = {
                                             :field="column"
                                             renderer="table"
                                             density="full"
-                                            :search-term="activeSearchValue || ''"
+                                            :search-term="cellSearchTerm"
                                             :highlight="highlightSearchText"
                                             :theme="theme"
                                             :cell-slot="$slots.cell"
@@ -4928,7 +4960,7 @@ export const TableComponent = {
                                         <template v-for="col in (slotByKey.get(column.key)?.inline || [])" :key="col.key">
                                             <span class="chip-sep"> | </span>
                                             <span :class="[cellColorClass(row, col), { 'search-match': hasSearchMatch(row[col.key], col) }]">
-                                                <CellRenderer v-if="col.cell" :row="row" :field="col" renderer="table" density="full" :search-term="activeSearchValue || ''" :highlight="highlightSearchText" :theme="theme" :cell-slot="$slots.cell" :cell-scope="{ rowIndex: idx }" />
+                                                <CellRenderer v-if="col.cell" :row="row" :field="col" renderer="table" density="full" :search-term="cellSearchTerm" :highlight="highlightSearchText" :theme="theme" :cell-slot="$slots.cell" :cell-scope="{ rowIndex: idx }" />
                                                 <span v-else v-html="highlightSearchText(row[col.key], col)"></span>
                                             </span>
                                             <DecorationCards v-if="decorations" :cards="cellDecorations(row, col.key)" :inline="true" />
@@ -4959,7 +4991,7 @@ export const TableComponent = {
                                         <template v-for="(col, ci) in line" :key="col.key">
                                             <span v-if="ci > 0" class="chip-sep"> | </span>
                                             <span :class="cellColorClass(row, col)">
-                                                <CellRenderer v-if="col.cell" :row="row" :field="col" renderer="table" density="full" :search-term="activeSearchValue || ''" :highlight="highlightSearchText" :theme="theme" :cell-slot="$slots.cell" :cell-scope="{ rowIndex: idx }" />
+                                                <CellRenderer v-if="col.cell" :row="row" :field="col" renderer="table" density="full" :search-term="cellSearchTerm" :highlight="highlightSearchText" :theme="theme" :cell-slot="$slots.cell" :cell-scope="{ rowIndex: idx }" />
                                                 <span v-else v-html="highlightSearchText(row[col.key], col)"></span>
                                             </span>
                                             <DecorationCards v-if="decorations" :cards="cellDecorations(row, col.key)" />
@@ -5013,7 +5045,7 @@ export const TableComponent = {
                                             :fields="detailsColumns"
                                             :highlight="highlightSearchText"
                                             :cell-slot="$slots.cell"
-                                            :search-term="activeSearchValue || ''"
+                                            :search-term="cellSearchTerm"
                                             :theme="theme"
                                         >
                                             <!-- Custom slot content -->

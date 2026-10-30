@@ -29,6 +29,9 @@ import { searchWords as toSearchWords, matchRow } from './views/searchMatch.js';
  * @param {String} searchTerm - The search term to split
  * @returns {Array} Array of words
  */
+/** Delay between the last keystroke and the search being applied to rows */
+export const SEARCH_DEBOUNCE_MS = 150;
+
 function splitSearchTerms(searchTerm) {
     if (!searchTerm || typeof searchTerm !== 'string') return [];
     return searchTerm.trim().split(/\s+/).filter(word => word.length > 0);
@@ -117,13 +120,30 @@ export function useSearch(options = {}) {
     } = options;
 
     // State
+    // searchValue is bound to the input and synced to the URL; matching and highlighting follow
+    // debouncedValue, which trails typing by SEARCH_DEBOUNCE_MS (clearing applies at once).
     const searchValue = Vue.ref('');
+    const debouncedValue = Vue.ref('');
     const _clearingSearch = Vue.ref(false);
+    let debounceTimer = null;
+    function applyNow(value) {
+        clearTimeout(debounceTimer);
+        debounceTimer = null;
+        debouncedValue.value = value;
+    }
+    Vue.watch(searchValue, (value) => {
+        if (!value || !value.trim()) { applyNow(value); return; }
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => applyNow(searchValue.value), SEARCH_DEBOUNCE_MS);
+    });
 
     // Computed
-    // Words shorter than SEARCH_LIMITS.minTermLength are dropped before matching and highlighting (§4.5)
+    // Words shorter than SEARCH_LIMITS.minTermLength are dropped before matching and highlighting (§4.5).
+    // searchKey is the effective search as a string: keystrokes that don't change the effective words
+    // (a trailing space, a one-letter word) leave it equal, so nothing downstream recomputes.
+    const searchKey = Vue.computed(() => toSearchWords(debouncedValue.value).join(' '));
     const searchWords = Vue.computed(() => {
-        return toSearchWords(searchValue.value);
+        return searchKey.value ? searchKey.value.split(' ') : [];
     });
 
     // A search with no remaining words is inactive: no filtering, highlighting or glow
@@ -430,6 +450,7 @@ export function useSearch(options = {}) {
         );
         if (params?.searchTerm) {
             searchValue.value = params.searchTerm;
+            applyNow(params.searchTerm); // a shared link opens with its search applied, not debounced
         }
         if (params?.searchIndex) {
             searchIndex.value = parseInt(params.searchIndex) || null;
@@ -459,6 +480,7 @@ export function useSearch(options = {}) {
                 
                 if (newParams?.searchTerm !== oldParams?.searchTerm) {
                     searchValue.value = newParams?.searchTerm || '';
+                    applyNow(searchValue.value);
                 }
                 if (newParams?.searchIndex !== oldParams?.searchIndex) {
                     searchIndex.value = newParams?.searchIndex ? (parseInt(newParams.searchIndex) || null) : null;
@@ -470,6 +492,8 @@ export function useSearch(options = {}) {
     return {
         // State
         searchValue,
+        debouncedValue,
+        searchKey,
         searchWords,
         hasActiveSearch,
         searchIndex,

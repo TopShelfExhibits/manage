@@ -428,6 +428,13 @@ export const PacklistTable = {
             },
             immediate: true
         },
+        // Entering edit is a parameter-only change (the page isn't remounted), so re-check the
+        // lock here as mount used to, and leave edit mode when another user holds it
+        async editMode(isEdit) {
+            if (!isEdit || !this.tabName) return;
+            await this.checkLockStatus();
+            if (this.editMode && this.lockedByOther) this.onForeignLockWhileClean();
+        },
         isDirty(newValue) {
             if (newValue && !this.editMode && this.tabName && !this.lockedByOther && this.lockCheckComplete) {
                 const editPath = NavigationRegistry.buildPathWithCurrentParams(
@@ -1543,7 +1550,7 @@ export const PacklistTable = {
                                 :isLoading="isLoading"
                                 :drag-id="'packlist-items'"
                                 :drag-label="'Items'"
-                                :parent-search-value="$refs.mainTableComponent?.search?.searchValue?.value || ''"
+                                :parent-search-value="$refs.mainTableComponent?.search?.debouncedValue?.value || ''"
                                 :showSearch="true"
                                 :hideRowsOnSearch="false"
                                 :showSelectionBubble="editMode"

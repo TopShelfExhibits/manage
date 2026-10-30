@@ -542,7 +542,7 @@ export const CalendarComponent = {
                                 <span v-for="(line, li) in chipLines" :key="li" :class="li === 0 ? 'chip-first-row' : 'chip-second-row'">
                                     <template v-for="(col, colIdx) in line" :key="col.key">
                                         <span v-if="colIdx > 0" class="chip-sep"> | </span>
-                                        <span :class="['chip-val', valueColorClass(seg.row, col)]"><CellRenderer :row="seg.row" :field="col" renderer="calendar" density="compact" :highlight="highlightValue" :theme="theme" :search-term="search.searchValue.value" :cell-slot="$slots.cell" /></span>
+                                        <span :class="['chip-val', valueColorClass(seg.row, col)]"><CellRenderer :row="seg.row" :field="col" renderer="calendar" density="compact" :highlight="highlightValue" :theme="theme" :search-term="search.searchKey.value" :cell-slot="$slots.cell" /></span>
                                         <DecorationCards :cards="inlineCards(seg.row, col.key)" :inline="true" />
                                     </template>
                                 </span>

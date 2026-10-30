@@ -1056,13 +1056,13 @@ tr.selected > td.row-drag-handle::before {
     z-index: 4;
 }
 
-:not(:has(.dragging)) table:has(.selected):not(:has(table .selected)) > tbody > tr:not(.selected) > td.row-drag-handle::before,
-:not(:has(.dragging)) table:has(table .selected) tr tbody > tr:not(.selected) > td.row-drag-handle::before {
+html:not(.row-dragging) table:has(.selected):not(:has(table .selected)) > tbody > tr:not(.selected) > td.row-drag-handle::before,
+html:not(.row-dragging) table:has(table .selected) tr tbody > tr:not(.selected) > td.row-drag-handle::before {
     font-size: 1.2rem;
     content: "☐";
 }
 
-.row-drag-handle:hover, :not(:has(.dragging)) .new-row-button:hover {
+.row-drag-handle:hover, html:not(.row-dragging) .new-row-button:hover {
     background-color: var(--color-gray-bg-hover);
 }
 
@@ -1121,7 +1121,7 @@ tr.selected > td::after {
     content: "";
     background: var(--color-green-bg-transparent);
 }
-:has(.dragging) tr.selected > td::after {
+html.row-dragging tr.selected > td::after {
     background: var(--color-blue-bg);
 }
 .editing tbody > tr.marked-for-deletion > td:not(.spacer-cell):not(.drag-handle)::after {
@@ -1143,7 +1143,7 @@ tr.selected.drop-target-above > td::after, .drop-target-header + tbody > tr:firs
     content: "";
     border-bottom: 2px solid var(--color-blue);
 }
-:has(.dragging) tr:hover > td.empty-message::after, .drop-target-onto>td::after {
+html.row-dragging tr:hover > td.empty-message::after, .drop-target-onto>td::after {
     content: "";
     background: var(--color-blue);
     opacity: .4;
@@ -1502,7 +1502,7 @@ button.search-highlight {
 }
 
 /* When dragging is happening anywhere, change all cursors */
-:has(.dragging) * {
+html.row-dragging * {
     cursor: grabbing !important;
 }
 
@@ -2127,8 +2127,8 @@ button.search-highlight {
     }
     
     /* Larger unselected checkboxes */
-    :not(:has(.dragging)) table:has(.selected):not(:has(table .selected)) > tbody > tr:not(.selected) > td.row-drag-handle::before,
-    :not(:has(.dragging)) table:has(table .selected) tr tbody > tr:not(.selected) > td.row-drag-handle::before {
+    html:not(.row-dragging) table:has(.selected):not(:has(table .selected)) > tbody > tr:not(.selected) > td.row-drag-handle::before,
+    html:not(.row-dragging) table:has(table .selected) tr tbody > tr:not(.selected) > td.row-drag-handle::before {
         font-size: 1.4rem;
     }
     
@@ -2143,7 +2143,7 @@ button.search-highlight {
         border-bottom-width: 4px;
     }
     
-    :has(.dragging) tr:hover > td.empty-message::after, 
+    html.row-dragging tr:hover > td.empty-message::after, 
     .drop-target-onto > td::after {
         opacity: 0.5;
     }
@@ -2154,7 +2154,7 @@ button.search-highlight {
     }
     
     /* Stronger visual feedback when dragging on touch */
-    :has(.dragging) tr.selected > td::after {
+    html.row-dragging tr.selected > td::after {
         background: var(--color-blue-bg);
         opacity: 0.7;
     }
@@ -2185,7 +2185,7 @@ button.search-highlight {
 
     /* Remove hover-dependent effects on touch devices */
     .row-drag-handle:hover,
-    :not(:has(.dragging)) .new-row-button:hover {
+    html:not(.row-dragging) .new-row-button:hover {
         background-color: var(--color-gray-bg);
     }
 
