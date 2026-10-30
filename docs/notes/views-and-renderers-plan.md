@@ -287,6 +287,7 @@ Presentation properties (`width`, `font`, `autoColor`, `cellClass`, `columnClass
  * @property {'table'|'calendar'|'cards'} layout
  * @property {string}  [theme]            header/footer/button colour; defaults to registry.theme
  * @property {string}  [className]        structural CSS hook (e.g. 'packlist-table'); never colour
+ * @property {boolean} [fullWidth]        full-width container mode: the page container drops its max-width
  *
  * // Visibility
  * @property {Slot[]}  [columns]          shown, in order
@@ -671,7 +672,7 @@ These are set by the content component with its data, never by views.
 **Instant write contract** (Phase 2):
 
 1. The renderer emits `cell-commit(row, columnKey, value)`. The cell shows the new value **immediately** (R7.3), on the local computed row.
-   - `DataView` holds the commit in a small queue keyed by row identity and column for `INSTANT_WRITE_DELAY_MS` (2000).
+   - `DataView` holds the commit in a small queue keyed by row identity and column for `INSTANT_WRITE_DELAY_MS` (1200 ms).
    - Another commit to the same cell within the delay replaces the queued value and restarts the timer. If the final value equals the loaded value, nothing is written, so a quick check-then-uncheck costs no write.
    - When the timer fires, `DataView` calls the page's `commitCell` hook, which returns a promise. The cell shows a pending state until it settles.
    - Queued commits flush immediately when the page unmounts (in-app navigation). A browser cannot be relied on to finish a write while a tab is closing, so while commits are queued or in flight, `beforeunload` shows the browser's leave-confirmation prompt and starts the flush.
@@ -882,7 +883,7 @@ Depends only on Phases 0–1.
   - category card search matches the same fields as the overview table;
   - single-character words are ignored on every page;
   - a search matching more than 80% of a set over 100 rows is ignored: the set stays unfiltered and unhighlighted, and the match counter shows `∞`.
-- **Design queue (Phase 2):** a new page with checkboxes and an assignee pick list that write to the Schedule sheet after a 2-second delay, and a saved note per show; completed rows turn gray.
+- **Design queue (Phase 2):** a new page with checkboxes and an assignee pick list that write to the Schedule sheet after a 1.2-second delay, and a saved note per show; completed rows turn gray.
 - **Sizes:**
   - viewports and containers in the 600–999px range follow the medium tier (Phase 6);
   - the compact navbar and padding now apply below 1024px instead of at 800px and below, so tablets and small laptop windows get compact chrome;
@@ -970,7 +971,7 @@ Each entry gives the problem (where it isn't obvious), the approach, and the ris
 - _Approach:_ identity-based location, read-verify-write, one retry, then revert and refresh (§4.16).
 - _Residual risks:_
   - Duplicate identities (two rows with the same Client + Year + Show). Those rows are write-disabled, not guessed (§4.16).
-  - The 2-second write delay. In-app navigation flushes queued writes. Closing the tab shows the leave prompt, but a user who forces the close can lose the last change.
+  - The 1.2-second write delay. In-app navigation flushes queued writes. Closing the tab shows the leave prompt, but a user who forces the close can lose the last change.
   - Overwritten values. Checking a box replaces a date or `-` with `X`, and unchecking writes blank. Accepted for now (R8.2); the design queue will be improved later.
 
 ---
@@ -1043,7 +1044,7 @@ Run per migrated page at desktop width, in a 360px dashboard card, in a double-w
 
 **Instant write and design queue (Phase 2)**
 
-- [ ] Checkbox shows checked at once; nothing is written for 2 seconds; check-then-uncheck within the delay writes nothing
+- [ ] Checkbox shows checked at once; nothing is written for 1.2 seconds; check-then-uncheck within the delay writes nothing
 - [ ] After the delay, one cell is written: `X` to check, blank to uncheck; a date or `-` in the cell reads as unchecked
 - [ ] Leaving the page during the delay still writes the queued change
 - [ ] Row moved or inserted above mid-write: re-located by Client + Year + Show and written correctly

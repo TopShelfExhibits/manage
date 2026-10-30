@@ -374,14 +374,15 @@ export const CalendarComponent = {
             return `${seg.startIdx + 1} / ${seg.endIdx + 2}`;
         },
         chipClasses(seg) {
-            const cls = ['clickable'];
+            // Only chips that run the primary action are clickable (and change colour on hover)
+            const cls = this.chipIsTrigger ? ['clickable'] : [];
             if (!seg.isStart) cls.push('chip-continuation');
             if (!seg.isEnd) cls.push('chip-continues');
             if (seg.row && seg.row.AppData && seg.row.AppData._analyzing) cls.push('analyzing');
             const colorCls = this.resolved?.rowColor ? rowColorFor(seg.row, this.resolved) : '';
             cls.push(colorCls || 'blue');
             if (!this.chipIsTrigger) cls.push('chip-no-trigger');
-            if (this.hoveredKey !== null && this.hoveredKey === seg.chipKey) cls.push('hovered');
+            if (this.chipIsTrigger && this.hoveredKey !== null && this.hoveredKey === seg.chipKey) cls.push('hovered');
             if (this.searchActive && this.searchMatchChipKeyMap.get(seg.chipKey) === this.search.searchIndex.value - 1) {
                 cls.push('search-active-result');
             }

@@ -3261,6 +3261,12 @@ export const TableComponent = {
             // No undo capture on focus - only capture when user starts typing in handleCellEdit
         },
         handleEditableCellContainerClick(rowIndex, column, event) {
+            // Instant-mode text cells: a click anywhere in the cell focuses the cell's editor
+            if (column?.cellEditable && !column.editable) {
+                const editor = event?.currentTarget?.querySelector?.('[contenteditable="true"]');
+                if (editor && event.target !== editor) editor.focus({ preventScroll: true });
+                return;
+            }
             if (!column?.editable) return;
 
             const target = event?.target;
@@ -4821,7 +4827,7 @@ export const TableComponent = {
                                         'drop-target-above': dropTarget?.type === 'between' && dropTarget?.visualTargetIndex === visibleIdx,
                                         'drop-target-below': dropTarget?.type === 'between' && dropTarget?.visualTargetIndex === visibleIdx + 1,
                                         'drop-target-onto': dropTarget?.type === 'onto' && dropTarget?.targetIndex === idx,
-                                        'row-action': hasRowTrigger,
+                                        'clickable row-action': hasRowTrigger,
                                         'details-match': hasRowTrigger && isDetailsOnlyMatch(row)
                                     },
                                     getRowMetadataClass(row),

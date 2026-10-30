@@ -122,7 +122,6 @@ const CheckboxCell = {
     template: html`
         <label :class="['cell-checkbox', { 'cell-readonly': !canEdit }]" :title="disabled || (canEdit ? '' : (checked ? 'Done' : 'Not done'))" @click.stop>
             <input type="checkbox" :checked="checked" :disabled="!canEdit" @change="toggle" />
-            <span v-if="disabled && density === 'full'" class="cell-hint">{{ disabled }}</span>
         </label>
     `
 };
@@ -152,7 +151,6 @@ const SelectCell = {
     template: html`
         <span v-if="!canEdit" class="cell-select-text" :title="disabled || ''">
             <span v-html="highlight ? highlight(value, field) : current"></span>
-            <span v-if="disabled && density === 'full'" class="cell-hint">{{ disabled }}</span>
         </span>
         <select v-else class="cell-select" :value="current" @change="change" @click.stop>
             <option value=""></option>
@@ -161,7 +159,11 @@ const SelectCell = {
     `
 };
 
-/** Editable single-line text that commits on blur (design queue Note). Read-only renders highlighted text. */
+/**
+ * Editable text that commits on blur (design queue Note). Uses the same contenteditable editor as
+ * the table's editable text cells; read-only renders highlighted text. The commit goes through the
+ * page's edit mode (instant: the delayed verified-write queue), so typing never writes per key.
+ */
 const EditTextCell = {
     name: 'EditTextCell',
     props: cellProps,
@@ -170,26 +172,37 @@ const EditTextCell = {
         current() { return this.value == null ? '' : String(this.value); },
         canEdit() { return this.editable && !!this.commit && !this.disabled; }
     },
+    watch: {
+        current() { this.syncEditor(); }
+    },
+    mounted() { this.syncEditor(); },
+    updated() { this.syncEditor(); },
     methods: {
-        onInput(e) { this.draft = e.target.value; },
+        // Keep the editor's text in step with the value, except while the user is typing in it
+        syncEditor() {
+            const el = this.$refs.editor;
+            if (el && document.activeElement !== el && this.draft === null && el.textContent !== this.current) {
+                el.textContent = this.current;
+            }
+        },
+        onInput(e) { this.draft = e.target.textContent; },
         onBlur() {
             if (this.draft !== null && this.draft !== this.current) this.commit(this.draft);
             this.draft = null;
         }
     },
     template: html`
-        <span v-if="!canEdit" :title="disabled || ''"><span v-html="highlight ? highlight(value, field) : current"></span><span v-if="disabled && density === 'full'" class="cell-hint">{{ disabled }}</span></span>
-        <input
+        <span v-if="!canEdit" :title="disabled || ''"><span v-html="highlight ? highlight(value, field) : current"></span></span>
+        <div
             v-else
-            type="text"
-            class="cell-text-input"
-            :value="draft !== null ? draft : current"
-            :placeholder="field.cellOptions?.placeholder || ''"
+            ref="editor"
+            contenteditable="true"
+            class="table-edit-textarea"
+            :data-placeholder="field.cellOptions?.placeholder || ''"
             @input="onInput"
             @blur="onBlur"
-            @keydown.enter="$event.target.blur()"
             @click.stop
-        />
+        ></div>
     `
 };
 
@@ -307,16 +320,9 @@ export const DecorationCards = {
                 @click.stop="activate(card)"
                 v-html="card.message"
             ></button>
-            <span
-                v-else-if="inline"
-                :class="cardClass(card)"
-                :title="card.title || card.hoverMessage || null"
-                @click.stop="activate(card)"
-                v-html="card.message"
-            ></span>
             <div
                 v-else
-                :class="cardClass(card)"
+                :class="[cardClass(card), inline ? 'card-inline' : '']"
                 :title="card.title || card.hoverMessage || null"
                 @click.stop="activate(card)"
                 v-html="card.message"

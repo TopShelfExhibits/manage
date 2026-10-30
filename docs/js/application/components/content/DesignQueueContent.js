@@ -45,12 +45,14 @@ const DESIGN_QUEUE_VIEWS = {
             hidden: ['_rowColor', '_identifier'],
             sort: { key: 'Ship', dir: 'asc' },
             rowColor: { field: '_rowColor', rule: 'value' },
+            fullWidth: true,
+            table: { hideRowsOnSearch: false },
             style: {
                 Client: { width: 150 },
                 Show: { width: 200 },
-                Elev: { width: 60 },
-                Panels: { width: 60 },
-                Setups: { width: 60 },
+                Elev: { width: 60, font: 'narrow' },
+                Panels: { width: 60, font: 'narrow' },
+                Setups: { width: 60, font: 'narrow' },
                 Assignee: { width: 140 },
                 'Account Manager': { width: 150 },
                 Ship: { width: 120, color: 'auto' },
@@ -312,7 +314,6 @@ export const DesignQueueContent = {
                 loading-message="Loading schedule..."
                 :show-search="true"
                 :sync-search-with-url="true"
-                :hide-rows-on-search="true"
                 @refresh="handleRefresh"
             >
                 <template #header-area>

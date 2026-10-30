@@ -28,6 +28,8 @@ const SCHEDULE_VIEWS = {
                 'Ship': { width: 120, color: 'auto' },
                 'packlist': { width: 120 }
             },
+            // Search highlights and navigates; it doesn't hide non-matching rows by default
+            table: { hideRowsOnSearch: false },
             variants: {
                 // Narrow containers (phone, 360px dashboard card): stack Client under Show; City and Size move to details
                 narrow: {

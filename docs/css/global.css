@@ -332,6 +332,20 @@ div.clickable.green:hover, div.clickable.green.hovered, col.clickable.green:hove
     background-color: var(--color-green-bg-hover);
 }
 
+/* Clickable table rows (row trigger): pointer and a hover colour for rows without a colour class */
+tr.clickable {
+    cursor: pointer;
+}
+tr.clickable:not(.white, .gray, .purple, .red, .orange, .yellow, .blue, .green):hover > td,
+tr.clickable:not(.white, .gray, .purple, .red, .orange, .yellow, .blue, .green):focus-visible > td {
+    background-color: var(--background-color-hover);
+}
+
+/* Inline decoration cards (calendar chip lines, details grid) are divs laid out inline */
+.card.card-inline {
+    display: inline-block;
+}
+
 
 button.white, input[type="button"].white, input[type="submit"].white, .button.white, thead.white > tr > th, .white > .modal-header {
     background-color: var(--background-color);

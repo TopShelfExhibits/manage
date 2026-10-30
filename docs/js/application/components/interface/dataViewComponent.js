@@ -6,7 +6,7 @@ import { RowDetailsModal } from './rowDetailsComponent.js';
 import { isCheckedValue } from '../../../data_management/utils/checkbox-values.js';
 
 /** Delay before an instant edit is written; another edit to the same cell restarts it (§4.16). */
-export const INSTANT_WRITE_DELAY_MS = 2000;
+export const INSTANT_WRITE_DELAY_MS = 1200;
 
 /**
  * Presentation props removed in Phase 5 (views-and-renderers-plan): presentation comes only from
@@ -190,8 +190,9 @@ export const DataView = {
         sortDir() {
             return this.resolved.sort?.dir === 'desc' ? 'desc' : 'asc';
         },
+        // Structural class from the view, plus the full-width container mode (view.fullWidth)
         rendererClass() {
-            return this.resolved.className || '';
+            return [this.resolved.className || '', this.resolved.fullWidth ? 'view-full-width' : ''].filter(Boolean).join(' ');
         }
     },
     watch: {
@@ -369,7 +370,6 @@ export const DataView = {
                 cellSlot: this.$slots.cell || null,
                 searchTerm: ctx.searchTerm || '',
                 theme: r.theme,
-                modalClass: 'details-modal',
                 size: 'page'
             }, String(title));
         }

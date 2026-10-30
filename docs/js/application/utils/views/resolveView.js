@@ -332,6 +332,8 @@ export function resolveView(fields, view, opts = {}) {
         layout,
         theme: v.theme ?? fallbackTheme ?? '',
         className: v.className || '',
+        // Full-width container mode: releases the page's max-width while this view shows
+        fullWidth: !!v.fullWidth,
         fields: fieldKeys.map(k => fieldMap.get(k)),
         fieldMap,
         style,
