@@ -2413,6 +2413,9 @@ td.details-cell button.action-button {
 
 /* ── Views system: editable cells and instant writes (views-and-renderers-plan §4.16) ── */
 
+.table-cell-container:has(.cell-checkbox:only-child) {
+    text-align: center;
+}
 .cell-checkbox {
     display: inline-flex;
     align-items: center;
@@ -2432,6 +2435,9 @@ select.cell-select, input.cell-text-input {
     width: 100%;
     box-sizing: border-box;
     min-width: 0;
+}
+select.cell-select:only-child {
+    border: none;
 }
 
 /* Instant-write failure (pending cells share the dirty-cell style above) */
@@ -2460,5 +2466,6 @@ td.instant-failed {
 /* Empty contenteditable cells show their placeholder */
 .table-edit-textarea[data-placeholder]:empty::before {
     content: attr(data-placeholder);
-    opacity: 0.5;
+    opacity: 0.25;
+    font-style: italic;
 }
