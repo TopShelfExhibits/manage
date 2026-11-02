@@ -30,6 +30,7 @@
 import { Requests } from '../data_management/api.js';
 import { FakeGoogleSheetsAuth, FakeGoogleSheetsService, setFakeDelaysEnabled } from '../google_sheets_services/FakeGoogle.js';
 import { isCheckedValue } from '../data_management/utils/checkbox-values.js';
+import { useBatchEdits, useInstantEdits } from '../application/utils/cellEdits.js';
 import { CacheInvalidationBus, ApplicationUtils, ProductionUtils, triggerCachePoll } from '../data_management/index.js';
 import { resolveView, resolveAction, pickView, mergeView, matchesKeyPattern, setViewWarningHandler } from '../application/utils/views/resolveView.js';
 import { SEARCH_LIMITS, searchWords, matchRow, matchRows } from '../application/utils/views/searchMatch.js';
@@ -2020,6 +2021,114 @@ test('SHOW NOTES', 'a note write that lands on a moved row is undone and retried
     } finally {
         notesRestore(snap);
     }
+});
+
+// ── Cell edits (utils/cellEdits.js): batch and instant edits ─────────────────
+
+const editWait = (ms) => new Promise(r => setTimeout(r, ms));
+
+function batchHarness(rowKey = null) {
+    const rows = [{ k: '1', A: 'x', MetaData: 'm' }, { k: '2', A: 'y' }];
+    const originals = rows.map(r => ({ ...r }));
+    const emitted = [];
+    const edits = useBatchEdits({
+        rows: () => rows,
+        originalRows: () => originals,
+        rowKey: () => rowKey,
+        undoRoute: () => null,
+        // The page writes its rows on cell-edit
+        emitEdit: (i, key, value) => { emitted.push([i, key, value]); rows[i][key] = value; }
+    });
+    return { rows, emitted, edits };
+}
+
+test('CELL EDITS', 'batch: an edit marks the cell unsaved until it is back to the loaded value', async () => {
+    const { edits, emitted } = batchHarness();
+    edits.edit(0, 'A', 'z');
+    assertEqual([edits.cellState(0, 'A'), edits.hasUnsaved.value, emitted.length], ['unsaved', true, 1], 'changed');
+    edits.edit(0, 'A', 'x');
+    assertEqual([edits.cellState(0, 'A'), edits.hasUnsaved.value], ['', false], 'back to loaded');
+});
+
+test('CELL EDITS', 'batch: revert, nested tables, and recompare (with MetaData)', async () => {
+    const { rows, edits, emitted } = batchHarness();
+    edits.edit(1, 'A', 'q');
+    edits.revert(1, 'A');
+    assertEqual([rows[1].A, edits.cellState(1, 'A'), emitted[emitted.length - 1]], ['y', '', [1, 'A', 'y']], 'reverted');
+    edits.setNested(0, 'Items', true);
+    assertEqual([edits.cellState(0, 'Items'), edits.hasUnsaved.value], ['unsaved', true], 'nested changed');
+    edits.setNested(0, 'Items', false);
+    assertEqual(edits.hasUnsaved.value, false, 'nested back');
+    rows[0].MetaData = 'changed';
+    edits.compareAll(['A']);
+    assertEqual([edits.cellState(0, 'A'), edits.hasUnsaved.value], ['', true], 'MetaData counts as a change');
+});
+
+test('CELL EDITS', 'batch: loaded values follow the row key when rows move', async () => {
+    const { rows, edits } = batchHarness('k');
+    rows.reverse();
+    assertEqual([edits.originalValue(rows[0], 0, 'A'), edits.originalValue(rows[1], 1, 'A')], ['y', 'x'], 'by key');
+});
+
+function instantHarness(commit) {
+    const rows = [{ id: 'a', Elev: '', Note: '' }, { id: 'b', Elev: 'X', Note: 'n' }];
+    const calls = { commits: [], errors: [], refreshes: 0 };
+    const edits = useInstantEdits({
+        enabled: () => true,
+        rows: () => rows,
+        rowId: (r) => r.id,
+        commitCells: async (entries) => {
+            calls.commits.push(entries.map(e => `${e.row.id}.${e.key}=${e.value}`));
+            return commit(entries);
+        },
+        derive: (r) => ({ ...r, done: r.Elev === 'X' }),
+        field: (key) => (key === 'Elev' ? { key, label: 'Elev', cell: 'checkbox' } : { key, label: key }),
+        delay: () => 20,
+        modal: () => ({ error: (m) => calls.errors.push(m), alert: () => {} }),
+        refresh: () => { calls.refreshes++; }
+    });
+    return { rows, calls, edits };
+}
+const allOk = async (entries) => entries.map(() => ({ ok: true }));
+
+test('CELL EDITS', 'instant: edits show at once and nearby edits are written as one batch', async () => {
+    const { rows, calls, edits } = instantHarness(allOk);
+    edits.edit(rows[0], 'Elev', 'X');
+    edits.edit(rows[1], 'Note', 'new');
+    assertEqual([edits.cellState(rows[0], 'Elev'), edits.overlay(rows)[0]], ['unsaved', { id: 'a', Elev: 'X', Note: '', done: true }], 'shown and derived');
+    await editWait(80);
+    assertEqual(calls.commits, [['a.Elev=X', 'b.Note=new']], 'one batch');
+    assertEqual(edits.cellState(rows[0], 'Elev'), '', 'saved');
+    rows[0].Elev = 'X';
+    rows[1].Note = 'new';
+    edits.reconcile();
+    assertEqual(Object.keys(edits.pending).length, 0, 'overlay dropped once the rows carry the values');
+});
+
+test('CELL EDITS', 'instant: a cell back to its loaded value within the delay is not written', async () => {
+    const { rows, calls, edits } = instantHarness(allOk);
+    edits.edit(rows[0], 'Elev', 'X');
+    edits.edit(rows[0], 'Elev', '');
+    edits.edit(rows[1], 'Elev', 'TRUE'); // checked, like the loaded X
+    await editWait(80);
+    assertEqual([calls.commits, Object.keys(edits.pending).length], [[], 0], 'nothing written');
+});
+
+test('CELL EDITS', 'instant: a failed write reverts, reports once and asks for a refresh', async () => {
+    const { rows, calls, edits } = instantHarness(async (entries) => entries.map(() => ({ ok: false, reason: 'not-found' })));
+    edits.edit(rows[0], 'Elev', 'X');
+    await editWait(80);
+    assertEqual([edits.cellState(rows[0], 'Elev'), edits.overlay(rows), calls.refreshes], ['failed', rows, 1], 'reverted');
+    assertEqual(calls.errors.length === 1 && calls.errors[0].includes('Elev: the row was not found in the sheet'), true, 'message');
+});
+
+test('CELL EDITS', 'instant: an edit made while its cell is being written is written next', async () => {
+    const { rows, calls, edits } = instantHarness(async (entries) => { await editWait(60); return entries.map(() => ({ ok: true })); });
+    edits.edit(rows[0], 'Note', 'one');
+    await editWait(40); // the write is in flight
+    edits.edit(rows[0], 'Note', 'two');
+    await editWait(250);
+    assertEqual(calls.commits, [['a.Note=one'], ['a.Note=two']], 'two writes in order');
 });
 
 // ── Batched verified writes, fault injection, sheet health ───────────────────

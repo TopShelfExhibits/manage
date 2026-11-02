@@ -1367,7 +1367,7 @@ export const InventoryTableComponent = {
                 :rowDetailsVisible="row => getPendingEntries(row).length > 0"
                 emptyMessage="No inventory items found"
                 :loading-message="loadingMessage"
-                class="inventory-table-component mark-dirty"
+                class="inventory-table-component"
                 @refresh="handleRefresh"
                 @cell-edit="handleCellEdit"
                 @new-row="handleNewRow"

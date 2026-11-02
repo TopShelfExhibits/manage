@@ -684,6 +684,8 @@ These are set by the content component with its data, never by views.
 
 Phase 0's key-based `cell-edit` contract serves `batch`. `instant` adds `cell-commit` beside it and leaves `cell-edit` unchanged.
 
+**One edit mechanism** ([cellEdits.js](../js/application/utils/cellEdits.js)). `useBatchEdits` (one per table: changed cells, revert, nested tables, undo while typing) and `useInstantEdits` (one per `DataView`: the delayed queue, overlay, write results) keep the same per-cell states, shown as the classes `cell-unsaved` and `cell-failed`. Every batch table colours unsaved cells except pack lists, whose edits change most cells.
+
 **One editor per cell type, in both modes.** A column is `editable` when the edit mode isn't `none` and its field is editable; the table has no second flag. Every edit goes through one table method that routes by `editMode`: `batch` → `cell-edit` (dirty tracking, undo, Save), `instant` → `cell-commit`. An editable field without a `cell` edits through the `text` cell (number and `external-edit` fields keep their own editors). The text cell is the only text editor: in `batch` it reports every change, in `instant` it reports the finished edit on blur; pasting inserts plain text, and in `batch` pasted text with tabs or line breaks is left to the table's row paste.
 
 **Preferences (R4.5, R5.2, R7.1, R7.2).** Everything an instant-write page needs from the sheet lives in the live database, so a renamed header or a new assignee needs no code change. For Schedule data the identity is Client + Year + Show, the same three inputs as `ProductionUtils.computeIdentifier` ([production-utils.js:332](../js/data_management/abstraction/production-utils.js#L332)).

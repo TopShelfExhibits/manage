@@ -7,6 +7,7 @@ import { searchWords as toSearchWords, matchRows, matchRow, valueMatchesAny } fr
 import { ContentHeaderComponent } from './contentHeaderComponent.js';
 import { RowDetailsComponent } from './rowDetailsComponent.js';
 import { CellRenderer, DecorationCards, placeDecorations } from './cells.js';
+import { useBatchEdits } from '../../utils/cellEdits.js';
 
 // Clicks landing on these never trigger a row action (§4.8 row-trigger guards)
 const ROW_TRIGGER_IGNORE = 'button, a, input, select, textarea, [contenteditable], .column-button, .card.clickable';
@@ -1633,33 +1634,36 @@ export const TableComponent = {
     },
     emits: ['refresh', 'cell-edit', 'cell-commit', 'new-row', 'inner-table-dirty', 'show-hamburger-menu', 'search', 'on-save', 'row-move', 'row-options', 'row-action'],
     setup(props, { emit }) {
+        const appContext = Vue.inject('appContext');
         // Initialize search composable
         const search = useSearch({
             formatValue: null, // Will be provided via this.formatCellValue in methods
             syncWithUrl: props.syncSearchWithUrl,
             navigationRegistry: NavigationRegistry,
             containerPath: props.containerPath,
-            appContext: Vue.inject('appContext')
+            appContext
+        });
+        // Batch edits (utils/cellEdits.js): changed cells, revert, nested tables, undo while typing
+        const batchEdits = useBatchEdits({
+            rows: () => props.data,
+            originalRows: () => props.originalData,
+            rowKey: () => props.rowKey,
+            undoRoute: () => (appContext?.currentPath ? appContext.currentPath.split('?')[0] : null),
+            emitEdit: (rowIndex, key, value) => emit('cell-edit', rowIndex, key, value)
         });
 
-        // Return search properties and methods to be available in component
         return {
-            search
+            search,
+            batchEdits
         };
     },
     data() {
         return {
-            dirtyCells: {},
-            allowSaveEvent: false,
-            nestedTableDirtyCells: {}, // Track dirty state for nested tables by [rowIndex][columnKey]
             sortColumn: null, // Current sort column key
             sortDirection: 'asc', // Current sort direction: 'asc' or 'desc'
             isUsingDefaultSort: true,
             expandedRows: new Set(), // Track which rows are expanded for details
             overriddenGroups: new Set(), // Groups deviating from the current visibility default
-            hasUndoCaptured: false, // Track if first edit has been captured for undo
-            lastEditTimestamp: null, // Track last edit time for 5-second idle detection
-            _undoIdleTimer: null, // Timer to discard no-op snapshot after idle period
             clickState: {
                 isMouseDown: false,
                 startRowIndex: null,
@@ -1778,27 +1782,21 @@ export const TableComponent = {
             }
         },
 
-        // Watch for changes to originalData prop and recompare dirty state
+        // Watch for changes to originalData prop and recompare the changed cells
         originalData: {
             handler() {
-                if (!this.isBatchEditing) return;
-                this.$nextTick(() => {
-                    this.compareAllCellsDirty();
-                });
+                this.$nextTick(() => this.recompareEdits());
             },
             deep: true
         },
-        allowSaveEvent(val) {
-            // Emit to parent if dirty state changes
+        hasUnsavedEdits(val) {
+            // A nested table tells its host cell whether it has changes
             this.$emit('inner-table-dirty', val);
         },
         data: {
             handler() {
                 this.$nextTick(() => this._measureColWidths());
-                if (!this.isBatchEditing) return;
-                this.$nextTick(() => {
-                    this.compareAllCellsDirty();
-                });
+                this.$nextTick(() => this.recompareEdits());
             },
             deep: true,
             flush: 'post' // Ensure DOM updates happen after data changes
@@ -1806,18 +1804,11 @@ export const TableComponent = {
         visibleColumns() {
             this.$nextTick(() => this._measureColWidths());
         },
-        isLoading(val) {
-            if (!this.isBatchEditing) return;
-            // When loading state changes, compare dirty
-            this.$nextTick(() => {
-                this.compareAllCellsDirty();
-            });
+        isLoading() {
+            this.$nextTick(() => this.recompareEdits());
         },
         draggable() {
-            if (!this.isBatchEditing) return;
-            this.$nextTick(() => {
-                this.compareAllCellsDirty();
-            });
+            this.$nextTick(() => this.recompareEdits());
         },
         groupVisibilityOverride(val) {
             if (!val) return;
@@ -2268,21 +2259,14 @@ export const TableComponent = {
         showSaveButton() {
             return this.isBatchEditing || !!this.newRow;
         },
-        // Batch editing (edits are held until Save): dirty tracking, undo, row paste and selection.
+        // Batch editing (edits are held until Save): changed cells, undo, row paste and selection.
         // Instant edits are written by DataView's queue instead, so none of these apply.
         isBatchEditing() {
             return this.editMode === 'batch' && this.columns.some(col => col.editable);
         },
-        originalDataByKey() {
-            if (!this.rowKey || !Array.isArray(this.originalData)) return null;
-            const map = new Map();
-            this.originalData.forEach(row => {
-                const keyVal = this._getRowKeyValue(row);
-                if (keyVal !== undefined && keyVal !== null && keyVal !== '') {
-                    map.set(String(keyVal), row);
-                }
-            });
-            return map;
+        // Changes in this table (or a nested one) that Save would write
+        hasUnsavedEdits() {
+            return this.batchEdits.hasUnsaved.value;
         },
         // Counteracts the clone table's translateX so sticky-end cells stay at the right edge.
         // position:sticky is disabled inside transformed ancestors, so this must be done manually.
@@ -2405,9 +2389,7 @@ export const TableComponent = {
         this.search.setupUrlWatcher();
         this.applyHideRowsModeFromUrl();
         
-        this.$nextTick(() => {
-            this.compareAllCellsDirty();
-        });
+        this.$nextTick(() => this.recompareEdits());
         
         // Listen for clicks outside details area to close expanded details
         document.addEventListener('click', this.handleOutsideClick);
@@ -2502,6 +2484,7 @@ export const TableComponent = {
         }
     },
     beforeUnmount() {
+        this.batchEdits.dispose();
         if (this.hasDraggingRow) adjustRootDragging(-1);
         document.removeEventListener('click', this.handleOutsideClick);
         document.removeEventListener('keydown', this.handleEscapeKey);
@@ -2614,14 +2597,14 @@ export const TableComponent = {
         },
 
         handleRefresh() {
-            // Capture state before discarding changes (when allowSaveEvent is true)
-            if (this.allowSaveEvent && undoRegistry.currentRouteKey) {
+            // Capture state before discarding changes
+            if (this.hasUnsavedEdits && undoRegistry.currentRouteKey) {
                 undoRegistry.capture(this.data, undoRegistry.currentRouteKey, { type: 'discard' });
             }
-            
+
             this.$emit('refresh');
-            // Clear dirty state for nested tables on refresh
-            this.nestedTableDirtyCells = {};
+            // Nested tables are rebuilt from the reloaded rows
+            this.batchEdits.clearNested();
         },
 
         // Selection helper methods
@@ -3110,7 +3093,7 @@ export const TableComponent = {
             return this.rowDecorMap.get(row)?.rowLevel || [];
         },
         
-        // Cell colour from the view (style[key].color); state classes (dirty) are added after it
+        // Cell colour from the view (style[key].color); the edit state class is added after it
         cellColorClass(row, column) {
             if (!column?.colorRule || !row) return '';
             return colorFor(row, column, this.resolved);
@@ -3121,20 +3104,8 @@ export const TableComponent = {
             return rowColorFor(row, this.resolved);
         },
         getCellClass(value, column, rowIndex) {
-            let baseClass = '';
             const row = typeof rowIndex === 'number' && this.data ? this.data[rowIndex] : null;
-            const color = row ? this.cellColorClass(row, column) : '';
-            if (color) baseClass = color;
-                        
-            // Add dirty class if cell is dirty (dirty state is keyed by column key)
-            if (this.dirtyCells[rowIndex] && this.dirtyCells[rowIndex][column.key]) {
-                baseClass = (baseClass ? baseClass + ' ' : '') + 'dirty';
-            }
-            // Add dirty class if nested table in this cell is dirty
-            if (this.nestedTableDirtyCells[rowIndex] && this.nestedTableDirtyCells[rowIndex][column.key]) {
-                baseClass = (baseClass ? baseClass + ' ' : '') + 'dirty';
-            }
-            return baseClass;
+            return row ? this.cellColorClass(row, column) : '';
         },
         
         getColumnWidth(column) {
@@ -3143,96 +3114,31 @@ export const TableComponent = {
         getColumnFont(column) {
             return column.font ? 'font-' + column.font : '';
         },
-        // Batch edit contract: emits cell-edit(rowIndex, columnKey, value); dirty state is keyed by column key.
-        handleCellEdit(rowIndex, column, value) {
-            if (!this.isBatchEditing || !column) return;
-            const columnKey = column.key;
-            const now = Date.now();
-            const timeSinceLastEdit = this.lastEditTimestamp ? now - this.lastEditTimestamp : Infinity;
-            
-            // Create new snapshot if:
-            // 1. No snapshot captured yet (!hasUndoCaptured)
-            // 2. More than 5 seconds since last edit (timeSinceLastEdit >= 5000)
-            if ((!this.hasUndoCaptured || timeSinceLastEdit >= 5000) && this.appContext?.currentPath) {
-                // Clear previous capture to force new snapshot
-                undoRegistry.clearCurrentEditCapture();
-                const routeKey = this.appContext.currentPath.split('?')[0];
-                undoRegistry.capture(this.data, routeKey, {
-                    type: 'cell-edit',
-                    cellInfo: { rowIndex, columnKey },
-                    preventDuplicates: true
-                });
-                this.hasUndoCaptured = true;
-            }
-            
-            // Reset the idle timer — when it fires, discard the snapshot if state is unchanged
-            if (this._undoIdleTimer) clearTimeout(this._undoIdleTimer);
-            if (this.appContext?.currentPath) {
-                const routeKey = this.appContext.currentPath.split('?')[0];
-                this._undoIdleTimer = setTimeout(() => {
-                    this._undoIdleTimer = null;
-                    undoRegistry.discardLastSnapshotIfUnchanged(this.data, routeKey);
-                }, 5000);
-            }
-            
-            // Update last edit timestamp
-            this.lastEditTimestamp = now;
-            
-            this.$emit('cell-edit', rowIndex, columnKey, value);
-            // Dirty check for single cell
-            if (!this.dirtyCells[rowIndex]) this.dirtyCells[rowIndex] = {};
-            const originalValue = this.originalData[rowIndex]?.[columnKey];
-            if (value !== originalValue) {
-                this.dirtyCells[rowIndex][columnKey] = true;
-            } else {
-                delete this.dirtyCells[rowIndex][columnKey];
-            }
-            this.checkDirtyCells();
-        },
         // Every cell edit (registry cells and the number input) comes here:
-        //   batch   → the standard cell-edit path (page writes the store; dirty tracking; Save)
+        //   batch   → batchEdits (cell-edit to the page; changed-cell tracking; Save)
         //   instant → cell-commit(row, columnKey, value) for DataView's delayed verified-write queue
         commitCellValue(rowIndex, column, value) {
             if (!column.editable) return;
             if (this.editMode === 'instant') this.$emit('cell-commit', this.data[rowIndex], column.key, value);
-            else this.handleCellEdit(rowIndex, column, value);
+            else if (this.isBatchEditing) this.batchEdits.edit(rowIndex, column.key, value);
         },
-        cellStateClass(row, column) {
-            if (!this.cellState) return '';
-            const s = this.cellState(row, column.key);
-            return s ? 'instant-' + s : '';
+        // The cell's edit state as a class: cell-unsaved, cell-failed (utils/cellEdits.js)
+        cellStateClass(row, rowIndex, column) {
+            const state = this.editMode === 'instant'
+                ? (this.cellState ? this.cellState(row, column.key) : '')
+                : (this.isBatchEditing ? this.batchEdits.cellState(rowIndex, column.key) : '');
+            return state ? 'cell-' + state : '';
         },
         cellDisabledReason(row, column) {
             if (!this.cellDisabled) return '';
             try { return this.cellDisabled(row, column.key) || ''; } catch { return ''; }
         },
-        isCellDirty(rowIndex, column) {
-            return !!(this.dirtyCells[rowIndex] && column && this.dirtyCells[rowIndex][column.key]);
-        },
-        // The loaded value of a cell (undefined when the row has no loaded counterpart)
-        originalCellValue(row, rowIndex, column) {
-            return this.getOriginalDataForRow(row, rowIndex)?.[column.key];
-        },
         // A batch cell changed from its loaded value shows the original and a revert control
         showRevert(row, rowIndex, column) {
             return this.isBatchEditing && column.editable && column.format !== 'external-edit'
-                && this.isCellDirty(rowIndex, column)
-                && this.getOriginalDataForRow(row, rowIndex) !== undefined
-                && this.originalCellValue(row, rowIndex, column) !== row[column.key];
-        },
-        _getRowKeyValue(row) {
-            if (!this.rowKey || !row) return undefined;
-            return this.rowKey.split('.').reduce((obj, key) => obj?.[key], row);
-        },
-        getOriginalDataForRow(row, idx) {
-            if (this.rowKey && this.originalDataByKey) {
-                const keyVal = this._getRowKeyValue(row);
-                if (keyVal !== undefined && keyVal !== null && keyVal !== '') {
-                    return this.originalDataByKey.get(String(keyVal));
-                }
-                return undefined;
-            }
-            return this.originalData?.[idx];
+                && this.batchEdits.isChanged(rowIndex, column.key)
+                && this.batchEdits.originalRow(row, rowIndex) !== undefined
+                && this.batchEdits.originalValue(row, rowIndex, column.key) !== row[column.key];
         },
         revertCellToOriginal(rowIndex, column, event) {
             if (!this.isBatchEditing) return;
@@ -3241,32 +3147,7 @@ export const TableComponent = {
                 event.stopPropagation();
                 event.preventDefault();
             }
-            
-            // Capture snapshot before reverting (so revert can be undone)
-            if (this.appContext?.currentPath) {
-                const routeKey = this.appContext.currentPath.split('?')[0];
-                undoRegistry.capture(this.data, routeKey, {
-                    type: 'cell-revert',
-                    cellInfo: { rowIndex, columnKey: column.key }
-                });
-            }
-
-            const originalRow = this.getOriginalDataForRow(this.data[rowIndex], rowIndex);
-            const originalValue = originalRow?.[column.key];
-            
-            // Update the data (the cell's editor follows its value)
-            if (this.data[rowIndex]) {
-                this.data[rowIndex][column.key] = originalValue;
-            }
-
-            // Clear dirty flag
-            if (this.dirtyCells[rowIndex]) {
-                delete this.dirtyCells[rowIndex][column.key];
-            }
-
-            // Emit cell-edit event
-            this.$emit('cell-edit', rowIndex, column.key, originalValue);
-            this.checkDirtyCells();
+            this.batchEdits.revert(rowIndex, column.key);
         },
         // A click anywhere in an editable cell focuses its text or number editor
         handleEditableCellContainerClick(column, event) {
@@ -3276,80 +3157,14 @@ export const TableComponent = {
             const editor = event.currentTarget?.querySelector?.('[contenteditable="true"], input[type="number"]');
             editor?.focus({ preventScroll: true });
         },
+        // Leaving a batch cell ends its undo step
         handleCellBlur() {
-            // Clear flags when a batch cell loses focus (enables new snapshot on next focus+edit)
+            if (this.isBatchEditing) this.batchEdits.endEdit();
+        },
+        // Recompare the changed cells after rows change (editable main-table columns)
+        recompareEdits() {
             if (!this.isBatchEditing) return;
-            this.hasUndoCaptured = false;
-            this.lastEditTimestamp = null;
-            undoRegistry.clearCurrentEditCapture();
-            if (this._undoIdleTimer) {
-                clearTimeout(this._undoIdleTimer);
-                this._undoIdleTimer = null;
-            }
-        },
-        compareAllCellsDirty() {
-            // Compare all cells in data vs originalData and update dirtyCells
-            if (!this.isBatchEditing) return;
-            this.dirtyCells = {};
-            if (!Array.isArray(this.data) || !Array.isArray(this.originalData)) return;
-            this.data.forEach((row, rowIndex) => {
-                const originalRow = this.originalData[rowIndex];
-                // Treat undefined originalRow as an object with all nulls for dirty checking
-                // Dirty state is keyed by column key (not position), so details/stacked columns can't shift it
-                this.mainTableColumns.forEach((column) => {
-                    const key = column.key;
-                    if (column.editable) {
-                        const currentValue = row[key];
-                        // If originalRow is undefined, treat as null
-                        const originalValue = originalRow ? originalRow[key] : null;
-                        if (currentValue !== originalValue) {
-                            if (!this.dirtyCells[rowIndex]) this.dirtyCells[rowIndex] = {};
-                            this.dirtyCells[rowIndex][key] = true;
-                        }
-                    }
-                });
-                
-                // Always check MetaData and EditHistory columns for changes, even though they're hidden
-                // Use a special column index (-1) to track these hidden column changes
-                ['MetaData'].forEach(hiddenKey => {
-                    if (row && row.hasOwnProperty(hiddenKey)) {
-                        const currentValue = row[hiddenKey];
-                        const originalValue = originalRow ? originalRow[hiddenKey] : null;
-                        // Compare values (handle both string and object comparisons)
-                        const isDifferent = currentValue !== originalValue;
-                        if (isDifferent) {
-                            if (!this.dirtyCells[rowIndex]) this.dirtyCells[rowIndex] = {};
-                            // Use -1 as a sentinel column index for hidden metadata columns
-                            this.dirtyCells[rowIndex][-1] = true;
-                        }
-                    }
-                });
-            });
-            this.checkDirtyCells();
-        },
-        // Called by slot from nested TableComponent (keyed by the host cell's column key)
-        handleInnerTableDirty(isDirty, rowIndex, columnKey) {
-            if (!this.nestedTableDirtyCells[rowIndex]) this.nestedTableDirtyCells[rowIndex] = {};
-            if (isDirty) {
-                this.nestedTableDirtyCells[rowIndex][columnKey] = true;
-            } else {
-                delete this.nestedTableDirtyCells[rowIndex][columnKey];
-                if (Object.keys(this.nestedTableDirtyCells[rowIndex]).length === 0) {
-                    delete this.nestedTableDirtyCells[rowIndex];
-                }
-            }
-            this.checkDirtyCells();
-        },
-        checkDirtyCells() {
-            // If any cell is dirty, allow save event
-            const hasDirtyCell = Object.keys(this.dirtyCells).some(row =>
-                Object.keys(this.dirtyCells[row]).length > 0
-            );
-            // If any nested table cell is dirty, allow save event
-            const hasNestedDirty = Object.keys(this.nestedTableDirtyCells).some(row =>
-                Object.keys(this.nestedTableDirtyCells[row]).length > 0
-            );
-            this.allowSaveEvent = hasDirtyCell || hasNestedDirty;
+            this.batchEdits.compareAll(this.mainTableColumns.filter(c => c.editable).map(c => c.key));
         },
         handleSave() {
             this.$emit('on-save');
@@ -4611,7 +4426,7 @@ export const TableComponent = {
                     v-model:hide-rows="hideRowsOnSearchLocal"
                     :show-refresh="showRefresh"
                     :is-loading="isLoading"
-                    :dirty="allowSaveEvent"
+                    :dirty="hasUnsavedEdits"
                     :view-select="viewSelect"
                     @refresh="handleRefresh"
                 >
@@ -4626,9 +4441,9 @@ export const TableComponent = {
                             New Item
                         </button>
                         <button
-                            v-if="showSaveButton || allowSaveEvent"
+                            v-if="showSaveButton || hasUnsavedEdits"
                             @click="handleSave"
-                            :disabled="isLoading || !allowSaveEvent"
+                            :disabled="isLoading || !hasUnsavedEdits"
                             class="green"
                         >
                             Save
@@ -4785,7 +4600,7 @@ export const TableComponent = {
                                     v-for="(column, colIndex) in mainTableColumns" 
                                     :key="column.key"
                                     :colspan="column.colspan || 1"
-                                    :class="[getCellClass(row[column.key], column, idx), getStickyColProps(column)?.stickyClass, cellStateClass(row, column)]"
+                                    :class="[getCellClass(row[column.key], column, idx), getStickyColProps(column)?.stickyClass, cellStateClass(row, idx, column)]"
                                     :style="getStickyColProps(column)?.stickyStyle"
                                     @click="handleEditableCellContainerClick(column, $event)"
                                     @focusout="handleCellBlur"
@@ -4799,10 +4614,10 @@ export const TableComponent = {
                                             <span
                                                 v-if="showRevert(row, idx, column)"
                                                 class="original-value clickable"
-                                                :title="'Click to revert to: ' + formatCellValue(originalCellValue(row, idx, column), column)"
+                                                :title="'Click to revert to: ' + formatCellValue(batchEdits.originalValue(row, idx, column.key), column)"
                                                 @click="revertCellToOriginal(idx, column, $event)"
                                             >
-                                                {{ formatCellValue(originalCellValue(row, idx, column), column) }} →
+                                                {{ formatCellValue(batchEdits.originalValue(row, idx, column.key), column) }} →
                                             </span>
                                             <input
                                                 type="number"
@@ -4825,7 +4640,7 @@ export const TableComponent = {
                                             :edit-mode="editMode"
                                             :commit="(value) => commitCellValue(idx, column, value)"
                                             :disabled="cellDisabledReason(row, column)"
-                                            :cell-scope="{ rowIndex: idx, onInnerTableDirty: (isDirty) => handleInnerTableDirty(isDirty, idx, column.key) }"
+                                            :cell-scope="{ rowIndex: idx, onInnerTableDirty: (isDirty) => batchEdits.setNested(idx, column.key, isDirty) }"
                                         />
                                         <!-- Edited outside the cell (e.g. a modal) and tracked for dirty state: the page's default slot -->
                                         <slot
@@ -4840,7 +4655,7 @@ export const TableComponent = {
                                         <span v-else v-html="highlightSearchText(row[column.key], column)"></span>
                                         <!-- Changed batch cell (not number): revert button; its hint shows the original over the editor -->
                                         <template v-if="column.format !== 'number' && showRevert(row, idx, column)">
-                                            <span class="column-button-hint">{{ originalCellValue(row, idx, column) || '(empty)' }}</span>
+                                            <span class="column-button-hint">{{ batchEdits.originalValue(row, idx, column.key) || '(empty)' }}</span>
                                             <button
                                                 @click="revertCellToOriginal(idx, column, $event)"
                                                 title="Revert to original value"
@@ -5013,7 +4828,7 @@ export const TableComponent = {
                 
                 
             </div>
-            <div class="content-footer red"  v-if="showFooter && allowSaveEvent"><p>There are unsaved changes in this table.</p></div>
+            <div class="content-footer red"  v-if="showFooter && hasUnsavedEdits"><p>There are unsaved changes in this table.</p></div>
         </div>
     `
 };

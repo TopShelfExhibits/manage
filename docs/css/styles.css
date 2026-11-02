@@ -1383,13 +1383,7 @@ td:hover:has(.table-cell-container > .table-edit-textarea), td:hover:has(.table-
     gap: var(--padding-sm);
     cursor: pointer;
 }
-.cell-checkbox input[type="checkbox"] {
-    width: 18px;
-    height: 18px;
-    margin: 0;
-    cursor: pointer;
-}
-.cell-checkbox.cell-readonly, .cell-checkbox.cell-readonly input {
+.cell-checkbox.cell-readonly {
     cursor: default;
 }
 select.cell-select {
@@ -1437,13 +1431,13 @@ select.cell-select:only-child {
     opacity: 0;
 }
 
-/* Unsaved cells: batch edits (in tables marked .mark-dirty) and instant writes still pending */
-.mark-dirty .dirty,
-td.instant-pending {
+/* Edit states (utils/cellEdits.js). Unsaved: a batch edit not saved yet, or an instant write
+   queued or in flight. Pack lists don't colour unsaved cells (see the pack list styles). */
+td.cell-unsaved {
     background-color: var(--color-red-bg-transparent);
 }
 /* Instant write failed (the value was reverted) */
-td.instant-failed {
+td.cell-failed {
     outline: 2px solid var(--color-red);
     outline-offset: -3px;
     background-color: var(--color-red-bg) !important;
@@ -1853,6 +1847,10 @@ html.row-dragging * {
 .packlist-crates:not(.editing) table tr:last-child td {
     border-bottom: none;
 } 
+/* Editing a pack list changes most cells, so unsaved cells keep their normal background */
+.packlist-crates td.cell-unsaved {
+    background-color: transparent;
+}
 .packlist-crates td:has(.table-edit-textarea), .packlist-crates td:has(.empty-message) {
     padding: var(--padding-sm);
 }

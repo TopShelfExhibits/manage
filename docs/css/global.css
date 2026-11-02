@@ -88,6 +88,18 @@ h6 {
     white-space: pre-wrap;
 }
 
+/* Checkboxes: an 18px square (not the input width below); the variants restyle it */
+input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
+    flex: none;
+    margin: 0;
+    cursor: pointer;
+}
+input[type="checkbox"]:disabled {
+    cursor: default;
+}
+
 input[type="checkbox"].switch {
     -webkit-appearance: none;
     appearance: none;
@@ -96,6 +108,7 @@ input[type="checkbox"].switch {
     color: inherit;
     letter-spacing: inherit;
     inline-size: 3.5rem;
+    block-size: auto;
     display: flex;
     align-items: center;
     justify-content: flex-start;

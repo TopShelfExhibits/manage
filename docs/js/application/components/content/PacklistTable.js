@@ -959,11 +959,6 @@ export const PacklistTable = {
             await this.packlistTableStore.save('Saving packlist...');
         },
 
-        handleInnerTableDirty(isDirty, rowIndex) {
-            if (this.$refs.mainTableComponent && this.$refs.mainTableComponent.checkDirtyCells) {
-                this.$refs.mainTableComponent.checkDirtyCells();
-            }
-        },
 
         /**
          * Get card color for an alert
@@ -1556,12 +1551,7 @@ export const PacklistTable = {
                                 :showSelectionBubble="editMode"
                                 @cell-edit="(itemRowIdx, itemColKey, value) => { row.Items[itemRowIdx][itemColKey] = value; }"
                                 @new-row="(positionData) => { handleAddItem(rowIndex, positionData); }"
-                                @inner-table-dirty="(isDirty) => { 
-                                    if (typeof onInnerTableDirty === 'function') {
-                                        onInnerTableDirty(isDirty);
-                                    }
-                                    handleInnerTableDirty(isDirty, rowIndex);
-                                }"
+                                @inner-table-dirty="onInnerTableDirty"
                                 @row-options="handleRowOptions"
                                 class="table-fixed"
                             >

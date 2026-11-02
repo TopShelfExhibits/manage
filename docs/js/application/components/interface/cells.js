@@ -121,7 +121,7 @@ const CheckboxCell = {
         }
     },
     template: html`
-        <label :class="['cell-checkbox', { 'cell-readonly': !editable }]" :title="disabled || (editable ? '' : (checked ? 'Done' : 'Not done'))" @click.stop>
+        <label :class="['cell-checkbox', { 'cell-readonly': !editable }]" :title="disabled || null" @click.stop>
             <input type="checkbox" :checked="checked" :disabled="!editable" @change="toggle" />
         </label>
     `
