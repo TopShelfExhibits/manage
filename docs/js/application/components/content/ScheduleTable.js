@@ -85,9 +85,10 @@ export const ScheduleTableComponent = {
             type: Object,
             default: null
         },
-        hideRowsOnSearch: {
-            type: Boolean,
-            default: true
+        // View patches (e.g. a picker that hides non-matching rows: { table: { hideRowsOnSearch: true } })
+        patches: {
+            type: Array,
+            default: () => []
         },
         templateName: {
             type: String,
@@ -577,7 +578,7 @@ export const ScheduleTableComponent = {
             :loading-message="loadingMessage"
             :show-search="true"
             :sync-search-with-url="true"
-            :hide-rows-on-search="hideRowsOnSearch"
+            :patches="patches"
             @refresh="handleRefresh"
         >
             <template #header-area>

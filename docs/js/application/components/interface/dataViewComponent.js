@@ -1,6 +1,7 @@
 import { html, NavigationRegistry, TableComponent, CalendarComponent, CardsComponent } from '../../index.js';
-import { resolveView, resolveAction, pickView, devWarn, searchTiers } from '../../utils/views/resolveView.js';
-import { rowsToCards, bucketRowsToCards } from '../../utils/views/cardsAdapter.js';
+import { resolveView, resolveAction, pickView, devWarn } from '../../utils/views/resolveView.js';
+import { searchWords, makeHighlighter } from '../../utils/views/searchMatch.js';
+import { formatText } from '../../utils/views/fieldFormat.js';
 import { useContainerSize } from '../../utils/useContainerSize.js';
 import { RowDetailsModal } from './rowDetailsComponent.js';
 import { useInstantEdits, INSTANT_WRITE_DELAY_MS } from '../../utils/cellEdits.js';
@@ -13,7 +14,8 @@ const REMOVED_PRESENTATION_PROPS = [
     'columns', 'hideColumns', 'hide-columns', 'viewModes', 'view-modes', 'chipColorClass', 'chip-color-class',
     'chipActions', 'chip-actions', 'onItemClick', 'on-item-click', 'items', 'defaultSortColumn', 'default-sort-column',
     'defaultSortDirection', 'default-sort-direction', 'theme', 'allowDetails', 'allow-details', 'onEventClick',
-    'eventStartColumn', 'event-start-column', 'eventEndColumn', 'event-end-column', 'rowClass', 'row-class'
+    'eventStartColumn', 'event-start-column', 'eventEndColumn', 'event-end-column', 'rowClass', 'row-class',
+    'sortColumns', 'sort-columns', 'hideRowsOnSearch', 'hide-rows-on-search'
 ];
 
 /**
@@ -26,11 +28,13 @@ const REMOVED_PRESENTATION_PROPS = [
  *   action     ActionDef { to(row) | run(row), label, icon, disabled(row) }
  *   decorations(row, key) → Card[] with decorationKeys (the keys the page decorates)
  *   editMode   'none' | 'batch' | 'instant'
- *   patches    ViewPatch[] (customization input)
+ *   patches    ViewPatch[] (customization input, e.g. a page that searches by hiding rows)
  *   printing   applies the view's print variant
+ *   bucket*    hooks for bucket cards (cards.bucketBy)
  *
  * DataView picks the view (?view=, legacy ?layout=, registry default; a fixed `viewId` for modals),
- * resolves it, resolves the primary action, and renders the renderer for the view's layout.
+ * resolves it, resolves the primary action, and renders the renderer for the view's layout. Every
+ * renderer takes the same input: resolved, rows (as data), action, decorations.
  * Everything else ($attrs: loading state, search options, listeners) and every slot is forwarded.
  *
  * Size: the container tier of the nearest size container (useContainerSize, same thresholds as
@@ -127,7 +131,7 @@ export const DataView = {
             return this.resolved.layout;
         },
         resolvedAction() {
-            const base = resolveAction(this.action, this.resolved, this.editMode, { hasRowDetails: !!(this.$slots['row-details'] || this.$slots['row-detail-rows']) });
+            const base = resolveAction(this.action, this.resolved, { hasRowDetails: !!(this.$slots['row-details'] || this.$slots['row-detail-rows']) });
             return { ...base, perform: (row, ctx) => this.performAction(base, row, ctx) };
         },
         viewSelect() {
@@ -140,43 +144,6 @@ export const DataView = {
                 containerPath: this.containerPath,
                 navigateToPath: this.navigateToPath
             };
-        },
-        sortKey() {
-            const sort = this.resolved.sort;
-            if (Array.isArray(sort)) return sort.map(s => ({ key: s.key, direction: s.dir === 'desc' ? 'desc' : 'asc' }));
-            return sort?.key || null;
-        },
-        // ── Cards layout ─────────────────────────────────────────────────────
-        cardModels() {
-            if (this.layout !== 'cards') return [];
-            const r = this.resolved;
-            if (r.cards?.bucketBy) {
-                return bucketRowsToCards(this.rowsView, r, {
-                    bucketKeys: this.bucketKeys,
-                    bucketDecorations: this.bucketDecorations,
-                    bucketLabel: this.bucketLabel,
-                    bucketAppData: this.bucketAppData
-                });
-            }
-            return rowsToCards(this.rowsView, r, { decorations: this.decorations, decorationKeys: this.decorationKeys });
-        },
-        cardSearchTiers() {
-            return searchTiers(this.resolved);
-        },
-        fieldLabels() {
-            const out = {};
-            for (const f of this.resolved.fields) out[f.key] = f.label ?? f.key;
-            return out;
-        },
-        cardSortColumns() {
-            const r = this.resolved;
-            if (r.cards?.bucketBy) return [{ key: 'title', label: r.fieldMap.get(r.cards.bucketBy)?.label || 'Title', type: 'string', sortable: true }];
-            return r.fields
-                .filter(f => f.sortable && !r.hidden.has(f.key))
-                .map(f => ({ key: f.key, label: f.label ?? f.key, type: f.type || null, sortable: true }));
-        },
-        sortDir() {
-            return this.resolved.sort?.dir === 'desc' ? 'desc' : 'asc';
         },
         // Structural class from the view, plus the full-width container mode (view.fullWidth)
         rendererClass() {
@@ -234,6 +201,9 @@ export const DataView = {
             const title = this.detailsTitle
                 ? this.detailsTitle(row)
                 : (shownFields.map(f => row[f.key]).find(v => v != null && v !== '' && typeof v !== 'object') || 'Details');
+            // The renderer's search carries into the modal: its values are highlighted the same way
+            const words = searchWords(ctx.searchTerm);
+            const highlighter = words.length ? makeHighlighter(words) : null;
             this.$modal.custom(RowDetailsModal, {
                 row,
                 fields,
@@ -242,6 +212,7 @@ export const DataView = {
                 rowDetails: rowDetailsSlot ? (scope) => rowDetailsSlot(scope) : null,
                 cellSlot: this.$slots.cell || null,
                 searchTerm: ctx.searchTerm || '',
+                highlight: highlighter ? (value, field) => highlighter(formatText(value, field)) : null,
                 theme: r.theme,
                 size: 'page'
             }, String(title));
@@ -264,7 +235,6 @@ export const DataView = {
             :decorations="decorations"
             :decoration-keys="decorationKeys"
             :view-select="viewSelect"
-            :hide-rows-on-search="resolved.table?.hideRowsOnSearch ?? $attrs.hideRowsOnSearch ?? $attrs['hide-rows-on-search'] ?? true"
             :container-path="containerPath"
             :navigate-to-path="navigateToPath"
         >
@@ -291,17 +261,16 @@ export const DataView = {
             key="dataview-cards"
             v-bind="$attrs"
             :class="rendererClass"
-            :theme="resolved.theme"
-            :cards="cardModels"
+            :resolved="resolved"
+            :data="rowsView"
             :action="resolvedAction"
-            :search-tiers="cardSearchTiers"
-            :field-labels="fieldLabels"
+            :decorations="decorations"
+            :decoration-keys="decorationKeys"
+            :bucket-keys="bucketKeys"
+            :bucket-decorations="bucketDecorations"
+            :bucket-label="bucketLabel"
+            :bucket-app-data="bucketAppData"
             :view-select="viewSelect"
-            :sort-columns="$attrs.sortColumns || $attrs['sort-columns'] || cardSortColumns"
-            :default-sort-column="sortKey"
-            :default-sort-direction="sortDir"
-            :hide-cards-on-search="resolved.cards?.hideOnSearch !== false"
-            :show-header="$attrs.showHeader ?? $attrs['show-header'] ?? true"
             :container-path="containerPath"
             :navigate-to-path="navigateToPath"
         >

@@ -79,7 +79,7 @@ export const ShowInventoryReport = {
                         minQty: { color: 'auto' },
                         'show_*': { width: 1, font: 'narrow', columnColor: 'striped gray' }
                     },
-                    table: { sticky: { start: ['image'] } }
+                    table: { sticky: { start: ['image'] }, hideRowsOnSearch: false }
                 }]
             };
         },
@@ -339,7 +339,6 @@ export const ShowInventoryReport = {
                 :sync-search-with-url="true"
                 :container-path="containerPath || 'reports/show-usage'"
                 :navigate-to-path="navigateToPath"
-                :hide-rows-on-search="false"
                 :is-loading="isLoading"
                 :is-analyzing="isAnalyzing"
                 :loading-message="loadingMessage"

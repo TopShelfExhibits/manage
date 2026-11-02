@@ -1,6 +1,6 @@
 # Views System & Unified Renderers: Refactor Plan
 
-**Status:** revision 9, decisions applied; Phases 0–6 implemented on `views-system` (uncommitted, awaiting manual testing) · **Branch:** `views-system` · **Date:** 2026-10-30
+**Status:** revision 9, decisions applied; Phases 0–6 implemented and committed on `views-system`, awaiting manual testing · **Branch:** `views-system` · **Date:** 2026-11-02
 
 ## Implementation status (2026-10-30)
 
@@ -25,7 +25,10 @@ All six phases are implemented in the working tree. The in-browser suite passes 
 - Fields may carry `cellOptions` (e.g. which key holds the item number for the image cell) and `format: 'multiline'`.
 - The calendar skips table group-master rows, so ItemReport uses one row set for both views.
 - PacklistTable resolves its views directly (no DataView), per C3.
-- The renderer contract keeps individual state props (`isLoading`, `error`, …) instead of one `state` object; cards keep `theme` and default-sort props, set only by DataView.
+- The renderer contract keeps individual state props (`isLoading`, `error`, …) instead of one `state` object. Every renderer (table, calendar, cards) takes `resolved`, `data`, `action` and decorations; cards build their cards with the adapter themselves.
+- `resolved.sort` is always a list of `{ key, direction }`. Whether search hides rows is view data only (`table.hideRowsOnSearch`); a page that needs a different default passes a patch.
+- Search highlighting and HTML escaping each have one implementation: `searchMatch.makeHighlighter` and `fieldFormat.escapeHtml`. Decoration placement lives in `views/decorations.js`.
+- Batch edits match rows to loaded rows by `rowKey` everywhere; rows added, removed or moved mark the table changed without marking cells.
 - `Requests.getInventoryHiddenSearchData` was removed (D7); category cards search the item rows.
 
 ## Purpose

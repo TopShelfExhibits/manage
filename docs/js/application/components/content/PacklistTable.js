@@ -144,6 +144,7 @@ const PACKLIST_ITEMS_VIEW = {
     id: 'packlist-items',
     layout: 'table',
     hidden: ['Pack', 'Check', 'Extracted Item', 'Extracted Qty'],
+    table: { hideRowsOnSearch: false },
     style: {
         '*': { width: 40, font: 'narrow' },
         'Description': { width: 200, font: '' },
@@ -151,6 +152,10 @@ const PACKLIST_ITEMS_VIEW = {
     },
     variants: { print: { hidden: ['Extracted Item', 'Extracted Qty'] } }
 };
+
+// Editable headers; edits apply only while the page is in edit mode (tableEditMode 'batch')
+const CRATE_EDITABLE = ['Type', 'L', 'W', 'H', 'Weight'];
+const ITEM_EDITABLE = ['Description', 'Packing/shop notes'];
 
 // Width/font by header for the crates table (structural class packlist-table, R3.6)
 function crateColumnStyle(label) {
@@ -184,12 +189,8 @@ export const PacklistTable = {
     computed: {
         // Items view resolved once (print variant while printing); shared by all crates
         itemsResolved() {
-            const fields = this.itemHeaders.map(label => ({
-                key: label,
-                label,
-                editable: this.editMode && ['Description', 'Packing/shop notes'].includes(label)
-            }));
-            return resolveView(fields, PACKLIST_ITEMS_VIEW, { print: this.isPrinting, editMode: this.editMode ? 'batch' : 'none' });
+            const fields = this.itemHeaders.map(key => ({ key, label: key, editable: ITEM_EDITABLE.includes(key) }));
+            return resolveView(fields, PACKLIST_ITEMS_VIEW, { print: this.isPrinting, editMode: this.tableEditMode });
         },
         tableEditMode() {
             return this.editMode ? 'batch' : 'none';
@@ -198,22 +199,29 @@ export const PacklistTable = {
         hiddenColumns() {
             return this.itemHeaders.filter(k => this.itemsResolved.hidden.has(k));
         },
-        // Crates view: the sheet's crate headers, in sheet order
+        // Crates view: the sheet's crate headers, in sheet order. Piece # and the nested item table
+        // are page cells (#cell); the item table's cell spans the item headers after it.
         cratesResolved() {
-            // Piece # and the nested item table are page cells (#cell); the rest are plain values
-            const fields = this.mainColumns.map(c => ({
-                key: c.key, label: c.label, editable: !!c.editable, isIndex: c.isIndex, colspan: c.colspan,
-                cell: (c.isIndex || c.key === this.itemHeadersStart) ? 'slot' : undefined
-            }));
+            const fields = this.mainHeaders.map(key => {
+                const isIndex = key === 'Piece #';
+                const isItems = key === this.itemHeadersStart;
+                return {
+                    key, label: key, isIndex,
+                    editable: CRATE_EDITABLE.includes(key),
+                    colspan: isItems ? this.itemHeaders.length : undefined,
+                    cell: (isIndex || isItems) ? 'slot' : undefined
+                };
+            });
             const style = {};
-            for (const c of this.mainColumns) style[c.key] = crateColumnStyle(c.key);
+            for (const key of this.mainHeaders) style[key] = crateColumnStyle(key);
             return resolveView(fields, {
                 id: 'packlist-crates',
                 layout: 'table',
                 className: 'packlist-table',
-                columns: this.mainColumns.map(c => c.key),
-                style
-            }, { editMode: this.editMode ? 'batch' : 'none' });
+                columns: this.mainHeaders,
+                style,
+                table: { hideRowsOnSearch: false }
+            }, { editMode: this.tableEditMode });
         },
         mainHeaders() {
             // Use headers from the first crate if available, else use default schema
@@ -228,32 +236,6 @@ export const PacklistTable = {
             }
             // Default schema when no data is available
             return ['Piece #', 'Type', 'L', 'W', 'H', 'Weight', 'Pack', 'Check', 'Description', 'Packing/shop notes'];
-        },
-        mainColumns() {
-            return this.mainHeaders.map((label, idx) => {
-                if (label === 'Piece #') {
-                    return { key: label, label, editable: false, isIndex: true };
-                }
-                // Only make columns editable if editMode is true
-                const isEditable = this.editMode && ['Type','L','W','H','Weight'].includes(label);
-
-                // When not in edit mode, move Type, L, W, H, Weight to details
-                //const isDetailsColumn = !this.editMode && ['Type','L','W','H','Weight'].includes(label);
-
-                if (label === this.itemHeadersStart) {
-                    return {
-                        key: label,
-                        label,
-                        colspan: this.itemHeaders.length
-                    };
-                } else {
-                    return {
-                        key: label,
-                        label,
-                        editable: isEditable
-                    };
-                };
-            });
         },
         mainTableData() {
             // Use the reactive array directly from the store
@@ -1455,7 +1437,6 @@ export const PacklistTable = {
                     :sync-search-with-url="true"
                     :container-path="containerPath || 'packlist/' + tabName"
                     :navigate-to-path="(path) => $emit('navigate-to-path', path)"
-                    :hideRowsOnSearch="false"
                     :emptyMessage="'No crates'"
                     :draggable="editMode"
                     :newRow="editMode"
@@ -1465,7 +1446,6 @@ export const PacklistTable = {
                     :loading-progress="packlistTableStore && packlistTableStore.isAnalyzing ? packlistTableStore.analysisProgress : -1"
                     :loading-message="loadingMessage"
                     :drag-id="'packlist-crates'"
-                    :drag-label="'Crates'"
                     :hide-group-members="true"
                     @refresh="handleRefresh"
                     @cell-edit="handleCellEdit"
@@ -1548,10 +1528,8 @@ export const PacklistTable = {
                                 :showHeader="false"
                                 :isLoading="isLoading"
                                 :drag-id="'packlist-items'"
-                                :drag-label="'Items'"
                                 :parent-search-value="$refs.mainTableComponent?.search?.debouncedValue?.value || ''"
                                 :showSearch="true"
-                                :hideRowsOnSearch="false"
                                 :showSelectionBubble="editMode"
                                 @cell-edit="(itemRowIdx, itemColKey, value) => { row.Items[itemRowIdx][itemColKey] = value; }"
                                 @new-row="(positionData) => { handleAddItem(rowIndex, positionData); }"

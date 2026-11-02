@@ -33,7 +33,7 @@ import { isCheckedValue } from '../data_management/utils/checkbox-values.js';
 import { useBatchEdits, useInstantEdits } from '../application/utils/cellEdits.js';
 import { CacheInvalidationBus, ApplicationUtils, ProductionUtils, triggerCachePoll } from '../data_management/index.js';
 import { resolveView, resolveAction, pickView, mergeView, matchesKeyPattern, setViewWarningHandler } from '../application/utils/views/resolveView.js';
-import { SEARCH_LIMITS, searchWords, matchRow, matchRows } from '../application/utils/views/searchMatch.js';
+import { SEARCH_LIMITS, searchWords, matchRow, matchRows, makeHighlighter } from '../application/utils/views/searchMatch.js';
 import { formatValue, formatText } from '../application/utils/views/fieldFormat.js';
 import { rowsToCards, bucketRowsToCards } from '../application/utils/views/cardsAdapter.js';
 import { applyColorRule, colorFor, rowColorFor } from '../application/utils/views/viewColor.js';
@@ -1661,7 +1661,7 @@ test('VIEWS ACTION', 'page action wins, then details, then none', async () => {
     assertEqual(resolveAction(null, r).kind, 'details', 'details');
     const { result: noDetails } = withViewWarnings(() => resolveView([{ key: 'a' }], { id: 'n', layout: 'table', columns: ['a'] }));
     assertEqual(resolveAction(null, noDetails).kind, 'none', 'none');
-    assertEqual(resolveAction(null, noDetails, 'none', { hasRowDetails: true }).kind, 'details', 'row-details slot');
+    assertEqual(resolveAction(null, noDetails, { hasRowDetails: true }).kind, 'details', 'row-details slot');
 });
 
 test('VIEWS ACTION', 'both to and run → to, with a warning', async () => {
@@ -1669,6 +1669,13 @@ test('VIEWS ACTION', 'both to and run → to, with a warning', async () => {
     const { result: a, warnings } = withViewWarnings(() => resolveAction({ to: () => 'x', run: () => {} }, r));
     assertEqual(a.kind, 'navigate', 'to wins');
     if (!warnings.length) throw new Error('expected warning');
+});
+
+test('VIEWS SEARCH', 'makeHighlighter escapes, wraps matches and merges overlaps', async () => {
+    const h = makeHighlighter(['ab', 'bc']);
+    assertEqual(h('xABCx <b>'), 'x<span class="search-match">ABC</span>x &lt;b&gt;', 'merged, case-insensitive, escaped');
+    assertEqual([makeHighlighter([])('<i>'), h(null), h(0)], ['&lt;i&gt;', '', '0'], 'no words only escapes');
+    assertEqual(makeHighlighter(['a.b'])('a.b axb'), '<span class="search-match">a.b</span> axb', 'regex characters are literal');
 });
 
 test('VIEWS SEARCH', 'searchWords drops words shorter than 2 characters', async () => {

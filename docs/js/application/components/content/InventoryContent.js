@@ -479,7 +479,6 @@ export const InventoryContent = {
                 :show-refresh="isCategoriesView"
                 :show-search="true"
                 :sync-search-with-url="true"
-                :show-header="true"
                 :show-footer="true"
                 :empty-message="isCategoriesView ? 'No categories available' : 'No inventory items found across all categories'"
                 @refresh="handleRefresh"

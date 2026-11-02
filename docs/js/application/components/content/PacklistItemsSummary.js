@@ -23,7 +23,7 @@ const SUMMARY_VIEWS = {
         columns: ['image', 'itemId', 'quantity', 'available', 'remaining', 'overlappingShows'],
         hidden: ['tabName'],
         style: { image: { width: 1 }, remaining: { color: 'auto' }, overlappingShows: { columnColor: 'gray' } },
-        table: { sticky: { start: ['image'] } }
+        table: { sticky: { start: ['image'] }, hideRowsOnSearch: false }
     }]
 };
 
@@ -236,7 +236,6 @@ export const PacklistItemsSummary = {
                 :sync-search-with-url="true"
                 :container-path="containerPath || 'packlist/' + projectIdentifier + '/details'"
                 :navigate-to-path="appContext.navigateToPath"
-                :hide-rows-on-search="false"
                 :is-loading="itemsSummaryStore ? itemsSummaryStore.isLoading : false"
                 :is-analyzing="itemsSummaryStore ? itemsSummaryStore.isAnalyzing : false"
                 :loading-message="itemsSummaryStore && itemsSummaryStore.isLoading ? itemsSummaryStore.analysisMessage.loadingMessage : (itemsSummaryStore ? itemsSummaryStore.analysisMessage : null)"

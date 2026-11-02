@@ -2,7 +2,7 @@
  * Views engine (§4.2–§4.4, §4.8, §4.15).
  *
  *   resolveView(fields, view, { size, print, patches, editMode }) → ResolvedView   (pure)
- *   resolveAction(actionDef, resolved, editMode, { hasRowDetails })  → ResolvedAction (pure)
+ *   resolveAction(actionDef, resolved, { hasRowDetails })            → ResolvedAction (pure)
  * Renderers read the ResolvedView directly (Phase 5 renderer contract, §4.4).
  *
  * Fields describe what the data is (FieldDef). Views describe presentation (ViewDef).
@@ -37,10 +37,10 @@ export function devWarn(msg) {
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-export const ALWAYS_HIDDEN = Object.freeze(['AppData', 'EditHistory', 'MetaData']);
+const ALWAYS_HIDDEN = Object.freeze(['AppData', 'EditHistory', 'MetaData']);
 
 /** Presentation properties that belong to views, not fields (§4.1). Ignored, with a dev warning. */
-export const LEGACY_FIELD_PROPS = Object.freeze([
+const LEGACY_FIELD_PROPS = Object.freeze([
     'width', 'font', 'autoColor', 'cellClass', 'columnClass', 'allowHide', 'details',
     'stackUnder', 'sticky', 'firstRow', 'secondRow', 'whenSmall'
 ]);
@@ -116,8 +116,15 @@ function normalizeSlots(columns, fieldKeys) {
     return slots;
 }
 
+/** The view's sort ({ key, dir } or a list of them) as [{ key, direction: 'asc'|'desc' }]. */
+function normalizeSort(sort) {
+    return (Array.isArray(sort) ? sort : [sort])
+        .filter(s => s && typeof s.key === 'string' && s.key)
+        .map(s => ({ key: s.key, direction: s.dir === 'desc' ? 'desc' : 'asc' }));
+}
+
 /** Apply medium / narrow / print variants in cascade order. */
-export function applyVariants(view, size = 'wide', print = false) {
+function applyVariants(view, size = 'wide', print = false) {
     const { variants, ...base } = view || {};
     let out = base;
     if (variants) {
@@ -129,7 +136,7 @@ export function applyVariants(view, size = 'wide', print = false) {
 }
 
 /** Apply component patches (§4.15) whose sizes include `size` (omitted sizes = all sizes). */
-export function applyPatches(view, patches = [], size = 'wide') {
+function applyPatches(view, patches = [], size = 'wide') {
     let out = view;
     for (const p of patches || []) {
         if (!p || !p.patch) continue;
@@ -307,15 +314,11 @@ export function resolveView(fields, view, opts = {}) {
         if (c.bucketBy && !known(c.bucketBy)) warnUnknown('cards.bucketBy', c.bucketBy);
     }
 
-    // 5. Trigger (edit-mode rule)
+    // 5. Trigger (edit-mode rule: a table being edited can't use the whole row as its trigger)
     let trigger = v.action === 'row' ? 'row' : 'button';
     if (trigger === 'row' && editMode !== 'none') {
         devWarn(`view "${viewId}": action 'row' is not allowed with editMode '${editMode}'; using 'button'`);
         trigger = 'button';
-    }
-    if (editMode === 'none') {
-        const editable = fieldKeys.filter(k => fieldMap.get(k).editable);
-        if (editable.length) devWarn(`view "${viewId}": editable fields ignored with editMode 'none': ${editable.join(', ')}`);
     }
 
     // 6. Output
@@ -343,7 +346,7 @@ export function resolveView(fields, view, opts = {}) {
         hidden,
         tier,
         rowColor: v.rowColor || null,
-        sort: v.sort || null,
+        sort: normalizeSort(v.sort),
         table,
         calendar,
         cards,
@@ -371,15 +374,14 @@ export function resolveView(fields, view, opts = {}) {
 
 /**
  * Pick the row's one primary action (§4.8): page action, else details, else none.
+ * The trigger is the resolved view's (resolveView applies the edit-mode rule).
  * @param {Object} [actionDef]  { to, run, label, icon, disabled }
  * @param {Object} resolved     ResolvedView
- * @param {string} [editMode]
  * @param {{ hasRowDetails?: boolean }} [opts] hasRowDetails: the page supplies a #row-details slot
  * @returns {ResolvedAction}
  */
-export function resolveAction(actionDef, resolved, editMode = resolved?.editMode || 'none', opts = {}) {
-    let trigger = resolved?.trigger === 'row' ? 'row' : 'button';
-    if (trigger === 'row' && editMode !== 'none') trigger = 'button';
+export function resolveAction(actionDef, resolved, opts = {}) {
+    const trigger = resolved?.trigger === 'row' ? 'row' : 'button';
     const def = actionDef || {};
     const disabled = typeof def.disabled === 'function' ? def.disabled : null;
 

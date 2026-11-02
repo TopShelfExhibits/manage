@@ -1,64 +1,28 @@
 import {html} from '../index.js';
-import { searchWords as toSearchWords, matchRow } from './views/searchMatch.js';
+import { searchWords as toSearchWords, makeHighlighter } from './views/searchMatch.js';
 
 /**
  * useSearch - Vue 3 Composable for Search Functionality
- * 
- * Provides reusable search functionality with:
- * - Text highlighting with multi-word support
- * - Row filtering with AND/OR logic
- * - URL parameter synchronization
- * - XSS-safe HTML escaping
- * 
+ *
+ * Provides the search box state for one renderer: the debounced term and its effective words
+ * (searchMatch.searchWords), highlighting through the shared highlighter, the active result
+ * index, and URL parameter synchronization. Matching itself is searchMatch.matchRows.
+ *
  * @example
  * const search = useSearch({
- *     formatValue: formatCellValue,
  *     syncWithUrl: true,
  *     navigationRegistry: NavigationRegistry,
  *     containerPath: '/inventory',
  *     appContext: { currentPath: '/inventory?tab=items' }
  * });
- * 
+ *
  * // In template
  * <input v-model="search.searchValue.value" />
- * <span v-html="search.highlightText(cellValue, column)"></span>
+ * <span v-html="search.highlightRawText(text)"></span>
  */
 
-/**
- * Split search term into individual words
- * @param {String} searchTerm - The search term to split
- * @returns {Array} Array of words
- */
 /** Delay between the last keystroke and the search being applied to rows */
 export const SEARCH_DEBOUNCE_MS = 150;
-
-function splitSearchTerms(searchTerm) {
-    if (!searchTerm || typeof searchTerm !== 'string') return [];
-    return searchTerm.trim().split(/\s+/).filter(word => word.length > 0);
-}
-
-/**
- * Escape HTML special characters to prevent XSS
- * @param {String} text - Text to escape
- * @returns {String} Escaped text
- */
-function escapeHtml(text) {
-    return String(text)
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#039;');
-}
-
-/**
- * Escape regex special characters
- * @param {String} text - Text to escape
- * @returns {String} Escaped text safe for regex
- */
-function escapeRegex(text) {
-    return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
 
 function getFocusedSearchInput() {
     const active = document.activeElement;
@@ -103,7 +67,6 @@ function restoreSearchInputFocusStateWithRetry(state) {
 /**
  * Create a search composable
  * @param {Object} options - Configuration options
- * @param {Function} options.formatValue - Optional value formatter function(value, column)
  * @param {Boolean} options.syncWithUrl - Enable URL parameter synchronization
  * @param {Object} options.navigationRegistry - Navigation registry for URL sync
  * @param {String} options.containerPath - Container path for URL sync
@@ -112,7 +75,6 @@ function restoreSearchInputFocusStateWithRetry(state) {
  */
 export function useSearch(options = {}) {
     const {
-        formatValue = null,
         syncWithUrl = false,
         navigationRegistry = null,
         containerPath = null,
@@ -153,89 +115,16 @@ export function useSearch(options = {}) {
 
     const searchIndex = Vue.ref(null); // 1-based index of active search result, null = nothing selected
 
-    /**
-     * Core highlighting logic - processes a string and returns HTML with highlights
-     * @param {String} text - The text to highlight
-     * @param {Array} words - Array of search words
-     * @returns {String} HTML with highlighted matches
-     */
-    function applyHighlighting(text, words) {
-        if (!text || !words || words.length === 0) {
-            return escapeHtml(text || '');
-        }
-
-        const stringValue = String(text);
-        
-        // Collect all match positions for all search words
-        const matches = [];
-        words.forEach(word => {
-            const escapedSearchWord = escapeRegex(word);
-            const regex = new RegExp(escapedSearchWord, 'gi');
-            let match;
-            while ((match = regex.exec(stringValue)) !== null) {
-                matches.push({
-                    start: match.index,
-                    end: match.index + match[0].length,
-                    text: match[0]
-                });
-            }
-        });
-        
-        // Sort matches by start position
-        matches.sort((a, b) => a.start - b.start);
-        
-        // Merge overlapping matches
-        const merged = [];
-        for (const match of matches) {
-            if (merged.length === 0) {
-                merged.push(match);
-            } else {
-                const last = merged[merged.length - 1];
-                if (match.start <= last.end) {
-                    // Overlapping or adjacent - merge them
-                    last.end = Math.max(last.end, match.end);
-                    last.text = stringValue.substring(last.start, last.end);
-                } else {
-                    merged.push(match);
-                }
-            }
-        }
-        
-        // Build the final string with highlights, escaping HTML as we go
-        let result = '';
-        let lastIndex = 0;
-        
-        for (const match of merged) {
-            // Add the non-matching part before this match (escaped)
-            const beforeMatch = stringValue.substring(lastIndex, match.start);
-            result += escapeHtml(beforeMatch);
-            
-            // Add the matching part with highlight (escaped)
-            const matchText = escapeHtml(match.text);
-            result += `<span class="search-match">${matchText}</span>`;
-            
-            lastIndex = match.end;
-        }
-        
-        // Add any remaining text after the last match (escaped)
-        const afterMatch = stringValue.substring(lastIndex);
-        result += escapeHtml(afterMatch);
-        
-        return result;
-    }
+    // The shared highlighter (searchMatch.makeHighlighter), rebuilt only when the words change
+    const highlighter = Vue.computed(() => makeHighlighter(searchWords.value));
 
     /**
-     * Highlight search terms in raw text (without formatting)
-     * Useful for highlighting pre-formatted or HTML content
+     * Highlight search terms in plain text
      * @param {String} text - The text to highlight
-     * @returns {String} HTML string with highlighted matches
+     * @returns {String} Escaped HTML with highlighted matches
      */
     function highlightRawText(text) {
-        if (!hasActiveSearch.value || !text) {
-            return escapeHtml(text || '');
-        }
-        
-        return applyHighlighting(text, searchWords.value);
+        return highlighter.value(text);
     }
 
     /**
@@ -248,78 +137,16 @@ export function useSearch(options = {}) {
         if (!hasActiveSearch.value || !htmlContent) {
             return htmlContent || '';
         }
-        
-        // Replace <br> tags with newline placeholder before stripping HTML
-        // This preserves line breaks through the process
-        const NEWLINE_PLACEHOLDER = '\n';
-        let processedContent = String(htmlContent)
-            .replace(/<br\s*\/?>/gi, NEWLINE_PLACEHOLDER)
-            .replace(/<\/p>/gi, NEWLINE_PLACEHOLDER)
-            .replace(/<\/div>/gi, NEWLINE_PLACEHOLDER)
-            .replace(/<\/li>/gi, NEWLINE_PLACEHOLDER);
-        
-        // Strip HTML tags to get plain text
+        // Line breaks become newlines before the tags are stripped, and <br> again afterwards
+        const processedContent = String(htmlContent)
+            .replace(/<br\s*\/?>/gi, '\n')
+            .replace(/<\/p>/gi, '\n')
+            .replace(/<\/div>/gi, '\n')
+            .replace(/<\/li>/gi, '\n');
         const tempDiv = document.createElement('div');
         tempDiv.innerHTML = processedContent;
         const plainText = tempDiv.textContent || tempDiv.innerText || '';
-        
-        // Apply highlighting to plain text (this escapes HTML including newlines)
-        const highlighted = applyHighlighting(plainText, searchWords.value);
-        
-        // Convert newlines back to <br> tags
-        // Need to be careful not to break the search-match spans
-        return highlighted.replace(/\n/g, '<br>');
-    }
-
-    /**
-     * Highlight search terms in text with HTML spans
-     * @param {*} value - The value to highlight
-     * @param {Object} column - Column definition (for formatting)
-     * @returns {String} HTML string with highlighted matches
-     */
-    function highlightText(value, column = null) {
-        // First format the value if formatter provided
-        const formattedValue = formatValue && column ? formatValue(value, column) : value;
-        
-        // If no search value or empty formatted value, return as-is
-        if (!hasActiveSearch.value || !formattedValue) {
-            return formattedValue;
-        }
-        
-        return applyHighlighting(formattedValue, searchWords.value);
-    }
-
-    /**
-     * Check if a value contains any search terms (OR logic)
-     * @param {*} value - Value to check
-     * @param {Object} column - Column definition (for formatting)
-     * @returns {Boolean} True if any search word matches
-     */
-    function hasMatch(value, column = null) {
-        if (!hasActiveSearch.value) {
-            return false;
-        }
-        
-        const formattedValue = formatValue && column ? formatValue(value, column) : value;
-        if (!formattedValue) return false;
-        
-        const formattedLower = String(formattedValue).toLowerCase();
-        
-        // Check if any search word matches (OR logic for highlighting indication)
-        return searchWords.value.some(word => formattedLower.includes(word.toLowerCase()));
-    }
-
-    /**
-     * Check if a row matches search terms (AND logic)
-     * @param {Object} row - Row data object
-     * @param {Array} visibleColumns - Array of column definitions to search
-     * @returns {Boolean} True if all search words match somewhere in the row
-     */
-    function matchesRow(row, visibleColumns) {
-        if (!hasActiveSearch.value) return true;
-        if (!row) return false;
-        // Wraps the shared matcher (AND across words)
-        return matchRow(row, { shown: (visibleColumns || []).map(c => c.key), details: [] }, searchWords.value).matched;
+        return highlighter.value(plainText).replace(/\n/g, '<br>');
     }
 
     /**
@@ -497,23 +324,16 @@ export function useSearch(options = {}) {
         searchWords,
         hasActiveSearch,
         searchIndex,
-        
+
         // Methods
-        highlightText,
         highlightRawText,
         highlightHtmlContent,
-        hasMatch,
-        matchesRow,
         clearSearch,
         setSearchIndex,
         handleBlur,
         updateUrlParameter,
         initializeFromUrl,
-        setupUrlWatcher,
-        
-        // Utility exports
-        splitSearchTerms,
-        escapeHtml
+        setupUrlWatcher
     };
 }
 

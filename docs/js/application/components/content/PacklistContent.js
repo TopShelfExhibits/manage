@@ -162,7 +162,7 @@ export const PacklistMenuComponent = {
                         <schedule-table
                             :filter="dateFilter"
                             :search-params="tableSearchParams"
-                            :hide-rows-on-search="true"
+                            :patches="[{ patch: { table: { hideRowsOnSearch: true } } }]"
                             :template-name="templateName"
                             @navigate-to-path="handleNavigateToPath"
                             @packlist-created="handlePacklistCreated"
@@ -1059,15 +1059,10 @@ export const PacklistContent = {
                 :navigate-to-path="navigateToPath"
                 :action="packlistAction"
                 :decorations="packlistDecorations"
-                :show-header="true"
                 :show-search="true"
                 :show-sort="true"
                 :sync-search-with-url="true"
                 :show-refresh="true"
-                :sort-columns="[
-                    { key: 'title', label: 'Title', type: 'string', sortable: true },
-                    { key: 'shipDate', label: 'Ship Date', type: 'date', sortable: true }
-                ]"
                 :is-loading="isLoading"
                 :is-analyzing="isAnalyzing"
                 :loading-progress="loadingProgress"

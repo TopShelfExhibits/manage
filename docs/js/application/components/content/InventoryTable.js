@@ -870,14 +870,14 @@ export const InventoryTableComponent = {
         };
     },
     computed: {
-        // What each inventory key is; editability follows the page's edit permission (§4.16)
+        // What each inventory key is; edits apply only while the page's edit mode is 'batch' (§4.16)
         fields() {
             return [
                 { key: 'image', labelHtml: '<span class="material-symbols-outlined">imagesmode</span>', label: 'IMG', sortable: false, cell: 'image', cellOptions: { itemKey: 'itemNumber', editable: true } },
                 { key: 'itemNumber', label: 'Item#', type: 'item', sortable: true },
-                { key: 'quantity', label: 'Qty', format: 'number', type: 'number', editable: this.allowEdit, sortable: true },
-                { key: 'description', label: 'Description (visible in pack lists)', editable: this.allowEdit, sortable: true },
-                { key: 'notes', label: 'Notes (internal only)', editable: this.allowEdit, sortable: false },
+                { key: 'quantity', label: 'Qty', format: 'number', type: 'number', editable: true, sortable: true },
+                { key: 'description', label: 'Description (visible in pack lists)', editable: true, sortable: true },
+                { key: 'notes', label: 'Notes (internal only)', editable: true, sortable: false },
                 {
                     key: '_navigate', labelHtml: '<span class="material-symbols-outlined">calendar_month</span>', label: '', sortable: false,
                     cell: 'navigate',
@@ -899,61 +899,6 @@ export const InventoryTableComponent = {
         },
         editModeName() {
             return this.allowEdit ? 'batch' : 'none';
-        },
-        columns() {
-            // Legacy column list (kept for helpers that read column keys)
-            const cols = [
-                { 
-                    key: 'image', 
-                    labelHtml: '<span class="material-symbols-outlined">imagesmode</span>',
-                    label: 'IMG',
-                    width: 1,
-                    sortable: false,
-                    sticky: 'start'
-                },
-                { 
-                    key: 'itemNumber', 
-                    label: 'Item#',
-                    type: 'item',
-                    width: 120,
-                    sortable: true
-                },
-                { 
-                    key: 'quantity', 
-                    label: 'Qty',
-                    format: 'number',
-                    editable: this.allowEdit,
-                    autoColor: false,
-                    width: 120,
-                    sortable: true
-                },
-                { 
-                    key: 'description', 
-                    label: 'Description (visible in pack lists)',
-                    editable: this.allowEdit,
-                    sortable: true
-                },
-                { 
-                    key: 'notes', 
-                    label: 'Notes (internal only)',
-                    editable: this.allowEdit,
-                    sortable: false
-                },
-                {
-                    key: '_navigate',
-                    labelHtml: '<span class="material-symbols-outlined">calendar_month</span>',
-                    label: '',
-                    width: 36,
-                    sortable: false,
-                    sticky: 'end'
-                }
-            ];
-            // Apply column filters based on metadata flags
-            return cols.filter(c => {
-                if (this.tabMetaFlags.hideQuantity && c.key === 'quantity') return false;
-                if (this.tabMetaFlags.hideItemNumber && c.key === 'itemNumber') return false;
-                return true;
-            });
         },
         tableData() {
             return this.inventoryTableStore ? this.inventoryTableStore.data : [];

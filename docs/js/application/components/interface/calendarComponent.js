@@ -4,7 +4,8 @@ import { useStickyHeader } from '../../utils/useStickyHeader.js';
 import { formatText, escapeHtml } from '../../utils/views/fieldFormat.js';
 import { matchRows } from '../../utils/views/searchMatch.js';
 import { ContentHeaderComponent } from './contentHeaderComponent.js';
-import { CellRenderer, DecorationCards, placeDecorations } from './cells.js';
+import { CellRenderer, DecorationCards } from './cells.js';
+import { placeDecorations } from '../../utils/views/decorations.js';
 import { colorFor, rowColorFor } from '../../utils/views/viewColor.js';
 
 export const CalendarComponent = {
@@ -36,7 +37,6 @@ export const CalendarComponent = {
     emits: ['refresh', 'row-action'],
     setup(props) {
         const search = useSearch({
-            formatValue: null,
             syncWithUrl: props.syncSearchWithUrl,
             navigationRegistry: NavigationRegistry,
             containerPath: props.containerPath,

@@ -1,6 +1,7 @@
 import { html } from '../../utils/template-helpers.js';
 import { NavigationRegistry } from '../../index.js';
 import { isCheckedValue, checkboxWriteValue } from '../../../data_management/utils/checkbox-values.js';
+import { escapeHtml, formatText } from '../../utils/views/fieldFormat.js';
 
 /**
  * Cell registry (views-and-renderers-plan §4.14). A field with `cell: '<name>'` renders through
@@ -61,15 +62,16 @@ const ImageCell = {
     `
 };
 
+// Read-only value as HTML: the renderer's highlighter (which formats and escapes), else escaped text
+function readOnlyHtml(cell) {
+    return cell.highlight ? cell.highlight(cell.value, cell.field) : escapeHtml(cell.value);
+}
+
 const TextCell = {
     name: 'TextCell',
     props: cellProps,
     computed: {
-        html() {
-            if (this.highlight) return this.highlight(this.value, this.field);
-            return this.value == null ? '' : String(this.value)
-                .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-        }
+        html() { return readOnlyHtml(this); }
     },
     template: html`<span :class="field.cellOptions?.class || ''" v-html="html"></span>`
 };
@@ -136,6 +138,7 @@ const SelectCell = {
     props: cellProps,
     computed: {
         current() { return this.value == null ? '' : String(this.value); },
+        readOnly() { return readOnlyHtml(this); },
         options() {
             const list = (this.field.cellOptions?.options || []).map(String);
             if (this.current && !list.some(o => o.trim().toLowerCase() === this.current.trim().toLowerCase())) list.push(this.current);
@@ -150,7 +153,7 @@ const SelectCell = {
     },
     template: html`
         <span v-if="!editable" class="cell-select-text" :title="disabled || ''">
-            <span v-html="highlight ? highlight(value, field) : current"></span>
+            <span v-html="readOnly"></span>
         </span>
         <select v-else class="cell-select" :value="current" @change="change" @click.stop>
             <option value=""></option>
@@ -171,7 +174,8 @@ const EditTextCell = {
     props: cellProps,
     data() { return { draft: null }; },
     computed: {
-        current() { return this.value == null ? '' : String(this.value); }
+        current() { return this.value == null ? '' : String(this.value); },
+        readOnly() { return readOnlyHtml(this); }
     },
     watch: {
         current() { this.syncEditor(); }
@@ -215,7 +219,7 @@ const EditTextCell = {
         }
     },
     template: html`
-        <span v-if="!editable" :title="disabled || ''"><span v-html="highlight ? highlight(value, field) : current"></span></span>
+        <span v-if="!editable" :title="disabled || ''"><span v-html="readOnly"></span></span>
         <div
             v-else
             ref="editor"
@@ -245,7 +249,7 @@ const CELL_REGISTRY = {
  * @param {'full'|'compact'} [density]
  * @returns {Object|null}
  */
-export function cellComponentFor(field, density = 'full') {
+function cellComponentFor(field, density = 'full') {
     if (!field || !field.cell || field.cell === 'slot') return null;
     const entry = CELL_REGISTRY[field.cell];
     if (!entry) return null;
@@ -254,17 +258,11 @@ export function cellComponentFor(field, density = 'full') {
 
 // ── Shared field-value renderer ──────────────────────────────────────────────
 
-function escapeText(text) {
-    return String(text ?? '')
-        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;').replace(/'/g, '&#039;');
-}
-
 /**
  * Renders one field value through the cell pipeline:
  *   registry cell → page #cell slot (field.cell === 'slot') → formatted, highlighted text.
- * Props: row, field, renderer, density, searchTerm, highlight(value, field) → HTML, theme,
- *        cellSlot (the page's #cell slot function, if any), format(value, field) → text,
+ * Props: row, field, renderer, density, searchTerm, highlight(value, field) → HTML (else the value
+ *        is formatted and escaped), theme, cellSlot (the page's #cell slot function, if any),
  *        editable, editMode, commit, disabled (a cell is editable only with a commit and no reason blocking it)
  */
 export const CellRenderer = {
@@ -276,7 +274,6 @@ export const CellRenderer = {
         density: { type: String, default: 'full' },
         searchTerm: { type: String, default: '' },
         highlight: { type: Function, default: null },
-        format: { type: Function, default: null },
         theme: { type: String, default: '' },
         cellSlot: { type: Function, default: null },
         editable: { type: Boolean, default: false },
@@ -298,13 +295,7 @@ export const CellRenderer = {
         if (field.cell === 'slot' && this.cellSlot) {
             return this.cellSlot({ ...(this.cellScope || {}), row, field, value, renderer, density });
         }
-        let text;
-        if (highlight) {
-            text = highlight(value, field);
-        } else {
-            const formatted = this.format ? this.format(value, field) : value;
-            text = escapeText(formatted);
-        }
+        const text = highlight ? highlight(value, field) : escapeHtml(formatText(value, field));
         return h('span', { innerHTML: text == null ? '' : String(text) });
     }
 };
@@ -347,30 +338,3 @@ export const DecorationCards = {
         </template>
     `
 };
-
-/**
- * Split a row's decorations into those placed inline on displayed keys and the rest
- * (row-level cards plus cards for decorated keys the renderer doesn't display).
- * @param {Function|null} decorations  (row, key) → Card[]
- * @param {string[]} decorationKeys    keys the page decorates
- * @param {Object} row
- * @param {Set<string>|string[]} displayedKeys
- * @returns {{ byKey: Map<string, Object[]>, rowLevel: Object[] }}
- */
-export function placeDecorations(decorations, decorationKeys, row, displayedKeys) {
-    const byKey = new Map();
-    const rowLevel = [];
-    if (typeof decorations !== 'function' || !row) return { byKey, rowLevel };
-    const shown = displayedKeys instanceof Set ? displayedKeys : new Set(displayedKeys || []);
-    const safe = (key) => {
-        try { return decorations(row, key) || []; } catch (e) { console.warn('[views] decorations failed', e); return []; }
-    };
-    for (const key of decorationKeys || []) {
-        const cards = safe(key);
-        if (!cards.length) continue;
-        if (shown.has(key)) byKey.set(key, cards);
-        else rowLevel.push(...cards);
-    }
-    rowLevel.push(...safe(null));
-    return { byKey, rowLevel };
-}

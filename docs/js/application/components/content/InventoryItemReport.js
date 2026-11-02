@@ -34,7 +34,7 @@ const ITEM_REPORT_VIEWS = {
                 minQty: { color: 'auto' },
                 overlappingShows: { columnColor: 'gray' }
             },
-            table: { sticky: { start: ['image'] } },
+            table: { sticky: { start: ['image'] }, hideRowsOnSearch: false },
             action: 'row'
         },
         {
@@ -521,7 +521,6 @@ export const InventoryItemReport = {
                 :hide-group-members="false"
                 :show-search="true"
                 :sync-search-with-url="true"
-                :hide-rows-on-search="false"
                 :show-refresh="true"
                 :is-loading="isLoading"
                 :is-analyzing="isAnalyzing"

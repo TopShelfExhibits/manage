@@ -1,6 +1,7 @@
 import { html } from '../../utils/template-helpers.js';
-import { formatValue } from '../../utils/views/fieldFormat.js';
-import { CellRenderer, DecorationCards, placeDecorations } from './cells.js';
+import { hasDisplayValue } from '../../utils/views/fieldFormat.js';
+import { placeDecorations } from '../../utils/views/decorations.js';
+import { CellRenderer, DecorationCards } from './cells.js';
 
 /**
  * RowDetailsComponent — the details grid shared by the table's inline expand and RowDetailsModal.
@@ -26,21 +27,12 @@ export const RowDetailsComponent = {
     computed: {
         gridFields() {
             if (!this.skipEmpty) return this.fields;
-            return this.fields.filter(f => {
-                if (f.cell) return true;
-                const v = this.row[f.key];
-                if (v === null || v === undefined || v === '') return false;
-                if (Array.isArray(v)) return v.length > 0;
-                return typeof v !== 'object';
-            });
+            return this.fields.filter(f => f.cell || hasDisplayValue(this.row[f.key]));
         }
     },
     methods: {
         cardsFor(key) {
             return this.decorationsByKey?.get?.(key) || [];
-        },
-        format(value, field) {
-            return formatValue(value, field);
         }
     },
     template: html`
@@ -56,7 +48,6 @@ export const RowDetailsComponent = {
                             density="full"
                             :search-term="searchTerm"
                             :highlight="highlight"
-                            :format="format"
                             :theme="theme"
                             :cell-slot="cellSlot"
                         />
@@ -102,14 +93,9 @@ export const RowDetailsModal = {
     },
     emits: ['close-modal'],
     computed: {
+        // The keys the grid shows (it skips empty values), so their decorations stay inline
         displayedKeys() {
-            const keys = new Set();
-            for (const f of this.fields) {
-                const v = this.row[f.key];
-                const hasValue = f.cell || (v !== null && v !== undefined && v !== '' && !(Array.isArray(v) && v.length === 0) && (typeof v !== 'object' || Array.isArray(v)));
-                if (hasValue) keys.add(f.key);
-            }
-            return keys;
+            return new Set(this.fields.filter(f => f.cell || hasDisplayValue(this.row[f.key])).map(f => f.key));
         },
         placed() {
             return placeDecorations(this.decorations, this.decorationKeys, this.row, this.displayedKeys);
