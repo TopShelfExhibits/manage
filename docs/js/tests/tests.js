@@ -2130,6 +2130,99 @@ test('INSTANT WRITE', 'sheet health reports duplicate identities, duplicate head
     }
 });
 
+// ── Targeted re-analysis (reactive stores) ───────────────────────────────────
+// An analysis invalidation names one cache key (method + args). The store re-runs only the
+// rows whose analysis produced that key, keeps the old values on screen until the new ones
+// arrive, and doesn't write results equal to the current ones. A test API in the 'api'
+// namespace makes invalidation events fire exactly as they do for real API methods.
+
+const taCalls = {};
+const taValues = {};
+class TargetedAnalysisTestApi {
+    static async __taRows() {
+        return [{ name: 'alpha' }, { name: 'bravo' }, { name: 'charlie' }];
+    }
+    static async __taAnalyze(deps, name) {
+        taCalls[name] = (taCalls[name] || 0) + 1;
+        return { v: taValues[name] ?? `v-${name}` };
+    }
+}
+let taApi = null;
+let taStore = null;
+
+async function taWaitFor(cond, timeoutMs = 4000) {
+    const start = Date.now();
+    while (!cond()) {
+        if (Date.now() - start > timeoutMs) return false;
+        await new Promise(r => setTimeout(r, 25));
+    }
+    return true;
+}
+async function taSetup() {
+    if (taStore) return taStore;
+    const { wrapMethods } = await import('../data_management/index.js');
+    const { getReactiveStore, createAnalysisConfig } = await import('../application/index.js');
+    taApi = wrapMethods(TargetedAnalysisTestApi, 'api', ['__taRows']);
+    taStore = getReactiveStore(taApi.__taRows, null, [], [createAnalysisConfig(taApi.__taAnalyze, 'ta', 'Testing', ['name'])]);
+    await taWaitFor(() => !taStore.isLoading && !taStore.isAnalyzing && taStore.data.length === 3 && taStore.data.every(r => r.AppData?.ta));
+    return taStore;
+}
+const taValueOf = (store, name) => store.data.find(r => r.name === name)?.AppData?.ta?.v ?? null;
+
+test('TARGETED ANALYSIS', 'an invalidated key re-runs only its row, and other rows are never blanked', async () => {
+    const { invalidateCache } = await import('../data_management/index.js');
+    const store = await taSetup();
+    assertEqual(['alpha', 'bravo', 'charlie'].map(n => taValueOf(store, n)), ['v-alpha', 'v-bravo', 'v-charlie'], 'initial analysis');
+    Object.keys(taCalls).forEach(k => delete taCalls[k]);
+    taValues.bravo = 'changed';
+    // Every value bravo shows, and any write at all to the other rows
+    const bravoSeen = [];
+    let otherWrites = 0;
+    const stops = [
+        Vue.watch(() => store.data.find(r => r.name === 'bravo').AppData.ta, (v) => { bravoSeen.push(v?.v ?? null); }, { flush: 'sync' }),
+        Vue.watch(() => store.data.find(r => r.name === 'alpha').AppData.ta, () => { otherWrites++; }, { flush: 'sync' }),
+        Vue.watch(() => store.data.find(r => r.name === 'charlie').AppData.ta, () => { otherWrites++; }, { flush: 'sync' })
+    ];
+    try {
+        invalidateCache([{ namespace: 'api', methodName: '__taAnalyze', args: ['bravo'] }]);
+        const done = await taWaitFor(() => taValueOf(store, 'bravo') === 'changed');
+        assertEqual(done, true, 'bravo re-analyzed');
+        await new Promise(r => setTimeout(r, 300));
+        assertEqual(bravoSeen, ['changed'], 'bravo went straight to the new value (never blank)');
+        assertEqual(otherWrites, 0, 'other rows never written');
+        assertEqual({ ...taCalls }, { bravo: 1 }, 'only bravo computed');
+    } finally {
+        stops.forEach(stop => stop());
+        delete taValues.bravo;
+    }
+});
+
+test('TARGETED ANALYSIS', 'a re-run that returns an equal result does not write it', async () => {
+    const { invalidateCache } = await import('../data_management/index.js');
+    const store = await taSetup();
+    const row = store.data.find(r => r.name === 'alpha');
+    let writes = 0;
+    const stop = Vue.watch(() => row.AppData.ta, () => { writes++; }, { flush: 'sync' });
+    Object.keys(taCalls).forEach(k => delete taCalls[k]);
+    try {
+        invalidateCache([{ namespace: 'api', methodName: '__taAnalyze', args: ['alpha'] }]);
+        await taWaitFor(() => taCalls.alpha === 1);
+        await new Promise(r => setTimeout(r, 300));
+        assertEqual([taCalls.alpha, writes, taValueOf(store, 'alpha')], [1, 0, 'v-alpha'], 're-ran, no write');
+    } finally {
+        stop();
+    }
+});
+
+test('TARGETED ANALYSIS', 'a key no row produced re-runs nothing', async () => {
+    const { invalidateCache } = await import('../data_management/index.js');
+    await taSetup();
+    Object.keys(taCalls).forEach(k => delete taCalls[k]);
+    invalidateCache([{ namespace: 'api', methodName: '__taAnalyze', args: ['zulu'] }]);
+    await new Promise(r => setTimeout(r, 500));
+    assertEqual({ ...taCalls }, {}, 'no calls');
+});
+
 // ── Runner export ─────────────────────────────────────────────────────────────
 
 export async function runTests() {
