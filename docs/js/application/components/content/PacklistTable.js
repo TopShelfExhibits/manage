@@ -268,6 +268,10 @@ export const PacklistTable = {
             }
             return [];
         },
+        // Loaded crates by row id, so a moved crate's item table compares with its own loaded items
+        originalCratesById() {
+            return new Map(this.originalData.map(crate => [crate?.AppData?._rowId, crate]));
+        },
         itemHeaders() {
             // Try to infer item headers from the first crate's Items array
             const crates = this.mainTableData;
@@ -1444,7 +1448,7 @@ export const PacklistTable = {
                     :resolved="cratesResolved"
                     :edit-mode="tableEditMode"
                     :class="cratesResolved.className"
-                    :rowKey="'Piece #'"
+                    :rowKey="'AppData._rowId'"
                     :title="tabName"
                     :showRefresh="!editMode"
                     :showSearch="true"
@@ -1530,7 +1534,7 @@ export const PacklistTable = {
                             <TableComponent
                                 v-if="row.Items"
                                 :data="row.Items"
-                                :originalData="originalData && originalData[rowIndex] ? originalData[rowIndex].Items : []"
+                                :originalData="originalCratesById.get(row.AppData?._rowId)?.Items || []"
                                 :rowKey="'AppData._rowId'"
                                 :resolved="itemsResolved"
                                 :edit-mode="tableEditMode"

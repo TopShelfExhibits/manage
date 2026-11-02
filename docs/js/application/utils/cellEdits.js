@@ -128,7 +128,7 @@ export function useBatchEdits(host) {
     function edit(rowIndex, key, value) {
         snapshotForUndo(rowIndex, key);
         host.emitEdit(rowIndex, key, value);
-        mark(state.changed, rowIndex, key, value !== host.originalRows()?.[rowIndex]?.[key]);
+        mark(state.changed, rowIndex, key, value !== originalValue(host.rows()?.[rowIndex], rowIndex, key));
     }
 
     /** Put a cell back to its loaded value (an undoable step). */
@@ -152,8 +152,9 @@ export function useBatchEdits(host) {
     }
 
     /**
-     * Compare every row with its loaded row (by index) after rows change: the editable keys, and
+     * Compare every row with its loaded row (originalRow) after rows change: the editable keys, and
      * the hidden MetaData (marked under key -1, so the table counts as changed without a cell).
+     * Rows added, removed or moved mark row -1, so Save sees the change without marking cells.
      */
     function compareAll(editableKeys) {
         const changed = {};
@@ -161,11 +162,13 @@ export function useBatchEdits(host) {
         const originals = host.originalRows();
         if (Array.isArray(rows) && Array.isArray(originals)) {
             rows.forEach((row, rowIndex) => {
-                const original = originals[rowIndex];
+                const original = originalRow(row, rowIndex);
                 const differs = (key) => row?.[key] !== (original ? original[key] : null);
                 for (const key of editableKeys) if (differs(key)) mark(changed, rowIndex, key, true);
                 if (row && Object.prototype.hasOwnProperty.call(row, 'MetaData') && differs('MetaData')) mark(changed, rowIndex, -1, true);
             });
+            const moved = rows.length !== originals.length || rows.some((row, i) => originalRow(row, i) !== originals[i]);
+            if (moved) mark(changed, -1, 'rows', true);
         }
         state.changed = changed;
     }

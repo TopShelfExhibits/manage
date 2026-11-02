@@ -2079,6 +2079,23 @@ test('CELL EDITS', 'batch: loaded values follow the row key when rows move', asy
     assertEqual([edits.originalValue(rows[0], 0, 'A'), edits.originalValue(rows[1], 1, 'A')], ['y', 'x'], 'by key');
 });
 
+test('CELL EDITS', 'batch with a row key: moved rows mark the table, not cells; edits compare by key', async () => {
+    const { rows, edits } = batchHarness('k');
+    rows.reverse();
+    edits.compareAll(['A']);
+    assertEqual([edits.cellState(0, 'A'), edits.cellState(1, 'A'), edits.hasUnsaved.value], ['', '', true], 'moved: unsaved, no cells');
+    edits.edit(0, 'A', 'q');
+    assertEqual(edits.cellState(0, 'A'), 'unsaved', 'edit after a move');
+    edits.edit(0, 'A', 'y');
+    assertEqual(edits.cellState(0, 'A'), '', 'back to its own loaded value');
+    rows.reverse();
+    edits.compareAll(['A']);
+    assertEqual(edits.hasUnsaved.value, false, 'order restored');
+    rows.pop();
+    edits.compareAll(['A']);
+    assertEqual(edits.hasUnsaved.value, true, 'a removed row counts as a change');
+});
+
 function instantHarness(commit) {
     const rows = [{ id: 'a', Elev: '', Note: '' }, { id: 'b', Elev: 'X', Note: 'n' }];
     const calls = { commits: [], errors: [], refreshes: 0 };
