@@ -415,6 +415,45 @@ class database_uncached {
         return _numberToColumnLetter(columnNumber);
     }
 
+    /** A1 range on a tab, quoting the sheet name when needed: a1Range('Production Schedule', 'A5:Z5'). */
+    static a1Range(tabName, ref) {
+        return `${_quoteSheetName(tabName)}!${ref}`;
+    }
+
+    /**
+     * Read several ranges of one table in a single uncached request (values.batchGet).
+     * @param {string} tableId
+     * @param {string[]} ranges - full A1 ranges (see a1Range)
+     * @returns {Promise<Array<Array<Array<string>>>>} one 2D array per range
+     */
+    static async readFreshRanges(tableId, ranges) {
+        return await GoogleSheetsService.batchGetValues(tableId, ranges);
+    }
+
+    /**
+     * Write several single cells of one tab in a single request (values.batchUpdate), then
+     * invalidate the tab's cached data once.
+     * @param {string} tableId
+     * @param {string} tabName
+     * @param {Array<{ rowNumber: number, columnNumber: number, value: string }>} cells - 1-based
+     * @returns {Promise<boolean>}
+     */
+    static async setCellValues(tableId, tabName, cells) {
+        if (!cells || !cells.length) return true;
+        const data = cells.map(c => {
+            const col = _numberToColumnLetter(c.columnNumber);
+            return { range: Database.a1Range(tabName, `${col}${c.rowNumber}:${col}${c.rowNumber}`), values: [[c.value ?? '']] };
+        });
+        await GoogleSheetsService.batchSetValues(tableId, data);
+
+        stampDataChange(`database:getData:"${tableId}","${tabName}"`);
+        invalidateCache([
+            { namespace: 'database', methodName: 'getData', args: [tableId, tabName] }
+        ], true);
+
+        return true;
+    }
+
     /**
      * Write a single cell value using A1 notation range.
      * This avoids full-table writes for high-concurrency updates.
@@ -427,7 +466,7 @@ class database_uncached {
      */
     static async setCellValue(tableId, tabName, rowNumber, columnNumber, value) {
         const colLetter = _numberToColumnLetter(columnNumber);
-        const range = `${tabName}!${colLetter}${rowNumber}:${colLetter}${rowNumber}`;
+        const range = Database.a1Range(tabName, `${colLetter}${rowNumber}:${colLetter}${rowNumber}`);
 
         await GoogleSheetsService.setSheetData(tableId, range, [[value ?? '']], null);
 
@@ -511,7 +550,7 @@ class database_uncached {
 export const Database = wrapMethods(
     database_uncached, 
     'database', 
-    ['createTab', 'hideTabs', 'showTabs', 'setData', 'updateRow', 'setCellValue', 'appendSheetRow', 'uploadItemImage', 'readFresh', 'columnLetter'],
+    ['createTab', 'hideTabs', 'showTabs', 'setData', 'updateRow', 'setCellValue', 'setCellValues', 'appendSheetRow', 'uploadItemImage', 'readFresh', 'readFreshRanges', 'columnLetter', 'a1Range'],
     ['getItemImageBlobUrl', 'getDriveBlobUrl', 'getTabs'], // Infinite cache: image URLs (expensive Google Drive API calls)
     {
         // Sheet data: infinite for INVENTORY and PACK_LISTS (cross-session poller handles freshness);
@@ -629,4 +668,14 @@ function _numberToColumnLetter(num) {
         n = Math.floor((n - 1) / 26);
     }
     return letter;
+}
+
+/**
+ * Quote a sheet name for an A1 range when it holds anything but letters, digits and underscores
+ * ("Production Schedule" → "'Production Schedule'"); quotes inside are doubled.
+ * @private
+ */
+function _quoteSheetName(name) {
+    const s = String(name);
+    return /^[A-Za-z0-9_]+$/.test(s) ? s : `'${s.replace(/'/g, "''")}'`;
 }

@@ -8,6 +8,11 @@ import { isCheckedValue } from '../../../data_management/utils/checkbox-values.j
 /** Delay before an instant edit is written; another edit to the same cell restarts it (§4.16). */
 export const INSTANT_WRITE_DELAY_MS = 1200;
 
+// Modal messages render as HTML: escape text that can carry sheet values
+function escapeHtml(text) {
+    return String(text ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
 /**
  * Presentation props removed in Phase 5 (views-and-renderers-plan): presentation comes only from
  * the view. A page still passing one gets a dev warning (attrs are listed as written by the page).
@@ -40,11 +45,14 @@ const REMOVED_PRESENTATION_PROPS = [
  * the CSS @container rules), so view variants and CSS switch together (R6.4).
  *
  * Instant edit mode (§4.16): registry cells emit cell-commit(row, key, value). DataView shows the
- * value at once on a local overlay, holds the write for INSTANT_WRITE_DELAY_MS (restarting on
- * another edit to the same cell, and dropping it when the value returns to the loaded one), then
- * calls the page's commitCell(row, key, value) → Promise<{ ok, reason }>. Pending and failed cells
- * get state classes; a failure reverts the cell, shows an error and asks the page to refresh.
- * Queued writes flush on unmount, and a leave prompt guards closing the tab while writes are queued.
+ * value at once on a local overlay and holds the write: one timer for the whole table restarts on
+ * every edit, so edits made within INSTANT_WRITE_DELAY_MS of each other are written together. A
+ * cell whose value returns to the loaded one is dropped. The batch goes to the page's
+ * commitCells([{ row, key, value }]) → Promise<Array<{ ok, reason, warning }>> (or commitCell(row,
+ * key, value) per cell when the page has no batch hook). One batch is in flight at a time.
+ * Pending and failed cells get state classes; failures revert, show one error and ask the page to
+ * refresh; warnings (another row may have changed) are shown too. Queued writes flush on unmount,
+ * and a leave prompt guards closing the tab while writes are queued.
  */
 export const DataView = {
     name: 'DataView',
@@ -71,6 +79,7 @@ export const DataView = {
         detailsTitle: { type: Function, default: null },
         // Instant edit mode
         commitCell: { type: Function, default: null },
+        commitCells: { type: Function, default: null },
         rowId: { type: Function, default: null },
         cellDisabled: { type: Function, default: null },
         // derive(row) → row: recompute the page's derived fields on locally edited rows
@@ -239,7 +248,7 @@ export const DataView = {
             return this.rows.find(r => this.rowId(r) === id) || null;
         },
         onCellCommit(row, key, value) {
-            if (this.editMode !== 'instant' || !this.rowId || !this.commitCell) return;
+            if (this.editMode !== 'instant' || !this.rowId || !(this.commitCells || this.commitCell)) return;
             const id = this.rowId(row);
             const k = id + '::' + key;
             const existing = this.pendingCells[k];
@@ -250,57 +259,95 @@ export const DataView = {
                 return;
             }
             const loaded = this.loadedRow(id);
-            const original = existing ? existing.original : (loaded ? loaded[key] : undefined);
-            if (existing?.timer) clearTimeout(existing.timer);
+            // What the sheet holds now: a saved entry's value (the reload may not have arrived yet),
+            // a queued entry's original, or the loaded value
+            const original = existing
+                ? (existing.status === 'saved' ? existing.value : existing.original)
+                : (loaded ? loaded[key] : undefined);
             delete this.failedCells[k];
             if (this.sameCellValue(key, value, original)) {
                 // Back to the loaded value within the delay: nothing is written
                 delete this.pendingCells[k];
-                return;
+            } else {
+                this.pendingCells[k] = { id, key, value, original, status: 'queued', row: loaded || row };
             }
-            const entry = { id, key, value, original, status: 'queued', row: loaded || row, timer: null };
-            entry.timer = setTimeout(() => this.writeEntry(k), this.writeDelay);
-            this.pendingCells[k] = entry;
+            this.scheduleFlush();
         },
-        async writeEntry(k) {
-            const entry = this.pendingCells[k];
-            if (!entry || entry.status !== 'queued') return;
-            entry.timer = null;
-            entry.status = 'writing';
-            const value = entry.value;
-            let result;
+        // One timer for the table: every edit restarts it, so nearby edits share a batch
+        scheduleFlush() {
+            clearTimeout(this._flushTimer);
+            this._flushTimer = setTimeout(() => this.flushAll(), this.writeDelay);
+        },
+        // Write every queued cell as one batch (after the batch in flight, if any)
+        async flushAll() {
+            clearTimeout(this._flushTimer);
+            this._flushTimer = null;
+            if (this._flushing) { this._flushAgain = true; return this._flushing; }
+            const keys = Object.keys(this.pendingCells).filter(k => this.pendingCells[k].status === 'queued');
+            if (!keys.length) return;
+            this._flushing = this.writeBatch(keys);
+            try { await this._flushing; } finally { this._flushing = null; }
+            if (this._flushAgain) { this._flushAgain = false; await this.flushAll(); }
+        },
+        async writeBatch(keys) {
+            const entries = keys.map(k => this.pendingCells[k]);
+            const values = entries.map(e => e.value);
+            entries.forEach(e => { e.status = 'writing'; });
+            let results;
             try {
-                result = await this.commitCell(entry.row, entry.key, value);
-            } catch (e) {
-                result = { ok: false, reason: e?.message || 'error' };
-            }
-            const current = this.pendingCells[k];
-            if (!current) return;
-            if (result && result.ok) {
-                if (current.next !== undefined && !this.sameCellValue(current.key, current.next, value)) {
-                    // A newer edit arrived during the write: write it next
-                    const next = current.next;
-                    delete current.next;
-                    current.original = value;
-                    current.value = next;
-                    current.status = 'queued';
-                    current.timer = setTimeout(() => this.writeEntry(k), this.writeDelay);
+                if (this.commitCells) {
+                    results = await this.commitCells(entries.map((e, n) => ({ row: e.row, key: e.key, value: values[n] })));
                 } else {
-                    current.status = 'saved';
-                    // Safety: drop the overlay even if the reload never arrives
-                    setTimeout(() => { if (this.pendingCells[k]?.status === 'saved') delete this.pendingCells[k]; }, 20000);
+                    results = await Promise.all(entries.map((e, n) => Promise.resolve(this.commitCell(e.row, e.key, values[n]))
+                        .catch(err => ({ ok: false, reason: err?.message || 'error' }))));
                 }
-                return;
+            } catch (e) {
+                results = entries.map(() => ({ ok: false, reason: e?.message || 'error' }));
             }
-            // Failure: revert, mark failed, show the error, refresh the data
-            delete this.pendingCells[k];
-            this.failedCells[k] = true;
-            setTimeout(() => { delete this.failedCells[k]; }, 6000);
-            const field = this.resolved.fieldMap.get(entry.key);
-            this.$modal?.error?.(`Could not save ${field?.label || entry.key}: ${this.describeFailure(result?.reason)}. The value was reverted and the data refreshed.`, 'Save failed');
-            // Ask the page to refresh (its @refresh listener is forwarded to the renderer via $attrs)
-            const onRefresh = this.$attrs.onRefresh;
-            if (typeof onRefresh === 'function') onRefresh(); else if (Array.isArray(onRefresh)) onRefresh.forEach(fn => fn());
+            const failures = [];
+            const warnings = [];
+            let requeued = false;
+            keys.forEach((k, n) => {
+                const result = Array.isArray(results) ? results[n] : null;
+                if (result?.warning) warnings.push(escapeHtml(result.warning));
+                const current = this.pendingCells[k];
+                if (!current) return;
+                if (result && result.ok) {
+                    if (current.next !== undefined && !this.sameCellValue(current.key, current.next, values[n])) {
+                        // A newer edit arrived during the write: write it next
+                        const next = current.next;
+                        delete current.next;
+                        current.original = values[n];
+                        current.value = next;
+                        current.status = 'queued';
+                        requeued = true;
+                    } else {
+                        current.status = 'saved';
+                        // Safety: drop the overlay even if the reload never arrives
+                        setTimeout(() => { if (this.pendingCells[k]?.status === 'saved') delete this.pendingCells[k]; }, 20000);
+                    }
+                    return;
+                }
+                // Failure: revert and mark failed
+                delete this.pendingCells[k];
+                this.failedCells[k] = true;
+                setTimeout(() => { delete this.failedCells[k]; }, 6000);
+                const field = this.resolved.fieldMap.get(current.key);
+                failures.push(escapeHtml(`${field?.label || current.key}: ${this.describeFailure(result?.reason)}`));
+            });
+            if (requeued) this.scheduleFlush();
+            if (failures.length) {
+                // The modal renders its message as HTML (newlines become line breaks); parts are escaped
+                const list = failures.length === 1 ? failures[0] : failures.map(f => `• ${f}`).join('\n');
+                const head = failures.length === 1 ? 'Could not save ' : `Could not save ${failures.length} changes:\n`;
+                const extra = warnings.length ? `\n\n${warnings.join('\n')}` : '';
+                this.$modal?.error?.(`${head}${list}.\nThe values were reverted and the data refreshed.${extra}`, 'Save failed');
+                // Ask the page to refresh (its @refresh listener is forwarded to the renderer via $attrs)
+                const onRefresh = this.$attrs.onRefresh;
+                if (typeof onRefresh === 'function') onRefresh(); else if (Array.isArray(onRefresh)) onRefresh.forEach(fn => fn());
+            } else if (warnings.length) {
+                this.$modal?.alert?.(warnings.join('\n'), 'Check the sheet', false);
+            }
         },
         describeFailure(reason) {
             const map = {
@@ -311,17 +358,10 @@ export const DataView = {
                 'duplicate': 'more than one row has this identity',
                 'no-identity-columns': 'the identity columns were not found in the sheet',
                 'moved': 'the row kept moving while saving',
-                'verify-failed': 'the saved value did not read back correctly'
+                'verify-failed': 'the saved value did not read back correctly',
+                'superseded': 'a later edit to the same cell replaced it'
             };
             return map[reason] || reason || 'unknown error';
-        },
-        flushAll() {
-            for (const [k, p] of Object.entries(this.pendingCells)) {
-                if (p.status === 'queued') {
-                    if (p.timer) clearTimeout(p.timer);
-                    this.writeEntry(k);
-                }
-            }
         },
         cellStateFor(row, key) {
             if (!this.rowId) return '';

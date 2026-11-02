@@ -9,8 +9,9 @@ import { normalizeFilterValues } from '../../../data_management/utils/helpers.js
  * A page under Schedule (route schedule/design-queue) that shares the Schedule data and fields
  * (scheduleFields.js) but has its own purpose: track design work per show.
  *
- *  - editMode 'instant': each checkbox / select / note edit is one verified single-cell write
- *    after a short delay (DataView queue → commitCell → Requests.writeCellVerified / saveShowNote).
+ *  - editMode 'instant': checkbox / select / note edits are verified writes after a short delay.
+ *    Edits made close together go as one batch (DataView queue → commitCells →
+ *    Requests.writeCellsVerified for Schedule columns, saveShowNote for each note).
  *  - Writable columns and row identity come from the InstantWriteTables preference; the shown
  *    columns from DesignQueueFields (a view patch); Assignee options from DesignQueueAssignees.
  *  - Note is not a Schedule column: it is joined from CACHE/ShowNotes by computeIdentifier.
@@ -215,13 +216,26 @@ export const DesignQueueContent = {
             if (this.duplicateIdentities.has(identityKey(row))) return 'write disabled: duplicate row identity';
             return '';
         },
-        // Routing writes (§4.16): Note → saveShowNote; every other column → writeCellVerified
-        async commitCell(row, key, value) {
-            if (key === 'Note') {
-                if (!row._identifier) return { ok: false, reason: 'no show identifier' };
-                return await Requests.saveShowNote(row._identifier, value);
+        // Routing writes (§4.16): Note → saveShowNote (one upsert per note); every other column
+        // → one verified batch (writeCellsVerified). Results come back in entry order.
+        async commitCells(entries) {
+            const results = new Array(entries.length);
+            const batch = [];
+            entries.forEach((e, n) => { if (e.key !== 'Note') batch.push(n); });
+            const scheduleWrite = batch.length
+                ? Requests.writeCellsVerified(DQ_DATABASE, DQ_TAB, batch.map(n => ({ row: entries[n].row, column: entries[n].key, value: entries[n].value })))
+                    .catch(err => batch.map(() => ({ ok: false, reason: err?.message || 'error' })))
+                : Promise.resolve([]);
+            for (let n = 0; n < entries.length; n++) {
+                const e = entries[n];
+                if (e.key !== 'Note') continue;
+                results[n] = e.row._identifier
+                    ? await Requests.saveShowNote(e.row._identifier, e.value)
+                    : { ok: false, reason: 'no show identifier' };
             }
-            return await Requests.writeCellVerified(DQ_DATABASE, DQ_TAB, row, key, value);
+            const written = await scheduleWrite;
+            batch.forEach((n, k) => { results[n] = written[k] || { ok: false, reason: 'no result' }; });
+            return results;
         },
         async resolveIdentifiers() {
             for (const row of this.rawRows) {
@@ -300,7 +314,7 @@ export const DesignQueueContent = {
                 :container-path="containerPath"
                 :navigate-to-path="navigateToPath"
                 edit-mode="instant"
-                :commit-cell="commitCell"
+                :commit-cells="commitCells"
                 :row-id="rowId"
                 :cell-disabled="cellDisabled"
                 :derive="deriveRow"

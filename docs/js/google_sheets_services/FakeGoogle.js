@@ -29,6 +29,12 @@ function _colToIndex(letters) {
 let _delaysEnabled = true;
 export function setFakeDelaysEnabled(enabled) { _delaysEnabled = enabled; }
 
+// A1 sheet names may be quoted ('Production Schedule'!A5:Z5); quotes inside are doubled
+function _unquoteSheetName(name) {
+    const m = /^'(.*)'$/.exec(name || '');
+    return m ? m[1].replace(/''/g, "'") : name;
+}
+
 export class FakeGoogleSheetsAuth {
     static userEmail = 'test@example.com';
     static isInitialized = false;
@@ -1085,18 +1091,100 @@ export class FakeGoogleSheetsService {
         }
     }
 
+    /**
+     * Fault injection for tests (null in normal use). Hooks run inside the fake service calls, at
+     * the points where a concurrent editor could change the live sheet:
+     *   beforeRead(tableId, range)              before each range read (getSheetData, batchGetValues)
+     *   beforeWrite(tableId, range, values)     before a single setSheetData; return 'drop' to lose it
+     *   beforeBatchWrite(tableId, data)         before a batchSetValues; return 'drop' to lose all of
+     *                                           it, or a Set of data indices to lose just those
+     */
+    static faults = null;
+
+    static async _fault(name, ...args) {
+        const hook = this.faults && this.faults[name];
+        return typeof hook === 'function' ? await hook(...args) : undefined;
+    }
+
+    /** values.batchGet: one 2D array per range, in order (each range read as getSheetData would). */
+    static async batchGetValues(tableId, ranges) {
+        return await Promise.all((ranges || []).map(range => this.getSheetData(tableId, range)));
+    }
+
+    /**
+     * values.batchUpdate: write every { range, values } in one step. Like the API, the batch lands
+     * as a unit; a fault hook can only act before it (or drop parts of it).
+     */
+    static async batchSetValues(tableId, data) {
+        await this.delay(500 + Math.random() * 500);
+        await FakeGoogleSheetsAuth.checkAuth();
+        if (!this.ENDPOINT_IDS[tableId]) throw new Error(`[batchSetValues] Spreadsheet ID not found for table: ${tableId}`);
+        const fault = await this._fault('beforeBatchWrite', tableId, data);
+        if (fault === 'drop') return true;
+        (data || []).forEach((d, i) => {
+            if (fault instanceof Set && fault.has(i)) return;
+            if (!this._writeRange(tableId, d.range, d.values)) throw new Error(`[batchSetValues] Unsupported range: ${d.range}`);
+        });
+        return true;
+    }
+
+    /**
+     * Synchronous write of a values block to an A1 range ("Tab!B2:D3", sheet name optionally quoted).
+     * @returns {boolean} false when the range isn't an A1 block range
+     */
+    static _writeRange(tableId, range, updates) {
+        const rangeMatch = String(range).match(/^(.+)!([A-Z]+)(\d+):([A-Z]+)(\d+)$/);
+        if (!rangeMatch) return false;
+        const [, rawSheetName, startCol, startRow, endCol, endRow] = rangeMatch;
+        const sheetName = _unquoteSheetName(rawSheetName);
+        const startColIndex = _colToIndex(startCol);
+        const endColIndex = _colToIndex(endCol);
+        const startRowIndex = parseInt(startRow) - 1;
+        const endRowIndex = parseInt(endRow) - 1;
+
+        // Initialize sheet if it doesn't exist
+        if (!this.mockData[tableId]) this.mockData[tableId] = {};
+        if (!this.mockData[tableId][sheetName]) {
+            // Initialize with empty structure (will be populated dynamically)
+            this.mockData[tableId][sheetName] = [
+                ['Users'] // Row 0: Headers row (lock keys added dynamically)
+            ];
+        }
+        const sheet = this.mockData[tableId][sheetName];
+        if (!Array.isArray(updates) || !updates.length || !Array.isArray(updates[0])) return true;
+
+        for (let r = 0; r < updates.length && startRowIndex + r <= endRowIndex; r++) {
+            const rowIndex = startRowIndex + r;
+            // Ensure row exists, and columns up to endColIndex
+            while (sheet.length <= rowIndex) sheet.push([]);
+            while (sheet[rowIndex].length <= endColIndex) sheet[rowIndex].push('');
+            for (let colOffset = 0; colOffset < updates[r].length; colOffset++) {
+                const targetColIndex = startColIndex + colOffset;
+                if (targetColIndex <= endColIndex) sheet[rowIndex][targetColIndex] = updates[r][colOffset];
+            }
+        }
+        // Debug log for Caching tab writes
+        if (tableId === 'CACHE' && sheetName === 'Caching') {
+            console.log(`[FakeGoogle] Caching tab updated at row ${startRowIndex + 1}:`, updates[0]);
+        }
+        return true;
+    }
+
     static async getSheetData(tableId, range) {
         await this.delay(500 + Math.random() * 500); // Add random delay > 1s
         await FakeGoogleSheetsAuth.checkAuth();
-        
+
         const spreadsheetId = this.ENDPOINT_IDS[tableId];
         if (!spreadsheetId) throw new Error(`[getSheetData] Spreadsheet ID not found for table: ${tableId}`);
 
         //console.log(`FakeGoogleSheetsService: Getting data for ${tableId}, range: ${range}`);
         await this.delay(100);
+        await this._fault('beforeRead', tableId, range);
 
-        // Parse range to extract sheet name and cell range
-        const [sheetName, cellRange] = range.split('!');
+        // Parse range to extract sheet name and cell range (the sheet name may be quoted)
+        const bang = range.lastIndexOf('!');
+        const sheetName = _unquoteSheetName(bang >= 0 ? range.slice(0, bang) : range);
+        const cellRange = bang >= 0 ? range.slice(bang + 1) : undefined;
 
         // Initialize Caching tab in mockData if it doesn't exist yet
         // CRITICAL: Caching tab MUST have both columns (Key, Timestamp) populated for poller to function.
@@ -1159,52 +1247,13 @@ export class FakeGoogleSheetsService {
 
         //console.log(`FakeGoogleSheetsService: Setting data for ${tableId}/${tabName}`);
         await this.delay(150);
+        if (await this._fault('beforeWrite', tableId, tabName, updates) === 'drop') return true;
 
         try {
             // Handle range-specific updates (e.g., "Locks!B2" for single cell, "Caching!A2:B2" for row updates)
             // CRITICAL: Must support multi-column writes. writeCacheTimestamp uses A#:B# ranges to write
             // both Key and Timestamp columns simultaneously. Single-column writes would break cache invalidation.
-            const rangeMatch = tabName.match(/^([^!]+)!([A-Z]+)(\d+):([A-Z]+)(\d+)$/);
-            if (rangeMatch) {
-                const [, sheetName, startCol, startRow, endCol, endRow] = rangeMatch;
-                const startColIndex = _colToIndex(startCol);
-                const endColIndex = _colToIndex(endCol);
-                const rowIndex = parseInt(startRow) - 1;
-                
-                // Initialize sheet if it doesn't exist
-                if (!this.mockData[tableId]) this.mockData[tableId] = {};
-                if (!this.mockData[tableId][sheetName]) {
-                    // Initialize with empty structure (will be populated dynamically)
-                    this.mockData[tableId][sheetName] = [
-                        ['Users'] // Row 0: Headers row (lock keys added dynamically)
-                    ];
-                }
-                
-                // Ensure row exists
-                while (this.mockData[tableId][sheetName].length <= rowIndex) {
-                    this.mockData[tableId][sheetName].push([]);
-                }
-                
-                // Ensure columns exist in row (expand to endColIndex)
-                while (this.mockData[tableId][sheetName][rowIndex].length <= endColIndex) {
-                    this.mockData[tableId][sheetName][rowIndex].push('');
-                }
-                
-                // Update the cell(s) - handle both single cell and multi-column ranges
-                if (Array.isArray(updates) && updates.length > 0 && Array.isArray(updates[0])) {
-                    for (let colOffset = 0; colOffset < updates[0].length; colOffset++) {
-                        const targetColIndex = startColIndex + colOffset;
-                        if (targetColIndex <= endColIndex) {
-                            this.mockData[tableId][sheetName][rowIndex][targetColIndex] = updates[0][colOffset];
-                        }
-                    }
-                    // Debug log for Caching tab writes
-                    if (tableId === 'CACHE' && sheetName === 'Caching') {
-                        console.log(`[FakeGoogle] Caching tab updated at row ${rowIndex + 1}:`, updates[0]);
-                    }
-                }
-                return true;
-            }
+            if (this._writeRange(tableId, tabName, updates)) return true;
             
             // If removeRowsBelow is specified, delete all rows below that row before saving
             if (typeof removeRowsBelow === 'number') {

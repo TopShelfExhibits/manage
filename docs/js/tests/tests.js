@@ -1867,6 +1867,269 @@ test('INSTANT WRITE', 'design queue preferences are readable as json', async () 
     assertEqual(cfg.columns.Assignee, 'select', 'Assignee select');
 });
 
+// ── Batched verified writes, fault injection, sheet health ───────────────────
+// writeCellsVerified writes any cells of one tab as one batch with the same safety steps as a
+// single cell. FakeGoogleSheetsService.faults injects what a concurrent editor could do to the
+// live sheet mid-save (insert, sort, drop, duplicate, rename); the randomized test checks that no
+// cell outside the batch ever changes in rows the save could know about, and that a change it
+// can't undo (a row or column added mid-save) is always reported.
+
+const IW_WRITABLE = ['Elev', 'Panels', 'Setups', 'Assignee'];
+
+function iwHeaderIndex(name, header = iwSheet()[0]) {
+    return header.findIndex(h => String(h).replace(/\s+/g, ' ').trim().toLowerCase() === name.toLowerCase());
+}
+function iwIdentityKey(line) {
+    return [line[0], line[1], line[2]].map(v => String(v ?? '').trim().toLowerCase()).join('|');
+}
+// Data rows (array references) whose Show + Client + Year is complete and unique
+function iwUniqueRows() {
+    const s = iwSheet();
+    const counts = new Map();
+    const complete = s.slice(1).filter(l => l && l[0] && l[1] && l[2]);
+    complete.forEach(l => counts.set(iwIdentityKey(l), (counts.get(iwIdentityKey(l)) || 0) + 1));
+    return complete.filter(l => counts.get(iwIdentityKey(l)) === 1);
+}
+function iwRowObj(line) {
+    return { Show: line[0], Client: line[1], Year: String(line[2]) };
+}
+// Snapshot by row reference (faults move rows; writes change them in place) and restore in place
+function iwSnapshot() {
+    const s = iwSheet();
+    return { rows: s.slice(), copies: s.map(r => r.slice()) };
+}
+function iwRestore(snap) {
+    const s = iwSheet();
+    s.length = 0;
+    snap.rows.forEach((r, i) => { r.length = 0; r.push(...snap.copies[i]); s.push(r); });
+}
+async function withFaults(faults, fn) {
+    FakeGoogleSheetsService.faults = faults;
+    try { return await fn(); } finally { FakeGoogleSheetsService.faults = null; }
+}
+function iwNewRow(label) {
+    const row = new Array(iwSheet()[0].length).fill('');
+    row[0] = `${label} Show`; row[1] = `${label} Client`; row[2] = '2025';
+    return row;
+}
+// Deterministic RNG (mulberry32) so a failing run can be replayed from its seed
+function seededRandom(seed) {
+    let a = seed >>> 0;
+    return () => {
+        a = (a + 0x6D2B79F5) >>> 0;
+        let t = a;
+        t = Math.imul(t ^ (t >>> 15), t | 1);
+        t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+}
+
+test('INSTANT WRITE', 'writeCellsVerified writes cells on several rows with one write request', async () => {
+    const snap = iwSnapshot();
+    const [a, b] = iwUniqueRows();
+    let batches = 0, fullReads = 0;
+    try {
+        const res = await withFaults({
+            beforeBatchWrite: () => { batches++; },
+            beforeRead: (t, range) => { if (t === IW_DB && !range.includes('!')) fullReads++; }
+        }, () => Requests.writeCellsVerified(IW_DB, IW_TAB, [
+            { row: iwRowObj(a), column: 'Elev', value: 'X' },
+            { row: iwRowObj(a), column: 'Panels', value: '-' },
+            { row: iwRowObj(b), column: 'Setups', value: 'X' }
+        ]));
+        assertEqual(res.map(r => r.ok), [true, true, true], 'all ok');
+        assertEqual([a[iwHeaderIndex('Elev')], a[iwHeaderIndex('Panels')], b[iwHeaderIndex('Setups')]], ['X', '-', 'X'], 'written');
+        assertEqual([batches, fullReads], [1, 1], 'one write request, one full read');
+    } finally {
+        iwRestore(snap);
+    }
+});
+
+test('INSTANT WRITE', 'batch results are per cell: refused and unmatched cells do not stop the others', async () => {
+    const snap = iwSnapshot();
+    const [a, b] = iwUniqueRows();
+    try {
+        const res = await Requests.writeCellsVerified(IW_DB, IW_TAB, [
+            { row: iwRowObj(a), column: 'Elev', value: 'X' },
+            { row: iwRowObj(a), column: 'City', value: 'X' },
+            { row: { Show: 'Nope', Client: 'Nobody', Year: '2099' }, column: 'Elev', value: 'X' },
+            { row: iwRowObj(b), column: 'Elev', value: 'X' }
+        ]);
+        assertEqual(res.map(r => r.ok ? 'ok' : r.reason), ['ok', 'column-not-writable', 'not-found', 'ok'], 'results');
+        assertEqual([a[iwHeaderIndex('Elev')], b[iwHeaderIndex('Elev')]], ['X', 'X'], 'written');
+    } finally {
+        iwRestore(snap);
+    }
+});
+
+test('INSTANT WRITE', 'rows shifted just before the write: the displaced value is restored and the target retried', async () => {
+    const snap = iwSnapshot();
+    const s = iwSheet();
+    const target = iwUniqueRows()[2];
+    const col = iwHeaderIndex('Panels');
+    const neighbour = s[s.indexOf(target) - 1];
+    const neighbourValue = neighbour[col];
+    const inserted = iwNewRow('Inserted');
+    let fired = false;
+    try {
+        const res = await withFaults({
+            beforeBatchWrite: () => { if (!fired) { fired = true; s.splice(1, 0, inserted); } }
+        }, () => Requests.writeCellsVerified(IW_DB, IW_TAB, [{ row: iwRowObj(target), column: 'Panels', value: neighbourValue === 'X' ? '-' : 'X' }]));
+        const want = neighbourValue === 'X' ? '-' : 'X';
+        assertEqual([res[0].ok, res[0].warning], [true, undefined], 'ok without warning');
+        assertEqual(target[col], want, 'target written');
+        assertEqual(neighbour[col], neighbourValue, 'neighbour restored');
+        assertEqual(inserted[col], '', 'inserted row untouched');
+    } finally {
+        iwRestore(snap);
+    }
+});
+
+test('INSTANT WRITE', 'a row added at the target mid-write is reported, and the target still written', async () => {
+    const snap = iwSnapshot();
+    const s = iwSheet();
+    const target = iwUniqueRows()[2];
+    const col = iwHeaderIndex('Elev');
+    const inserted = iwNewRow('Added');
+    let fired = false;
+    try {
+        const res = await withFaults({
+            beforeBatchWrite: () => { if (!fired) { fired = true; s.splice(s.indexOf(target), 0, inserted); } }
+        }, () => Requests.writeCellsVerified(IW_DB, IW_TAB, [{ row: iwRowObj(target), column: 'Elev', value: 'X' }]));
+        assertEqual(res[0].ok, true, 'ok');
+        assertEqual(target[col], 'X', 'target written');
+        assertEqual(/Added Show/.test(res[0].warning || '') && /added while saving/.test(res[0].warning), true, 'warning names the added row');
+    } finally {
+        iwRestore(snap);
+    }
+});
+
+test('INSTANT WRITE', 'a dropped write fails verification and is retried', async () => {
+    const snap = iwSnapshot();
+    const target = iwUniqueRows()[1];
+    const want = target[iwHeaderIndex('Setups')] === 'X' ? '-' : 'X';
+    let drops = 0;
+    try {
+        const res = await withFaults({
+            beforeBatchWrite: () => (drops++ === 0 ? 'drop' : undefined)
+        }, () => Requests.writeCellsVerified(IW_DB, IW_TAB, [{ row: iwRowObj(target), column: 'Setups', value: want }]));
+        assertEqual([res[0].ok, drops, target[iwHeaderIndex('Setups')]], [true, 2, want], 'retried and written');
+    } finally {
+        iwRestore(snap);
+    }
+});
+
+test('INSTANT WRITE', 'randomized faults never change cells outside the batch (seeded)', async () => {
+    const SEED = 20261031;
+    const RUNS = 60;
+    const rng = seededRandom(SEED);
+    const pick = (arr) => arr[Math.floor(rng() * arr.length)];
+    const once = (fn) => { let done = false; return (...args) => { if (done) return undefined; const r = fn(...args); if (r !== false) done = true; return r === false ? undefined : r; }; };
+
+    // Each fault plays one concurrent editor action at a moment the save can't control
+    const FAULTS = {
+        none: () => ({}),
+        insertAbove: (ctx) => ({ beforeBatchWrite: once(() => { const s = iwSheet(); const row = iwNewRow('Rand'); ctx.added.push([row, row.slice()]); s.splice(1 + Math.floor(rng() * (s.length - 1)), 0, row); }) }),
+        insertAtTarget: (ctx) => ({ beforeBatchWrite: once(() => { const s = iwSheet(); const row = iwNewRow('Rand'); ctx.added.push([row, row.slice()]); s.splice(s.indexOf(pick(ctx.targets)), 0, row); }) }),
+        shuffle: () => ({ beforeBatchWrite: once(() => { const s = iwSheet(); const body = s.slice(1); for (let i = body.length - 1; i > 0; i--) { const j = Math.floor(rng() * (i + 1)); [body[i], body[j]] = [body[j], body[i]]; } s.splice(1, body.length, ...body); }) }),
+        dropAll: () => ({ beforeBatchWrite: once(() => 'drop') }),
+        dropSome: () => ({ beforeBatchWrite: once(() => new Set([0])) }),
+        moveAfterWrite: (ctx) => { let written = false; return { beforeBatchWrite: () => { written = true; }, beforeRead: once((t, range) => { if (!written || !range.includes('!')) return false; const row = iwNewRow('Late'); ctx.added.push([row, row.slice()]); iwSheet().splice(1, 0, row); }) }; },
+        duplicate: (ctx) => ({ beforeRead: once((t, range) => { if (range.includes('!')) return false; const copy = pick(ctx.targets).slice(); ctx.added.push([copy, copy.slice()]); iwSheet().push(copy); }) }),
+        renameHeader: () => ({ beforeRead: once((t, range) => { if (range.includes('!')) return false; iwSheet()[0][1] = 'Customer'; }) }),
+        insertColumn: (ctx) => ({ beforeBatchWrite: once(() => { const s = iwSheet(); const c = iwHeaderIndex(pick(ctx.columns)); ctx.insertedCol = c; s.forEach((r, i) => r.splice(c, 0, i === 0 ? 'Inserted' : '')); }) })
+    };
+    const faultNames = Object.keys(FAULTS);
+    const failures = [];
+
+    for (let run = 0; run < RUNS; run++) {
+        const snap = iwSnapshot();
+        const header = snap.copies[0];
+        const faultName = faultNames[run % faultNames.length];
+        const unique = iwUniqueRows();
+        // 1–4 distinct cells
+        const cells = new Map();
+        const n = 1 + Math.floor(rng() * 4);
+        while (cells.size < n) {
+            const ref = pick(unique);
+            const column = pick(IW_WRITABLE);
+            const value = column === 'Assignee' ? pick(['Ann', 'Bo', '']) : pick(['X', '', '-']);
+            cells.set(snap.rows.indexOf(ref) + ':' + column, { ref, column, value });
+        }
+        const items = [...cells.values()];
+        const ctx = { targets: items.map(i => i.ref), columns: items.map(i => i.column), added: [], insertedCol: -1 };
+        let results;
+        try {
+            results = await withFaults(FAULTS[faultName](ctx), () =>
+                Requests.writeCellsVerified(IW_DB, IW_TAB, items.map(i => ({ row: iwRowObj(i.ref), column: i.column, value: i.value }))));
+        } catch (e) {
+            failures.push(`run ${run} (${faultName}): threw ${e?.message || e}`);
+            iwRestore(snap);
+            continue;
+        }
+
+        const warned = results.some(r => r.warning);
+        const mapCol = (c) => (ctx.insertedCol >= 0 && c >= ctx.insertedCol ? c + 1 : c);
+        const problems = [];
+        // Rows known before the save: only cells of successful items may change, to their value
+        for (let i = 1; i < snap.rows.length; i++) {
+            const ref = snap.rows[i];
+            const copy = snap.copies[i];
+            for (let c = 0; c < copy.length; c++) {
+                let expected = copy[c] ?? '';
+                items.forEach((it, k) => { if (it.ref === ref && results[k].ok && iwHeaderIndex(it.column, header) === c) expected = it.value; });
+                const actual = ref[mapCol(c)] ?? '';
+                if (String(actual) !== String(expected)) problems.push(`${copy[1]} / ${copy[0]} ${normalize(header[c])}: "${copy[c] ?? ''}" became "${actual}" (expected "${expected}")`);
+            }
+        }
+        // Rows and columns added mid-save may change only when the save reported it
+        if (!warned) {
+            ctx.added.forEach(([row, original]) => {
+                const now = ctx.insertedCol >= 0 ? row.filter((_, c) => c !== ctx.insertedCol) : row;
+                if (JSON.stringify(now.map(v => v ?? '')) !== JSON.stringify(original.map(v => v ?? ''))) problems.push(`added row ${original[0]} changed without a warning`);
+            });
+            if (ctx.insertedCol >= 0 && iwSheet().slice(1).some(r => String(r[ctx.insertedCol] ?? '') !== '')) problems.push('inserted column changed without a warning');
+        }
+        if (faultName === 'none' && results.some(r => !r.ok)) problems.push('a clean save failed: ' + results.map(r => r.reason).join(','));
+        if (problems.length) failures.push(`run ${run} (${faultName}, seed ${SEED}): ${problems.join('; ')}`);
+        iwRestore(snap);
+    }
+    assertEqual(failures, [], `${RUNS} randomized saves`);
+
+    function normalize(h) { return String(h ?? '').replace(/\s+/g, ' ').trim(); }
+});
+
+// The fake schedule deliberately holds multi-booth shows (two rows, one Client + Year + Show);
+// writes to those rows are refused. Any other issue means the fixture data is in a bad state.
+const IW_KNOWN_DUPLICATES = ['multiboothco / 2026 / multi booth', 'qgenda / 2024 / himss', 'qgenda / 2025 / himss'];
+
+test('INSTANT WRITE', 'sheet health: the fake Production Schedule has only its known multi-booth duplicates', async () => {
+    const health = await Requests.checkSheetHealth(IW_DB, IW_TAB);
+    const other = health.issues.filter(i => i.kind !== 'duplicate-identity').map(i => i.message);
+    assertEqual(other, [], 'no other issues');
+    const dups = health.issues.filter(i => i.kind === 'duplicate-identity').map(i => i.message.replace(/^Rows [\d, ]+ share the identity /, '')).sort();
+    assertEqual(dups, IW_KNOWN_DUPLICATES, 'known duplicates only');
+});
+
+test('INSTANT WRITE', 'sheet health reports duplicate identities, duplicate headers and missing columns', async () => {
+    const snap = iwSnapshot();
+    const s = iwSheet();
+    try {
+        s.push(iwUniqueRows()[0].slice());
+        s[0][iwHeaderIndex('Setups')] = 'Elev';
+        const health = await Requests.checkSheetHealth(IW_DB, IW_TAB);
+        const kinds = health.issues.map(i => i.kind);
+        assertEqual(health.ok, false, 'not ok');
+        ['duplicate-identity', 'duplicate-header', 'missing-writable-column'].forEach(k => assertContains(kinds, k, k));
+        const dup = health.issues.find(i => i.kind === 'duplicate-identity');
+        assertEqual(dup.rows.length, 2, 'both rows listed');
+        const noConfig = await Requests.checkSheetHealth(IW_DB, 'Some Other Tab');
+        assertEqual(noConfig.issues.map(i => i.kind), ['no-config'], 'no config');
+    } finally {
+        iwRestore(snap);
+    }
+});
+
 // ── Runner export ─────────────────────────────────────────────────────────────
 
 export async function runTests() {

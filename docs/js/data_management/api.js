@@ -1511,6 +1511,25 @@ class Requests_uncached {
         return await InstantWriteUtils.writeCellVerified(database, tab, row, column, value);
     }
 
+    /**
+     * MUTATION METHOD — excluded from caching.
+     * Verified writes of several cells of one tab in one batch, each located by row identity and
+     * column header (views plan §4.16).
+     * @param {Array<{ row: Object, column: string, value: string }>} items
+     * @returns {Promise<Array<{ ok: boolean, reason?: string, warning?: string }>>} one result per item
+     */
+    static async writeCellsVerified(database, tab, items) {
+        return await InstantWriteUtils.writeCellsVerified(database, tab, items);
+    }
+
+    /**
+     * Read-only health check of an instant-write tab (fresh read, so excluded from caching).
+     * @returns {Promise<{ ok: boolean, issues: Array<{ kind: string, message: string, rows?: number[] }> }>}
+     */
+    static async checkSheetHealth(database, tab) {
+        return await InstantWriteUtils.checkSheetHealth(database, tab);
+    }
+
     /** Show notes from CACHE/ShowNotes as [{ Identifier, Note, EditHistory }] ([] if the tab is missing). */
     static async getShowNotes(deps) {
         try {
@@ -1568,8 +1587,10 @@ export const Requests = wrapMethods(
         'savePageNotes',
         'savePreferences',
         'writeCellVerified',
+        'writeCellsVerified',
+        'checkSheetHealth',
         'saveShowNote'
-    ], // Mutation methods
+    ], // Mutation methods (and fresh reads that must not be cached)
     ['computeIdentifier'], // Infinite cache methods
     {} // No custom cache durations needed - lock methods delegate to ApplicationUtils caching
 );

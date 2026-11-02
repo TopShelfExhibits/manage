@@ -202,6 +202,48 @@ export class GoogleSheetsService {
     }
 
     /**
+     * values.batchGet: read several ranges in one request.
+     * @param {string} tableId
+     * @param {string[]} ranges - A1 ranges including the sheet name
+     * @returns {Promise<Array<Array<Array<string>>>>} one 2D array per range, in order ([[]] when empty)
+     */
+    static async batchGetValues(tableId, ranges) {
+        await GoogleSheetsAuth.checkAuth();
+        const spreadsheetId = window.ENDPOINT_IDS[tableId];
+        if (!spreadsheetId) throw new Error(`[GoogleSheetsData.batchGetValues] SPREADSHEET_NOT_FOUND: Spreadsheet ID not found for table: ${tableId}`);
+        if (!ranges || !ranges.length) return [];
+        const response = await GoogleSheetsService.withExponentialBackoff(() =>
+            gapi.client.sheets.spreadsheets.values.batchGet({ spreadsheetId, ranges })
+        );
+        const valueRanges = response.result?.valueRanges || [];
+        return ranges.map((_, i) => {
+            const values = valueRanges[i]?.values;
+            return Array.isArray(values) && values.length ? values : [[]];
+        });
+    }
+
+    /**
+     * values.batchUpdate: write several ranges in one request (same value input as setSheetData).
+     * Only the given ranges change; nothing is truncated.
+     * @param {string} tableId
+     * @param {Array<{ range: string, values: Array<Array<string>> }>} data
+     * @returns {Promise<boolean>}
+     */
+    static async batchSetValues(tableId, data) {
+        if (!(await GoogleSheetsAuth.checkAuth())) GoogleSheetsService._throwAuthError();
+        const spreadsheetId = window.ENDPOINT_IDS[tableId];
+        if (!spreadsheetId) throw new Error(`[GoogleSheetsData.batchSetValues] SPREADSHEET_NOT_FOUND: Spreadsheet ID not found for table: ${tableId}`);
+        if (!data || !data.length) return true;
+        await GoogleSheetsService.withExponentialBackoff(() =>
+            gapi.client.sheets.spreadsheets.values.batchUpdate({
+                spreadsheetId,
+                resource: { valueInputOption: 'USER_ENTERED', data }
+            })
+        );
+        return true;
+    }
+
+    /**
      * Set sheet data from array of JS objects
      * @param {string} tableId
      * @param {string} tabName
@@ -371,8 +413,11 @@ export class GoogleSheetsService {
         if (typeof gapi === 'undefined' || !gapi.client?.sheets?.spreadsheets?.get) return;
         
         // Extract sheet name from range if provided (e.g., "Locks!D1:D1" -> "Locks")
-        const sheetName = tabName.includes('!') ? tabName.split('!')[0] : tabName;
-        const rangeSpec = tabName.includes('!') ? tabName.split('!')[1] : null;
+        // (the sheet name may be quoted: "'Production Schedule'!A5:A5")
+        const bang = tabName.lastIndexOf('!');
+        const quoted = bang >= 0 ? tabName.slice(0, bang) : tabName;
+        const sheetName = /^'.*'$/.test(quoted) ? quoted.slice(1, -1).replace(/''/g, "'") : quoted;
+        const rangeSpec = bang >= 0 ? tabName.slice(bang + 1) : null;
         
         // Parse range to determine required rows/cols if not explicitly provided
         if (rangeSpec && (requiredRows === null || requiredCols === null)) {
