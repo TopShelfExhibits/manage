@@ -1,7 +1,8 @@
-import { html, Requests, DataView, getReactiveStore, createAnalysisConfig, invalidateCache, Priority, ScheduleFilterSelect } from '../../index.js';
+import { html, Requests, DataView, getReactiveStore, invalidateCache, ScheduleFilterSelect } from '../../index.js';
 import { buildScheduleFields } from '../../../data_management/abstraction/scheduleFields.js';
 import { isCheckedValue } from '../../../data_management/utils/checkbox-values.js';
 import { normalizeFilterValues } from '../../../data_management/utils/helpers.js';
+import { shipReturnAnalysis, withTransshipShipDate, shipReturnCards, SHIP_RETURN_DECORATION_KEYS } from '../../utils/scheduleShipping.js';
 
 /**
  * Design queue — views-and-renderers-plan Phase 2 (R6.1, R7.1, R8.1, R8.2).
@@ -86,7 +87,8 @@ export const DesignQueueContent = {
             prefsStore: null,
             notesStore: null,
             identifiers: {},            // identityKey → computeIdentifier result
-            DESIGN_QUEUE_VIEWS
+            DESIGN_QUEUE_VIEWS,
+            SHIP_RETURN_DECORATION_KEYS
         };
     },
     computed: {
@@ -170,10 +172,15 @@ export const DesignQueueContent = {
             if (sheetHasNote) console.warn('[DesignQueue] the Schedule sheet has its own Note column; the sheet value wins over CACHE/ShowNotes');
             return this.rawRows.map(row => {
                 const identifier = this.identifiers[identityKey(row)] || '';
-                const out = { ...row, _identifier: identifier };
+                // Transship rows show (and sort by) the source show's end date as Ship
+                const out = { ...withTransshipShipDate(row), _identifier: identifier };
                 if (!sheetHasNote) out.Note = identifier ? (this.notesByIdentifier.get(identifier.trim().toUpperCase()) ?? '') : '';
                 return this.deriveRow(out);
             });
+        },
+        // Decorations: the shared transship cards on Ship (and Recieved, when shown)
+        decorations() {
+            return (row, key) => shipReturnCards(row, key, this.$modal);
         },
         isLoading() {
             return !!this.scheduleStore?.isLoading;
@@ -256,20 +263,8 @@ export const DesignQueueContent = {
                 return;
             }
             const { searchParams, ...dateFilter } = this.filter || {};
-            const analysisConfig = [
-                // Normalize ship dates to include the year (sorting by Ship)
-                createAnalysisConfig(
-                    Requests.guessShipDate,
-                    'estimatedShipDate',
-                    'Normalizing ship dates...',
-                    ['Ship', 'S. Start', 'S. End', 'Year'],
-                    [],
-                    'Ship',
-                    false,
-                    Priority.ANALYSIS,
-                    true
-                )
-            ];
+            // Ship and return info, shared with the Schedule page (same cached analysis calls)
+            const analysisConfig = shipReturnAnalysis();
             this.scheduleStore = getReactiveStore(
                 Requests.getProductionScheduleData,
                 null,
@@ -315,6 +310,8 @@ export const DesignQueueContent = {
                 :navigate-to-path="navigateToPath"
                 edit-mode="instant"
                 :commit-cells="commitCells"
+                :decorations="decorations"
+                :decoration-keys="SHIP_RETURN_DECORATION_KEYS"
                 :row-id="rowId"
                 :cell-disabled="cellDisabled"
                 :derive="deriveRow"

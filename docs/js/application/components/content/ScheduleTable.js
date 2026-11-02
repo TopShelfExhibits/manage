@@ -2,6 +2,7 @@ import { html, Requests, parseDate, toUSDateString, DataView, getReactiveStore, 
 import { IndexResolutionComponent } from '../interface/IndexResolutionModal.js';
 import { TransshipmentModal } from '../interface/ScheduleModals.js';
 import { buildScheduleFields } from '../../../data_management/abstraction/scheduleFields.js';
+import { shipReturnAnalysis, withTransshipShipDate, shipReturnCards } from '../../utils/scheduleShipping.js';
 
 /**
  * Schedule page view registry (views-and-renderers-plan §4.3). Presentation only: which fields
@@ -119,12 +120,7 @@ export const ScheduleTableComponent = {
         tableData() {
             const rawData = this.scheduleTableStore ? this.scheduleTableStore.data : [];
             // Use source show's end date as the sort/display ship date for transship rows
-            return rawData.map(row => {
-                if (row.AppData?.transshipSource) {
-                    return { ...row, Ship: row.AppData.transshipSourceEndDate ?? '' };
-                }
-                return row;
-            });
+            return rawData.map(withTransshipShipDate);
         },
         originalData() {
             return this.scheduleTableStore && Array.isArray(this.scheduleTableStore.originalData)
@@ -187,8 +183,7 @@ export const ScheduleTableComponent = {
                         }));
                     case 'Ship':
                     case 'Recieved':
-                        return [...this.getShipDateCards(row, key), ...this.getTransshipCards(row, key)]
-                            .map(c => ({ ...c, title: c.hoverMessage }));
+                        return shipReturnCards(row, key, this.$modal);
                     default: return [];
                 }
             };
@@ -226,6 +221,8 @@ export const ScheduleTableComponent = {
                 return;
             }
             
+            // Ship and return info (shared with the Design Queue): ship date, then transshipments
+            const [shipDate, ...transship] = shipReturnAnalysis();
             // Create analysis configuration to check packlist existence for each row
             const analysisConfig = [
                 createAnalysisConfig(
@@ -239,18 +236,7 @@ export const ScheduleTableComponent = {
                     Priority.ANALYSIS,
                     true // extractColumnsAsObject
                 ),
-                // Normalize ship dates to always include year
-                createAnalysisConfig(
-                    Requests.guessShipDate,
-                    'estimatedShipDate',
-                    'Normalizing ship dates...',
-                    ['Ship', 'S. Start', 'S. End', 'Year'],
-                    [],
-                    'Ship', // Store directly in Ship column to display with year
-                    false,
-                    Priority.ANALYSIS,
-                    true // extractColumnsAsObject
-                ),
+                shipDate,
                 // Normalize show start dates to always include year
                 createAnalysisConfig(
                     Requests.normalizeStartDate,
@@ -275,43 +261,8 @@ export const ScheduleTableComponent = {
                     Priority.ANALYSIS,
                     true // extractColumnsAsObject
                 ),
-                // Detect transship rows before index checks so the ship cell annotation is visible first
-                createAnalysisConfig(
-                    Requests.getTransshipSourceEndDateForRow,
-                    'transshipSourceEndDate',
-                    'Checking transshipment dates...',
-                    ['Show', 'Client', 'Year'],
-                    [],
-                    null,
-                    false,
-                    Priority.ANALYSIS,
-                    true, // extractColumnsAsObject
-                    false  // nonessential
-                ),
-                createAnalysisConfig(
-                    Requests.getTransshipSourceForScheduleRow,
-                    'transshipSource',
-                    'Checking transshipments...',
-                    ['Show', 'Client', 'Year'],
-                    [],
-                    null,
-                    false,
-                    Priority.ANALYSIS,
-                    true, // extractColumnsAsObject
-                    false  // nonessential
-                ),
-                createAnalysisConfig(
-                    Requests.getTransshipDestinationsForScheduleRow,
-                    'transshipDestination',
-                    'Checking transshipment destinations...',
-                    ['Show', 'Client', 'Year'],
-                    [],
-                    null,
-                    false,
-                    Priority.ANALYSIS,
-                    true, // extractColumnsAsObject
-                    false  // nonessential
-                ),
+                // Transship rows before index checks so the ship cell annotation is visible first
+                ...transship,
                 createAnalysisConfig(
                     Requests.checkScheduleReferenceState,
                     'clientIndexIssue',
@@ -416,47 +367,6 @@ export const ScheduleTableComponent = {
                 console.error('Error creating packlist:', error);
                 this.$modal.error(`Failed to create packlist: ${error.message}`, 'Error');
             }
-        },
-        getShipDateCards(row, columnKey) {
-            // Cards are no longer needed - ship dates are now normalized and displayed directly in the column
-            // Keeping function for backwards compatibility but returning empty array
-            return [];
-        },
-        getTransshipCards(row, columnKey) {
-            const source = row.AppData?.transshipSource;
-            const dest   = row.AppData?.transshipDestination;
-            if (columnKey === 'Ship' && source) {
-                return [{
-                    message: 'TS',
-                    class: 'gray',
-                    hoverMessage: `transship from: ${source}`,
-                    action: () => this.handleTransshipClick(row, source)
-                }];
-            }
-            // Return date for source shows is extended to the destination's return date
-            if (columnKey === 'Recieved' && dest) {
-                return [{
-                    message: 'return extended',
-                    class: 'gray',
-                    hoverMessage: `Items remain out until the later show ends: ${dest}`,
-                    action: () => this.handleTransshipReturnClick(row, dest)
-                }];
-            }
-            return [];
-        },
-        handleTransshipClick(row, sourceId) {
-            const showId = [row.Client, row.Year, row.Show].filter(Boolean).join(' ');
-            this.$modal.alert(
-                `${showId}\ntransships directly from:\n${sourceId}`,
-                'Transshipment'
-            );
-        },
-        handleTransshipReturnClick(row, destId) {
-            const showId = [row.Client, row.Year, row.Show].filter(Boolean).join(' ');
-            this.$modal.alert(
-                `${showId}\ntransships directly to:\n${destId}`,
-                'Extended Return'
-            );
         },
         getPacklistCards(row, columnKey) {
             // Only show packlist cards in the packlist column
