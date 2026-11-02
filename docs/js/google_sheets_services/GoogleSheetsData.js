@@ -244,6 +244,33 @@ export class GoogleSheetsService {
     }
 
     /**
+     * Delete whole rows of one tab in a single request (bottom up, so the numbers stay valid).
+     * @param {string} tableId
+     * @param {string} tabName
+     * @param {number[]} rowNumbers - 1-based sheet rows
+     * @returns {Promise<boolean>}
+     */
+    static async deleteSheetRows(tableId, tabName, rowNumbers) {
+        if (!(await GoogleSheetsAuth.checkAuth())) GoogleSheetsService._throwAuthError();
+        const spreadsheetId = window.ENDPOINT_IDS[tableId];
+        if (!spreadsheetId) throw new Error(`[GoogleSheetsData.deleteSheetRows] SPREADSHEET_NOT_FOUND: Spreadsheet ID not found for table: ${tableId}`);
+        const rows = [...new Set((rowNumbers || []).map(Number).filter(n => Number.isInteger(n) && n > 1))].sort((a, b) => b - a);
+        if (!rows.length) return true;
+        const info = await GoogleSheetsService.withExponentialBackoff(() =>
+            gapi.client.sheets.spreadsheets.get({ spreadsheetId, includeGridData: false })
+        );
+        const sheet = (info.result?.sheets || []).find(s => s.properties.title === tabName);
+        if (!sheet) throw new Error(`[GoogleSheetsData.deleteSheetRows] SHEET_NOT_FOUND: ${tabName}`);
+        const requests = rows.map(n => ({
+            deleteDimension: { range: { sheetId: sheet.properties.sheetId, dimension: 'ROWS', startIndex: n - 1, endIndex: n } }
+        }));
+        await GoogleSheetsService.withExponentialBackoff(() =>
+            gapi.client.sheets.spreadsheets.batchUpdate({ spreadsheetId, resource: { requests } })
+        );
+        return true;
+    }
+
+    /**
      * Set sheet data from array of JS objects
      * @param {string} tableId
      * @param {string} tabName

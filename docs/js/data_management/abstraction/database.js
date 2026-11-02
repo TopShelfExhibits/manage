@@ -479,6 +479,26 @@ class database_uncached {
     }
 
     /**
+     * Delete whole rows of one tab in a single request, then invalidate the tab's cached data.
+     * Positional: callers check the rows just before and verify after (rows move under it).
+     * @param {string} tableId
+     * @param {string} tabName
+     * @param {number[]} rowNumbers - 1-based sheet rows (the header row is never deleted)
+     * @returns {Promise<boolean>}
+     */
+    static async deleteSheetRows(tableId, tabName, rowNumbers) {
+        if (!rowNumbers || !rowNumbers.length) return true;
+        await GoogleSheetsService.deleteSheetRows(tableId, tabName, rowNumbers);
+
+        stampDataChange(`database:getData:"${tableId}","${tabName}"`);
+        invalidateCache([
+            { namespace: 'database', methodName: 'getData', args: [tableId, tabName] }
+        ], true);
+
+        return true;
+    }
+
+    /**
      * Append a single row to the end of a tab using a targeted range write.
      * @param {string} tableId - Identifier for the table
      * @param {string} tabName - Sheet/tab name
@@ -550,7 +570,7 @@ class database_uncached {
 export const Database = wrapMethods(
     database_uncached, 
     'database', 
-    ['createTab', 'hideTabs', 'showTabs', 'setData', 'updateRow', 'setCellValue', 'setCellValues', 'appendSheetRow', 'uploadItemImage', 'readFresh', 'readFreshRanges', 'columnLetter', 'a1Range'],
+    ['createTab', 'hideTabs', 'showTabs', 'setData', 'updateRow', 'setCellValue', 'setCellValues', 'deleteSheetRows', 'appendSheetRow', 'uploadItemImage', 'readFresh', 'readFreshRanges', 'columnLetter', 'a1Range'],
     ['getItemImageBlobUrl', 'getDriveBlobUrl', 'getTabs'], // Infinite cache: image URLs (expensive Google Drive API calls)
     {
         // Sheet data: infinite for INVENTORY and PACK_LISTS (cross-session poller handles freshness);

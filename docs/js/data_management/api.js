@@ -1,5 +1,7 @@
-import { wrapMethods, Database, InventoryUtils, PackListUtils, ProductionUtils, ApplicationUtils, EditHistoryUtils, InstantWriteUtils, todayISOString, offsetToISO, sanitizeTabName, mapWithConcurrency, ProgressBus, getRandomLoadingQuote } from './index.js';
+import { wrapMethods, normalizeHeaderName, Database, InventoryUtils, PackListUtils, ProductionUtils, ApplicationUtils, EditHistoryUtils, InstantWriteUtils, todayISOString, offsetToISO, sanitizeTabName, mapWithConcurrency, ProgressBus, getRandomLoadingQuote } from './index.js';
 import { authState } from '../application/utils/auth.js';
+import { instantWriteEntry } from './utils/instant-write-config.js';
+import { columnKind } from './utils/checkbox-values.js';
 
 /**
  * CACHING ARCHITECTURE NOTES:
@@ -1493,13 +1495,27 @@ class Requests_uncached {
     }
 
     /**
-     * The InstantWriteTables entry ({ identity, columns }) for a database/tab, or null.
+     * The InstantWriteTables entry for a database/tab, normalized ({ identity, columns: [names] }),
+     * or null (see utils/instant-write-config.js).
      */
     static async getInstantWriteConfig(deps, database, tab) {
         const all = await deps.call(Requests.getJsonPreference, 'InstantWriteTables', {});
-        const entry = all && all[`${database}/${tab}`];
-        if (!entry || !Array.isArray(entry.identity) || !entry.identity.length || !entry.columns) return null;
-        return { identity: entry.identity, columns: entry.columns };
+        return instantWriteEntry(all, database, tab);
+    }
+
+    /**
+     * What each column of a tab holds, judged from all its values (the data decides cell types):
+     * [{ column, kind: 'checkbox'|'empty'|'text' }], column = normalized header name.
+     * Cached with the tab's data, so it follows writes and refreshes.
+     */
+    static async getColumnKinds(deps, database, tab) {
+        const raw = await deps.call(Database.getData, database, tab);
+        const header = Array.isArray(raw?.[0]) ? raw[0] : [];
+        const body = raw.slice(1);
+        return header
+            .map((h, c) => ({ column: normalizeHeaderName(h), c }))
+            .filter(({ column }) => column)
+            .map(({ column, c }) => ({ column, kind: columnKind(body.map(line => line?.[c])) }));
     }
 
     /**

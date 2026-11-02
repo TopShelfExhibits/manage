@@ -37,7 +37,11 @@ import { formatValue, formatText } from '../application/utils/views/fieldFormat.
 import { rowsToCards, bucketRowsToCards } from '../application/utils/views/cardsAdapter.js';
 import { applyColorRule, colorFor, rowColorFor } from '../application/utils/views/viewColor.js';
 import { containerTier, viewportTier, BREAKPOINTS } from '../application/utils/useContainerSize.js';
-import { todayISOString } from '../data_management/utils/helpers.js';
+import { todayISOString, searchFilter, textFiltersToSearchParams, parseSearchParameters } from '../data_management/utils/helpers.js';
+import { columnKind, columnKindsOfRows } from '../data_management/utils/checkbox-values.js';
+import { instantWriteEntry } from '../data_management/utils/instant-write-config.js';
+import { estimateShipDate } from '../data_management/utils/ship-date.js';
+import { withShipDate } from '../application/utils/scheduleShipping.js';
 
 // ── Runner ────────────────────────────────────────────────────────────────────
 
@@ -1864,7 +1868,152 @@ test('INSTANT WRITE', 'design queue preferences are readable as json', async () 
     assertContains(fields, 'Assignee', 'DesignQueueFields');
     const cfg = await Requests.getInstantWriteConfig('PROD_SCHED', 'Production Schedule');
     assertEqual(cfg.identity, ['Client', 'Year', 'Show'], 'identity');
-    assertEqual(cfg.columns.Assignee, 'select', 'Assignee select');
+    assertEqual(cfg.columns, ['Elev', 'Panels', 'Setups', 'Assignee'], 'columns');
+});
+
+// ── Instant-write preference, column kinds, ship estimate ────────────────────
+
+test('INSTANT WRITE', 'InstantWriteTables: columns as a list, the older typed object still read', async () => {
+    const key = 'PROD_SCHED/Production Schedule';
+    assertEqual(instantWriteEntry({ [key]: { identity: ['Client', 'Year', 'Show', 'Size'], columns: ['Elev', 'Assignee'] } }, 'PROD_SCHED', 'Production Schedule'),
+        { identity: ['Client', 'Year', 'Show', 'Size'], columns: ['Elev', 'Assignee'] }, 'list form');
+    assertEqual(instantWriteEntry({ [key]: { identity: ['Client'], columns: { Elev: 'checkbox', Assignee: 'select' } } }, 'PROD_SCHED', 'Production Schedule'),
+        { identity: ['Client'], columns: ['Elev', 'Assignee'] }, 'object form');
+    assertEqual([instantWriteEntry({ [key]: { identity: [], columns: ['Elev'] } }, 'PROD_SCHED', 'Production Schedule'), instantWriteEntry({}, 'PROD_SCHED', 'Production Schedule')], [null, null], 'incomplete');
+});
+
+test('INSTANT WRITE', 'column kinds come from the data', async () => {
+    assertEqual(['X', '', '-', 'N/a'].map(v => columnKind([v, 'X'])), ['checkbox', 'checkbox', 'checkbox', 'checkbox'], 'checkbox values');
+    assertEqual([columnKind(['', ' ']), columnKind(['-', 'N/A']), columnKind(['X', 'Alex'])], ['empty', 'text', 'text'], 'empty, never checked, mixed');
+    assertEqual([columnKind(['X', 'X', '-', '8/1']), columnKind(['X', '1/10', '3/1', 'Done'])], ['checkbox', 'text'], 'a stray date, mostly dates');
+    assertEqual(columnKindsOfRows([{ A: 'X', B: 'Bo', AppData: {} }, { A: '', B: '' }]), { A: 'checkbox', B: 'text' }, 'rows');
+    const kinds = Object.fromEntries((await Requests.getColumnKinds('PROD_SCHED', 'Production Schedule')).map(k => [k.column, k.kind]));
+    assertEqual([kinds.Elev, kinds.Panels, kinds.Setups, kinds.Client, kinds.Assignee], ['checkbox', 'checkbox', 'checkbox', 'text', 'text'], 'schedule kinds');
+});
+
+test('INSTANT WRITE', 'Ship shows the estimate (with year, from show dates when missing); transship uses the source end', async () => {
+    const row = { Ship: '', 'S. Start': '3/20', 'S. End': '3/23', Year: '2026' };
+    assertEqual(withShipDate(row).Ship, '03/06/2026', 'S. Start minus 14 days');
+    assertEqual(withShipDate({ ...row, Ship: '3/1' }).Ship, '03/01/2026', 'sheet value gains its year');
+    assertEqual(withShipDate({ ...row, AppData: { transshipSource: 'X', transshipSourceEndDate: '03/02/2026' } }).Ship, '03/02/2026', 'transship');
+    assertEqual(estimateShipDate({ Year: '2026' }), null, 'no dates');
+});
+
+// ── Filters: same-column OR, is empty, checked / unchecked ───────────────────
+
+test('FILTERS', 'filters on one column match rows meeting either; excludes still apply', async () => {
+    const rows = [{ N: 'Bob' }, { N: '' }, { N: 'Ann' }, { N: 'Bobby' }];
+    const sp = textFiltersToSearchParams([
+        { column: 'N', values: ['bob'], type: 'contains' },
+        { column: 'N', values: [], type: 'empty' },
+        { column: 'N', values: ['bobby'], type: 'excludes' }
+    ]);
+    assertEqual(searchFilter(rows, sp).map(r => r.N), ['Bob', ''], 'Bob or empty, not Bobby');
+    assertEqual(searchFilter(rows, textFiltersToSearchParams([{ column: 'N', values: [], type: 'empty' }])).map(r => r.N), [''], 'is empty alone');
+    assertEqual(searchFilter(rows, textFiltersToSearchParams([{ column: 'N', values: [''], type: 'contains' }])).length, 4, 'a contains filter without a value is ignored');
+});
+
+test('FILTERS', 'checkbox filters: checked is X or TRUE, unchecked is anything else', async () => {
+    const rows = [{ E: 'X' }, { E: '' }, { E: '-' }, { E: 'TRUE' }, { E: 'N/a' }];
+    assertEqual(searchFilter(rows, textFiltersToSearchParams([{ column: 'E', type: 'checked' }])).map(r => r.E), ['X', 'TRUE'], 'checked');
+    assertEqual(searchFilter(rows, textFiltersToSearchParams([{ column: 'E', type: 'unchecked' }])).map(r => r.E), ['', '-', 'N/a'], 'unchecked');
+});
+
+test('FILTERS', 'URL filter parameters keep same-column filters and value-less types', async () => {
+    const sp = parseSearchParameters({ Col1: 'Client', Val1: 'a|b', Type1: 'contains', Col2: 'Client', Val2: '', Type2: 'empty' }).searchParams;
+    assertEqual(sp, { Client: [{ values: ['a', 'b'], type: 'contains' }, { values: [], type: 'empty' }] }, 'grouped');
+    const all = await Requests.getProductionScheduleData(null, null);
+    const want = all.filter(r => isCheckedValue(r.Setups) && (/o/i.test(r.Client) || !String(r.Client).trim()));
+    const data = await Requests.getProductionScheduleData(null, textFiltersToSearchParams([
+        { column: 'Setups', type: 'checked' },
+        { column: 'Client', values: ['o'], type: 'contains' },
+        { column: 'Client', values: [], type: 'empty' }
+    ]));
+    assertEqual([data.length > 0, data.length], [true, want.length], 'schedule data filtered');
+});
+
+// ── Show notes: empty notes are removed, never appended ──────────────────────
+
+function notesSheet() {
+    return FakeGoogleSheetsService.mockData.CACHE.ShowNotes;
+}
+function notesSnapshot() {
+    return notesSheet().map(r => r.slice());
+}
+function notesRestore(snap) {
+    const s = notesSheet();
+    s.length = 0;
+    snap.forEach(r => s.push(r.slice()));
+}
+
+test('SHOW NOTES', 'clearing a note removes its row; an empty note is never appended', async () => {
+    const snap = notesSnapshot();
+    try {
+        const id = 'TESTCO 2099 CLEAR TEST';
+        await Requests.saveShowNote(id, 'to be cleared');
+        assertEqual(notesSheet().some(r => r[0] === id), true, 'created');
+        const res = await Requests.saveShowNote(id, '   ');
+        assertEqual([res.ok, notesSheet().some(r => r[0] === id)], [true, false], 'row removed');
+        const len = notesSheet().length;
+        const res2 = await Requests.saveShowNote('TESTCO 2099 NEVER', '');
+        assertEqual([res2.ok, notesSheet().length], [true, len], 'nothing appended');
+        assertEqual(notesSheet()[0], ['Identifier', 'Note', 'EditHistory'], 'header kept');
+    } finally {
+        notesRestore(snap);
+    }
+});
+
+test('SHOW NOTES', 'any save removes rows with empty notes and keeps every other note', async () => {
+    const snap = notesSnapshot();
+    const s = notesSheet();
+    try {
+        s.push(['TESTCO 2099 EMPTY A', '', 'old history'], ['', '', ''], ['TESTCO 2099 KEEP', 'keep me', ''], ['TESTCO 2099 EMPTY B', ' ', '']);
+        const res = await Requests.saveShowNote('TESTCO 2099 NEW', 'a new note');
+        assertEqual(res.ok, true, 'ok');
+        const ids = s.slice(1).map(r => r[0]);
+        assertEqual(ids.filter(id => /EMPTY/.test(id)).length + ids.filter(id => !id).length, 0, 'empty rows removed');
+        assertContains(ids, 'TESTCO 2099 KEEP', 'other note kept');
+        assertEqual(s.find(r => r[0] === 'TESTCO 2099 NEW')?.[1], 'a new note', 'new note written');
+        snap.slice(1).forEach(r => assertContains(ids, r[0], 'fixture note kept'));
+    } finally {
+        notesRestore(snap);
+    }
+});
+
+test('SHOW NOTES', 'rows moving before a removal never lose a note', async () => {
+    const snap = notesSnapshot();
+    const s = notesSheet();
+    try {
+        s.push(['TESTCO 2099 EMPTY', '', ''], ['TESTCO 2099 A', 'note a', ''], ['TESTCO 2099 B', 'note b', '']);
+        let fired = false;
+        const res = await withFaults({
+            // Another save inserts a note at the top just before the removal: positions shift by one
+            beforeDelete: () => { if (!fired) { fired = true; s.splice(1, 0, ['TESTCO 2099 OTHER', 'other note', '']); } }
+        }, () => Requests.saveShowNote('TESTCO 2099 A', 'note a, edited'));
+        assertEqual(res.ok, true, 'ok');
+        const notes = Object.fromEntries(s.slice(1).map(r => [r[0], r[1]]));
+        assertEqual([notes['TESTCO 2099 A'], notes['TESTCO 2099 B'], notes['TESTCO 2099 OTHER']], ['note a, edited', 'note b', 'other note'], 'every note present');
+        snap.slice(1).forEach(r => assertEqual(notes[r[0]], r[1], 'fixture note ' + r[0]));
+    } finally {
+        notesRestore(snap);
+    }
+});
+
+test('SHOW NOTES', 'a note write that lands on a moved row is undone and retried', async () => {
+    const snap = notesSnapshot();
+    const s = notesSheet();
+    try {
+        s.push(['TESTCO 2099 FIRST', 'first note', ''], ['TESTCO 2099 TARGET', 'target note', '']);
+        let fired = false;
+        const res = await withFaults({
+            beforeBatchWrite: (t) => { if (t === 'CACHE' && !fired) { fired = true; s.splice(1, 0, ['TESTCO 2099 INSERTED', 'inserted note', '']); } }
+        }, () => Requests.saveShowNote('TESTCO 2099 TARGET', 'target, edited'));
+        assertEqual(res.ok, true, 'ok');
+        const notes = Object.fromEntries(s.slice(1).map(r => [r[0], r[1]]));
+        assertEqual([notes['TESTCO 2099 TARGET'], notes['TESTCO 2099 FIRST'], notes['TESTCO 2099 INSERTED']], ['target, edited', 'first note', 'inserted note'], 'only the target changed');
+    } finally {
+        notesRestore(snap);
+    }
 });
 
 // ── Batched verified writes, fault injection, sheet health ───────────────────

@@ -1098,12 +1098,26 @@ export class FakeGoogleSheetsService {
      *   beforeWrite(tableId, range, values)     before a single setSheetData; return 'drop' to lose it
      *   beforeBatchWrite(tableId, data)         before a batchSetValues; return 'drop' to lose all of
      *                                           it, or a Set of data indices to lose just those
+     *   beforeDelete(tableId, tabName, rows)    before a deleteSheetRows; return 'drop' to lose it
      */
     static faults = null;
 
     static async _fault(name, ...args) {
         const hook = this.faults && this.faults[name];
         return typeof hook === 'function' ? await hook(...args) : undefined;
+    }
+
+    /** Delete whole rows (1-based; the header row is never deleted), bottom up, as one step. */
+    static async deleteSheetRows(tableId, tabName, rowNumbers) {
+        await this.delay(500 + Math.random() * 500);
+        await FakeGoogleSheetsAuth.checkAuth();
+        if (!this.ENDPOINT_IDS[tableId]) throw new Error(`[deleteSheetRows] Spreadsheet ID not found for table: ${tableId}`);
+        const sheet = this.mockData[tableId]?.[tabName];
+        if (!sheet) throw new Error(`[deleteSheetRows] Sheet not found: ${tabName}`);
+        const rows = [...new Set((rowNumbers || []).map(Number).filter(n => Number.isInteger(n) && n > 1))].sort((a, b) => b - a);
+        if (await this._fault('beforeDelete', tableId, tabName, rows) === 'drop') return true;
+        rows.forEach(n => { if (n - 1 < sheet.length) sheet.splice(n - 1, 1); });
+        return true;
     }
 
     /** values.batchGet: one 2D array per range, in order (each range read as getSheetData would). */
@@ -1657,9 +1671,9 @@ export class FakeGoogleSheetsService {
     if (prefs) {
         prefs.push(
             ['InstantWriteTables', 'Instant-write tables', 'row identity and writable columns for tables that save each edit immediately', 'schedule*', 'json',
-                '{"PROD_SCHED/Production Schedule": {"identity": ["Client", "Year", "Show"], "columns": {"Elev": "checkbox", "Panels": "checkbox", "Setups": "checkbox", "Assignee": "select"}}}', ''],
+                '{"PROD_SCHED/Production Schedule": {"identity": ["Client", "Year", "Show"], "columns": ["Elev", "Panels", "Setups", "Assignee"]}}', ''],
             ['DesignQueueFields', 'Design queue fields', 'columns shown on the design queue', 'schedule/design-queue*', 'json',
-                '["Client", "Show", "Size", "Elev", "Panels", "Setups", "Assignee", "Account Manager", "Ship", "Note", "Booth#"]', ''],
+                '["Client", "Show", "Size", "Note", "Elev", "Panels", "Setups", "Assignee", "Account Manager", "Ship", "Booth#"]', ''],
             ['DesignQueueAssignees', 'Design queue assignees', 'people who can be assigned design work', 'schedule/design-queue*', 'json',
                 '["Alex", "Sam"]', '']
         );

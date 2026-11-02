@@ -1,11 +1,13 @@
 import { Database, EditHistoryUtils, normalizeHeaderName } from '../index.js';
 import { isCheckedValue, checkboxWriteValue } from '../utils/checkbox-values.js';
+import { instantWriteEntry, isInstantColumn } from '../utils/instant-write-config.js';
 
 /**
  * Instant (single-cell, verified) writes — views-and-renderers-plan §4.16, Phase 2.
  *
  * Everything an instant-write page needs from the sheet lives in the live database:
- *   CACHE/Preferences  InstantWriteTables  { "<database>/<tab>": { identity: [...], columns: { name: type } } }
+ *   CACHE/Preferences  InstantWriteTables  { "<database>/<tab>": { identity: [...], columns: [...] } }
+ *                      (see utils/instant-write-config.js; cell types come from the data)
  *   CACHE/ShowNotes    Identifier | Note | EditHistory   (show notes, keyed by computeIdentifier)
  *
  * writeCellsVerified locates each target by identity (row) and header name (column), never by
@@ -76,14 +78,11 @@ function rowMatchesNamed(line, header, named, exclude) {
 export class InstantWriteUtils {
     /**
      * The InstantWriteTables entry for a database/tab, or null.
-     * @returns {Promise<{ identity: string[], columns: Object<string,string> }|null>}
+     * @returns {Promise<{ identity: string[], columns: string[] }|null>}
      */
     static async getInstantWriteConfig(database, tab) {
         const prefs = await Database.getData('CACHE', 'Preferences', PREFERENCES_MAPPING);
-        const all = parseJsonPreference(prefs, 'InstantWriteTables', {});
-        const entry = all && all[`${database}/${tab}`];
-        if (!entry || !Array.isArray(entry.identity) || !entry.identity.length || !entry.columns) return null;
-        return { identity: entry.identity, columns: entry.columns };
+        return instantWriteEntry(parseJsonPreference(prefs, 'InstantWriteTables', {}), database, tab);
     }
 
     /** Read a JSON preference by id (page-level reads: DesignQueueFields, DesignQueueAssignees). */
@@ -144,7 +143,7 @@ export class InstantWriteUtils {
         let todo = [];
         const lastForCell = new Map();
         list.forEach((it, i) => {
-            if (!Object.keys(config.columns).some(c => sameValue(c, it?.column))) {
+            if (!isInstantColumn(config, it?.column)) {
                 results[i] = { ok: false, reason: 'column-not-writable' };
                 return;
             }
@@ -360,7 +359,7 @@ export class InstantWriteUtils {
         });
         const idCols = config.identity.map(n => headerIndex(header, n));
         config.identity.forEach((n, k) => { if (idCols[k] < 0) issues.push({ kind: 'missing-identity-column', message: `Identity column "${n}" is missing` }); });
-        Object.keys(config.columns).forEach(n => { if (headerIndex(header, n) < 0) issues.push({ kind: 'missing-writable-column', message: `Writable column "${n}" is missing` }); });
+        config.columns.forEach(n => { if (headerIndex(header, n) < 0) issues.push({ kind: 'missing-writable-column', message: `Writable column "${n}" is missing` }); });
 
         if (idCols.every(c => c >= 0)) {
             const byIdentity = new Map();
@@ -395,53 +394,204 @@ export class InstantWriteUtils {
     }
 
     /**
-     * Upsert one show note: update the note row if it exists, append one otherwise, then verify.
-     * @returns {Promise<{ ok: boolean, reason?: string }>}
+     * Save one show note, by identifier, and clean up empty notes.
+     *   - A note with text updates the identifier's row, or is appended when there is none.
+     *   - An empty note removes the identifier's row (nothing is appended for it).
+     *   - Every save also removes other rows whose note is empty, so the tab holds only notes.
+     * Rows are found by identifier, checked just before each write, and re-read after it. The tab
+     * changes position under concurrent saves (appends, removals), so: a write that landed on
+     * another row is undone from the pre-write read and retried once, and after removing rows
+     * every note the save read is checked to still be there (one that isn't is put back).
+     * @returns {Promise<{ ok: boolean, reason?: string, warning?: string }>}
      */
     static async saveShowNote(identifier, text, username = null) {
         if (!identifier) return { ok: false, reason: 'no-identifier' };
-        const note = text ?? '';
+        const note = String(text ?? '');
+        let result = await InstantWriteUtils._saveShowNoteOnce(identifier, note, username);
+        if (!result.ok && result.retry) result = await InstantWriteUtils._saveShowNoteOnce(identifier, note, username);
+        delete result.retry;
+        return result;
+    }
+
+    /** One read → check → write → verify pass of saveShowNote. @private */
+    static async _saveShowNoteOnce(identifier, note, username) {
         const raw = await Database.readFresh('CACHE', SHOW_NOTES_TAB);
         const header = raw?.[0] || [];
         if (!header.length || header.every(h => !h)) return { ok: false, reason: 'no-show-notes-tab' };
-        const idCol = headerIndex(header, 'Identifier');
-        const noteCol = headerIndex(header, 'Note');
-        const histCol = headerIndex(header, 'EditHistory');
-        if (idCol < 0 || noteCol < 0) return { ok: false, reason: 'show-notes-headers' };
+        const cols = {
+            id: headerIndex(header, 'Identifier'),
+            note: headerIndex(header, 'Note'),
+            hist: headerIndex(header, 'EditHistory'),
+            width: Math.max(header.length, SHOW_NOTES_HEADERS.length)
+        };
+        if (cols.id < 0 || cols.note < 0) return { ok: false, reason: 'show-notes-headers' };
 
         const matches = [];
-        for (let r = 1; r < raw.length; r++) if (sameValue(raw[r]?.[idCol], identifier)) matches.push(r);
+        for (let r = 1; r < raw.length; r++) if (sameValue(raw[r]?.[cols.id], identifier)) matches.push(r);
         if (matches.length > 1) return { ok: false, reason: 'duplicate' };
+        const own = matches.length ? matches[0] : -1;
+        const isEmpty = !note.trim();
 
-        let history = '';
-        if (username) {
-            const oldNote = matches.length ? (raw[matches[0]][noteCol] ?? '') : '';
-            const changes = EditHistoryUtils.calculateRowDiff({ Note: oldNote }, { Note: note });
-            if (changes.length) {
-                const entry = EditHistoryUtils.createEditHistoryEntry(username, changes, 'web');
-                history = EditHistoryUtils.appendToEditHistory(matches.length && histCol >= 0 ? (raw[matches[0]][histCol] ?? '') : '', entry);
+        // Rows to remove: every row without a note (blank rows too), and this show's row when its
+        // note is being cleared
+        const emptyRows = [];
+        for (let r = 1; r < raw.length; r++) {
+            if (r === own ? isEmpty : !String(raw[r]?.[cols.note] ?? '').trim()) emptyRows.push(r);
+        }
+
+        let warning = '';
+        if (!isEmpty) {
+            let history = '';
+            if (username) {
+                const oldNote = own >= 0 ? (raw[own][cols.note] ?? '') : '';
+                const changes = EditHistoryUtils.calculateRowDiff({ Note: oldNote }, { Note: note });
+                if (changes.length) {
+                    const entry = EditHistoryUtils.createEditHistoryEntry(username, changes, 'web');
+                    history = EditHistoryUtils.appendToEditHistory(own >= 0 && cols.hist >= 0 ? (raw[own][cols.hist] ?? '') : '', entry);
+                }
+            }
+            const written = own >= 0
+                ? await InstantWriteUtils._writeNoteRow(raw, cols, own, identifier, note, history)
+                : await InstantWriteUtils._appendNoteRow(raw, cols, identifier, note, history);
+            if (!written.ok) return written;
+            // The row just written is no longer empty, whatever the read said; removals below check
+            // the tab against what it holds now (this note's new text, or the appended row)
+            const at = emptyRows.indexOf(own);
+            if (at >= 0) emptyRows.splice(at, 1);
+            const line = own >= 0 ? raw[own].slice() : [];
+            line[cols.id] = own >= 0 ? line[cols.id] : identifier;
+            line[cols.note] = note;
+            if (cols.hist >= 0 && (history || own < 0)) line[cols.hist] = history;
+            if (own >= 0) raw[own] = line; else raw.push(line);
+        }
+
+        if (emptyRows.length) {
+            const removed = await InstantWriteUtils._removeNoteRows(raw, cols, emptyRows);
+            if (removed.warning) warning = removed.warning;
+            if (isEmpty && own >= 0 && !removed.removed.includes(own)) {
+                // This show's row changed before it could be removed: read again and retry
+                return { ok: false, reason: 'moved', retry: true, ...(warning ? { warning } : {}) };
             }
         }
+        return warning ? { ok: true, warning } : { ok: true };
+    }
 
-        let rowNumber;
-        if (matches.length === 1) {
-            rowNumber = matches[0] + 1;
-            await Database.setCellValue('CACHE', SHOW_NOTES_TAB, rowNumber, noteCol + 1, note);
-            if (history && histCol >= 0) await Database.setCellValue('CACHE', SHOW_NOTES_TAB, rowNumber, histCol + 1, history);
-        } else {
-            const values = new Array(Math.max(header.length, SHOW_NOTES_HEADERS.length)).fill('');
-            values[idCol] = identifier;
-            values[noteCol] = note;
-            if (histCol >= 0) values[histCol] = history;
-            rowNumber = await Database.appendSheetRow('CACHE', SHOW_NOTES_TAB, values);
-        }
+    /** One note row as an A1 range. @private */
+    static _noteRowRange(cols, rowNumber) {
+        return Database.a1Range(SHOW_NOTES_TAB, `A${rowNumber}:${Database.columnLetter(cols.width)}${rowNumber}`);
+    }
 
-        const lastCol = Database.columnLetter(Math.max(header.length, noteCol + 1));
-        const after = await Database.readFresh('CACHE', `${SHOW_NOTES_TAB}!A${rowNumber}:${lastCol}${rowNumber}`);
+    /**
+     * Update the note (and its history) in the row at raw index `r`, checked before and verified
+     * after. A write that landed on another row (rows moved in between) is undone. @private
+     */
+    static async _writeNoteRow(raw, cols, r, identifier, note, history) {
+        const rowNumber = r + 1;
+        const range = InstantWriteUtils._noteRowRange(cols, rowNumber);
+        const [before] = await Database.readFreshRanges('CACHE', [range]);
+        if (!sameValue(before?.[0]?.[cols.id], identifier)) return { ok: false, reason: 'moved', retry: true };
+
+        const cells = [{ rowNumber, columnNumber: cols.note + 1, value: note }];
+        if (history && cols.hist >= 0) cells.push({ rowNumber, columnNumber: cols.hist + 1, value: history });
+        await Database.setCellValues('CACHE', SHOW_NOTES_TAB, cells);
+
+        const [after] = await Database.readFreshRanges('CACHE', [range]);
         const line = after?.[0] || [];
-        if (!sameValue(line[idCol], identifier) || String(line[noteCol] ?? '') !== String(note)) {
-            return { ok: false, reason: 'verify-failed' };
+        if (sameValue(line[cols.id], identifier)) {
+            return String(line[cols.note] ?? '') === note ? { ok: true } : { ok: false, reason: 'verify-failed' };
         }
-        return { ok: true };
+        // Rows moved between the check and the write: put the row that got this note back as read
+        const warning = await InstantWriteUtils._restoreNoteRow(raw, cols, line, note);
+        return { ok: false, reason: 'moved', retry: true, ...(warning ? { warning } : {}) };
+    }
+
+    /** Append a note row after checking the next row is free; verified like _writeNoteRow. @private */
+    static async _appendNoteRow(raw, cols, identifier, note, history) {
+        const rowNumber = raw.length + 1;
+        const range = InstantWriteUtils._noteRowRange(cols, rowNumber);
+        const [before] = await Database.readFreshRanges('CACHE', [range]);
+        if ((before?.[0] || []).some(v => String(v ?? '').trim())) return { ok: false, reason: 'moved', retry: true };
+
+        const values = new Array(cols.width).fill('');
+        values[cols.id] = identifier;
+        values[cols.note] = note;
+        if (cols.hist >= 0) values[cols.hist] = history;
+        await Database.setCellValues('CACHE', SHOW_NOTES_TAB, values.map((value, c) => ({ rowNumber, columnNumber: c + 1, value })));
+
+        const [after] = await Database.readFreshRanges('CACHE', [range]);
+        const line = after?.[0] || [];
+        if (sameValue(line[cols.id], identifier) && String(line[cols.note] ?? '') === note) return { ok: true };
+        if (!sameValue(line[cols.id], identifier)) {
+            const warning = await InstantWriteUtils._restoreNoteRow(raw, cols, line, note);
+            return { ok: false, reason: 'moved', retry: true, ...(warning ? { warning } : {}) };
+        }
+        return { ok: false, reason: 'verify-failed' };
+    }
+
+    /**
+     * A note write landed on another show's row (`line`, as re-read). Put that row's note and
+     * history back from the pre-write read, while it still holds the written note. @private
+     */
+    static async _restoreNoteRow(raw, cols, line, writtenNote) {
+        const victimId = String(line?.[cols.id] ?? '');
+        if (String(line?.[cols.note] ?? '') !== writtenNote) return '';
+        const r = raw.findIndex((l, i) => i > 0 && sameValue(l?.[cols.id], victimId));
+        if (!victimId || r < 0) return `A note may have been written over the row of ${victimId || 'a row added while saving'}; check the ShowNotes tab.`;
+        const fresh = await Database.readFresh('CACHE', SHOW_NOTES_TAB);
+        const now = fresh.findIndex((l, i) => i > 0 && sameValue(l?.[cols.id], victimId));
+        if (now < 0 || String(fresh[now][cols.note] ?? '') !== writtenNote) return '';
+        const rowNumber = now + 1;
+        const cells = [{ rowNumber, columnNumber: cols.note + 1, value: String(raw[r][cols.note] ?? '') }];
+        if (cols.hist >= 0) cells.push({ rowNumber, columnNumber: cols.hist + 1, value: String(raw[r][cols.hist] ?? '') });
+        const range = InstantWriteUtils._noteRowRange(cols, rowNumber);
+        const [before] = await Database.readFreshRanges('CACHE', [range]);
+        if (!sameValue(before?.[0]?.[cols.id], victimId)) return `A note may have been written over the row of ${victimId}; check the ShowNotes tab.`;
+        await Database.setCellValues('CACHE', SHOW_NOTES_TAB, cells);
+        return '';
+    }
+
+    /**
+     * Remove note rows (raw indices). Each row is re-read just before removal and only removed
+     * when it still holds what the save read; all are removed in one request, bottom up. Then
+     * every other note the save read must still be in the tab: one that isn't (a removal hit it
+     * because rows moved) is appended again.
+     * @returns {Promise<{ removed: number[], warning?: string }>} removed raw indices
+     * @private
+     */
+    static async _removeNoteRows(raw, cols, indices) {
+        const sameLine = (a, b) => {
+            for (let c = 0; c < cols.width; c++) if (String(a?.[c] ?? '') !== String(b?.[c] ?? '')) return false;
+            return true;
+        };
+        const blocks = await Database.readFreshRanges('CACHE', indices.map(i => InstantWriteUtils._noteRowRange(cols, i + 1)));
+        const confirmed = indices.filter((i, k) => sameLine(blocks[k]?.[0], raw[i]));
+        if (!confirmed.length) return { removed: [] };
+
+        await Database.deleteSheetRows('CACHE', SHOW_NOTES_TAB, confirmed.map(i => i + 1));
+
+        // Every note the save read and kept must still be there (as many times as it was)
+        const keyOf = (l) => `${String(l?.[cols.id] ?? '').trim().toUpperCase()}\u0001${String(l?.[cols.note] ?? '')}`;
+        const fresh = await Database.readFresh('CACHE', SHOW_NOTES_TAB);
+        const have = new Map();
+        for (let r = 1; r < fresh.length; r++) have.set(keyOf(fresh[r]), (have.get(keyOf(fresh[r])) || 0) + 1);
+        const lost = [];
+        const removedSet = new Set(confirmed);
+        for (let r = 1; r < raw.length; r++) {
+            if (removedSet.has(r) || !String(raw[r]?.[cols.note] ?? '').trim()) continue;
+            const k = keyOf(raw[r]);
+            if (have.get(k) > 0) have.set(k, have.get(k) - 1);
+            else lost.push(raw[r]);
+        }
+        let warning = '';
+        for (const line of lost) {
+            const values = new Array(cols.width).fill('').map((_, c) => String(line?.[c] ?? ''));
+            try {
+                await Database.appendSheetRow('CACHE', SHOW_NOTES_TAB, values);
+            } catch (e) {
+                warning = `The note for ${line[cols.id]} may have been removed; check the ShowNotes tab.`;
+            }
+        }
+        if (lost.length && !warning) console.warn(`[InstantWriteUtils] restored ${lost.length} show note(s) removed while rows moved`);
+        return { removed: confirmed, ...(warning ? { warning } : {}) };
     }
 }
