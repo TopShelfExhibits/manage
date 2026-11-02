@@ -1,14 +1,9 @@
 import { html, Requests, DataView, ScheduleFilterSelect, toISODateString, parseDate, getReactiveStore, runNonessentialAnalysisOnAllStores } from '../../index.js';
+import { textFiltersToSearchParams } from '../../../data_management/utils/helpers.js';
 
 // Converts ScheduleFilterSelect textFilters array to getProductionScheduleData searchParams format
 function buildSearchParams(textFilters) {
-    if (!textFilters?.length) return null;
-    const result = {};
-    for (const tf of textFilters) {
-        if (!tf.column) continue;
-        const values = tf.values?.filter(v => String(v).trim()) || (tf.value ? [tf.value] : []);
-        if (values.length) result[tf.column] = { values, type: tf.type || 'contains' };
-    }
+    const result = textFiltersToSearchParams(textFilters);
     return Object.keys(result).length ? result : null;
 }
 

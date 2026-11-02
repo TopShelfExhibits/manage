@@ -1,5 +1,5 @@
 import { Requests, html, hamburgerMenuRegistry, PacklistTable, DataView, NavigationRegistry, DashboardToggleComponent, getReactiveStore, findMatchingStores, createAnalysisConfig, generateStoreKey, authState, ScheduleFilterSelect, invalidateCache, Priority } from '../../index.js';
-import { normalizeFilterValues } from '../../../data_management/utils/helpers.js';
+import { textFiltersToSearchParams } from '../../../data_management/utils/helpers.js';
 import { PacklistItemsSummary } from './PacklistItemsSummary.js';
 import { ScheduleTableComponent } from './ScheduleTable.js';
 import { PacklistTableMenuComponent } from './PacklistTable.js';
@@ -134,17 +134,8 @@ export const PacklistMenuComponent = {
                             filter.dateFilters = searchData.dateFilters;
                         }
                         
-                        // Apply text filters
-                        if (searchData.textFilters && searchData.textFilters.length > 0) {
-                            searchData.textFilters.forEach(textFilter => {
-                                if (textFilter.column && (textFilter.values || textFilter.value)) {
-                                    filter.searchParams[textFilter.column] = {
-                                        values: normalizeFilterValues(textFilter),
-                                        type: textFilter.type || 'contains'
-                                    };
-                                }
-                            });
-                        }
+                        // Apply text filters (filters on the same column are kept together and OR'd)
+                        Object.assign(filter.searchParams, textFiltersToSearchParams(searchData.textFilters));
                         
                         this.filter = filter;
                     },

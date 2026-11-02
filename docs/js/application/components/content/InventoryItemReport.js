@@ -1,5 +1,5 @@
 import { html, DataView, Requests, getReactiveStore, createAnalysisConfig, NavigationRegistry, ItemImageComponent, ScheduleFilterSelect, InventoryCategoryFilter, Priority, invalidateCache, toISODateString, todayISOString, offsetToISO, OverlappingShowsModal } from '../../index.js';
-import { normalizeFilterValues } from '../../../data_management/utils/helpers.js';
+import { textFiltersToSearchParams } from '../../../data_management/utils/helpers.js';
 
 // What each report key is (calendarStart/End are derived ranges on a computed copy of the rows)
 const ITEM_REPORT_FIELDS = [
@@ -302,16 +302,8 @@ export const InventoryItemReport = {
             this.referenceDate = resolvedStart ?? todayISOString();
             this.endDate = resolvedEnd ?? null;
 
-            if (searchData.textFilters && searchData.textFilters.length > 0) {
-                searchData.textFilters.forEach(textFilter => {
-                    if (textFilter.column && (textFilter.values || textFilter.value)) {
-                        searchParams[textFilter.column] = {
-                            values: normalizeFilterValues(textFilter),
-                            type: textFilter.type || 'contains'
-                        };
-                    }
-                });
-            }
+            // Apply text filters (filters on the same column are kept together and OR'd)
+            Object.assign(searchParams, textFiltersToSearchParams(searchData.textFilters));
 
             this.searchFilter = filter;
             this.searchParams = searchParams;

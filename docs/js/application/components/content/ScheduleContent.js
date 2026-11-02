@@ -1,7 +1,7 @@
 import { html, ScheduleTableComponent, hamburgerMenuRegistry, DashboardToggleComponent, NavigationRegistry, Requests, ScheduleFilterSelect } from '../../index.js';
 import { TransshipmentModal } from '../interface/ScheduleModals.js';
 import { DesignQueueContent } from './DesignQueueContent.js';
-import { normalizeFilterValues } from '../../../data_management/utils/helpers.js';
+import { textFiltersToSearchParams } from '../../../data_management/utils/helpers.js';
 
 // Schedule Hamburger Menu Component
 export const ScheduleMenuComponent = {
@@ -147,17 +147,8 @@ export const ScheduleContent = {
                 filter.dateFilters = searchData.dateFilters;
             }
             
-            // Apply text filters
-            if (searchData.textFilters && searchData.textFilters.length > 0) {
-                searchData.textFilters.forEach(textFilter => {
-                    if (textFilter.column && (textFilter.values || textFilter.value)) {
-                        filter.searchParams[textFilter.column] = {
-                            values: normalizeFilterValues(textFilter),
-                            type: textFilter.type || 'contains'
-                        };
-                    }
-                });
-            }
+            // Apply text filters (filters on the same column are kept together and OR'd)
+            Object.assign(filter.searchParams, textFiltersToSearchParams(searchData.textFilters));
             
             this.filter = filter;
         }
