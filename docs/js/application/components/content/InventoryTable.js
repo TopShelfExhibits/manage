@@ -854,10 +854,6 @@ export const InventoryTableComponent = {
         tabTitle: {
             type: String,
             default: undefined
-        },
-        editMode: {
-            type: Boolean,
-            default: true
         }
     },
     data() {
@@ -968,8 +964,8 @@ export const InventoryTableComponent = {
             ];
         },
         allowEdit() {
-            // Allow editing only if editMode is true AND not locked by another user AND lock check is complete
-            return this.editMode && !this.lockedByOther && this.lockCheckComplete;
+            // Inventory is always in edit mode, unless another user or device holds the lock
+            return !this.lockedByOther && this.lockCheckComplete;
         },
         allowSave() {
             const result = this.isDirty && !this.lockedByOther && this.lockCheckComplete;
@@ -1024,28 +1020,9 @@ export const InventoryTableComponent = {
         this._visibilityManager.destroy();
     },
     methods: {
-        onForeignLockWhileClean() {
-            if (!this.appContext?.navigateToPath) return;
-
-            const viewPath = NavigationRegistry.buildPathWithCurrentParams(
-                this.containerPath,
-                this.appContext?.currentPath,
-                { edit: undefined }
-            );
-            this.appContext.navigateToPath(viewPath);
-        },
-
-        onLockAcquireFailed(lockInfo) {
+        onLockAcquireFailed() {
             if (this.inventoryTableStore) {
                 this.inventoryTableStore.setData(this.inventoryTableStore.originalData);
-            }
-            if (this.appContext?.navigateToPath) {
-                const viewPath = NavigationRegistry.buildPathWithCurrentParams(
-                    this.containerPath,
-                    this.appContext?.currentPath,
-                    { edit: undefined }
-                );
-                this.appContext.navigateToPath(viewPath);
             }
         },
 
@@ -1308,7 +1285,7 @@ export const InventoryTableComponent = {
                 :container-path="containerPath"
                 :navigate-to-path="appContext.navigateToPath"
                 :newRow="allowEdit"
-                :forceDetails="editMode"
+                :forceDetails="true"
                 :rowDetailsVisible="row => getPendingEntries(row).length > 0"
                 emptyMessage="No inventory items found"
                 :loading-message="loadingMessage"
