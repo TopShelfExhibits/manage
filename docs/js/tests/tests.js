@@ -40,7 +40,7 @@ import { applyColorRule, colorFor, rowColorFor } from '../application/utils/view
 import { containerTier, viewportTier, BREAKPOINTS } from '../application/utils/useContainerSize.js';
 import { todayISOString, searchFilter, textFiltersToSearchParams, parseSearchParameters } from '../data_management/utils/helpers.js';
 import { columnKind, columnKindsOfRows } from '../data_management/utils/checkbox-values.js';
-import { instantWriteEntry } from '../data_management/utils/instant-write-config.js';
+import { instantWriteEntry, identityKey, cellKey, joinKey } from '../data_management/utils/instant-write-config.js';
 import { estimateShipDate } from '../data_management/utils/ship-date.js';
 import { withShipDate } from '../application/utils/scheduleShipping.js';
 
@@ -1887,6 +1887,15 @@ test('INSTANT WRITE', 'InstantWriteTables: columns as a list, the older typed ob
     assertEqual(instantWriteEntry({ [key]: { identity: ['Client'], columns: { Elev: 'checkbox', Assignee: 'select' } } }, 'PROD_SCHED', 'Production Schedule'),
         { identity: ['Client'], columns: ['Elev', 'Assignee'] }, 'object form');
     assertEqual([instantWriteEntry({ [key]: { identity: [], columns: ['Elev'] } }, 'PROD_SCHED', 'Production Schedule'), instantWriteEntry({}, 'PROD_SCHED', 'Production Schedule')], [null, null], 'incomplete');
+});
+
+test('INSTANT WRITE', 'keys: identities match trimmed and case-insensitively; cells by normalized column', async () => {
+    const id = ['Client', 'Year', 'Show'];
+    const key = (row) => identityKey(id, k => row[k]);
+    assertEqual(key({ Client: ' QGenda ', Year: 2025, Show: 'HIMSS' }), key({ Client: 'qgenda', Year: '2025', Show: 'himss ' }), 'same identity');
+    assertEqual(key({ Client: 'A|B', Year: '', Show: 'C' }) === key({ Client: 'A', Year: 'B', Show: 'C' }), false, 'a value with | is not split');
+    assertEqual(cellKey('r', 'Account  Manager'), cellKey('r', 'account manager'), 'column names normalized');
+    assertEqual(joinKey('a', null, 1).split(''), ['a', '', '1'], 'parts');
 });
 
 test('INSTANT WRITE', 'column kinds come from the data', async () => {

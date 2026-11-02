@@ -1,5 +1,5 @@
 import { Database, EditHistoryUtils, normalizeHeaderName } from '../index.js';
-import { instantWriteEntry, isInstantColumn } from '../utils/instant-write-config.js';
+import { instantWriteEntry, isInstantColumn, joinKey, identityText, columnText, identityParts, identityKey, cellKey } from '../utils/instant-write-config.js';
 
 /**
  * Instant (verified) writes by row identity — views-and-renderers-plan §4.16.
@@ -30,14 +30,14 @@ const PREFERENCES_MAPPING = { id: 'ID', name: 'Name', description: 'Description'
 const SHOW_NOTES_TAB = 'ShowNotes';
 const SHOW_NOTES_HEADERS = ['Identifier', 'Note', 'EditHistory'];
 
-/** Values are compared trimmed and case-insensitively against the raw sheet values. */
+/** Values (identities, identifiers) are compared as identities match: trimmed, case-insensitive. */
 export function sameValue(a, b) {
-    return String(a ?? '').trim().toLowerCase() === String(b ?? '').trim().toLowerCase();
+    return identityText(a) === identityText(b);
 }
 
 function headerIndex(headerRow, name) {
-    const target = normalizeHeaderName(name).toLowerCase();
-    return (headerRow || []).findIndex(h => normalizeHeaderName(h).toLowerCase() === target);
+    const target = columnText(name);
+    return (headerRow || []).findIndex(h => columnText(h) === target);
 }
 
 function parseJsonPreference(prefs, id, fallback) {
@@ -50,7 +50,7 @@ function parseJsonPreference(prefs, id, fallback) {
 function namedValues(header, line) {
     const map = new Map();
     (header || []).forEach((h, c) => {
-        const name = normalizeHeaderName(h ?? '').toLowerCase();
+        const name = columnText(h);
         if (name && !map.has(name)) map.set(name, String(line?.[c] ?? ''));
     });
     return map;
@@ -62,7 +62,7 @@ function rowMatchesNamed(line, header, named, exclude) {
     let compared = 0;
     const seen = new Set();
     for (let c = 0; c < (header || []).length; c++) {
-        const name = normalizeHeaderName(header[c] ?? '').toLowerCase();
+        const name = columnText(header[c]);
         if (!name || seen.has(name) || exclude.has(name) || !named.has(name)) continue;
         seen.add(name);
         if (String(line[c] ?? '') !== named.get(name)) return false;
@@ -89,12 +89,13 @@ export class InstantWriteUtils {
         const header = raw?.[0] || [];
         const idCols = identity.map(name => headerIndex(header, name));
         if (idCols.some(i => i < 0)) return { status: 'no-identity-columns' };
-        const wanted = identity.map(name => rowObj?.[name]);
-        if (wanted.every(v => v === undefined || v === null || String(v).trim() === '')) return { status: 'not-found' };
+        const wanted = identityParts(identity, name => rowObj?.[name]);
+        if (wanted.every(v => !v)) return { status: 'not-found' };
+        const wantedKey = joinKey(...wanted);
         const hits = [];
         for (let r = 1; r < raw.length; r++) {
             const line = raw[r] || [];
-            if (idCols.every((c, k) => sameValue(line[c], wanted[k]))) hits.push(r);
+            if (identityKey(identity, (name, k) => line[idCols[k]]) === wantedKey) hits.push(r);
         }
         if (hits.length === 0) return { status: 'not-found', idCols };
         if (hits.length > 1) return { status: 'duplicate', idCols };
@@ -125,10 +126,9 @@ export class InstantWriteUtils {
                 results[i] = { ok: false, reason: 'column-not-writable' };
                 return;
             }
-            const cellKey = config.identity.map(n => String(it.row?.[n] ?? '').trim().toLowerCase()).join('\u0001')
-                + '\u0002' + normalizeHeaderName(it.column).toLowerCase();
-            if (lastForCell.has(cellKey)) results[lastForCell.get(cellKey)] = { ok: false, reason: 'superseded' };
-            lastForCell.set(cellKey, i);
+            const cell = cellKey(identityKey(config.identity, n => it.row?.[n]), it.column);
+            if (lastForCell.has(cell)) results[lastForCell.get(cell)] = { ok: false, reason: 'superseded' };
+            lastForCell.set(cell, i);
         });
         todo = [...lastForCell.values()].sort((a, b) => a - b);
 
@@ -171,8 +171,8 @@ export class InstantWriteUtils {
         const rangeOf = n => Database.a1Range(tab, `A${n}:${lastCol}${n}`);
         const identityAt = (line, p) => p.idCols.every((c, k) => sameValue(line?.[c], p.row?.[config.identity[k]]));
         // The header still names the identity and target columns where step 2 found them
-        const headerHolds = (line, p) => sameValue(normalizeHeaderName(line?.[p.colIdx] ?? ''), normalizeHeaderName(header[p.colIdx]))
-            && p.idCols.every(c => sameValue(normalizeHeaderName(line?.[c] ?? ''), normalizeHeaderName(header[c])));
+        const headerHolds = (line, p) => columnText(line?.[p.colIdx]) === columnText(header[p.colIdx])
+            && p.idCols.every(c => columnText(line?.[c]) === columnText(header[c]));
         const readRows = async (numbers) => {
             const blocks = await Database.readFreshRanges(database, [rangeOf(1), ...numbers.map(rangeOf)]);
             return { head: blocks[0]?.[0] || [], byRow: new Map(numbers.map((n, k) => [n, blocks[k + 1]?.[0] || []])) };
@@ -220,8 +220,8 @@ export class InstantWriteUtils {
             // a write landed in by the verify read's header (a shifted write fills a neighbour).
             // Rows are matched on their other cells only.
             const batchColumns = new Set([
-                ...list.map(it => normalizeHeaderName(it?.column ?? '').toLowerCase()),
-                ...writes.map(w => normalizeHeaderName(after.head[w.colIdx] ?? '').toLowerCase())
+                ...list.map(it => columnText(it?.column)),
+                ...writes.map(w => columnText(after.head[w.colIdx]))
             ].filter(Boolean));
             for (const [i, r] of await InstantWriteUtils._resolveDisplaced(database, tab, config, raw, displaced, batchColumns, writes)) out.set(i, r);
         }
@@ -244,19 +244,19 @@ export class InstantWriteUtils {
         // one may have filled the other's row, so "the row holds the value" proves nothing
         const sameWriteCount = new Map();
         for (const w of writes) {
-            const k = normalizeHeaderName(w.column).toLowerCase() + '\u0001' + String(w.desired);
+            const k = joinKey(columnText(w.column), w.desired);
             sameWriteCount.set(k, (sameWriteCount.get(k) || 0) + 1);
         }
         const out = new Map();
         const fresh = await Database.readFresh(database, tab);
         const freshHeader = fresh?.[0] || [];
         const rawHeader = raw?.[0] || [];
-        const describe = (named) => config.identity.map(n => named.get(normalizeHeaderName(n).toLowerCase())).filter(v => String(v ?? '').trim()).join(' / ') || 'a row without identity';
+        const describe = (named) => config.identity.map(n => named.get(columnText(n))).filter(v => String(v ?? '').trim()).join(' / ') || 'a row without identity';
 
         for (const p of displaced) {
             const colNow = headerIndex(freshHeader, p.column);
             const own = InstantWriteUtils.locateRow(fresh, config.identity, p.row);
-            const onlyWriter = sameWriteCount.get(normalizeHeaderName(p.column).toLowerCase() + '\u0001' + String(p.desired)) === 1;
+            const onlyWriter = sameWriteCount.get(joinKey(columnText(p.column), p.desired)) === 1;
             if (onlyWriter && own.status === 'ok' && colNow >= 0 && String(fresh[own.rowIndex][colNow] ?? '') === String(p.desired)) {
                 out.set(p.i, { ok: true, value: p.desired, rowNumber: own.rowIndex + 1 });
                 continue;
@@ -266,7 +266,7 @@ export class InstantWriteUtils {
             const afterLine = p.afterLine || [];
             if (String(afterLine[p.colIdx] ?? '') === String(p.desired)) {
                 // The cell that received the value: its column by name, its row by the other cells
-                const victimCol = normalizeHeaderName(p.afterHead?.[p.colIdx] ?? '').toLowerCase();
+                const victimCol = columnText(p.afterHead?.[p.colIdx]);
                 const named = namedValues(p.afterHead, afterLine);
                 const exclude = new Set([...batchColumns, victimCol]);
                 const matches = (line, header) => rowMatchesNamed(line, header, named, exclude);
@@ -330,7 +330,7 @@ export class InstantWriteUtils {
         // Header names must be unique (columns are found by name)
         const seen = new Map();
         header.forEach((h, c) => {
-            const name = normalizeHeaderName(h).toLowerCase();
+            const name = columnText(h);
             if (!name) return;
             if (seen.has(name)) issues.push({ kind: 'duplicate-header', message: `Header "${normalizeHeaderName(h)}" appears in columns ${Database.columnLetter(seen.get(name) + 1)} and ${Database.columnLetter(c + 1)}` });
             else seen.set(name, c);
@@ -344,17 +344,17 @@ export class InstantWriteUtils {
             for (let r = 1; r < raw.length; r++) {
                 const line = raw[r] || [];
                 if (!line.some(v => String(v ?? '').trim())) continue; // blank row
-                const parts = idCols.map(c => String(line[c] ?? '').trim().toLowerCase());
+                const parts = identityParts(config.identity, (name, k) => line[idCols[k]]);
                 if (parts.every(v => !v)) {
                     issues.push({ kind: 'blank-identity', message: `Row ${r + 1} has data but no identity`, rows: [r + 1] });
                     continue;
                 }
-                const key = parts.join('\u0001');
-                if (!byIdentity.has(key)) byIdentity.set(key, []);
-                byIdentity.get(key).push(r + 1);
+                const key = joinKey(...parts);
+                if (!byIdentity.has(key)) byIdentity.set(key, { parts, rows: [] });
+                byIdentity.get(key).rows.push(r + 1);
             }
-            for (const [key, rows] of byIdentity) {
-                if (rows.length > 1) issues.push({ kind: 'duplicate-identity', message: `Rows ${rows.join(', ')} share the identity ${key.split('\u0001').join(' / ')}`, rows });
+            for (const { parts, rows } of byIdentity.values()) {
+                if (rows.length > 1) issues.push({ kind: 'duplicate-identity', message: `Rows ${rows.join(', ')} share the identity ${parts.join(' / ')}`, rows });
             }
         }
         return { ok: issues.length === 0, issues };
@@ -548,7 +548,7 @@ export class InstantWriteUtils {
         await Database.deleteSheetRows('CACHE', SHOW_NOTES_TAB, confirmed.map(i => i + 1));
 
         // Every note the save read and kept must still be there (as many times as it was)
-        const keyOf = (l) => `${String(l?.[cols.id] ?? '').trim().toUpperCase()}\u0001${String(l?.[cols.note] ?? '')}`;
+        const keyOf = (l) => joinKey(identityText(l?.[cols.id]), l?.[cols.note]);
         const fresh = await Database.readFresh('CACHE', SHOW_NOTES_TAB);
         const have = new Map();
         for (let r = 1; r < fresh.length; r++) have.set(keyOf(fresh[r]), (have.get(keyOf(fresh[r])) || 0) + 1);

@@ -1,7 +1,7 @@
 /**
- * Instant writes: the InstantWriteTables preference and what each write failure means
- * (views-and-renderers-plan §4.16). Pure, no imports, so UI modules can read it without pulling
- * in the data layer.
+ * Instant writes: the InstantWriteTables preference, how rows and cells are matched (keys), and
+ * what each write failure means (views-and-renderers-plan §4.16). Pure, no imports, so UI
+ * modules can read it without pulling in the data layer.
  *
  *   { "<database>/<tab>": { "identity": ["Client", "Year", "Show"], "columns": ["Elev", "Panels"] } }
  *
@@ -31,10 +31,48 @@ export function instantWriteEntry(all, database, tab) {
     return { identity, columns };
 }
 
-/** Whether `column` is one of the entry's instant-write columns (trimmed, case-insensitive). */
+/** Whether `column` is one of the entry's instant-write columns (see columnText). */
 export function isInstantColumn(entry, column) {
-    const target = String(column ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
-    return !!entry && entry.columns.some(c => c.replace(/\s+/g, ' ').trim().toLowerCase() === target);
+    const target = columnText(column);
+    return !!entry && entry.columns.some(c => columnText(c) === target);
+}
+
+// ── Keys: how rows, cells and columns are matched ───────────────────────────
+
+const KEY_SEPARATOR = '';
+
+/** One key from several parts, joined with a character sheet values never hold. */
+export function joinKey(...parts) {
+    return parts.map(p => String(p ?? '')).join(KEY_SEPARATOR);
+}
+
+/** How identity values (and identifiers) match: trimmed, case-insensitive. */
+export function identityText(value) {
+    return String(value ?? '').trim().toLowerCase();
+}
+
+/** How column names match: line breaks and runs of spaces as one space, trimmed, case-insensitive. */
+export function columnText(name) {
+    return String(name ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+/**
+ * A row's identity values, as they match.
+ * @param {string[]} identity  the identity column names
+ * @param {(name: string, k: number) => *} valueOf  the row's value for each
+ */
+export function identityParts(identity, valueOf) {
+    return identity.map((name, k) => identityText(valueOf(name, k)));
+}
+
+/** A row's identity as one key: two rows with the same key are the same row to an instant write. */
+export function identityKey(identity, valueOf) {
+    return joinKey(...identityParts(identity, valueOf));
+}
+
+/** One cell: a row's identity key and a column name. */
+export function cellKey(rowKey, column) {
+    return joinKey(rowKey, columnText(column));
 }
 
 /**

@@ -1,7 +1,7 @@
 import { undoRegistry } from './undoRegistry.js';
 import { escapeHtml } from './views/fieldFormat.js';
 import { isCheckedValue } from '../../data_management/utils/checkbox-values.js';
-import { describeWriteFailure } from '../../data_management/utils/instant-write-config.js';
+import { describeWriteFailure, joinKey } from '../../data_management/utils/instant-write-config.js';
 
 /**
  * Cell edits — how tables edit, in both edit modes (views-and-renderers-plan §4.16).
@@ -198,7 +198,7 @@ export function useBatchEdits(host) {
  * @param {Object} host
  * @param {() => boolean} host.enabled           instant editing is on (mode, rowId and commitCells present)
  * @param {() => Array} host.rows                the loaded rows
- * @param {(row) => string} host.rowId           the row's identity (cells are keyed "<rowId>::<key>")
+ * @param {(row) => string} host.rowId           the row's identity (cells are keyed by it and the field key)
  * @param {(entries) => Promise<Array>} host.commitCells  the page's write: [{ row, key, value }] →
  *                                               [{ ok, reason, warning }], one result per entry
  * @param {(row) => Object} host.derive          recomputes the page's derived fields on an edited row
@@ -208,16 +208,16 @@ export function useBatchEdits(host) {
  * @param {() => void} host.refresh              asks the page to reload (after a failure)
  */
 export function useInstantEdits(host) {
-    // "<rowId>::<key>" → { id, key, value, original, row, status: 'queued'|'writing'|'saved', next? }
+    // joinKey(rowId, key) → { id, key, value, original, row, status: 'queued'|'writing'|'saved', next? }
     const pending = Vue.reactive({});
-    // "<rowId>::<key>" → true while the failed state shows
+    // joinKey(rowId, key) → true while the failed state shows
     const failed = Vue.reactive({});
     const hasQueued = Vue.computed(() => Object.values(pending).some(p => p.status === 'queued' || p.status === 'writing'));
     let flushTimer = null;
     let flushing = null;
     let flushAgain = false;
 
-    const cellKey = (id, key) => id + '::' + key;
+    const cellKey = (id, key) => joinKey(id, key);
     const loadedRow = (id) => host.rows().find(r => host.rowId(r) === id) || null;
 
     function sameValue(key, a, b) {

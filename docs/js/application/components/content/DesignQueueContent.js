@@ -1,7 +1,7 @@
 import { html, Requests, DataView, getReactiveStore, invalidateCache, ScheduleFilterSelect } from '../../index.js';
 import { buildScheduleFields } from '../../../data_management/abstraction/scheduleFields.js';
 import { columnKindsOfRows, isCheckedValue } from '../../../data_management/utils/checkbox-values.js';
-import { instantWriteEntry, isInstantColumn } from '../../../data_management/utils/instant-write-config.js';
+import { instantWriteEntry, isInstantColumn, identityKey, identityText, columnText } from '../../../data_management/utils/instant-write-config.js';
 import { textFiltersToSearchParams } from '../../../data_management/utils/helpers.js';
 import { shipReturnAnalysis, withShipDate, shipReturnCards, SHIP_RETURN_DECORATION_KEYS } from '../../utils/scheduleShipping.js';
 
@@ -72,8 +72,9 @@ const DESIGN_QUEUE_VIEWS = {
 };
 
 // Notes belong to a show (computeIdentifier inputs), whatever the row identity is
+const SHOW_IDENTITY = Object.freeze(['Client', 'Year', 'Show']);
 function showKey(row) {
-    return ['Client', 'Year', 'Show'].map(k => String(row?.[k] ?? '').trim().toLowerCase()).join('|');
+    return identityKey(SHOW_IDENTITY, k => row?.[k]);
 }
 
 
@@ -141,9 +142,9 @@ export const DesignQueueContent = {
         columnKinds() {
             const sheet = this.kindsStore?.data;
             if (Array.isArray(sheet) && sheet.length) {
-                return Object.fromEntries(sheet.map(k => [String(k.column).trim().toLowerCase(), k.kind]));
+                return Object.fromEntries(sheet.map(k => [columnText(k.column), k.kind]));
             }
-            return Object.fromEntries(Object.entries(columnKindsOfRows(this.rawRows)).map(([k, v]) => [k.trim().toLowerCase(), v]));
+            return Object.fromEntries(Object.entries(columnKindsOfRows(this.rawRows)).map(([k, v]) => [columnText(k), v]));
         },
         // FieldDefs: Schedule fields, instant cells typed by their data, the joined Note, derived fields
         fields() {
@@ -153,16 +154,16 @@ export const DesignQueueContent = {
                 const have = new Set(base.map(f => f.key));
                 for (const key of DESIGN_QUEUE_DEFAULT_FIELDS) if (!have.has(key) && key !== 'Note') base.push({ key, label: key });
             }
-            const keys = new Set(base.map(f => f.key.trim().toLowerCase()));
+            const keys = new Set(base.map(f => columnText(f.key)));
             const fields = base.map(f => {
                 if (!isInstantColumn({ columns: this.instantColumns }, f.key)) return f;
                 const type = this.cellTypeFor(f.key);
                 const field = { ...f, cell: type, editable: true, sortable: f.sortable || type === 'select' };
-                if (type === 'select') field.cellOptions = { options: this.selectOptions[f.key.trim().toLowerCase()] || [] };
+                if (type === 'select') field.cellOptions = { options: this.selectOptions[columnText(f.key)] || [] };
                 return field;
             });
             for (const col of this.instantColumns) {
-                if (!keys.has(col.trim().toLowerCase()) && this.rawRows.length) console.warn(`[DesignQueue] instant-write column "${col}" is not in the sheet; skipped`);
+                if (!keys.has(columnText(col)) && this.rawRows.length) console.warn(`[DesignQueue] instant-write column "${col}" is not in the sheet; skipped`);
             }
             if (!keys.has('note')) fields.push({ key: 'Note', label: 'Note', cell: 'text', editable: true, cellOptions: { placeholder: 'Add a note' } });
             fields.push({ key: '_rowColor', label: 'Row colour' }, { key: '_identifier', label: 'Identifier' });
@@ -174,7 +175,7 @@ export const DesignQueueContent = {
         notesByIdentifier() {
             const map = new Map();
             for (const n of this.notesStore?.data || []) {
-                if (n?.Identifier) map.set(String(n.Identifier).trim().toUpperCase(), n.Note ?? '');
+                if (n?.Identifier) map.set(identityText(n.Identifier), n.Note ?? '');
             }
             return map;
         },
@@ -194,7 +195,7 @@ export const DesignQueueContent = {
                 const identifier = this.identifiers[showKey(row)] || '';
                 // Ship shows (and sorts by) the estimated ship date; transship rows the source show's end
                 const out = { ...withShipDate(row), _identifier: identifier };
-                if (!sheetHasNote) out.Note = identifier ? (this.notesByIdentifier.get(identifier.trim().toUpperCase()) ?? '') : '';
+                if (!sheetHasNote) out.Note = identifier ? (this.notesByIdentifier.get(identityText(identifier)) ?? '') : '';
                 return this.deriveRow(out);
             });
         },
@@ -230,7 +231,7 @@ export const DesignQueueContent = {
     methods: {
         // Cell for an instant-write column: select (page options), checkbox (the data), else text
         cellTypeFor(key) {
-            const k = String(key).trim().toLowerCase();
+            const k = columnText(key);
             if (this.selectOptions[k]) return 'select';
             return this.columnKinds[k] === 'checkbox' ? 'checkbox' : 'text';
         },
@@ -240,7 +241,7 @@ export const DesignQueueContent = {
         },
         // Row identity: the preference's identity columns (Client + Year + Show by default)
         rowId(row) {
-            return this.identity.map(k => String(row?.[k] ?? '').trim().toLowerCase()).join('|');
+            return identityKey(this.identity, k => row?.[k]);
         },
         cellDisabled(row, key) {
             if (key === 'Note') return row._identifier ? '' : 'write disabled: no show identifier yet';
