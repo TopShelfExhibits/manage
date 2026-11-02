@@ -277,7 +277,9 @@ export const PacklistTable = {
             return this.packlistTableStore ? this.packlistTableStore.isLoading : false;
         },
         loadingMessage() {
-            return this.packlistTableStore ? (this.packlistTableStore.loadingMessage || 'Loading data...') : 'Loading data...';
+            const store = this.packlistTableStore;
+            if (store?.isAnalyzing && !store.isLoading) return store.analysisMessage || 'Analyzing data...';
+            return store?.loadingMessage || 'Loading data...';
         },
         // Check if data has been modified (uses reactive store's computed property)
         isDirty() {
@@ -1442,9 +1444,8 @@ export const PacklistTable = {
                     :newRow="editMode"
                     :isLoading="isLoading"
                     :isAnalyzing="packlistTableStore ? packlistTableStore.isAnalyzing : false"
-                    :loading-message="packlistTableStore && packlistTableStore.isLoading ? (packlistTableStore.loadingMessage || 'Loading data...') : (packlistTableStore && packlistTableStore.isAnalyzing ? (packlistTableStore.analysisMessage.loadingMessage || 'Analyzing data...') : loadingMessage)"
-                    :loading-progress="packlistTableStore && packlistTableStore.isAnalyzing ? packlistTableStore.analysisProgress : -1"
                     :loading-message="loadingMessage"
+                    :loading-progress="packlistTableStore && packlistTableStore.isAnalyzing ? packlistTableStore.analysisProgress : -1"
                     :drag-id="'packlist-crates'"
                     :hide-group-members="true"
                     @refresh="handleRefresh"
