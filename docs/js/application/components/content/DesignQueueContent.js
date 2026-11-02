@@ -1,6 +1,6 @@
 import { html, Requests, DataView, getReactiveStore, invalidateCache, ScheduleFilterSelect } from '../../index.js';
 import { buildScheduleFields } from '../../../data_management/abstraction/scheduleFields.js';
-import { columnKindsOfRows } from '../../../data_management/utils/checkbox-values.js';
+import { columnKindsOfRows, isCheckedValue } from '../../../data_management/utils/checkbox-values.js';
 import { instantWriteEntry, isInstantColumn } from '../../../data_management/utils/instant-write-config.js';
 import { textFiltersToSearchParams } from '../../../data_management/utils/helpers.js';
 import { shipReturnAnalysis, withShipDate, shipReturnCards, SHIP_RETURN_DECORATION_KEYS } from '../../utils/scheduleShipping.js';
@@ -19,8 +19,8 @@ import { shipReturnAnalysis, withShipDate, shipReturnCards, SHIP_RETURN_DECORATI
  *    it (Assignee, from DesignQueueAssignees), a checkbox when the sheet's values are checkbox
  *    values, text otherwise. The shown columns come from DesignQueueFields (a view patch).
  *  - Note is not a Schedule column: it is joined from CACHE/ShowNotes by computeIdentifier.
- *  - Completed rows (Elev, Panels and Setups each X, - or N/a) stay in place and turn gray via
- *    a derived colour field (_rowColor) recomputed from the local row.
+ *  - Rows whose Setups is checked (X) stay in place and turn gray via a derived colour field
+ *    (_rowColor) recomputed from the local row, so the row grays as soon as the box is clicked.
  *  - Ship shows the estimated ship date (sorted ascending); the initial filter is the
  *    "Upcoming" schedule search.
  * The Schedule page itself stays read-only.
@@ -35,9 +35,8 @@ export const DESIGN_QUEUE_DEFAULT_FIELDS = Object.freeze(['Client', 'Show', 'Siz
 const DEFAULT_INSTANT_COLUMNS = Object.freeze(['Elev', 'Panels', 'Setups', 'Assignee']);
 // Row identity when the preference is missing (the Schedule's show identity)
 const DEFAULT_IDENTITY = Object.freeze(['Client', 'Year', 'Show']);
-const TASK_COLUMNS = Object.freeze(['Elev', 'Panels', 'Setups']);
-// For the gray "completed" rule only: '-' and 'N/a' count as done (the cell still shows unchecked)
-const DONE_VALUES = Object.freeze(['x', 'true', '-', 'n/a']);
+// The row turns gray when this column is checked
+const DONE_COLUMN = 'Setups';
 
 const DESIGN_QUEUE_VIEWS = {
     id: 'design-queue',
@@ -77,9 +76,6 @@ function showKey(row) {
     return ['Client', 'Year', 'Show'].map(k => String(row?.[k] ?? '').trim().toLowerCase()).join('|');
 }
 
-function isTaskDone(value) {
-    return DONE_VALUES.includes(String(value ?? '').trim().toLowerCase());
-}
 
 export const DesignQueueContent = {
     name: 'DesignQueueContent',
@@ -238,10 +234,9 @@ export const DesignQueueContent = {
             if (this.selectOptions[k]) return 'select';
             return this.columnKinds[k] === 'checkbox' ? 'checkbox' : 'text';
         },
-        // Derived fields recomputed from the (local) row: the row turns gray when every task is done
+        // Derived fields recomputed from the (local) row: the row turns gray when Setups is checked
         deriveRow(row) {
-            const complete = TASK_COLUMNS.every(col => isTaskDone(row[col]));
-            return { ...row, _rowColor: complete ? 'gray' : '' };
+            return { ...row, _rowColor: isCheckedValue(row[DONE_COLUMN]) ? 'gray' : '' };
         },
         // Row identity: the preference's identity columns (Client + Year + Show by default)
         rowId(row) {
