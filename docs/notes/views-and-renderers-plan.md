@@ -15,7 +15,7 @@ All six phases are implemented in the working tree. The in-browser suite passes 
 
 - Engine: `js/application/utils/views/` (`resolveView.js`, `cardsAdapter.js`, `fieldFormat.js`, `viewColor.js`, `searchMatch.js`), `js/application/utils/useContainerSize.js`.
 - Components: `dataViewComponent.js`, `viewSelectComponent.js`, `contentHeaderComponent.js`, `rowDetailsComponent.js`, `cells.js` (registry: image, itemId, navigate, checkbox, select, text).
-- Data layer: `data_management/abstraction/scheduleFields.js`, `instant-write-utils.js` (`writeCellVerified`, `saveShowNote`), `utils/checkbox-values.js`; `Requests.writeCellVerified / saveShowNote / getShowNotes / getJsonPreference / getInstantWriteConfig`.
+- Data layer: `data_management/abstraction/scheduleFields.js`, `instant-write-utils.js` (`writeCellsVerified`, `saveShowNote`), `utils/checkbox-values.js`, `utils/instant-write-config.js` (the preference and the failure messages); `Requests.writeCellsVerified / saveShowNote / getShowNotes / getJsonPreference / getInstantWriteConfig`.
 - New page: `content/DesignQueueContent.js` (route `schedule/design-queue`, Schedule hamburger menu → Design Queue).
 
 **Choices made during implementation (all reversible)**
@@ -210,7 +210,7 @@ There are 20 renderer instances in 14 components.
  ├─ fields   ← FieldDef[]: what each key IS (label, type, format, sortable, editable, cell)
  ├─ editMode ← 'none' | 'batch' | 'instant'  (page data, never view data; §4.16)
  ├─ registry ← page view registry: views (data), default, theme
- └─ hooks    ← action · decorations · bucketDecorations · commitCell (instant mode)
+ └─ hooks    ← action · decorations · bucketDecorations · commitCells (instant mode)
         │
         ▼
  <DataView>  — the only producer of renderer presentation input
@@ -419,7 +419,7 @@ resolveView(fields, view, { size = 'wide', print = false, patches = [], editMode
 - `resolved: ResolvedView`
 - `action: ResolvedAction` (§4.8)
 - `state: { isLoading, isAnalyzing, loadingProgress, loadingMessage, error, emptyMessage }`
-- `hooks: { decorations, bucketDecorations, commitCell }`
+- `hooks: { decorations, bucketDecorations, commitCells }`
 - slots: `#cell`, `#row-details`, `#header-area`, plus table-only `#cell-extra`, `#row-detail-rows`, `#selection-actions`
 - renderer-only behaviour props: table editing/drag/selection/grouping and `editMode`; cards pins
 
@@ -674,15 +674,17 @@ These are set by the content component with its data, never by views.
 1. The renderer emits `cell-commit(row, columnKey, value)`. The cell shows the new value **immediately** (R7.3), on the local computed row.
    - `DataView` holds the commit in a small queue keyed by row identity and column for `INSTANT_WRITE_DELAY_MS` (1200 ms).
    - Another commit to the same cell within the delay replaces the queued value and restarts the timer. If the final value equals the loaded value, nothing is written, so a quick check-then-uncheck costs no write.
-   - When the timer fires, `DataView` calls the page's `commitCell` hook, which returns a promise. The cell shows a pending state until it settles.
+   - When the timer fires, `DataView` calls the page's `commitCells` hook with every queued cell, which returns a promise of one result per cell. The cells show a pending state until it settles.
    - Queued commits flush immediately when the page unmounts (in-app navigation). A browser cannot be relied on to finish a write while a tab is closing, so while commits are queued or in flight, `beforeunload` shows the browser's leave-confirmation prompt and starts the flush.
-2. `commitCell` calls one data-layer function, `Requests.writeCellVerified(database, tab, row, column, value)`. Steps 3–6 live there, in the abstraction layer, not in the page (per the [notes.md](notes.md) TODO on moving API logic into abstractions).
+2. `commitCells` calls one data-layer function, `Requests.writeCellsVerified(database, tab, [{ row, column, value }])`. Steps 3–6 live there, in the abstraction layer, not in the page (per the [notes.md](notes.md) TODO on moving API logic into abstractions).
 3. It locates the target by **identity, not position**: the row by its identity fields, the column by header name. It resolves both to live sheet indices just before writing.
 4. It reads the exact cell and aborts if the read fails or the row no longer matches.
 5. It writes only the desired state, in the sheet's existing convention (see checkbox values below), optionally with date metadata. A formula cell is replaced by the written value.
 6. It re-reads to verify. If rows or columns moved while the write was in flight, it re-locates by identity and retries once. Otherwise it returns a failure, and `DataView` reverts the cell, shows the failed state and an error, and refreshes the data.
 
 Phase 0's key-based `cell-edit` contract serves `batch`. `instant` adds `cell-commit` beside it and leaves `cell-edit` unchanged.
+
+**One editor per cell type, in both modes.** A column is `editable` when the edit mode isn't `none` and its field is editable; the table has no second flag. Every edit goes through one table method that routes by `editMode`: `batch` → `cell-edit` (dirty tracking, undo, Save), `instant` → `cell-commit`. An editable field without a `cell` edits through the `text` cell (number and `external-edit` fields keep their own editors). The text cell is the only text editor: in `batch` it reports every change, in `instant` it reports the finished edit on blur; pasting inserts plain text, and in `batch` pasted text with tabs or line breaks is left to the table's row paste.
 
 **Preferences (R4.5, R5.2, R7.1, R7.2).** Everything an instant-write page needs from the sheet lives in the live database, so a renamed header or a new assignee needs no code change. For Schedule data the identity is Client + Year + Show, the same three inputs as `ProductionUtils.computeIdentifier` ([production-utils.js:332](../js/data_management/abstraction/production-utils.js#L332)).
 
@@ -707,7 +709,7 @@ _Before Phase 2 starts_, add these rows to the live `CACHE/Preferences` sheet. A
 - **Guards:**
   - If a table in `instant` mode has no entry, or names a column that doesn't exist, its instant cells render read-only with a visible "write disabled: no row identity" hint.
   - If two loaded rows share an identity, instant cells on those rows are disabled. The write never guesses.
-- **Read path:** the page (for `columns` and the design queue preferences) and `writeCellVerified` (for `identity` and `columns`) read the preferences through `Requests.getPreferences`, the way `InventorySuppressCategoryAnalysis` is read today ([api.js:1407](../js/data_management/api.js#L1407)).
+- **Read path:** the page (for `columns` and the design queue preferences) and `writeCellsVerified` (for `identity` and `columns`) read the preferences through `Requests.getPreferences`, the way `InventorySuppressCategoryAnalysis` is read today ([api.js:1407](../js/data_management/api.js#L1407)).
 
 **Field data types and editability** belong to field definitions. In future, details cells get data types and editing through the same cell pipeline (§4.14).
 
@@ -715,7 +717,7 @@ _Before Phase 2 starts_, add these rows to the live `CACHE/Preferences` sheet. A
 
 - **Columns:** `Identifier`, `Note`, `EditHistory`. `Identifier` is the value `ProductionUtils.computeIdentifier(show, client, year)` returns, so the same note follows the show on any page.
 - **Reading:** the page joins notes into its rows as the field `Note`, so the `DesignQueueFields` preference can use the plain name. If the Schedule sheet ever gets its own `Note` column, the join logs a dev warning and the sheet value wins.
-- **Writing:** an edit commits on blur, through the same delayed `cell-commit` queue, and `commitCell` routes it to `Requests.saveShowNote(identifier, text)`. This is an upsert: it updates the note row if it exists, appends one otherwise, and verifies by re-reading. It is not `writeCellVerified`, because the note's row may not exist yet.
+- **Writing:** an edit commits on blur, through the same delayed `cell-commit` queue, and `commitCells` routes it to `Requests.saveShowNote(identifier, text)`. This is an upsert: it updates the note row if it exists, appends one otherwise, and verifies by re-reading. It is not `writeCellsVerified`, because the note's row may not exist yet.
 - **Setup:** add the `ShowNotes` tab to the live CACHE spreadsheet and to FakeGoogle before Phase 2.
 
 ### 4.17 Modal size tiers (R3.2)
@@ -810,7 +812,7 @@ Depends only on Phases 0–1.
 1. **`checkbox` and `select` cells** in the cell registry.
    - Checkbox works in both edit modes: in `batch` a toggle marks the cell dirty and prompts Save; in `instant` it emits `cell-commit`.
    - Select takes its options from a page-supplied list.
-2. **`Requests.writeCellVerified`** in the data layer: identity lookup, writable-column check, read, verify, write, re-read, one retry by identity, revert on failure (§4.16). Tested against FakeGoogle in [tests.js](../js/tests/tests.js), including a row moved mid-write and a duplicate identity.
+2. **`Requests.writeCellsVerified`** in the data layer: identity lookup, writable-column check, read, verify, write, re-read, one retry by identity, revert on failure (§4.16). Tested against FakeGoogle in [tests.js](../js/tests/tests.js), including a row moved mid-write and a duplicate identity.
 3. **`instant` edit mode** in `DataView` and `TableComponent` (still through the legacy adapter):
    - the delayed `cell-commit` queue with immediate local display (§4.16);
    - pending and failed state classes;
@@ -825,7 +827,7 @@ Depends only on Phases 0–1.
      A row is complete when each of the three columns is `X`, `-` or `N/a` (R8.2). `-` and `N/a` count as done for this rule only; the cell itself still shows unchecked, and checking it writes `X`.
    - **Assignee** is a `select` whose options come from `DesignQueueAssignees`.
    - **Note** is an editable text field saved to `CACHE/ShowNotes` (§4.16).
-   - **Routing writes:** `commitCell` routes by field: `Note` → `saveShowNote`; every other column → `writeCellVerified`.
+   - **Routing writes:** `commitCells` routes by field: `Note` → `saveShowNote`; every other column → `writeCellsVerified`.
    - **Order and filter:** `view.sort = { key: 'Ship', dir: 'asc' }`, so the most urgent work is first. The initial filter is upcoming shows (Ship on or after today), set through the existing Schedule filter parameters. Filters stay a page concern (R1.16).
 5. Verify the instant-write and design queue items in §9.
 

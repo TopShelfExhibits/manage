@@ -6,7 +6,7 @@ import { textFiltersToSearchParams } from '../../../data_management/utils/helper
 import { shipReturnAnalysis, withShipDate, shipReturnCards, SHIP_RETURN_DECORATION_KEYS } from '../../utils/scheduleShipping.js';
 
 /**
- * Design queue — views-and-renderers-plan Phase 2 (R6.1, R7.1, R8.1, R8.2).
+ * Design queue (views-and-renderers-plan §4.16).
  *
  * A page under Schedule (route schedule/design-queue) that shares the Schedule data and fields
  * (scheduleFields.js) but has its own purpose: track design work per show.
@@ -129,7 +129,7 @@ export const DesignQueueContent = {
         selectOptions() {
             return { assignee: this.assignees };
         },
-        // DesignQueueFields preference → one view patch (affects only this page, R7.2)
+        // DesignQueueFields preference → one view patch (affects only this page)
         patches() {
             const cols = this.jsonPref('DesignQueueFields', null);
             return Array.isArray(cols) && cols.length ? [{ patch: { columns: cols } }] : [];
@@ -157,7 +157,7 @@ export const DesignQueueContent = {
             const fields = base.map(f => {
                 if (!isInstantColumn({ columns: this.instantColumns }, f.key)) return f;
                 const type = this.cellTypeFor(f.key);
-                const field = { ...f, type, cell: type, editable: true, sortable: f.sortable || type === 'select' };
+                const field = { ...f, cell: type, editable: true, sortable: f.sortable || type === 'select' };
                 if (type === 'select') field.cellOptions = { options: this.selectOptions[f.key.trim().toLowerCase()] || [] };
                 return field;
             });
@@ -254,7 +254,7 @@ export const DesignQueueContent = {
             const id = row?.AppData?._rowId;
             return (id && this.rawRows.find(r => r?.AppData?._rowId === id)) || row;
         },
-        // Routing writes (§4.16): Note → saveShowNote (one upsert per note); every other column
+        // Routing writes: Note → saveShowNote (one upsert per note); every other column
         // → one verified batch (writeCellsVerified). Results come back in entry order.
         async commitCells(entries) {
             const results = new Array(entries.length);
@@ -269,10 +269,10 @@ export const DesignQueueContent = {
                 if (e.key !== 'Note') continue;
                 results[n] = e.row._identifier
                     ? await Requests.saveShowNote(e.row._identifier, e.value)
-                    : { ok: false, reason: 'no show identifier' };
+                    : { ok: false, reason: 'no-identifier' };
             }
             const written = await scheduleWrite;
-            batch.forEach((n, k) => { results[n] = written[k] || { ok: false, reason: 'no result' }; });
+            batch.forEach((n, k) => { results[n] = written[k] || { ok: false, reason: 'no-result' }; });
             return results;
         },
         async resolveIdentifiers() {

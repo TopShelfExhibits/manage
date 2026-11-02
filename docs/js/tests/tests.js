@@ -29,7 +29,7 @@
 
 import { Requests } from '../data_management/api.js';
 import { FakeGoogleSheetsAuth, FakeGoogleSheetsService, setFakeDelaysEnabled } from '../google_sheets_services/FakeGoogle.js';
-import { isCheckedValue } from '../data_management/abstraction/instant-write-utils.js';
+import { isCheckedValue } from '../data_management/utils/checkbox-values.js';
 import { CacheInvalidationBus, ApplicationUtils, ProductionUtils, triggerCachePoll } from '../data_management/index.js';
 import { resolveView, resolveAction, pickView, mergeView, matchesKeyPattern, setViewWarningHandler } from '../application/utils/views/resolveView.js';
 import { SEARCH_LIMITS, searchWords, matchRow, matchRows } from '../application/utils/views/searchMatch.js';
@@ -1759,14 +1759,20 @@ test('VIEWS CARDS', 'bucketRowsToCards: buckets by key, empty buckets seeded, no
     assertEqual([cards[1].row.tab, cards[1].hasDetails, cards[1].cardClass], ['FURNITURE', false, 'purple'], 'synthetic row, no details');
 });
 
-// ── Instant write (views-and-renderers-plan §4.16, Phase 2) ──────────────────
-// writeCellVerified locates rows by identity (Client + Year + Show) and columns by header name,
+// ── Instant write (views-and-renderers-plan §4.16) ───────────────────────────
+// writeCellsVerified locates rows by identity (Client + Year + Show) and columns by header name,
 // reads, writes, re-reads, and retries once if rows moved. These tests run against FakeGoogle's
 // Production Schedule and restore every cell they touch.
 
 const IW_DB = 'PROD_SCHED';
 const IW_TAB = 'Production Schedule';
 const IW_ROW = { Client: 'Gearfire', Year: '2025', Show: 'SHOT Show' };
+
+// One verified cell write (a batch of one); resolves to its result
+async function writeOneVerified(database, tab, row, column, value) {
+    const [result] = await Requests.writeCellsVerified(database, tab, [{ row, column, value }]);
+    return result;
+}
 
 function iwSheet() {
     return FakeGoogleSheetsService.mockData[IW_DB][IW_TAB];
@@ -1782,13 +1788,13 @@ test('INSTANT WRITE', 'checkbox reading: X/TRUE checked, any other value uncheck
     assertEqual(['X', 'x', ' TRUE ', '-', 'N/a', '1/10', '', null].map(isCheckedValue), [true, true, true, false, false, false, false, false], 'isChecked');
 });
 
-test('INSTANT WRITE', 'writeCellVerified writes one cell by identity and verifies it', async () => {
+test('INSTANT WRITE', 'a verified write changes one cell by identity and verifies it', async () => {
     const before = iwCell(IW_ROW, 'Elev');
     try {
-        const res = await Requests.writeCellVerified(IW_DB, IW_TAB, IW_ROW, 'Elev', 'X');
+        const res = await writeOneVerified(IW_DB, IW_TAB, IW_ROW, 'Elev', 'X');
         assertEqual(res.ok, true, 'ok');
         assertEqual(iwCell(IW_ROW, 'Elev').value, 'X', 'cell written');
-        const res2 = await Requests.writeCellVerified(IW_DB, IW_TAB, IW_ROW, 'Elev', '');
+        const res2 = await writeOneVerified(IW_DB, IW_TAB, IW_ROW, 'Elev', '');
         assertEqual([res2.ok, iwCell(IW_ROW, 'Elev').value], [true, ''], 'uncheck writes blank');
     } finally {
         iwSheet()[before.r][before.c] = before.value;
@@ -1796,9 +1802,9 @@ test('INSTANT WRITE', 'writeCellVerified writes one cell by identity and verifie
 });
 
 test('INSTANT WRITE', 'refuses columns not listed in InstantWriteTables and tables without an entry', async () => {
-    const r1 = await Requests.writeCellVerified(IW_DB, IW_TAB, IW_ROW, 'City', 'X');
+    const r1 = await writeOneVerified(IW_DB, IW_TAB, IW_ROW, 'City', 'X');
     assertEqual(r1, { ok: false, reason: 'column-not-writable' }, 'column refused');
-    const r2 = await Requests.writeCellVerified(IW_DB, 'Some Other Tab', IW_ROW, 'Elev', 'X');
+    const r2 = await writeOneVerified(IW_DB, 'Some Other Tab', IW_ROW, 'Elev', 'X');
     assertEqual(r2, { ok: false, reason: 'no-config' }, 'no config');
 });
 
@@ -1808,7 +1814,7 @@ test('INSTANT WRITE', 'duplicate identity is never guessed', async () => {
     const copy = [...sheet[src.r]];
     sheet.push(copy);
     try {
-        const res = await Requests.writeCellVerified(IW_DB, IW_TAB, IW_ROW, 'Elev', 'X');
+        const res = await writeOneVerified(IW_DB, IW_TAB, IW_ROW, 'Elev', 'X');
         assertEqual(res, { ok: false, reason: 'duplicate' }, 'duplicate');
         assertEqual(sheet[src.r][src.c], src.value, 'original untouched');
     } finally {
@@ -1831,7 +1837,7 @@ test('INSTANT WRITE', 'row moved mid-write: re-located by identity and written c
         return original.call(this, tableId, range);
     };
     try {
-        const res = await Requests.writeCellVerified(IW_DB, IW_TAB, IW_ROW, 'Panels', 'X');
+        const res = await writeOneVerified(IW_DB, IW_TAB, IW_ROW, 'Panels', 'X');
         assertEqual(res.ok, true, 'ok after retry');
         const after = iwCell(IW_ROW, 'Panels');
         assertEqual([after.r, after.value], [before.r + 1, 'X'], 'written at the moved row');

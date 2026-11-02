@@ -1,6 +1,7 @@
 /**
- * The InstantWriteTables preference (views-and-renderers-plan §4.16). Pure, no imports, so UI
- * modules can read it without pulling in the data layer.
+ * Instant writes: the InstantWriteTables preference and what each write failure means
+ * (views-and-renderers-plan §4.16). Pure, no imports, so UI modules can read it without pulling
+ * in the data layer.
  *
  *   { "<database>/<tab>": { "identity": ["Client", "Year", "Show"], "columns": ["Elev", "Panels"] } }
  *
@@ -34,4 +35,29 @@ export function instantWriteEntry(all, database, tab) {
 export function isInstantColumn(entry, column) {
     const target = String(column ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
     return !!entry && entry.columns.some(c => c.replace(/\s+/g, ' ').trim().toLowerCase() === target);
+}
+
+/**
+ * What each instant-write failure reason means, for the save-failed message. The reasons come
+ * from writeCellsVerified and saveShowNote (and the page's routing); anything else is shown as is.
+ */
+const WRITE_FAILURE_MESSAGES = Object.freeze({
+    'no-config': 'this table has no instant-write setup (InstantWriteTables preference)',
+    'column-not-writable': 'this column is not listed as writable',
+    'column-missing': 'the column was not found in the sheet',
+    'not-found': 'the row was not found in the sheet',
+    'duplicate': 'more than one row has this identity',
+    'no-identity-columns': 'the identity columns were not found in the sheet',
+    'moved': 'the row kept moving while saving',
+    'verify-failed': 'the saved value did not read back correctly',
+    'superseded': 'a later edit to the same cell replaced it',
+    'no-identifier': 'this show has no note identifier yet',
+    'no-show-notes-tab': 'the ShowNotes tab was not found',
+    'show-notes-headers': 'the ShowNotes tab is missing its Identifier or Note header',
+    'no-result': 'the save returned no result'
+});
+
+/** The message for a write failure reason. */
+export function describeWriteFailure(reason) {
+    return WRITE_FAILURE_MESSAGES[reason] || reason || 'unknown error';
 }

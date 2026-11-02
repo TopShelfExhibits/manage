@@ -32,7 +32,6 @@ export { DataView } from './components/interface/dataViewComponent.js';
 export { ViewSelectComponent } from './components/interface/viewSelectComponent.js';
 export { ContentHeaderComponent } from './components/interface/contentHeaderComponent.js';
 export { RowDetailsComponent, RowDetailsModal } from './components/interface/rowDetailsComponent.js';
-export { CELL_REGISTRY, registerCell } from './components/interface/cells.js';
 export { DashboardToggleComponent } from './components/interface/navigationComponents.js';
 export { ScheduleFilterSelect, ScheduleDateRangeCard, InventoryCategoryFilter } from './components/interface/filterComponents.js';
 

@@ -3,15 +3,16 @@ import { NavigationRegistry } from '../../index.js';
 import { isCheckedValue, checkboxWriteValue } from '../../../data_management/utils/checkbox-values.js';
 
 /**
- * Cell registry (§4.14). A field with `cell: '<name>'` renders through the registry in every
- * renderer: table cells, calendar chip lines, card lines and the details grid.
+ * Cell registry (views-and-renderers-plan §4.14). A field with `cell: '<name>'` renders through
+ * the registry in every renderer: table cells, calendar chip lines, card lines and the details grid.
  *
  * Every cell receives the same props:
  *   row, field, value, renderer ('table'|'calendar'|'cards'|'details'), density ('full'|'compact'),
  *   searchTerm (raw term, for navigation), highlight (fn(value, field) → safe HTML), theme,
- *   editable (the page's edit mode allows editing this field), commit(value) (report an edit:
- *   batch → cell-edit and dirty tracking; instant → the delayed cell-commit queue),
- *   disabled (a reason string when editing is blocked, e.g. "write disabled: no row identity")
+ *   editable (the cell may be edited now: edit mode on, a commit wired, nothing blocking it),
+ *   editMode ('batch'|'instant'; when a text cell reports: batch on every change, instant when
+ *   editing ends), commit(value) (report an edit: batch → cell-edit and dirty tracking;
+ *   instant → the delayed write queue), disabled (why editing is blocked; shown as the tooltip)
  * Field-specific options come from `field.cellOptions` (what the data is, e.g. which key holds
  * the item number). An entry without a compact form falls back to formatted text when compact.
  *
@@ -28,6 +29,7 @@ const cellProps = {
     highlight: { type: Function, default: null },
     theme: { type: String, default: '' },
     editable: { type: Boolean, default: false },
+    editMode: { type: String, default: '' },
     commit: { type: Function, default: null },
     disabled: { type: String, default: '' }
 };
@@ -103,32 +105,31 @@ const NavigateCell = {
 };
 
 /**
- * Checkbox (Phase 2). Reads `X`/TRUE as checked and anything else as unchecked (R7.3);
- * checking commits `X`, unchecking commits blank.
+ * Checkbox. Reads `X`/TRUE as checked and anything else as unchecked; checking commits `X`,
+ * unchecking commits blank.
  */
 const CheckboxCell = {
     name: 'CheckboxCell',
     props: cellProps,
     computed: {
-        checked() { return isCheckedValue(this.value); },
-        canEdit() { return this.editable && !!this.commit && !this.disabled; }
+        checked() { return isCheckedValue(this.value); }
     },
     methods: {
         toggle(event) {
-            if (!this.canEdit) { event.target.checked = this.checked; return; }
+            if (!this.editable) { event.target.checked = this.checked; return; }
             this.commit(checkboxWriteValue(event.target.checked));
         }
     },
     template: html`
-        <label :class="['cell-checkbox', { 'cell-readonly': !canEdit }]" :title="disabled || (canEdit ? '' : (checked ? 'Done' : 'Not done'))" @click.stop>
-            <input type="checkbox" :checked="checked" :disabled="!canEdit" @change="toggle" />
+        <label :class="['cell-checkbox', { 'cell-readonly': !editable }]" :title="disabled || (editable ? '' : (checked ? 'Done' : 'Not done'))" @click.stop>
+            <input type="checkbox" :checked="checked" :disabled="!editable" @change="toggle" />
         </label>
     `
 };
 
 /**
- * Select (Phase 2). Options come from field.cellOptions.options (page-supplied list). A current
- * value that isn't in the list still shows as an extra option, so nothing is hidden or overwritten.
+ * Select. Options come from field.cellOptions.options (page-supplied list). A current value
+ * that isn't in the list still shows as an extra option, so nothing is hidden or overwritten.
  */
 const SelectCell = {
     name: 'SelectCell',
@@ -139,17 +140,16 @@ const SelectCell = {
             const list = (this.field.cellOptions?.options || []).map(String);
             if (this.current && !list.some(o => o.trim().toLowerCase() === this.current.trim().toLowerCase())) list.push(this.current);
             return list;
-        },
-        canEdit() { return this.editable && !!this.commit && !this.disabled; }
+        }
     },
     methods: {
         change(event) {
-            if (!this.canEdit) return;
+            if (!this.editable) return;
             this.commit(event.target.value);
         }
     },
     template: html`
-        <span v-if="!canEdit" class="cell-select-text" :title="disabled || ''">
+        <span v-if="!editable" class="cell-select-text" :title="disabled || ''">
             <span v-html="highlight ? highlight(value, field) : current"></span>
         </span>
         <select v-else class="cell-select" :value="current" @change="change" @click.stop>
@@ -160,17 +160,18 @@ const SelectCell = {
 };
 
 /**
- * Editable text that commits on blur (design queue Note). Uses the same contenteditable editor as
- * the table's editable text cells; read-only renders highlighted text. The commit goes through the
- * page's edit mode (instant: the delayed verified-write queue), so typing never writes per key.
+ * Editable text: the one text editor for every edit mode (contenteditable, plain text only).
+ *   batch    every change is reported, so the page's rows and dirty tracking follow the typing
+ *   instant  the finished edit is reported when the editor loses focus, so typing never writes
+ * Pasting inserts plain text. In batch mode, pasted text with tabs or line breaks is left to the
+ * table, which pastes it as rows. Read-only renders highlighted text.
  */
 const EditTextCell = {
     name: 'EditTextCell',
     props: cellProps,
     data() { return { draft: null }; },
     computed: {
-        current() { return this.value == null ? '' : String(this.value); },
-        canEdit() { return this.editable && !!this.commit && !this.disabled; }
+        current() { return this.value == null ? '' : String(this.value); }
     },
     watch: {
         current() { this.syncEditor(); }
@@ -185,14 +186,36 @@ const EditTextCell = {
                 el.textContent = this.current;
             }
         },
-        onInput(e) { this.draft = e.target.textContent; },
+        // Batch reports each change (the value follows the typing); instant keeps a draft until blur
+        onInput() {
+            const text = this.$refs.editor.textContent;
+            if (this.editMode === 'batch') this.commit(text);
+            else this.draft = text;
+        },
         onBlur() {
             if (this.draft !== null && this.draft !== this.current) this.commit(this.draft);
             this.draft = null;
+            this.syncEditor();
+        },
+        onPaste(event) {
+            const text = event.clipboardData?.getData('text/plain') || '';
+            event.preventDefault();
+            if (!text) return;
+            if (this.editMode === 'batch' && /[\t\n]/.test(text)) {
+                // The table's paste handler runs on the same event; leave the cell so it isn't edited too
+                event.target.blur();
+                return;
+            }
+            const selection = window.getSelection();
+            if (!selection || !selection.rangeCount) return;
+            selection.deleteFromDocument();
+            selection.getRangeAt(0).insertNode(document.createTextNode(text));
+            selection.collapseToEnd();
+            this.onInput();
         }
     },
     template: html`
-        <span v-if="!canEdit" :title="disabled || ''"><span v-html="highlight ? highlight(value, field) : current"></span></span>
+        <span v-if="!editable" :title="disabled || ''"><span v-html="highlight ? highlight(value, field) : current"></span></span>
         <div
             v-else
             ref="editor"
@@ -201,12 +224,12 @@ const EditTextCell = {
             :data-placeholder="field.cellOptions?.placeholder || ''"
             @input="onInput"
             @blur="onBlur"
-            @click.stop
+            @paste="onPaste"
         ></div>
     `
 };
 
-export const CELL_REGISTRY = {
+const CELL_REGISTRY = {
     image: { full: ImageCell, compact: null },
     itemId: { full: TextCell, compact: TextCell },
     navigate: { full: NavigateCell, compact: null },
@@ -214,15 +237,6 @@ export const CELL_REGISTRY = {
     select: { full: SelectCell, compact: null },
     text: { full: EditTextCell, compact: null }
 };
-
-/**
- * Register (or replace) a cell type. Phase 2 adds checkbox and select through this.
- * @param {string} name
- * @param {{ full: Object, compact?: Object|null }} entry
- */
-export function registerCell(name, entry) {
-    CELL_REGISTRY[name] = entry;
-}
 
 /**
  * Resolve the component for a field at a density. Returns null when the field has no registry
@@ -250,7 +264,8 @@ function escapeText(text) {
  * Renders one field value through the cell pipeline:
  *   registry cell → page #cell slot (field.cell === 'slot') → formatted, highlighted text.
  * Props: row, field, renderer, density, searchTerm, highlight(value, field) → HTML, theme,
- *        cellSlot (the page's #cell slot function, if any), format(value, field) → text
+ *        cellSlot (the page's #cell slot function, if any), format(value, field) → text,
+ *        editable, editMode, commit, disabled (a cell is editable only with a commit and no reason blocking it)
  */
 export const CellRenderer = {
     name: 'CellRenderer',
@@ -265,6 +280,7 @@ export const CellRenderer = {
         theme: { type: String, default: '' },
         cellSlot: { type: Function, default: null },
         editable: { type: Boolean, default: false },
+        editMode: { type: String, default: '' },
         commit: { type: Function, default: null },
         disabled: { type: String, default: '' },
         // Extra scope for the page's #cell slot (e.g. rowIndex, onInnerTableDirty in PacklistTable)
@@ -272,11 +288,12 @@ export const CellRenderer = {
     },
     render() {
         const h = Vue.h;
-        const { row, field, renderer, density, searchTerm, highlight, theme, editable, commit, disabled } = this;
+        const { row, field, renderer, density, searchTerm, highlight, theme, editMode, commit, disabled } = this;
         const value = row ? row[field.key] : undefined;
         const comp = cellComponentFor(field, density);
         if (comp) {
-            return h(comp, { row, field, value, renderer, density, searchTerm, highlight, theme, editable, commit, disabled });
+            const editable = this.editable && !!commit && !disabled;
+            return h(comp, { row, field, value, renderer, density, searchTerm, highlight, theme, editable, editMode, commit, disabled });
         }
         if (field.cell === 'slot' && this.cellSlot) {
             return this.cellSlot({ ...(this.cellScope || {}), row, field, value, renderer, density });

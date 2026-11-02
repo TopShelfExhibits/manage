@@ -1,5 +1,5 @@
 /**
- * Checkbox cell values (views-and-renderers-plan §4.16, R7.3). Pure, no imports, so UI modules can
+ * Checkbox cell values (views-and-renderers-plan §4.16). Pure, no imports, so UI modules can
  * use it without pulling in the data layer (which has top-level await).
  *
  * Reading: `X` (or TRUE) is checked; any other value (blank, '-', 'FALSE', a date) is unchecked.

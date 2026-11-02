@@ -4,8 +4,9 @@ import { rowsToCards, bucketRowsToCards } from '../../utils/views/cardsAdapter.j
 import { useContainerSize } from '../../utils/useContainerSize.js';
 import { RowDetailsModal } from './rowDetailsComponent.js';
 import { isCheckedValue } from '../../../data_management/utils/checkbox-values.js';
+import { describeWriteFailure } from '../../../data_management/utils/instant-write-config.js';
 
-/** Delay before an instant edit is written; another edit to the same cell restarts it (§4.16). */
+/** Delay before an instant edit is written; another edit to the same cell restarts it. */
 export const INSTANT_WRITE_DELAY_MS = 1200;
 
 // Modal messages render as HTML: escape text that can carry sheet values
@@ -14,8 +15,8 @@ function escapeHtml(text) {
 }
 
 /**
- * Presentation props removed in Phase 5 (views-and-renderers-plan): presentation comes only from
- * the view. A page still passing one gets a dev warning (attrs are listed as written by the page).
+ * Presentation props DataView no longer takes: presentation comes only from the view. A page
+ * still passing one gets a dev warning (attrs are listed as written by the page).
  */
 const REMOVED_PRESENTATION_PROPS = [
     'columns', 'hideColumns', 'hide-columns', 'viewModes', 'view-modes', 'chipColorClass', 'chip-color-class',
@@ -25,7 +26,7 @@ const REMOVED_PRESENTATION_PROPS = [
 ];
 
 /**
- * DataView — the only producer of renderer presentation input (§3).
+ * DataView — the only producer of renderer presentation input (views-and-renderers-plan §3).
  *
  * The page supplies data and domain logic:
  *   fields     FieldDef[] (what each key is)
@@ -34,7 +35,7 @@ const REMOVED_PRESENTATION_PROPS = [
  *   action     ActionDef { to(row) | run(row), label, icon, disabled(row) }
  *   decorations(row, key) → Card[] with decorationKeys (the keys the page decorates)
  *   editMode   'none' | 'batch' | 'instant'
- *   patches    ViewPatch[] (customization input, §4.15)
+ *   patches    ViewPatch[] (customization input)
  *   printing   applies the view's print variant
  *
  * DataView picks the view (?view=, legacy ?layout=, registry default; a fixed `viewId` for modals),
@@ -42,14 +43,14 @@ const REMOVED_PRESENTATION_PROPS = [
  * Everything else ($attrs: loading state, search options, listeners) and every slot is forwarded.
  *
  * Size: the container tier of the nearest size container (useContainerSize, same thresholds as
- * the CSS @container rules), so view variants and CSS switch together (R6.4).
+ * the CSS @container rules), so view variants and CSS switch together.
  *
- * Instant edit mode (§4.16): registry cells emit cell-commit(row, key, value). DataView shows the
+ * Instant edit mode: the table emits cell-commit(row, key, value) for each edit. DataView shows the
  * value at once on a local overlay and holds the write: one timer for the whole table restarts on
  * every edit, so edits made within INSTANT_WRITE_DELAY_MS of each other are written together. A
  * cell whose value returns to the loaded one is dropped. The batch goes to the page's
- * commitCells([{ row, key, value }]) → Promise<Array<{ ok, reason, warning }>> (or commitCell(row,
- * key, value) per cell when the page has no batch hook). One batch is in flight at a time.
+ * commitCells([{ row, key, value }]) → Promise<Array<{ ok, reason, warning }>>, one result per
+ * entry. One batch is in flight at a time.
  * Pending and failed cells get state classes; failures revert, show one error and ask the page to
  * refresh; warnings (another row may have changed) are shown too. Queued writes flush on unmount,
  * and a leave prompt guards closing the tab while writes are queued.
@@ -78,7 +79,6 @@ export const DataView = {
         patches: { type: Array, default: () => [] },
         detailsTitle: { type: Function, default: null },
         // Instant edit mode
-        commitCell: { type: Function, default: null },
         commitCells: { type: Function, default: null },
         rowId: { type: Function, default: null },
         cellDisabled: { type: Function, default: null },
@@ -241,14 +241,14 @@ export const DataView = {
         // ── Instant edit queue ───────────────────────────────────────────────
         sameCellValue(key, a, b) {
             const field = this.resolved.fieldMap.get(key);
-            if (field && (field.type === 'checkbox' || field.cell === 'checkbox')) return isCheckedValue(a) === isCheckedValue(b);
+            if (field?.cell === 'checkbox') return isCheckedValue(a) === isCheckedValue(b);
             return String(a ?? '').trim() === String(b ?? '').trim();
         },
         loadedRow(id) {
             return this.rows.find(r => this.rowId(r) === id) || null;
         },
         onCellCommit(row, key, value) {
-            if (this.editMode !== 'instant' || !this.rowId || !(this.commitCells || this.commitCell)) return;
+            if (this.editMode !== 'instant' || !this.rowId || !this.commitCells) return;
             const id = this.rowId(row);
             const k = id + '::' + key;
             const existing = this.pendingCells[k];
@@ -295,12 +295,7 @@ export const DataView = {
             entries.forEach(e => { e.status = 'writing'; });
             let results;
             try {
-                if (this.commitCells) {
-                    results = await this.commitCells(entries.map((e, n) => ({ row: e.row, key: e.key, value: values[n] })));
-                } else {
-                    results = await Promise.all(entries.map((e, n) => Promise.resolve(this.commitCell(e.row, e.key, values[n]))
-                        .catch(err => ({ ok: false, reason: err?.message || 'error' }))));
-                }
+                results = await this.commitCells(entries.map((e, n) => ({ row: e.row, key: e.key, value: values[n] })));
             } catch (e) {
                 results = entries.map(() => ({ ok: false, reason: e?.message || 'error' }));
             }
@@ -333,7 +328,7 @@ export const DataView = {
                 this.failedCells[k] = true;
                 setTimeout(() => { delete this.failedCells[k]; }, 6000);
                 const field = this.resolved.fieldMap.get(current.key);
-                failures.push(escapeHtml(`${field?.label || current.key}: ${this.describeFailure(result?.reason)}`));
+                failures.push(escapeHtml(`${field?.label || current.key}: ${describeWriteFailure(result?.reason)}`));
             });
             if (requeued) this.scheduleFlush();
             if (failures.length) {
@@ -349,20 +344,6 @@ export const DataView = {
                 this.$modal?.alert?.(warnings.join('\n'), 'Check the sheet', false);
             }
         },
-        describeFailure(reason) {
-            const map = {
-                'no-config': 'this table has no instant-write setup (InstantWriteTables preference)',
-                'column-not-writable': 'this column is not listed as writable',
-                'column-missing': 'the column was not found in the sheet',
-                'not-found': 'the row was not found in the sheet',
-                'duplicate': 'more than one row has this identity',
-                'no-identity-columns': 'the identity columns were not found in the sheet',
-                'moved': 'the row kept moving while saving',
-                'verify-failed': 'the saved value did not read back correctly',
-                'superseded': 'a later edit to the same cell replaced it'
-            };
-            return map[reason] || reason || 'unknown error';
-        },
         cellStateFor(row, key) {
             if (!this.rowId) return '';
             const k = this.rowId(row) + '::' + key;
@@ -377,7 +358,7 @@ export const DataView = {
                 let path = null;
                 try { path = action.to(row); } catch (e) { console.warn('[DataView] action.to failed', e); }
                 if (!path) return;
-                // Navigating actions pass the current search so the destination can reveal the match (R3.8)
+                // Navigating actions pass the current search so the destination can reveal the match
                 if (ctx.searchTerm) path = NavigationRegistry.buildPath(path, { searchTerm: ctx.searchTerm });
                 const nav = this.navigateToPath || this.appContext?.navigateToPath;
                 if (nav) nav(path);

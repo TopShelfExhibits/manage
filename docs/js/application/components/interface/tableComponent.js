@@ -1465,7 +1465,7 @@ export const TableComponent = {
             type: Object,
             required: true
         },
-        // 'none' | 'batch' | 'instant' — page data, never view data (§4.16)
+        // 'none' | 'batch' | 'instant' — page data, never view data
         editMode: {
             type: String,
             default: 'none'
@@ -1620,7 +1620,7 @@ export const TableComponent = {
             type: Object,
             default: null
         },
-        // Instant edit mode (§4.16): cellState(row, key) → '' | 'pending' | 'failed'
+        // Instant edit mode: cellState(row, key) → '' | 'pending' | 'failed'
         cellState: {
             type: Function,
             default: null
@@ -1781,7 +1781,7 @@ export const TableComponent = {
         // Watch for changes to originalData prop and recompare dirty state
         originalData: {
             handler() {
-                if (!this.hasEditableColumns) return;
+                if (!this.isBatchEditing) return;
                 this.$nextTick(() => {
                     this.compareAllCellsDirty();
                 });
@@ -1795,9 +1795,8 @@ export const TableComponent = {
         data: {
             handler() {
                 this.$nextTick(() => this._measureColWidths());
-                if (!this.hasEditableColumns) return;
+                if (!this.isBatchEditing) return;
                 this.$nextTick(() => {
-                    this.updateAllEditableCells();
                     this.compareAllCellsDirty();
                 });
             },
@@ -1808,22 +1807,15 @@ export const TableComponent = {
             this.$nextTick(() => this._measureColWidths());
         },
         isLoading(val) {
-            if (!this.hasEditableColumns) return;
-            // When loading state changes, update cells and compare dirty
+            if (!this.isBatchEditing) return;
+            // When loading state changes, compare dirty
             this.$nextTick(() => {
-                this.updateAllEditableCells();
                 this.compareAllCellsDirty();
             });
         },
-        visibleRows() {
-            this.$nextTick(() => {
-                this.updateAllEditableCells();
-            });
-        },
         draggable() {
-            if (!this.hasEditableColumns) return;
+            if (!this.isBatchEditing) return;
             this.$nextTick(() => {
-                this.updateAllEditableCells();
                 this.compareAllCellsDirty();
             });
         },
@@ -1849,7 +1841,6 @@ export const TableComponent = {
             handler() {
                 this.$nextTick(() => {
                     this.applyDefaultSortColumn();
-                    this.updateAllEditableCells();
                 });
             },
             deep: true
@@ -1932,7 +1923,7 @@ export const TableComponent = {
             // 4. This table contains at least one selected row that is currently visible
             // 4. A drag is not currently happening
             // 5. The table has editable columns (edit mode is enabled)
-            if (!this.showSelectionBubble || this.selectedRowCount === 0 || !this.hasEditableColumns) {
+            if (!this.showSelectionBubble || this.selectedRowCount === 0 || !this.isBatchEditing) {
                 return false;
             }
             
@@ -2128,36 +2119,37 @@ export const TableComponent = {
         /**
          * Column model from the resolved view: one entry per slot (a parent-owned stack of lines,
          * each line a list of inline keys) plus the details fields. Hidden fields never appear.
-         * Editability follows editMode: batch → table editing; instant → registry cells only.
+         * A column is editable when the edit mode isn't 'none' and its field is editable. An
+         * editable field without a cell edits through the text cell; number and external-edit
+         * fields keep their own editors.
          */
         columnModel() {
             const r = this.resolved;
             if (!r) return { slots: [], details: [], all: [] };
-            const mode = this.editMode;
             const make = (key, extra = {}) => {
                 const f = r.fieldMap.get(key) || { key };
                 const s = r.style[key] || {};
-                const canEdit = mode !== 'none' && !!f.editable;
-                return {
+                const column = {
                     ...f,
                     label: f.label ?? key,
                     width: s.width,
                     font: s.font,
                     columnClass: s.columnColor || '',
                     colorRule: s.color || null,
-                    editable: canEdit && mode === 'batch',
-                    cellEditable: canEdit && !!f.cell,
+                    editable: this.editMode !== 'none' && !!f.editable,
                     ...extra
                 };
+                if (column.editable && !column.cell && column.format !== 'number' && column.format !== 'external-edit') column.cell = 'text';
+                return column;
             };
             const slots = r.slots.map(slot => {
                 const primary = make(slot.key, { sticky: slot.sticky || null });
                 // Editable fields inside a stack render read-only
                 const lines = slot.lines.map((line, li) => line.map((key, ki) =>
-                    (li === 0 && ki === 0) ? primary : make(key, { editable: false, cellEditable: false, stacked: true })));
+                    (li === 0 && ki === 0) ? primary : make(key, { editable: false, stacked: true })));
                 return { key: slot.key, primary, inline: lines[0].slice(1), lines: lines.slice(1), headerLines: lines };
             });
-            const details = r.details.map(f => make(f.key, { details: true, editable: false, cellEditable: false }));
+            const details = r.details.map(f => make(f.key, { details: true, editable: false }));
             return { slots, details, all: [...slots.flatMap(s => s.headerLines.flat()), ...details] };
         },
         // Every column the table knows (shown keys incl. stacked lines, then details)
@@ -2214,7 +2206,7 @@ export const TableComponent = {
         },
         hasRowTrigger() {
             const a = this.effectiveAction;
-            return a.kind !== 'none' && a.trigger === 'row' && !this.hasEditableColumns;
+            return a.kind !== 'none' && a.trigger === 'row' && !this.isBatchEditing;
         },
         // Keys displayed in place (columns and stacked children) — decorations for other keys go row-level
         displayedKeySet() {
@@ -2274,14 +2266,12 @@ export const TableComponent = {
         },
         activeSearchIndex() { return this.search.searchIndex.value; },
         showSaveButton() {
-            // True if any editable cell or add row button is present
-            const hasEditable = this.columns.some(col => col.editable);
-            const hasAddRow = !!this.newRow;
-            return hasEditable || hasAddRow;
+            return this.isBatchEditing || !!this.newRow;
         },
-        hasEditableColumns() {
-            // True if any column is editable
-            return this.columns.some(col => col.editable);
+        // Batch editing (edits are held until Save): dirty tracking, undo, row paste and selection.
+        // Instant edits are written by DataView's queue instead, so none of these apply.
+        isBatchEditing() {
+            return this.editMode === 'batch' && this.columns.some(col => col.editable);
         },
         originalDataByKey() {
             if (!this.rowKey || !Array.isArray(this.originalData)) return null;
@@ -2325,6 +2315,7 @@ export const TableComponent = {
         },
         // Columns eligible to receive pasted data (visible, non-action, editable)
         pasteableColumns() {
+            if (!this.isBatchEditing) return [];
             return this.visibleColumns.filter(col => !col.key.startsWith('_') && col.editable);
         },
         detailsColumns() {
@@ -2415,7 +2406,6 @@ export const TableComponent = {
         this.applyHideRowsModeFromUrl();
         
         this.$nextTick(() => {
-            this.updateAllEditableCells();
             this.compareAllCellsDirty();
         });
         
@@ -3155,7 +3145,7 @@ export const TableComponent = {
         },
         // Batch edit contract: emits cell-edit(rowIndex, columnKey, value); dirty state is keyed by column key.
         handleCellEdit(rowIndex, column, value) {
-            if (!this.hasEditableColumns || !column) return;
+            if (!this.isBatchEditing || !column) return;
             const columnKey = column.key;
             const now = Date.now();
             const timeSinceLastEdit = this.lastEditTimestamp ? now - this.lastEditTimestamp : Infinity;
@@ -3199,15 +3189,13 @@ export const TableComponent = {
             }
             this.checkDirtyCells();
         },
-        // Edits from registry cells (checkbox, select, text):
+        // Every cell edit (registry cells and the number input) comes here:
         //   batch   → the standard cell-edit path (page writes the store; dirty tracking; Save)
         //   instant → cell-commit(row, columnKey, value) for DataView's delayed verified-write queue
         commitCellValue(rowIndex, column, value) {
-            if (column.editable) {
-                this.handleCellEdit(rowIndex, column, value);
-            } else if (column.cellEditable) {
-                this.$emit('cell-commit', this.data[rowIndex], column.key, value);
-            }
+            if (!column.editable) return;
+            if (this.editMode === 'instant') this.$emit('cell-commit', this.data[rowIndex], column.key, value);
+            else this.handleCellEdit(rowIndex, column, value);
         },
         cellStateClass(row, column) {
             if (!this.cellState) return '';
@@ -3221,8 +3209,16 @@ export const TableComponent = {
         isCellDirty(rowIndex, column) {
             return !!(this.dirtyCells[rowIndex] && column && this.dirtyCells[rowIndex][column.key]);
         },
-        cellRefName(prefix, rowIndex, column) {
-            return prefix + rowIndex + '_' + column.key;
+        // The loaded value of a cell (undefined when the row has no loaded counterpart)
+        originalCellValue(row, rowIndex, column) {
+            return this.getOriginalDataForRow(row, rowIndex)?.[column.key];
+        },
+        // A batch cell changed from its loaded value shows the original and a revert control
+        showRevert(row, rowIndex, column) {
+            return this.isBatchEditing && column.editable && column.format !== 'external-edit'
+                && this.isCellDirty(rowIndex, column)
+                && this.getOriginalDataForRow(row, rowIndex) !== undefined
+                && this.originalCellValue(row, rowIndex, column) !== row[column.key];
         },
         _getRowKeyValue(row) {
             if (!this.rowKey || !row) return undefined;
@@ -3239,7 +3235,7 @@ export const TableComponent = {
             return this.originalData?.[idx];
         },
         revertCellToOriginal(rowIndex, column, event) {
-            if (!this.hasEditableColumns) return;
+            if (!this.isBatchEditing) return;
             // Stop propagation to prevent cell focus
             if (event) {
                 event.stopPropagation();
@@ -3258,26 +3254,9 @@ export const TableComponent = {
             const originalRow = this.getOriginalDataForRow(this.data[rowIndex], rowIndex);
             const originalValue = originalRow?.[column.key];
             
-            // Update the data
+            // Update the data (the cell's editor follows its value)
             if (this.data[rowIndex]) {
                 this.data[rowIndex][column.key] = originalValue;
-            }
-            
-            // Update the DOM element if it exists
-            if (column.format === 'number') {
-                const refName = this.cellRefName('number_editable_', rowIndex, column);
-                const ref = this.$refs[refName];
-                const inputEl = Array.isArray(ref) ? ref[0] : ref;
-                if (inputEl) {
-                    inputEl.value = Number.isFinite(parseFloat(originalValue)) ? parseFloat(originalValue) : '';
-                }
-            } else {
-                const refName = this.cellRefName('editable_', rowIndex, column);
-                const ref = this.$refs[refName];
-                const editableEl = Array.isArray(ref) ? ref[0] : ref;
-                if (editableEl) {
-                    editableEl.textContent = originalValue || '';
-                }
             }
 
             // Clear dirty flag
@@ -3289,64 +3268,17 @@ export const TableComponent = {
             this.$emit('cell-edit', rowIndex, column.key, originalValue);
             this.checkDirtyCells();
         },
-        handleCellFocus(rowIndex, column, event) {
-            // No undo capture on focus - only capture when user starts typing in handleCellEdit
-        },
-        handleEditableCellContainerClick(rowIndex, column, event) {
-            // Instant-mode text cells: a click anywhere in the cell focuses the cell's editor
-            if (column?.cellEditable && !column.editable) {
-                const editor = event?.currentTarget?.querySelector?.('[contenteditable="true"]');
-                if (editor && event.target !== editor) editor.focus({ preventScroll: true });
-                return;
-            }
+        // A click anywhere in an editable cell focuses its text or number editor
+        handleEditableCellContainerClick(column, event) {
             if (!column?.editable) return;
-
             const target = event?.target;
-            if (target?.isContentEditable || target?.tagName === 'INPUT') return;
-
-            if (column.format === 'number') {
-                const numberRefName = this.cellRefName('number_editable_', rowIndex, column);
-                const numberRef = this.$refs[numberRefName];
-                const numberInputEl = Array.isArray(numberRef) ? numberRef[0] : numberRef;
-                if (numberInputEl && typeof numberInputEl.focus === 'function') {
-                    numberInputEl.focus({ preventScroll: true });
-                }
-                return;
-            }
-
-            const refName = this.cellRefName('editable_', rowIndex, column);
-            const ref = this.$refs[refName];
-            const editableEl = Array.isArray(ref) ? ref[0] : ref;
-            if (editableEl && typeof editableEl.focus === 'function') {
-                editableEl.focus({ preventScroll: true });
-            }
+            if (target?.isContentEditable || target?.closest?.('input, select, button, label')) return;
+            const editor = event.currentTarget?.querySelector?.('[contenteditable="true"], input[type="number"]');
+            editor?.focus({ preventScroll: true });
         },
-        handleCellPaste(rowIndex, column, event) {
-            const text = event.clipboardData?.getData('text/plain') || '';
-            if (!text) return;
-
-            // If the pasted content has tabs (multi-column) or newlines (multi-row), defer entirely
-            // to the row paste system. Blur the cell first to ensure it updates properly.
-            // _handleExternalPaste fires on the same event and will handle this data.
-            if (text.includes('\t') || text.includes('\n')) {
-                event.preventDefault();
-                // Blur the cell so its content updates and doesn't retain stale data from before insertion
-                event.target?.blur();
-                return;
-            }
-
-            // Single-row single-column: allow paste but strip all HTML by inserting as plain text only.
-            event.preventDefault();
-            const selection = window.getSelection();
-            if (!selection || !selection.rangeCount) return;
-            selection.deleteFromDocument();
-            selection.getRangeAt(0).insertNode(document.createTextNode(text));
-            selection.collapseToEnd();
-            // Trigger the input handler so data and dirty state stay in sync.
-            this.handleCellEdit(rowIndex, column, event.target.textContent);
-        },
-        handleCellBlur(rowIndex, column, event) {
-            // Clear flags when cell loses focus (enables new snapshot on next focus+edit)
+        handleCellBlur() {
+            // Clear flags when a batch cell loses focus (enables new snapshot on next focus+edit)
+            if (!this.isBatchEditing) return;
             this.hasUndoCaptured = false;
             this.lastEditTimestamp = null;
             undoRegistry.clearCurrentEditCapture();
@@ -3357,7 +3289,7 @@ export const TableComponent = {
         },
         compareAllCellsDirty() {
             // Compare all cells in data vs originalData and update dirtyCells
-            if (!this.hasEditableColumns) return;
+            if (!this.isBatchEditing) return;
             this.dirtyCells = {};
             if (!Array.isArray(this.data) || !Array.isArray(this.originalData)) return;
             this.data.forEach((row, rowIndex) => {
@@ -4149,32 +4081,6 @@ export const TableComponent = {
             this.mouseMoveCounter = 0;
         },
         
-        updateAllEditableCells() {
-            // Set contenteditable text for all editable cells to match data (only on mount or new row)
-            if (!Array.isArray(this.data)) return; // <-- guard against null/undefined
-            this.data.forEach((row, rowIndex) => {
-                if (!row) return; // Skip undefined rows
-                this.mainTableColumns.forEach((column) => {
-                    if (column.editable) {
-                        const refName = this.cellRefName('editable_', rowIndex, column);
-                        const cell = this.$refs[refName];
-                        const value = row[column.key] || '';
-                        if (cell && cell instanceof HTMLElement) {
-                            // Only update if cell is not focused
-                            if (document.activeElement !== cell) {
-                                cell.textContent = value;
-                            }
-                        } else if (Array.isArray(cell)) {
-                            cell.forEach(el => {
-                                if (el instanceof HTMLElement && document.activeElement !== el) {
-                                    el.textContent = value;
-                                }
-                            });
-                        }
-                    }
-                });
-            });
-        },
         unselectAllEditableCells() {
             // Remove focus from any editable cell. get editable cells by searching dom for contenteditable=true
             const editableCells = this.$el.querySelectorAll('[contenteditable="true"]');
@@ -4730,7 +4636,7 @@ export const TableComponent = {
                     </template>
                     <template #actions-end>
                         <button
-                            v-if="hasEditableColumns && showUndoRedo"
+                            v-if="isBatchEditing && showUndoRedo"
                             @click="handleUndo"
                             :disabled="!canUndo"
                             class="button-symbol white"
@@ -4739,7 +4645,7 @@ export const TableComponent = {
                             ⮢
                         </button>
                         <button
-                            v-if="hasEditableColumns && showUndoRedo"
+                            v-if="isBatchEditing && showUndoRedo"
                             @click="handleRedo"
                             :disabled="!canRedo"
                             class="button-symbol white"
@@ -4760,7 +4666,7 @@ export const TableComponent = {
                 />
 
                 <!-- Sticky Header Clone (thead only, mirrors column widths) -->
-                <table v-if="showStickyHeader" :class="{ editing: hasEditableColumns, [dragId]: dragId, 'sticky-header': true }" :style="stickyScrollLeft ? { transform: 'translateX(-' + stickyScrollLeft + 'px)' } : {}">
+                <table v-if="showStickyHeader" :class="{ editing: isBatchEditing, [dragId]: dragId, 'sticky-header': true }" :style="stickyScrollLeft ? { transform: 'translateX(-' + stickyScrollLeft + 'px)' } : {}">
                     <colgroup>
                         <col v-if="draggable" :style="stickyColumnWidths[0] ? { width: stickyColumnWidths[0] + 'px' } : { width: '20px' }" />
                         <col v-for="(column, colIdx) in theadRow1Columns" 
@@ -4804,7 +4710,7 @@ export const TableComponent = {
 
             <!-- Data Table (always render if draggable, even when empty) -->
             <div key="data-table" v-if="(data && data.length > 0) || (draggable && !isLoading)" :class="'table-wrapper' + (theme ? ' ' + theme : '')">
-                <table :class="{ editing: hasEditableColumns, [dragId]: dragId }">
+                <table :class="{ editing: isBatchEditing, [dragId]: dragId }">
                     <colgroup>
                         <col v-if="draggable" :style="{ width: '20px' }" />
                         <col v-for="(column, colIdx) in theadRow1Columns" 
@@ -4851,7 +4757,7 @@ export const TableComponent = {
                                     {
                                         'dragging': isRowDragging(idx),
                                         'drag-over': false,
-                                        'selected': hasEditableColumns && isRowSelected(idx),
+                                        'selected': isBatchEditing && isRowSelected(idx),
                                         'analyzing': isRowAnalyzing(idx),
                                         'marked-for-deletion': isRowMarkedForDeletion(row),
                                         'in-group': isRowInGroup(idx),
@@ -4881,30 +4787,47 @@ export const TableComponent = {
                                     :colspan="column.colspan || 1"
                                     :class="[getCellClass(row[column.key], column, idx), getStickyColProps(column)?.stickyClass, cellStateClass(row, column)]"
                                     :style="getStickyColProps(column)?.stickyStyle"
-                                    @click="handleEditableCellContainerClick(idx, column, $event)"
+                                    @click="handleEditableCellContainerClick(column, $event)"
+                                    @focusout="handleCellBlur"
                                 >
                                     <div :class="['table-cell-container', { 'search-match': hasSearchMatch(row[column.key], column), 'search-active-result': hasSearchMatch(row[column.key], column) && searchMatchIndexMap.get(idx) === search.searchIndex.value - 1 }]">
-                                        <!-- Editable number input -->
+                                        <!-- Editable number: the original value (click to revert) while changed, then the input -->
                                         <slot
-                                            v-if="!column.cell && column.editable && column.format === 'number'"
+                                            v-if="column.editable && column.format === 'number'"
                                             :row="row"
                                             :column="column">
-                                            <span 
-                                                v-if="isCellDirty(idx, column) && getOriginalDataForRow(row, idx) !== undefined && getOriginalDataForRow(row, idx)?.[column.key] !== row[column.key]"
+                                            <span
+                                                v-if="showRevert(row, idx, column)"
                                                 class="original-value clickable"
-                                                :title="'Click to revert to: ' + formatCellValue(getOriginalDataForRow(row, idx)?.[column.key], column)"
+                                                :title="'Click to revert to: ' + formatCellValue(originalCellValue(row, idx, column), column)"
                                                 @click="revertCellToOriginal(idx, column, $event)"
                                             >
-                                                {{ formatCellValue(getOriginalDataForRow(row, idx)?.[column.key], column) }} →
+                                                {{ formatCellValue(originalCellValue(row, idx, column), column) }} →
                                             </span>
                                             <input
                                                 type="number"
                                                 :value="Number.isFinite(parseFloat(row[column.key])) ? parseFloat(row[column.key]) : ''"
-                                                :ref="cellRefName('number_editable_', idx, column)"
-                                                @input="handleCellEdit(idx, column, $event.target.value)"
+                                                @input="commitCellValue(idx, column, $event.target.value)"
                                             />
                                         </slot>
-                                        <!-- Externally editable (tracked for dirty but not directly editable) -->
+                                        <!-- Registry or page cell (editable text fields use the text cell) -->
+                                        <CellRenderer
+                                            v-else-if="column.cell"
+                                            :row="row"
+                                            :field="column"
+                                            renderer="table"
+                                            density="full"
+                                            :search-term="cellSearchTerm"
+                                            :highlight="highlightSearchText"
+                                            :theme="theme"
+                                            :cell-slot="$slots.cell"
+                                            :editable="column.editable"
+                                            :edit-mode="editMode"
+                                            :commit="(value) => commitCellValue(idx, column, value)"
+                                            :disabled="cellDisabledReason(row, column)"
+                                            :cell-scope="{ rowIndex: idx, onInnerTableDirty: (isDirty) => handleInnerTableDirty(isDirty, idx, column.key) }"
+                                        />
+                                        <!-- Edited outside the cell (e.g. a modal) and tracked for dirty state: the page's default slot -->
                                         <slot
                                             v-else-if="column.editable && column.format === 'external-edit'"
                                             :row="row"
@@ -4914,47 +4837,17 @@ export const TableComponent = {
                                             :cellColIndex="colIndex">
                                             <span v-html="highlightSearchText(row[column.key], column)"></span>
                                         </slot>
-                                        <!-- Editable text div -->
-                                        <div
-                                            v-else-if="!column.cell && column.editable"
-                                            contenteditable="true"
-                                            :data-row-index="idx"
-                                            :data-col-key="column.key"
-                                            @input="handleCellEdit(idx, column, $event.target.textContent)"
-                                            @focus="handleCellFocus(idx, column, $event)"
-                                            @blur="handleCellBlur(idx, column, $event)"
-                                            @paste="handleCellPaste(idx, column, $event)"
-                                            class="table-edit-textarea"
-                                            :class="{ 'search-match': hasSearchMatch(row[column.key], column) }"
-                                            :ref="cellRefName('editable_', idx, column)"
-                                        ></div>
-                                        <span v-if="!column.cell && column.editable && column.format !== 'external-edit' && getOriginalDataForRow(row, idx) !== undefined" class="column-button-hint">
-                                            {{ getOriginalDataForRow(row, idx)?.[column.key] || '(empty)' }}
-                                        </span>
-                                        <button
-                                            v-if="column.editable && column.format !== 'external-edit' && isCellDirty(idx, column) && column.format !== 'number' && getOriginalDataForRow(row, idx) !== undefined && getOriginalDataForRow(row, idx)?.[column.key] !== row[column.key]"
-                                            @click="revertCellToOriginal(idx, column, $event)"
-                                            title="Revert to original value"
-                                            class="column-button red">
-                                            ⮢
-                                        </button>
-                                        <!-- Non-editable content: registry/page cell, else the legacy default slot with text fallback -->
-                                        <CellRenderer
-                                            v-if="column.cell"
-                                            :row="row"
-                                            :field="column"
-                                            renderer="table"
-                                            density="full"
-                                            :search-term="cellSearchTerm"
-                                            :highlight="highlightSearchText"
-                                            :theme="theme"
-                                            :cell-slot="$slots.cell"
-                                            :editable="!!(column.editable || column.cellEditable)"
-                                            :commit="(value) => commitCellValue(idx, column, value)"
-                                            :disabled="cellDisabledReason(row, column)"
-                                            :cell-scope="{ rowIndex: idx, onInnerTableDirty: (isDirty) => handleInnerTableDirty(isDirty, idx, column.key) }"
-                                        />
-                                        <span v-else-if="!column.editable" v-html="highlightSearchText(row[column.key], column)"></span>
+                                        <span v-else v-html="highlightSearchText(row[column.key], column)"></span>
+                                        <!-- Changed batch cell (not number): revert button; its hint shows the original over the editor -->
+                                        <template v-if="column.format !== 'number' && showRevert(row, idx, column)">
+                                            <span class="column-button-hint">{{ originalCellValue(row, idx, column) || '(empty)' }}</span>
+                                            <button
+                                                @click="revertCellToOriginal(idx, column, $event)"
+                                                title="Revert to original value"
+                                                class="column-button red">
+                                                ⮢
+                                            </button>
+                                        </template>
 
                                         <!-- Inline keys on the slot's first line -->
                                         <template v-for="col in (slotByKey.get(column.key)?.inline || [])" :key="col.key">

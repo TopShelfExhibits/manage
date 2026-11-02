@@ -1,9 +1,8 @@
 import { Database, EditHistoryUtils, normalizeHeaderName } from '../index.js';
-import { isCheckedValue, checkboxWriteValue } from '../utils/checkbox-values.js';
 import { instantWriteEntry, isInstantColumn } from '../utils/instant-write-config.js';
 
 /**
- * Instant (single-cell, verified) writes — views-and-renderers-plan §4.16, Phase 2.
+ * Instant (verified) writes by row identity — views-and-renderers-plan §4.16.
  *
  * Everything an instant-write page needs from the sheet lives in the live database:
  *   CACHE/Preferences  InstantWriteTables  { "<database>/<tab>": { identity: [...], columns: [...] } }
@@ -24,8 +23,7 @@ import { instantWriteEntry, isInstantColumn } from '../utils/instant-write-confi
  *      value went to the cell that took the target's place; that cell's row is found in the
  *      step 2 read by its other cells (by column name) and its value restored, or, when the row or
  *      column wasn't there before (added mid-write), the result carries a warning to check it
- * writeCellVerified is the one-cell form. checkSheetHealth reports, read-only, whether a tab is
- * in a state these writes can rely on.
+ * checkSheetHealth reports, read-only, whether a tab is in a state these writes can rely on.
  */
 
 const PREFERENCES_MAPPING = { id: 'ID', name: 'Name', description: 'Description', page: 'Page', type: 'Type', value: 'Value', editHistory: 'EditHistory' };
@@ -36,8 +34,6 @@ const SHOW_NOTES_HEADERS = ['Identifier', 'Note', 'EditHistory'];
 export function sameValue(a, b) {
     return String(a ?? '').trim().toLowerCase() === String(b ?? '').trim().toLowerCase();
 }
-
-export { isCheckedValue, checkboxWriteValue };
 
 function headerIndex(headerRow, name) {
     const target = normalizeHeaderName(name).toLowerCase();
@@ -85,12 +81,6 @@ export class InstantWriteUtils {
         return instantWriteEntry(parseJsonPreference(prefs, 'InstantWriteTables', {}), database, tab);
     }
 
-    /** Read a JSON preference by id (page-level reads: DesignQueueFields, DesignQueueAssignees). */
-    static async getJsonPreference(id, fallback = null) {
-        const prefs = await Database.getData('CACHE', 'Preferences', PREFERENCES_MAPPING);
-        return parseJsonPreference(prefs, id, fallback);
-    }
-
     /**
      * Locate a row by identity in a raw sheet (header row first).
      * @returns {{ status: 'ok'|'not-found'|'duplicate'|'no-identity-columns', rowIndex?: number, idCols?: number[] }}
@@ -112,24 +102,12 @@ export class InstantWriteUtils {
     }
 
     /**
-     * Verified single-cell write by identity (writeCellsVerified with one cell).
+     * Verified writes of cells of one tab, by identity, as one batch (see the steps above).
      * @param {string} database   e.g. 'PROD_SCHED'
      * @param {string} tab        e.g. 'Production Schedule'
-     * @param {Object} rowObj     the loaded row (keys = normalized header names), used for identity values
-     * @param {string} column     header name of the target column
-     * @param {string} value      the value to write (checkbox: 'X' or '')
-     * @returns {Promise<{ ok: boolean, reason?: string, value?: string, rowNumber?: number, warning?: string }>}
-     */
-    static async writeCellVerified(database, tab, rowObj, column, value) {
-        const [result] = await InstantWriteUtils.writeCellsVerified(database, tab, [{ row: rowObj, column, value }]);
-        return result;
-    }
-
-    /**
-     * Verified writes of several cells of one tab, by identity, as one batch (see the steps above).
-     * @param {string} database
-     * @param {string} tab
      * @param {Array<{ row: Object, column: string, value: string }>} items
+     *        row: the loaded row (keys = normalized header names), used for identity values;
+     *        column: header name of the target column; value: what to write (checkbox: 'X' or '')
      * @returns {Promise<Array<{ ok: boolean, reason?: string, value?: string, rowNumber?: number, warning?: string }>>}
      *          one result per item, in order. `warning` reports another row the batch may have changed.
      */

@@ -923,26 +923,6 @@ tr:hover + .column-button.between-rows, .column-button.between-rows:has(+ tr:hov
     opacity: 1;
 }
 
-/* Designed to overlap the container when hovered */
-.column-button-hint {
-    opacity: 0;
-    display: block !important;
-    position: absolute;
-    pointer-events: none;
-    top:0;
-    background: var(--color-red-bg);
-    outline: 1px solid var(--color-red);
-    border-radius: var(--radius-md);
-    padding: var(--padding-sm);
-    z-index: 9;
-}
-.column-button-hint:has(+ .column-button:hover) {
-    opacity: 1;
-}
-.table-edit-textarea:has(~ .column-button:hover) {
-    opacity: 0;
-}
-
 /* Modal Close Buttons */
 .modal-header > .column-button {
     opacity: 1;
@@ -1362,6 +1342,9 @@ td.col-sticky-start, td.col-sticky-end {
     opacity: 1;
 }
 
+/* ── Editable cells (batch and instant edit modes) ── */
+
+/* Text editor (contenteditable text cell) and number input */
 .table-edit-textarea, td input[type="number"] {
     width: 100%;
     display: inline-block;
@@ -1373,7 +1356,15 @@ td.col-sticky-start, td.col-sticky-end {
     transition: background-color 0.15s ease-in-out, outline 0.05s ease-in-out;
     outline: none;
 }
-
+.table-edit-textarea[data-placeholder]:empty::before {
+    content: attr(data-placeholder);
+    opacity: 0.25;
+    font-style: italic;
+}
+td:hover:has(.table-cell-container > .table-edit-textarea), td:hover:has(.table-cell-container > input[type="number"]) {
+    background-color: var(--color-blue-bg-transparent);
+    cursor: text;
+}
 .table-cell-container:has(input[type="number"]),
 .table-cell-container:has(button:only-child) {
     display: flex;
@@ -1381,6 +1372,36 @@ td.col-sticky-start, td.col-sticky-end {
     gap: var(--padding-sm);
     align-items: center;
 }
+
+/* Checkbox and select cells */
+.table-cell-container:has(.cell-checkbox:only-child) {
+    text-align: center;
+}
+.cell-checkbox {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--padding-sm);
+    cursor: pointer;
+}
+.cell-checkbox input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
+    margin: 0;
+    cursor: pointer;
+}
+.cell-checkbox.cell-readonly, .cell-checkbox.cell-readonly input {
+    cursor: default;
+}
+select.cell-select {
+    width: 100%;
+    box-sizing: border-box;
+    min-width: 0;
+}
+select.cell-select:only-child {
+    border: none;
+}
+
+/* Changed batch cells: the original value (number cells, click to revert) */
 .original-value {
     display: block;
     white-space: nowrap;
@@ -1396,26 +1417,37 @@ td.col-sticky-start, td.col-sticky-end {
     outline: 1px solid var(--color-red);
     opacity: 1;
 }
+/* Changed batch cells: hovering the revert button shows the original value over the editor */
+.column-button-hint {
+    opacity: 0;
+    display: block !important;
+    position: absolute;
+    pointer-events: none;
+    top:0;
+    background: var(--color-red-bg);
+    outline: 1px solid var(--color-red);
+    border-radius: var(--radius-md);
+    padding: var(--padding-sm);
+    z-index: 9;
+}
+.column-button-hint:has(+ .column-button:hover) {
+    opacity: 1;
+}
+.table-edit-textarea:has(~ .column-button:hover) {
+    opacity: 0;
+}
 
-/* Dirty cells (batch edits) and cells with an instant write pending look the same */
+/* Unsaved cells: batch edits (in tables marked .mark-dirty) and instant writes still pending */
 .mark-dirty .dirty,
 td.instant-pending {
     background-color: var(--color-red-bg-transparent);
 }
-
-td:hover:has(.table-cell-container > .table-edit-textarea), td:hover:has(.table-cell-container > input[type="number"]) {
-    background-color: var(--color-blue-bg-transparent);
-    cursor: text;
+/* Instant write failed (the value was reverted) */
+td.instant-failed {
+    outline: 2px solid var(--color-red);
+    outline-offset: -3px;
+    background-color: var(--color-red-bg) !important;
 }
-/* tr:hover > td > .table-cell-container > .table-edit-textarea, tr:hover > td > .table-cell-container > input[type="number"] {
-    background-color: var(--color-blue-bg-transparent);
-}
-.mark-dirty .dirty > .table-cell-container > .table-edit-textarea:focus, .mark-dirty .dirty > .table-cell-container > input[type="number"]:focus {
-    outline: solid 2px var(--color-red-bg);
-}
-.table-edit-textarea:focus, td input[type="number"]:focus {
-    outline: solid 2px var(--color-blue-bg-hover);
-} */
 
 /* Search highlighting */
 .search-match:not(:has(.search-match)):not(:has(button)):not(:has(input)),
@@ -1476,17 +1508,6 @@ button.search-highlight {
     border: 2px solid var(--color-yellow) !important;
     box-shadow: 0 0 4px var(--color-yellow) !important;
 }
-
-/*.dirty::after {
-    content: "edited";
-    display: inline-block;
-    font-size: 0.8rem;
-    color: var(--color-red);
-    border-radius: var(--radius-md);
-    border: 1px dashed var(--color-red);
-    padding: 1.5px;
-    margin: 0 4px;
-}*/
 
 /* Messages */
 .loading-message, .empty-message {
@@ -1575,57 +1596,6 @@ html.row-dragging * {
 }
 
 
-/* Status Indicators */
-
-/* Removed per design decision, keep in case it's useful later
-.unsaved:has(.unsaved)::after,
-.alert:has(.alert)::after,
-.dirty:has(.dirty)::after {
-    content: none;
-    display: none;
-}
-.unsaved::after, .alert::after, .dirty::after {
-    width: 1.2rem;
-    height: 1.2rem;
-    border-radius: .6rem;
-    display: block;
-    opacity: .8;
-    line-height: 1.1rem;
-    position: absolute;
-    right: 3px;
-    top: calc(50% - .6rem);
-    text-align: center;
-    pointer-events: none;
-    transition: width 0.3s ease;
-}
-.unsaved::after {
-    content: "●";
-    background: var(--color-red);
-    color: var(--color-text-inverted);
-}
-:hover.unsaved::after {
-    content: "unsaved";
-    width: 4.5rem;
-}
-.alert::after {
-    content: "⚠";
-    background: var(--color-yellow);
-    color: var(--color-text);
-}
-:hover.alert::after {
-    content: "alert";
-    width: 3rem;
-}
-.dirty::after {
-    content: "✎";
-    background: var(--color-red);
-    color: var(--color-text-inverted);
-}
-:hover.dirty::after {
-    content: "edited";
-    width: 3.5rem;
-}
-*/
 
 
 
@@ -2411,42 +2381,6 @@ td.details-cell button.action-button {
     cursor: default;
 }
 
-/* ── Views system: editable cells and instant writes (views-and-renderers-plan §4.16) ── */
-
-.table-cell-container:has(.cell-checkbox:only-child) {
-    text-align: center;
-}
-.cell-checkbox {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--padding-sm);
-    cursor: pointer;
-}
-.cell-checkbox input[type="checkbox"] {
-    width: 18px;
-    height: 18px;
-    margin: 0;
-    cursor: pointer;
-}
-.cell-checkbox.cell-readonly, .cell-checkbox.cell-readonly input {
-    cursor: default;
-}
-select.cell-select, input.cell-text-input {
-    width: 100%;
-    box-sizing: border-box;
-    min-width: 0;
-}
-select.cell-select:only-child {
-    border: none;
-}
-
-/* Instant-write failure (pending cells share the dirty-cell style above) */
-td.instant-failed {
-    outline: 2px solid var(--color-red);
-    outline-offset: -3px;
-    background-color: var(--color-red-bg) !important;
-}
-
 /* Preferences in the hamburger menu: long values (JSON lists) are clamped; the full value is the tooltip */
 .preferences-menu-section .pref-value {
     display: -webkit-box;
@@ -2461,11 +2395,4 @@ td.instant-failed {
 /* Full-width container mode (view.fullWidth): the page container drops its max-width */
 .container:has(.view-full-width) {
     max-width: 100%;
-}
-
-/* Empty contenteditable cells show their placeholder */
-.table-edit-textarea[data-placeholder]:empty::before {
-    content: attr(data-placeholder);
-    opacity: 0.25;
-    font-style: italic;
 }

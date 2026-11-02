@@ -1520,17 +1520,8 @@ class Requests_uncached {
 
     /**
      * MUTATION METHOD — excluded from caching.
-     * Verified single-cell write located by row identity and column header (views plan §4.16).
-     * @returns {Promise<{ ok: boolean, reason?: string }>}
-     */
-    static async writeCellVerified(database, tab, row, column, value) {
-        return await InstantWriteUtils.writeCellVerified(database, tab, row, column, value);
-    }
-
-    /**
-     * MUTATION METHOD — excluded from caching.
      * Verified writes of several cells of one tab in one batch, each located by row identity and
-     * column header (views plan §4.16).
+     * column header (see instant-write-utils.js).
      * @param {Array<{ row: Object, column: string, value: string }>} items
      * @returns {Promise<Array<{ ok: boolean, reason?: string, warning?: string }>>} one result per item
      */
@@ -1602,7 +1593,6 @@ export const Requests = wrapMethods(
         'removeTransshipLink',
         'savePageNotes',
         'savePreferences',
-        'writeCellVerified',
         'writeCellsVerified',
         'checkSheetHealth',
         'saveShowNote'
