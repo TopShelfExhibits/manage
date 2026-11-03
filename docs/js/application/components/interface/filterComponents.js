@@ -773,13 +773,13 @@ export const ScheduleAdvancedFilter = {
                             { key: 'returnDate', label: 'Return', format: 'date', type: 'date' }
                         ];
                     },
-                    // Single-view registry, no URL; Select is the primary action (button in the action cell)
+                    // Single-view registry, no URL; Select is the primary action (a row click)
                     registry() {
                         return {
                             id: 'show-overlap-picker',
                             default: 'table',
                             theme: 'gray',
-                            views: [{ id: 'table', name: 'Shows', layout: 'table', columns: ['show', 'shipDate', 'returnDate'], sortable: ['show', 'shipDate', 'returnDate'], sort: { key: 'show', dir: 'asc' } }]
+                            views: [{ id: 'table', name: 'Shows', layout: 'table', columns: ['show', 'shipDate', 'returnDate'], sortable: ['show', 'shipDate', 'returnDate'], sort: { key: 'show', dir: 'asc' }, action: 'row' }]
                         };
                     },
                     selectAction() {

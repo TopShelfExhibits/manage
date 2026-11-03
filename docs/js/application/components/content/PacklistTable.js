@@ -766,7 +766,7 @@ export const PacklistTable = {
                             { key: 'quantity', label: 'Available' }
                         ];
                     },
-                    // Single-view registry in a modal (no URL); "+ Add Item" is the primary action
+                    // Single-view registry in a modal (no URL); adding the item is the primary action (a row click)
                     registry() {
                         return {
                             id: 'packlist-inventory-selector',
@@ -778,7 +778,9 @@ export const PacklistTable = {
                                 sortable: ['itemNumber', 'description', 'quantity'],
                                 style: { image: itemImageStyle('itemNumber'), itemNumber: { width: 120 }, quantity: { width: 100 } },
                                 table: { sticky: { start: ['image'] } },
-                                sort: { key: 'itemNumber', dir: 'asc' }
+                                sort: { key: 'itemNumber', dir: 'asc' },
+                                // Clicking a row adds the item
+                                action: 'row'
                             }]
                         };
                     },

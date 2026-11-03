@@ -4444,7 +4444,7 @@ export const TableComponent = {
                                         'drop-target-above': dropTarget?.type === 'between' && dropTarget?.visualTargetIndex === visibleIdx,
                                         'drop-target-below': dropTarget?.type === 'between' && dropTarget?.visualTargetIndex === visibleIdx + 1,
                                         'drop-target-onto': dropTarget?.type === 'onto' && dropTarget?.targetIndex === idx,
-                                        'clickable row-action': hasRowTrigger,
+                                        'clickable row-action': hasRowTrigger && !isActionDisabled(row),
                                         'details-match': hasRowTrigger && isDetailsOnlyMatch(row)
                                     },
                                     getRowMetadataClass(row),
