@@ -13,7 +13,7 @@ import { toUSDateString } from '../../data_management/utils/helpers.js';
  *   - A transship row ships when its source show ends: AppData.transshipSource names the source
  *     and AppData.transshipSourceEndDate is shown as its Ship date (also withShipDate).
  *   - A source show's return is extended to its destination's: AppData.transshipDestination.
- * shipReturnCards gives the matching decorations: "TS" on Ship and "return extended" on Recieved.
+ * shipReturnCards gives the matching decorations: "TS" on Ship and on Recieved (the column tells them apart).
  */
 
 /** Decoration keys used by shipReturnCards (add them to a page's decorationKeys). */
@@ -106,7 +106,7 @@ export function shipReturnCards(row, key, modal) {
     // Return date for source shows is extended to the destination's return date
     if (key === 'Recieved' && dest) {
         return [{
-            message: 'return extended',
+            message: 'TS',
             class: 'gray',
             title: `Items remain out until the later show ends: ${dest}`,
             action: () => modal?.alert(`${showLabel(row)}\ntransships directly to:\n${dest}`, 'Extended Return')
