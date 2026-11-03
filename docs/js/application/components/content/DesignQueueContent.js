@@ -1,7 +1,7 @@
-import { html, Requests, DataView, getReactiveStore, invalidateCache, ScheduleFilterSelect } from '../../index.js';
+import { html, Requests, DataView, getReactiveStore, invalidateCache, ScheduleFilterSelect, createAnalysisConfig, Priority } from '../../index.js';
 import { buildScheduleFields } from '../../../data_management/abstraction/scheduleFields.js';
 import { isCheckedValue } from '../../../data_management/utils/checkbox-values.js';
-import { isInstantColumn, identityKey, identityText, columnText } from '../../../data_management/utils/instant-write-config.js';
+import { isInstantColumn, identityKey, columnText } from '../../../data_management/utils/instant-write-config.js';
 import { textFiltersToSearchParams } from '../../../data_management/utils/helpers.js';
 import { shipReturnAnalysis, withShipDate, shipReturnCards, SHIP_RETURN_DECORATION_KEYS } from '../../utils/scheduleShipping.js';
 
@@ -19,7 +19,9 @@ import { shipReturnAnalysis, withShipDate, shipReturnCards, SHIP_RETURN_DECORATI
  *    select when the page has options for it (Assignee, from DesignQueueAssignees), a checkbox
  *    when the sheet's values are checkbox values, text otherwise. The shown columns come from
  *    DesignQueueFields (a view patch). Until setup loads, instant cells render read-only.
- *  - Note is not a Schedule column: it is joined from CACHE/ShowNotes by computeIdentifier.
+ *  - Note is not a Schedule column: a per-row analysis on the schedule store reads it from
+ *    CACHE/ShowNotes by computeIdentifier (Requests.getShowNoteForRow). It keeps the last note
+ *    while refreshing, and re-runs when the notes tab changes.
  *  - Rows whose Setups is checked (X) stay in place and turn gray via a derived colour field
  *    (_rowColor) recomputed from the local row, so the row grays as soon as the box is clicked.
  *  - Ship shows the estimated ship date (sorted ascending); the initial filter is the
@@ -72,10 +74,24 @@ const DESIGN_QUEUE_VIEWS = {
     ]
 };
 
-// Notes belong to a show (computeIdentifier inputs), whatever the row identity is
-const SHOW_IDENTITY = Object.freeze(['Client', 'Year', 'Show']);
-function showKey(row) {
-    return identityKey(SHOW_IDENTITY, k => row?.[k]);
+// Each row's show note ({ identifier, note } in AppData.showNote). Notes belong to a show
+// (computeIdentifier inputs), whatever the row identity is. A function: index.js exports are
+// not ready at module evaluation.
+function showNoteAnalysis() {
+    return {
+        ...createAnalysisConfig(
+            Requests.getShowNoteForRow,
+            'showNote',
+            'Loading show notes...',
+            ['Show', 'Client', 'Year'],
+            [],
+            null,
+            false,
+            Priority.ANALYSIS,
+            true // extractColumnsAsObject
+        ),
+        keepWhileRefreshing: true
+    };
 }
 
 
@@ -92,8 +108,6 @@ export const DesignQueueContent = {
             filter: null,
             scheduleStore: null,
             setupStore: null,
-            notesStore: null,
-            identifiers: {},            // showKey → computeIdentifier result
             DESIGN_QUEUE_VIEWS,
             SHIP_RETURN_DECORATION_KEYS
         };
@@ -158,16 +172,6 @@ export const DesignQueueContent = {
             fields.push({ key: '_rowColor', label: 'Row colour' }, { key: '_identifier', label: 'Identifier' });
             return fields;
         },
-        showKeyList() {
-            return this.rawRows.map(showKey).join(';;');
-        },
-        notesByIdentifier() {
-            const map = new Map();
-            for (const n of this.notesStore?.data || []) {
-                if (n?.Identifier) map.set(identityText(n.Identifier), n.Note ?? '');
-            }
-            return map;
-        },
         // Identities shared by more than one loaded row (writes to those rows are refused)
         duplicateIdentities() {
             const seen = new Map();
@@ -181,10 +185,11 @@ export const DesignQueueContent = {
             const sheetHasNote = this.rawRows.length && Object.prototype.hasOwnProperty.call(this.rawRows[0], 'Note');
             if (sheetHasNote) console.warn('[DesignQueue] the Schedule sheet has its own Note column; the sheet value wins over CACHE/ShowNotes');
             return this.rawRows.map(row => {
-                const identifier = this.identifiers[showKey(row)] || '';
+                // null until the row's note analysis has run
+                const showNote = row.AppData?.showNote || null;
                 // Ship shows (and sorts by) the estimated ship date; transship rows the source show's end
-                const out = { ...withShipDate(row), _identifier: identifier };
-                if (!sheetHasNote) out.Note = identifier ? (this.notesByIdentifier.get(identityText(identifier)) ?? '') : '';
+                const out = { ...withShipDate(row), _identifier: showNote?.identifier || '' };
+                if (!sheetHasNote) out.Note = showNote ? showNote.note : null;
                 return this.deriveRow(out);
             });
         },
@@ -205,16 +210,10 @@ export const DesignQueueContent = {
                 if (JSON.stringify(newFilter) !== JSON.stringify(oldFilter)) this.createScheduleStore();
             },
             deep: true
-        },
-        // Resolve show identifiers (for notes) whenever the set of rows changes; the store may fill its array in place
-        showKeyList: {
-            handler() { this.resolveIdentifiers(); },
-            immediate: true
         }
     },
     mounted() {
         this.setupStore = getReactiveStore(Requests.getDesignQueueSetup, null, [DQ_DATABASE, DQ_TAB]);
-        this.notesStore = getReactiveStore(Requests.getShowNotes, null, []);
     },
     methods: {
         // Cell for an instant-write column: select (page options), checkbox (the data), else text
@@ -232,7 +231,10 @@ export const DesignQueueContent = {
             return identityKey(this.identity, k => row?.[k]);
         },
         cellDisabled(row, key) {
-            if (key === 'Note') return row._identifier ? '' : 'write disabled: no show identifier yet';
+            if (key === 'Note') {
+                if (row._identifier) return '';
+                return row.Note === null ? 'write disabled: loading the note' : 'write disabled: no show identifier';
+            }
             if (!isInstantColumn({ columns: this.instantColumns }, key)) return '';
             if (!this.instantConfig) return 'write disabled: no row identity';
             // Until the column kinds load, a column's cell type isn't known (shown read-only)
@@ -266,27 +268,14 @@ export const DesignQueueContent = {
             batch.forEach((n, k) => { results[n] = written[k] || { ok: false, reason: 'no-result' }; });
             return results;
         },
-        async resolveIdentifiers() {
-            for (const row of this.rawRows) {
-                const k = showKey(row);
-                if (this.identifiers[k] !== undefined) continue;
-                this.identifiers[k] = '';
-                try {
-                    const id = await Requests.computeIdentifier(row.Show, row.Client, row.Year);
-                    this.identifiers[k] = id || '';
-                } catch {
-                    this.identifiers[k] = '';
-                }
-            }
-        },
         createScheduleStore() {
             if (this.filter === null) {
                 this.scheduleStore = null;
                 return;
             }
             const { searchParams, ...dateFilter } = this.filter || {};
-            // Ship and return info, shared with the Schedule page (same cached analysis calls)
-            const analysisConfig = shipReturnAnalysis();
+            // Show notes first, then ship and return info shared with the Schedule page (same cached analysis calls)
+            const analysisConfig = [showNoteAnalysis(), ...shipReturnAnalysis()];
             this.scheduleStore = getReactiveStore(
                 Requests.getProductionScheduleData,
                 null,

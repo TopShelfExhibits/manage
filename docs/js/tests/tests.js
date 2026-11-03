@@ -42,7 +42,7 @@ import { todayISOString, searchFilter, textFiltersToSearchParams, parseSearchPar
 import { columnKind, columnKindsOfRows } from '../data_management/utils/checkbox-values.js';
 import { instantWriteEntry, identityKey, cellKey, joinKey } from '../data_management/utils/instant-write-config.js';
 import { estimateShipDate } from '../data_management/utils/ship-date.js';
-import { getReactiveStore } from '../application/index.js';
+import { getReactiveStore, createAnalysisConfig } from '../application/index.js';
 import { withShipDate } from '../application/utils/scheduleShipping.js';
 
 // ── Runner ────────────────────────────────────────────────────────────────────
@@ -1978,6 +1978,22 @@ function notesRestore(snap) {
     snap.forEach(r => s.push(r.slice()));
 }
 
+test('SHOW NOTES', "a schedule row's note comes from its show identifier and follows note saves", async () => {
+    const snap = notesSnapshot();
+    const id = 'CHAINCO 2026 SPRING EXPO';
+    const row = { Show: 'Spring Expo', Client: 'ChainCo', Year: '2026' };
+    try {
+        await Requests.saveShowNote(id, 'first');
+        assertEqual(await Requests.getShowNoteForRow(row), { identifier: id, note: 'first' }, 'note by identifier');
+        await Requests.saveShowNote(id, 'second');
+        assertEqual((await Requests.getShowNoteForRow(row)).note, 'second', 'a save refreshes the cached note');
+        assertEqual(await Requests.getShowNoteForRow({ Show: null, Client: null, Year: null }), { identifier: '', note: '' }, 'no identifier');
+    } finally {
+        await Requests.saveShowNote(id, '');
+        notesRestore(snap);
+    }
+});
+
 test('SHOW NOTES', 'clearing a note removes its row; an empty note is never appended', async () => {
     const snap = notesSnapshot();
     try {
@@ -2194,6 +2210,28 @@ test('REACTIVE STORES', 'an evicted store that is read loads again; an unread on
     } finally {
         app.unmount();
     }
+});
+
+test('REACTIVE STORES', 'a keepWhileRefreshing analysis keeps its last result through reloads and re-runs', async () => {
+    let rows = [{ k: 'a' }, { k: 'b' }];
+    let gate = null; // while set, the analysis waits for it
+    const analyze = async (k) => { const n = rows.length; if (gate) await gate; return `${k}${n}`; };
+    const config = { ...createAnalysisConfig(analyze, 'res', 'test', ['k']), keepWhileRefreshing: true };
+    const store = getReactiveStore(async () => rows.map(r => ({ ...r })), null, [`keep-${Date.now()}`], [config], false);
+    await store.load();
+    assertEqual(store.data.map(r => r.AppData.res), ['a2', 'b2'], 'analysed');
+    let release;
+    gate = new Promise(r => { release = r; });
+    rows = [{ k: 'b' }, { k: 'c' }, { k: 'a' }];
+    const reload = store.load();
+    await editWait(50);
+    assertEqual(store.data.map(r => r.AppData.res), ['b2', null, 'a2'], 'kept by input value while the re-run waits');
+    gate = null;
+    release();
+    await reload;
+    assertEqual(store.data.map(r => r.AppData.res), ['b3', 'c3', 'a3'], 'replaced by the re-run');
+    store.clearSpecificAnalysisResults(['res']);
+    assertEqual(store.data[0].AppData.res, 'b3', 'an invalidation does not clear it first');
 });
 
 // ── Batched verified writes, fault injection, sheet health ───────────────────

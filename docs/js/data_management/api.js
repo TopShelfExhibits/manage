@@ -1,6 +1,6 @@
 import { wrapMethods, normalizeHeaderName, Database, InventoryUtils, PackListUtils, ProductionUtils, ApplicationUtils, EditHistoryUtils, InstantWriteUtils, todayISOString, offsetToISO, sanitizeTabName, mapWithConcurrency, ProgressBus, getRandomLoadingQuote } from './index.js';
 import { authState } from '../application/utils/auth.js';
-import { instantWriteEntry, columnText } from './utils/instant-write-config.js';
+import { instantWriteEntry, columnText, identityText } from './utils/instant-write-config.js';
 import { columnKind } from './utils/checkbox-values.js';
 
 /**
@@ -1569,6 +1569,26 @@ class Requests_uncached {
             console.warn('[Requests.getShowNotes] ShowNotes tab unavailable:', e?.message || e);
             return [];
         }
+    }
+
+    /**
+     * A schedule row's show note, for per-row analysis: { identifier, note }. identifier is
+     * computeIdentifier(Show, Client, Year), '' when it can't be computed; note is '' when the show
+     * has none. Cached, so it follows CACHE/ShowNotes and the identifier reference data.
+     * @param {{ Show, Client, Year }} row
+     */
+    static async getShowNoteForRow(deps, row) {
+        let identifier = '';
+        try {
+            identifier = (await deps.call(Requests.computeIdentifier, row?.Show, row?.Client, row?.Year)) || '';
+        } catch {
+            identifier = '';
+        }
+        if (!identifier) return { identifier: '', note: '' };
+        const notes = await deps.call(Requests.getShowNotes);
+        const key = identityText(identifier);
+        const hit = notes.find(n => identityText(n.Identifier) === key);
+        return { identifier, note: hit?.Note ?? '' };
     }
 
     /**

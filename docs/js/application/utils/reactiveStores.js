@@ -346,6 +346,28 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
     // isModified from running expensive JSON comparisons on every reactive evaluation.
     const isReadOnly = typeof saveCall !== 'function';
 
+    // Analyses marked keepWhileRefreshing keep their last result until a re-run replaces it: a
+    // reload carries each result to the new row with the same input values (sourceColumns), and an
+    // invalidation re-runs without clearing first. The rows never show a blank while refreshing.
+    const keptConfigs = (analysisConfig || []).filter(c => c.keepWhileRefreshing && c.sourceColumns?.length);
+    const inputKey = (row, c) => JSON.stringify(c.sourceColumns.map(k => row?.[k] ?? null));
+    const resultOf = (row, c) => (c.targetColumn ? row?.[c.targetColumn] : row?.AppData?.[c.resultKey]);
+    function keptResults(rows) {
+        return keptConfigs.map(c => new Map(rows
+            .filter(row => resultOf(row, c) != null)
+            .map(row => [inputKey(row, c), resultOf(row, c)])));
+    }
+    function restoreKept(rows, kept) {
+        keptConfigs.forEach((c, n) => {
+            for (const row of rows) {
+                const value = kept[n].get(inputKey(row, c));
+                if (value === undefined || !row?.AppData) continue;
+                if (c.targetColumn) row[c.targetColumn] = value;
+                else row.AppData[c.resultKey] = value;
+            }
+        });
+    }
+
     // An evicted store that is still read loads again. Pages often get a store once (mounted) and
     // read it through computeds, so eviction would otherwise leave them empty until remount.
     // This module reads _data, so its own sweeps, timers and methods never wake an evicted store.
@@ -521,7 +543,9 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
                 if (!isReadOnly) {
                     this.setOriginalData(dataToSet);
                 }
+                const kept = keptResults(this._data);
                 this.setData(dataToSet);
+                restoreKept(this._data, kept);
                 
                 // Release lock BEFORE running analysis so analysis can proceed
                 this.isReloadingMainData = false;
@@ -752,8 +776,9 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
             const clearSpecificResults = (item) => {
                 if (item && item.AppData) {
                     this.analysisConfig.forEach(config => {
-                        const shouldClear = identifiers.includes(config.resultKey) || 
-                                          identifiers.includes(config.targetColumn);
+                        // keepWhileRefreshing results stay until the re-run replaces them
+                        const shouldClear = !config.keepWhileRefreshing && (identifiers.includes(config.resultKey) ||
+                                          identifiers.includes(config.targetColumn));
                         
                         if (shouldClear) {
                             clearAnalysisResultsFromItem(item, config, true); // Clear target column data
@@ -2008,7 +2033,8 @@ function setupCacheInvalidationListeners(store, apiCall, apiArgs, analysisConfig
  * @param {number} priority - Priority level (0-9, default: Priority.ANALYSIS=1)
  * @param {boolean} extractColumnsAsObject - If true and sourceColumns has multiple items, extract all as {col1, col2, ...} object
  * @param {boolean} essential - If true (default), this analysis is essential and runs even when onlyRunEssentialAnalysis is enabled
- * @returns {Object} Analysis configuration object
+ * @returns {Object} Analysis configuration object. Set `keepWhileRefreshing: true` on it to keep the
+ *   last result until a re-run replaces it (reloads carry it to rows with the same sourceColumns values).
  */
 export function createAnalysisConfig(apiFunction, resultKey, label, sourceColumns = null, additionalParams = [], targetColumn = null, passFullItem = false, priority = Priority.ANALYSIS, extractColumnsAsObject = false, essential = true) {
     return {
