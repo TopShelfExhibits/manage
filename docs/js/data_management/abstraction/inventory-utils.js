@@ -1,4 +1,4 @@
-import { Database, ProductionUtils, PackListUtils, wrapMethods, parseDate, toISODateString, searchFilter, todayISOString, ApplicationUtils, invalidateCache, EditHistoryUtils } from '../index.js';
+import { Database, ProductionUtils, PackListUtils, wrapMethods, parseDate, toISODateString, searchFilter, todayISOString, ApplicationUtils, invalidateCache, EditHistoryUtils, DEFAULT_INVENTORY_NOTE_MAX_LENGTH } from '../index.js';
 
 /** Normalize an identifier for loose matching (strips spaces, case, non-alphanumeric) */
 function _normalizeId(v) { return String(v || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, ''); }
@@ -9,17 +9,45 @@ function _parseMetadata(str) {
     try { return JSON.parse(str); } catch { return {}; }
 }
 
+/** Fields reconstructed for the item timeline (contract: "Reconstructing past row states") */
+const TIMELINE_FIELDS = ['itemNumber', 'quantity', 'description', 'notes'];
+
+/**
+ * Human-readable labels for one history entry, e.g. ['quantity: +2', 'description: "a" → "b"'].
+ * @param {Object} entry - h entry
+ * @param {Object} before - State before the entry
+ * @param {Object} after - State after the entry
+ * @returns {Array<string>}
+ */
+function _historyChangeLabels(entry, before, after) {
+    return (Array.isArray(entry.c) ? entry.c : [])
+        .filter(ch => ch?.n !== undefined)
+        .map(ch => {
+            if (ch.n === 'quantity') {
+                const delta = (parseInt(after.quantity, 10) || 0) - (parseInt(before.quantity, 10) || 0);
+                return `quantity: ${delta >= 0 ? '+' + delta : delta}`;
+            }
+            if (ch.n in after) {
+                return `${ch.n}: "${before[ch.n] ?? ''}" → "${after[ch.n] ?? ''}"`;
+            }
+            return `${ch.n} changed`;
+        });
+}
+
+/** Inventory tab row key → sheet header (the wrapped InventoryUtils does not expose static fields) */
+export const DEFAULT_INVENTORY_MAPPING = {
+    itemNumber: 'ITEM#',
+    quantity: 'QTY',
+    description: 'Description',
+    notes: 'NOTES',
+    edithistory: 'EditHistory'
+};
+
 /**
  * Utility functions for inventory operations
  */
 class inventoryUtils_uncached {
-    static DEFAULT_INVENTORY_MAPPING = {
-        itemNumber: 'ITEM#',
-        quantity: 'QTY',
-        description: 'Description',
-        notes: 'NOTES',
-        edithistory: 'EditHistory'
-    };
+    static DEFAULT_INVENTORY_MAPPING = DEFAULT_INVENTORY_MAPPING;
 
     static INDEX_MAPPING = {
         prefix: 'PREFIX',
@@ -177,8 +205,10 @@ class inventoryUtils_uncached {
     }
 
     static async saveInventoryTabData(mappedData, tabOrItemName, mapping = inventoryUtils_uncached.DEFAULT_INVENTORY_MAPPING, filters = null, username = null, options = {}) {
-        const { source = 'web', scheduledDate = null, note = '' } = options;
-        
+        const { source = 'web', scheduledDate = null, noteMaxLength = DEFAULT_INVENTORY_NOTE_MAX_LENGTH } = options;
+        // Notes are capped by the InventoryNoteMaxLength preference (resolved by the API layer)
+        const note = String(options.note || '').slice(0, noteMaxLength);
+
         const allTabs = await Database.getTabs('INVENTORY');
         const tabExists = allTabs.some(tab => tab.title === tabOrItemName);
         let resolvedTabName = tabOrItemName;
@@ -217,8 +247,8 @@ class inventoryUtils_uncached {
             const buildBareRow = (item) => {
                 const bare = {};
                 for (const key of Object.keys(item)) {
-                    if (['AppData', 'MetaData'].includes(key)) continue;
-                    if (key === 'itemNumber' || key === 'edithistory' || key === 'EditHistory') {
+                    if (['AppData', 'metadata'].includes(key)) continue;
+                    if (key === 'itemNumber' || key === 'edithistory') {
                         bare[key] = item[key];
                     } else {
                         // Numeric fields → 0, string fields → ''
@@ -236,7 +266,7 @@ class inventoryUtils_uncached {
 
                 const changes = [];
                 for (const key of Object.keys(item)) {
-                    if (['edithistory', 'EditHistory', 'AppData', 'MetaData'].includes(key)) continue;
+                    if (['edithistory', 'AppData', 'metadata'].includes(key)) continue;
                     if (String(item[key]) !== String(baseItem[key] ?? '')) {
                         const existingNum = parseFloat(baseItem[key]);
                         const newNum = parseFloat(item[key]);
@@ -254,18 +284,21 @@ class inventoryUtils_uncached {
 
                 if (changes.length === 0) return baseItem;
 
-                const pendingEntry = EditHistoryUtils.createPendingEntry(shortUser, changes, effectiveDeciseconds, note);
-                const updatedEH = EditHistoryUtils.appendToPendingChanges(baseItem.edithistory || baseItem.EditHistory, pendingEntry);
+                const pendingEntry = EditHistoryUtils.createPendingEntry(shortUser, changes, effectiveDeciseconds, note, noteMaxLength);
+                const updatedEH = EditHistoryUtils.appendToPendingChanges(baseItem.edithistory, pendingEntry);
                 return { ...baseItem, edithistory: updatedEH };
             });
 
             return await Database.setData('INVENTORY', resolvedTabName, updatedRows, mapping, {
                 username,
-                identifierKey: 'itemNumber',
                 source: note || 'scheduled',
                 skipMetadata: true
             });
         }
+
+        // Inventory history stores the save note in `s`; without a note `s` is omitted
+        // (readers treat a missing `s` as 'web'). Non-web sources such as 'cad' are kept.
+        const historySource = note || (source === 'web' ? null : source);
 
         let saveResult;
         try {
@@ -281,7 +314,7 @@ class inventoryUtils_uncached {
 
                 // Send updates one by one with username
                 for (const update of updates) {
-                    await Database.updateRow('INVENTORY', resolvedTabName, update, mapping, { username, source });
+                    await Database.updateRow('INVENTORY', resolvedTabName, update, mapping, { username, source: historySource });
                 }
 
                 saveResult = true;
@@ -291,11 +324,9 @@ class inventoryUtils_uncached {
                 }
 
                 // Save JS objects using mapping with edithistory options
-                // Use note as the source descriptor when provided
                 saveResult = await Database.setData('INVENTORY', resolvedTabName, mappedData, mapping, {
                     username,
-                    identifierKey: 'itemNumber',
-                    source: note || source
+                    source: historySource
                 });
             }
         } finally {
@@ -347,7 +378,7 @@ class inventoryUtils_uncached {
         }
         const rows = await deps.call(Database.getData, 'INVENTORY', resolvedTabName, mapping);
         return rows.filter(row => {
-            const pending = EditHistoryUtils.getPendingEntries(row.edithistory || row.EditHistory);
+            const pending = EditHistoryUtils.getPendingEntries(row.edithistory);
             return pending.some(e => e.t === effectiveDateDeciseconds);
         });
     }
@@ -380,7 +411,6 @@ class inventoryUtils_uncached {
 
         await Database.setData('INVENTORY', resolvedTabName, updatedItems, mapping, {
             username,
-            identifierKey: 'itemNumber',
             skipMetadata: true
         });
         return { applied: true };
@@ -394,12 +424,13 @@ class inventoryUtils_uncached {
      * @param {Array<Object>} originalRows - Original rows before edits (current field values)
      * @param {Array<Object>} editedRows - Rows as edited in the modal (future field values)
      * @param {number} effectiveDateDeciseconds
-     * @param {string} [note] - Updated note (≤25 chars)
+     * @param {string} [note] - Updated note (truncated to noteMaxLength)
      * @param {string} [username]
      * @param {Object} [mapping]
+     * @param {number} [noteMaxLength] - InventoryNoteMaxLength preference
      * @returns {Promise<boolean>}
      */
-    static async savePendingChangeEntry(tabOrItemName, originalRows, editedRows, effectiveDateDeciseconds, note = null, username = null, mapping = inventoryUtils_uncached.DEFAULT_INVENTORY_MAPPING) {
+    static async savePendingChangeEntry(tabOrItemName, originalRows, editedRows, effectiveDateDeciseconds, note = null, username = null, mapping = inventoryUtils_uncached.DEFAULT_INVENTORY_MAPPING, noteMaxLength = DEFAULT_INVENTORY_NOTE_MAX_LENGTH) {
         //console.log(`[InventoryUtils] Saving pending change entry for "${tabOrItemName}"...`);
         
         const allTabs = await Database.getTabs('INVENTORY');
@@ -415,8 +446,7 @@ class inventoryUtils_uncached {
             const editedRow = editedRows.find(r => r.itemNumber === origRow.itemNumber);
             if (!editedRow) return origRow;
 
-            const ehKey = Object.prototype.hasOwnProperty.call(origRow, 'edithistory') ? 'edithistory' : 'EditHistory';
-            const parsed = EditHistoryUtils.parseEditHistory(origRow[ehKey]) || {};
+            const parsed = EditHistoryUtils.parseEditHistory(origRow.edithistory) || {};
             if (!Array.isArray(parsed.p)) return origRow;
 
             parsed.p = parsed.p.map(entry => {
@@ -429,16 +459,15 @@ class inventoryUtils_uncached {
                 return {
                     ...entry,
                     c: newChanges,
-                    s: note !== null ? String(note).slice(0, 25) : entry.s
+                    s: note !== null ? String(note).slice(0, noteMaxLength) : entry.s
                 };
             });
 
-            return { ...origRow, [ehKey]: JSON.stringify(parsed) };
+            return { ...origRow, edithistory: JSON.stringify(parsed) };
         });
 
         return await Database.setData('INVENTORY', resolvedTabName, updatedRows, mapping, {
             username,
-            identifierKey: 'itemNumber',
             skipMetadata: true
         });
     }
@@ -478,10 +507,13 @@ class inventoryUtils_uncached {
         const row = tabData.find(r => r.itemNumber === lookupId) || tabData.find(r => r.itemNumber === itemId);
         if (!row) return [];
 
-        const currentQty = parseInt(row.quantity ?? row.QTY ?? 0, 10) || 0;
-        const parsed = EditHistoryUtils.parseEditHistory(row.edithistory || row.EditHistory) || {};
+        const parsed = EditHistoryUtils.parseEditHistory(row.edithistory) || {};
         const history = Array.isArray(parsed.h) ? parsed.h : [];
         const pending = Array.isArray(parsed.p) ? parsed.p : [];
+        // Past states, newest first (same reconstruction as the Edit History page):
+        // states[k] is the state after history[k]; states[k + 1] is the state before it
+        const states = EditHistoryUtils.getHistoryStates(row, TIMELINE_FIELDS);
+        const qtyOf = (state) => parseInt(state?.quantity ?? 0, 10) || 0;
 
         const startParsed = startDate ? parseDate(startDate) : null;
         const endParsed   = endDate   ? parseDate(endDate)   : null;
@@ -492,67 +524,34 @@ class inventoryUtils_uncached {
         const events = [];
 
         // ── Phase 2: Inventory history entries ──
-        // Walk newest-first to compute per-entry deltas via backward replay from currentQty.
-        // The opening balance is derived here: when the replay first crosses startDate,
-        // runningQty has been rewound past all post-startDate changes — that is the qty at startDate.
-        let runningQty = currentQty;
-        let startQty = currentQty;
-        let openingBalanceSet = false;
+        // Opening balance: the quantity after the newest entry strictly BEFORE startDate.
+        // Strict less-than keeps entries ON startDate inside the window (no double count).
+        // If no entry precedes startDate, it is the oldest known quantity.
+        let startQty = qtyOf(states[states.length - 1].state);
+        const firstBeforeStart = startDs === null ? -1 : history.findIndex(entry => entry.t < startDs);
+        if (firstBeforeStart !== -1) {
+            startQty = qtyOf(states[firstBeforeStart].state);
+        }
 
-        for (const entry of history) {
+        history.forEach((entry, k) => {
             const ds = entry.t;
-            const date = toISODateString(new Date(ds * 100));
-
-            // Capture opening balance the moment we see the first entry strictly BEFORE startDate.
-            // Using strict less-than ensures entries ON startDate are fully rewound before capture,
-            // so the balance reflects qty before any startDate changes (preventing double-count).
-            if (!openingBalanceSet && startDs !== null && ds < startDs) {
-                startQty = runningQty;
-                openingBalanceSet = true;
-            }
-
-            let delta = 0;
-            const changeLabels = [];
-            if (Array.isArray(entry.c)) {
-                for (const ch of entry.c) {
-                    if (ch.n === 'quantity' || ch.n === 'QTY') {
-                        const oldVal = parseInt(ch.o, 10) || 0;
-                        delta = runningQty - oldVal;
-                        changeLabels.push(`quantity: ${delta >= 0 ? '+' + delta : delta}`);
-                    } else {
-                        changeLabels.push(ch.n);
-                    }
-                }
-            }
-
             const inWindow = (!startDs || ds >= startDs) && (!endDs || ds <= endDs);
-            if (inWindow) {
-                const noteText = entry.u ? (entry.s ? `${entry.u}: ${entry.s}` : entry.u) : (entry.s || '');
-                events.push({
-                    date,
-                    event: 'Inv. Change',
-                    note: noteText,
-                    change: changeLabels.join(', ') || '',
-                    quantity: null,
-                    _delta: delta
-                });
-            }
+            if (!inWindow) return;
 
-            // Rewind regardless of window (needed to correctly replay earlier entries)
-            if (Array.isArray(entry.c)) {
-                for (const ch of entry.c) {
-                    if (ch.n === 'quantity' || ch.n === 'QTY') {
-                        runningQty = parseInt(ch.o, 10) || 0;
-                    }
-                }
-            }
-        }
-
-        // If all history entries are after startDate (or there is no history),
-        // runningQty is fully rewound to before any recorded changes — correct opening balance.
-        if (!openingBalanceSet) {
-            startQty = runningQty;
-        }
+            const after = states[k].state;
+            const before = states[k + 1]?.state ?? after;
+            const delta = qtyOf(after) - qtyOf(before);
+            const isCreated = Array.isArray(entry.c) && entry.c.length === 0;
+            const entryNote = EditHistoryUtils.entryNote(entry);
+            events.push({
+                date: toISODateString(new Date(ds * 100)),
+                event: isCreated ? 'Created' : 'Inv. Change',
+                note: entry.u ? (entryNote ? `${entry.u}: ${entryNote}` : entry.u) : entryNote,
+                change: _historyChangeLabels(entry, before, after).join(', '),
+                quantity: null,
+                _delta: delta
+            });
+        });
 
         // NOTE: Balance row is pushed AFTER Phase 4 so pre-window ship adjustments are
         // captured in startQty before the anchor row is written.
@@ -569,10 +568,8 @@ class inventoryUtils_uncached {
             if (Array.isArray(entry.c)) {
                 for (const ch of entry.c) {
                     const ne = ch.ne;
-                    const label = (typeof ne === 'string' && /^[+-]/.test(ne))
-                        ? `quantity: ${ne.startsWith('+') ? ne : (parseInt(ne, 10) >= 0 ? '+' + ne : ne)}`
-                        : `${ch.n}: ${ne}`;
-                    changeLabels.push(label);
+                    // Deltas already carry their sign ('+2', '-1'); absolute values are shown as-is
+                    changeLabels.push(`${ch.n}: ${ne}`);
                     // Accumulate quantity delta so the forward pass stacks entries correctly.
                     // ne is always a delta string (e.g. '+2', '-1') for numeric fields.
                     if ((ch.n === 'quantity' || ch.n === 'QTY') && typeof ne === 'string' && /^[+\-]\d/.test(ne)) {
@@ -683,7 +680,7 @@ class inventoryUtils_uncached {
         }
 
         // ── Phase 5: Sort ──
-        const eventOrder = { 'Balance': -1, 'Returns': 0, 'Inv. Change': 1, 'Scheduled': 2, 'Ships': 3 };
+        const eventOrder = { 'Balance': -1, 'Created': 0, 'Returns': 0, 'Inv. Change': 1, 'Scheduled': 2, 'Ships': 3 };
         events.sort((a, b) => {
             if (a.date !== b.date) return a.date < b.date ? -1 : 1;
             return (eventOrder[a.event] ?? 9) - (eventOrder[b.event] ?? 9);
@@ -809,17 +806,15 @@ class inventoryUtils_uncached {
 
         const rows = await Database.getData('INVENTORY', resolvedTabName, mapping);
         const updatedRows = rows.map(row => {
-            const ehKey = Object.prototype.hasOwnProperty.call(row, 'edithistory') ? 'edithistory' : 'EditHistory';
-            const parsed = EditHistoryUtils.parseEditHistory(row[ehKey]);
+            const parsed = EditHistoryUtils.parseEditHistory(row.edithistory);
             if (!parsed || !Array.isArray(parsed.p)) return row;
             const filtered = parsed.p.filter(e => e.t !== effectiveDateDeciseconds);
             if (filtered.length === parsed.p.length) return row;
-            return { ...row, [ehKey]: JSON.stringify({ ...parsed, p: filtered }) };
+            return { ...row, edithistory: JSON.stringify({ ...parsed, p: filtered }) };
         });
 
         return await Database.setData('INVENTORY', resolvedTabName, updatedRows, mapping, {
             username,
-            identifierKey: 'itemNumber',
             skipMetadata: true
         });
     }

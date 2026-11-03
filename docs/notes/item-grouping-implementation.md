@@ -2,7 +2,7 @@
 
 ## Overview
 
-Items in a packlist can be grouped so that a single "master" row controls the visibility and grouping of its "child" rows. Grouping is managed by storing metadata in each item's `MetaData` (or `EditHistory`) field. The UI and data logic both rely on this metadata to determine group membership, master/child roles, and group expansion/collapse.
+Items in a packlist can be grouped so that a single "master" row controls the visibility and grouping of its "child" rows. Grouping is managed by storing metadata in each item's `metadata` field (sheet column `MetaData`; changes to it are recorded in `edithistory`). The UI and data logic both rely on this metadata to determine group membership, master/child roles, and group expansion/collapse.
 
 ## Grouping Data Structure
 
@@ -48,7 +48,7 @@ Each item row may have a `grouping` object in its metadata:
 
 ### Data Persistence
 
-- Grouping info is stored in the `MetaData` (or `EditHistory`) JSON for each item.
+- Grouping info is stored in the `metadata` JSON for each item (sheet column `MetaData`).
 - When saving/exporting, ensure the grouping object is included for all grouped items.
 
 ## Implementation Notes for VB.NET

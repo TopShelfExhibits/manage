@@ -1,4 +1,4 @@
-import { CacheInvalidationBus, ProgressBus, Requests, authState, Auth } from '../index.js';
+import { CacheInvalidationBus, ProgressBus, Requests, authState, Auth, resolveInventoryNoteMaxLength } from '../index.js';
 import { PriorityQueue, Priority } from './priorityQueue.js';
 
 // Re-export Priority for component use
@@ -86,13 +86,13 @@ export const appSettings = Vue.reactive({
  */
 
 /**
- * Generate a clean identifier for a function, using cache edithistory when available
+ * Generate a clean identifier for a function, using cache metadata when available
  * @param {Function} fn - The function to identify
  * @returns {string} A clean identifier string
  */
 function getMethodIdentifier(fn) {
     if (!fn) return '';
-    // If function has cache wrapper edithistory, use it for a clean identifier
+    // If function has cache wrapper metadata, use it for a clean identifier
     if (fn._namespace && fn._methodName) {
         return `${fn._namespace}.${fn._methodName}`;
     }
@@ -142,7 +142,7 @@ export function generateStoreKey(apiCall, saveCall, apiArgs, analysisConfig) {
  * @returns {Set} Set of column names to exclude
  */
 function getExcludedColumns(analysisConfig = null) {
-    const excludedColumns = new Set(['AppData']); // EditHistory should persist, only AppData is ephemeral
+    const excludedColumns = new Set(['AppData']); // edithistory should persist, only AppData is ephemeral
     if (analysisConfig && Array.isArray(analysisConfig)) {
         analysisConfig.forEach(config => {
             if (config.targetColumn) {
@@ -169,9 +169,9 @@ function shouldExcludeColumn(key, excludedColumns) {
  * @returns {boolean} True if marked for deletion
  */
 function isMarkedForDeletion(obj) {
-    if (!isValidObject(obj) || !obj.MetaData) return false;
+    if (!isValidObject(obj) || !obj.metadata) return false;
     try {
-        const metadata = typeof obj.MetaData === 'string' ? JSON.parse(obj.MetaData) : obj.MetaData;
+        const metadata = typeof obj.metadata === 'string' ? JSON.parse(obj.metadata) : obj.metadata;
         return metadata?.deletion?.marked === true;
     } catch (e) {
         return false;
@@ -487,6 +487,9 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
                 this.setData([]);
                 return;
             }
+            // Edits made while the fetch is in flight must not be overwritten when it resolves.
+            // A store that is already modified here is being discarded/refreshed on purpose.
+            const modifiedAtStart = !isReadOnly && this.isModified;
             this.setLoading(true, message);
             this.loadingProgress = -1;
             this.isReloadingMainData = true; // Lock to prevent analysis during reload
@@ -535,6 +538,12 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
                     priorities.load,
                     { label: message, type: 'load', store: 'reactive' }
                 );
+                // The user edited during the fetch: keep their edits and flag the newer server
+                // data as a conflict, as the invalidation handler does for a modified store.
+                if (!modifiedAtStart && !isReadOnly && this.isModified) {
+                    this.externalConflict = true;
+                    return;
+                }
                 // Handle null, undefined, or empty results by initializing empty arrays
                 const dataToSet = (result && Array.isArray(result)) ? result : [];
                 // Pre-assign stable row IDs before splitting into data and originalData.
@@ -634,18 +643,18 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
                 this.setLoading(false, '');
             }
         },
-        // Mark/unmark for deletion by index using MetaData
+        // Mark/unmark for deletion by index using metadata
         markRowForDeletion(idx, value = true) {
             if (this._data[idx]) {
                 const row = this._data[idx];
                 
-                // Parse existing MetaData
+                // Parse existing metadata
                 let metadata = {};
-                if (row.MetaData) {
+                if (row.metadata) {
                     try {
-                        metadata = typeof row.MetaData === 'string' ? JSON.parse(row.MetaData) : row.MetaData;
+                        metadata = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata;
                     } catch (e) {
-                        console.warn('Failed to parse MetaData:', e);
+                        console.warn('Failed to parse metadata:', e);
                     }
                 }
                 
@@ -656,14 +665,14 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
                     delete metadata.deletion;
                 }
                 
-                // Save back to MetaData
-                row.MetaData = Object.keys(metadata).length > 0 ? JSON.stringify(metadata) : null;
+                // Save back to metadata
+                row.metadata = Object.keys(metadata).length > 0 ? JSON.stringify(metadata) : null;
                 
                 // If marking for deletion and row is empty, remove immediately
                 if (value) {
-                    // Check if all fields (except 'AppData' and 'MetaData') are empty/falsy
+                    // Check if all fields (except 'AppData' and 'metadata') are empty/falsy
                     const hasContent = Object.keys(row).some(
-                        key => key !== 'AppData' && key !== 'MetaData' && !!row[key]
+                        key => key !== 'AppData' && key !== 'metadata' && !!row[key]
                     );
                     if (!hasContent) {
                         this._data.splice(idx, 1);
@@ -749,17 +758,17 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
                     // If the row above the insertion point is in a group, add the new row to that group
                     const items = this._data[parentIdx][key];
                     const rowAbove = insertIndex > 0 ? items[insertIndex - 1] : null;
-                    if (rowAbove && rowAbove.MetaData) {
+                    if (rowAbove && rowAbove.metadata) {
                         try {
-                            const aboveMeta = JSON.parse(rowAbove.MetaData);
+                            const aboveMeta = JSON.parse(rowAbove.metadata);
                             const aboveGrouping = aboveMeta?.grouping;
                             if (aboveGrouping) {
                                 let meta = {};
-                                try { meta = JSON.parse(row.MetaData || '{}'); } catch (e) { meta = {}; }
+                                try { meta = JSON.parse(row.metadata || '{}'); } catch (e) { meta = {}; }
                                 meta.grouping = { groupId: aboveGrouping.groupId, isGroupMaster: false };
-                                row.MetaData = JSON.stringify(meta);
+                                row.metadata = JSON.stringify(meta);
                             }
-                        } catch (e) { /* malformed MetaData - skip grouping */ }
+                        } catch (e) { /* malformed metadata - skip grouping */ }
                     }
                 } else {
                     // Default: append to end
@@ -1187,7 +1196,7 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
         }
     });
 
-    // Helper to strip AppData, EditHistory, and analysis target columns from objects (including filtering out items marked for deletion)
+    // Helper to strip AppData and analysis target columns from objects (including filtering out items marked for deletion)
     function removeAppData(arr, analysisConfig = null) {
         if (!Array.isArray(arr)) return arr;
         
@@ -1392,7 +1401,7 @@ const AUTO_SAVE_INTERVAL_MS = 2 * 60 * 1000; // 2 minutes
  * Calculate diff between original and current data recursively
  * Only stores row indices with their changed fields for efficiency
  * Handles nested arrays recursively
- * Excludes AppData, EditHistory, and analysis target columns
+ * Excludes AppData and analysis target columns
  * @param {Array} originalData - Original data
  * @param {Array} currentData - Current modified data
  * @param {Array} analysisConfig - Analysis configuration to identify columns to exclude
@@ -1668,25 +1677,43 @@ function normalizeBackupPayload(backupData) {
 
     // Current format: { diff: [...], timestamp }
     if (Array.isArray(backupData.diff)) {
-        return { mode: 'diff', diff: backupData.diff };
+        return { mode: 'diff', diff: renameLegacyRowKeys(backupData.diff) };
     }
 
     // Legacy format: direct diff array
     if (Array.isArray(backupData)) {
-        return { mode: 'diff', diff: backupData };
+        return { mode: 'diff', diff: renameLegacyRowKeys(backupData) };
     }
 
     // Legacy alias occasionally used in prototypes.
     if (Array.isArray(backupData.changes)) {
-        return { mode: 'diff', diff: backupData.changes };
+        return { mode: 'diff', diff: renameLegacyRowKeys(backupData.changes) };
     }
 
     // Legacy snapshot format: full data captured directly.
     if (Array.isArray(backupData.data)) {
-        return { mode: 'full', data: backupData.data };
+        return { mode: 'full', data: renameLegacyRowKeys(backupData.data) };
     }
 
     return null;
+}
+
+// Row keys renamed to lowercase; backups saved before the rename still use the old names
+const LEGACY_ROW_KEYS = { MetaData: 'metadata', EditHistory: 'edithistory' };
+
+/**
+ * Recursively rename legacy row keys in a backup payload.
+ * @param {*} value - Backup payload (arrays/objects are copied, other values returned as-is)
+ * @returns {*}
+ */
+function renameLegacyRowKeys(value) {
+    if (Array.isArray(value)) return value.map(renameLegacyRowKeys);
+    if (!value || typeof value !== 'object') return value;
+    const renamed = {};
+    for (const [key, child] of Object.entries(value)) {
+        renamed[LEGACY_ROW_KEYS[key] || key] = renameLegacyRowKeys(child);
+    }
+    return renamed;
 }
 
 /**
@@ -2088,6 +2115,15 @@ export function getPreferencesStore() {
         Requests.savePreferences,
         []
     );
+}
+
+/**
+ * Maximum inventory save note length (InventoryNoteMaxLength preference, default 25 until loaded).
+ * Reactive: computed properties that call it update when the preference changes.
+ * @returns {number}
+ */
+export function getInventoryNoteMaxLength() {
+    return resolveInventoryNoteMaxLength(getPreferencesStore().data);
 }
 
 export function runNonessentialAnalysisOnAllStores() {

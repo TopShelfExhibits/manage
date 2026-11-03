@@ -26,7 +26,7 @@ import { instantWriteEntry, isInstantColumn, joinKey, identityText, columnText, 
  * tests/sheetHealth.js (test only) reports whether a fixture tab is in a state these writes rely on.
  */
 
-const PREFERENCES_MAPPING = { id: 'ID', name: 'Name', description: 'Description', page: 'Page', type: 'Type', value: 'Value', editHistory: 'EditHistory' };
+const PREFERENCES_MAPPING = { id: 'ID', name: 'Name', description: 'Description', page: 'Page', type: 'Type', value: 'Value', edithistory: 'EditHistory' };
 const SHOW_NOTES_TAB = 'ShowNotes';
 const SHOW_NOTES_HEADERS = ['Identifier', 'Note', 'EditHistory'];
 
@@ -312,10 +312,10 @@ export class InstantWriteUtils {
         return matches(after?.[0], header) && String(after?.[0]?.[colIdx] ?? '') === original;
     }
 
-    /** All show notes as [{ Identifier, Note, EditHistory }] (cached read). */
+    /** All show notes as [{ Identifier, Note, edithistory }] (cached read). */
     static async getShowNotes() {
         try {
-            const data = await Database.getData('CACHE', SHOW_NOTES_TAB, { Identifier: 'Identifier', Note: 'Note', EditHistory: 'EditHistory' });
+            const data = await Database.getData('CACHE', SHOW_NOTES_TAB, { Identifier: 'Identifier', Note: 'Note', edithistory: 'EditHistory' });
             return Array.isArray(data) ? data.filter(r => r && r.Identifier) : [];
         } catch (e) {
             console.warn('[InstantWriteUtils] ShowNotes tab unavailable:', e?.message || e);

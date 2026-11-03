@@ -2,12 +2,13 @@
 export { Requests } from '../data_management/api.js';
 export { parseDate, toISODateString, toUSDateString, todayISOString, offsetToISO, parseDateFilterParameters, buildDateFilterParameters, parseTextFilterParameters, buildTextFilterParameters, parseSearchParameters } from '../data_management/utils/helpers.js';
 export { CacheInvalidationBus, invalidateCache, ProgressBus } from '../data_management/utils/caching.js';
-export { EditHistoryUtils } from '../data_management/utils/metadata-utils.js';
+export { EditHistoryUtils, DEFAULT_INVENTORY_NOTE_MAX_LENGTH, resolveInventoryNoteMaxLength } from '../data_management/utils/metadata-utils.js';
+export { ProposalUtils, PROPOSAL_LOCK_NAMESPACE } from '../data_management/utils/proposal-utils.js';
 
 // Utils
 export { html } from './utils/template-helpers.js';
 export { Auth, authState, getDeviceId } from './utils/auth.js';
-export { getReactiveStore, createAnalysisConfig, findMatchingStores, clearAllReactiveStores, generateStoreKey, appSettings, runNonessentialAnalysisOnAllStores, getPreferencesStore } from './utils/reactiveStores.js';
+export { getReactiveStore, createAnalysisConfig, findMatchingStores, clearAllReactiveStores, generateStoreKey, appSettings, runNonessentialAnalysisOnAllStores, getPreferencesStore, getInventoryNoteMaxLength } from './utils/reactiveStores.js';
 export { Priority } from './utils/priorityQueue.js';
 export { undoRegistry, setTableRowSelectionState } from './utils/undoRegistry.js';
 export { getAutoColorClass, shouldAutoColor } from './utils/autoColor.js';

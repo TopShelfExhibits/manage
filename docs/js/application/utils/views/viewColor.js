@@ -3,6 +3,8 @@
  *   'auto'            → getAutoColorClass(number) for numeric values; date proximity for date fields
  *   'value'           → the value itself is the class (for page-computed derived colour fields)
  *   'checked:<class>' → <class> when the value is a checked checkbox value (X / TRUE)
+ *   'sign:<pos>:<neg>' → <pos> for a number above 0, <neg> below 0 (either may be empty)
+ *   'differs:<key>:<class>' → <class> when the value differs (as text) from the row's <key>
  *   other             → a literal class name
  *
  * Pure: no Vue, no DOM. Safe to import from tests.
@@ -44,9 +46,10 @@ function isDateField(field) {
  * @param {string} rule
  * @param {*} value
  * @param {Object} [field]
+ * @param {Object} [row] - the value's row ('differs:' compares with another of its keys)
  * @returns {string} class name or ''
  */
-export function applyColorRule(rule, value, field) {
+export function applyColorRule(rule, value, field, row) {
     if (!rule) return '';
     if (rule === 'auto') {
         if (value === null || value === undefined || value === '') return '';
@@ -60,6 +63,17 @@ export function applyColorRule(rule, value, field) {
         return String(value);
     }
     if (rule.startsWith('checked:')) return isCheckedValue(value) ? rule.slice('checked:'.length) : '';
+    if (rule.startsWith('sign:')) {
+        const [positive = '', negative = ''] = rule.slice('sign:'.length).split(':');
+        const num = typeof value === 'number' ? value : parseFloat(value);
+        if (!Number.isFinite(num) || num === 0) return '';
+        return num > 0 ? positive : negative;
+    }
+    if (rule.startsWith('differs:')) {
+        const [key, cls = ''] = rule.slice('differs:'.length).split(':');
+        if (!row || !key) return '';
+        return String(value ?? '') !== String(row[key] ?? '') ? cls : '';
+    }
     return String(rule);
 }
 
@@ -74,7 +88,7 @@ export function colorFor(row, field, resolved) {
     if (!row || !field) return '';
     const rule = resolved?.style?.[field.key]?.color;
     if (!rule) return '';
-    return applyColorRule(rule, row[field.key], field);
+    return applyColorRule(rule, row[field.key], field, row);
 }
 
 /**
@@ -87,6 +101,6 @@ export function rowColorFor(row, resolved) {
     const rc = resolved?.rowColor;
     if (!row || !rc || !rc.field) return '';
     const field = resolved.fieldMap?.get?.(rc.field) || { key: rc.field };
-    const cls = applyColorRule(rc.rule || 'value', row[rc.field], field);
+    const cls = applyColorRule(rc.rule || 'value', row[rc.field], field, row);
     return cls || rc.fallback || '';
 }

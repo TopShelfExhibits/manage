@@ -2,7 +2,7 @@ import { Database, wrapMethods, invalidateCache, stampDataChange, normalizeHeade
 import { setTimestampWriter, startCacheTimestampPoller, startCacheCleanup } from '../utils/caching.js';
 
 // Dynamically import GoogleSheetsAuth based on environment
-import { isLocalhost } from '../../google_sheets_services/FakeGoogle.js';
+import { isLocalhost } from '../utils/helpers.js';
 let GoogleSheetsAuth, GoogleSheetsService;
 if (isLocalhost()) {
     ({ GoogleSheetsAuth, GoogleSheetsService } = await import('../../google_sheets_services/FakeGoogle.js'));

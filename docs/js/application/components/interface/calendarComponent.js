@@ -343,9 +343,9 @@ export const CalendarComponent = {
     },
     methods: {
         _isGroupMaster(row) {
-            if (!row || !row.MetaData) return false;
+            if (!row || !row.metadata) return false;
             try {
-                const meta = typeof row.MetaData === 'string' ? JSON.parse(row.MetaData) : row.MetaData;
+                const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata;
                 return !!meta?.grouping?.isGroupMaster;
             } catch { return false; }
         },

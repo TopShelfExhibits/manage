@@ -82,9 +82,9 @@ const RowOptionsMenuComponent = {
     computed: {
         anyHighlighted() {
             return this.selectedRows.some(({ row }) => {
-                if (!row || !row.MetaData) return false;
+                if (!row || !row.metadata) return false;
                 try {
-                    const metadata = typeof row.MetaData === 'string' ? JSON.parse(row.MetaData) : row.MetaData;
+                    const metadata = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata;
                     return metadata?.highlight?.class === 'yellow';
                 } catch (e) {
                     return false;
@@ -574,7 +574,7 @@ export const PacklistTable = {
                     Requests.checkCadSourceHistory,
                     'cadSourceAlert',
                     'Checking CAD source history...',
-                    'EditHistory',
+                    'edithistory',
                     [],
                     null,
                     false,
@@ -983,9 +983,9 @@ export const PacklistTable = {
         },
 
         getRowGrouping(row) {
-            if (!row || !row.MetaData) return null;
+            if (!row || !row.metadata) return null;
             try {
-                const metadata = typeof row.MetaData === 'string' ? JSON.parse(row.MetaData) : row.MetaData;
+                const metadata = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata;
                 return metadata?.grouping || null;
             } catch (e) {
                 return null;
@@ -1366,14 +1366,14 @@ export const PacklistTable = {
         },
 
         highlightRows(selectedRows, shouldRemove = false) {
-            // Toggle highlight class in MetaData for selected rows
+            // Toggle highlight class in metadata for selected rows
             selectedRows.forEach(({ row }) => {
                 if (row) {
-                    // Parse MetaData (handle both string and object formats)
+                    // Parse metadata (handle both string and object formats)
                     let metadata = {};
-                    if (row.MetaData) {
+                    if (row.metadata) {
                         try {
-                            metadata = typeof row.MetaData === 'string' ? JSON.parse(row.MetaData) : row.MetaData;
+                            metadata = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata;
                         } catch (e) {
                             metadata = {};
                         }
@@ -1397,7 +1397,7 @@ export const PacklistTable = {
                     }
                     
                     // Store back as JSON string
-                    row.MetaData = JSON.stringify(metadata);
+                    row.metadata = JSON.stringify(metadata);
                 }
             });
         },
@@ -1501,9 +1501,9 @@ export const PacklistTable = {
                             {{
                                 mainTableData
                                     .filter(r => {
-                                        if (!r || !r.MetaData) return true;
+                                        if (!r || !r.metadata) return true;
                                         try {
-                                            const metadata = typeof r.MetaData === 'string' ? JSON.parse(r.MetaData) : r.MetaData;
+                                            const metadata = typeof r.metadata === 'string' ? JSON.parse(r.metadata) : r.metadata;
                                             return metadata?.deletion?.marked !== true;
                                         } catch (e) {
                                             return true;

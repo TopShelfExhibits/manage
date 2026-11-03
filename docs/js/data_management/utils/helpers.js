@@ -99,6 +99,22 @@ export function toUSDateString(date) {
  * @param {string} headerName - The raw header name from Google Sheets
  * @returns {string} Normalized header name
  */
+/**
+ * Whether the app is running locally (localhost, 127.0.0.1, or file://).
+ * Local runs use the fake Google services and the dev/test tooling.
+ * @returns {boolean}
+ */
+export function isLocalhost() {
+    return (
+        typeof window !== 'undefined' &&
+        (
+            window.location.hostname === 'localhost' ||
+            window.location.hostname === '127.0.0.1' ||
+            window.location.protocol === 'file:'
+        )
+    );
+}
+
 export function normalizeHeaderName(headerName) {
     return String(headerName ?? '')
         .replace(/[\r\n]+/g, ' ')  // Replace carriage returns and newlines with spaces

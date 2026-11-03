@@ -174,7 +174,7 @@ export const InventoryItemReport = {
                         minQty: lowestMinQty === Infinity ? null : lowestMinQty,
                         shows: combinedShows,
                         overlappingShows: allOverlappingShows,
-                        MetaData: JSON.stringify({ grouping: { groupId, isGroupMaster: true } })
+                        metadata: JSON.stringify({ grouping: { groupId, isGroupMaster: true } })
                     };
                     result.push(masterRow);
 
@@ -182,12 +182,12 @@ export const InventoryItemReport = {
                     rows.forEach(row => {
                         let existingMeta = {};
                         try {
-                            existingMeta = JSON.parse(row.MetaData || '{}');
+                            existingMeta = JSON.parse(row.metadata || '{}');
                         } catch (e) {}
                         
                         result.push({
                             ...row,
-                            MetaData: JSON.stringify({
+                            metadata: JSON.stringify({
                                 ...existingMeta,
                                 grouping: { groupId, isGroupMaster: false }
                             })

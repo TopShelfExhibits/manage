@@ -41,7 +41,7 @@ export function devWarn(msg) {
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const ALWAYS_HIDDEN = Object.freeze(['AppData', 'EditHistory', 'MetaData']);
+const ALWAYS_HIDDEN = Object.freeze(['AppData', 'edithistory', 'metadata']);
 
 /** Presentation properties that belong to views, not fields (§4.1). Ignored, with a dev warning. */
 const LEGACY_FIELD_PROPS = Object.freeze([

@@ -1,5 +1,5 @@
 // Dynamic Google Sheets Service selection
-import { isLocalhost } from '../../google_sheets_services/FakeGoogle.js';
+import { isLocalhost } from '../utils/helpers.js';
 let GoogleSheetsService, GoogleSheetsAuth;
 
 if (isLocalhost()) {
@@ -17,6 +17,7 @@ if (isLocalhost()) {
 
 import { wrapMethods, invalidateCache, stampDataChange, EditHistoryUtils } from '../index.js';
 import { ApplicationUtils } from '../index.js';
+import { ARCHIVE_TAB_NAME, ARCHIVE_HEADERS } from '../utils/metadata-utils.js';
 
 class database_uncached {
     /**
@@ -211,53 +212,31 @@ class database_uncached {
      * @param {Object} [mapping] - Optional mapping for object keys to sheet headers
      * @param {Object} [options] - Optional parameters for edithistory tracking
      * @param {string} [options.username] - Username making the change
-     * @param {boolean} [options.skipMetadata] - Skip edithistory generation (for EditHistory table itself)
-     * @param {string} [options.identifierKey] - Key to identify rows (for deletion tracking)
-     * @param {string} [options.source] - Source system for history entries ('web' | 'cad')
+     * @param {boolean} [options.skipMetadata] - Skip edithistory generation (caller manages EditHistory itself)
+     * @param {string} [options.source] - Source for history entries ('web' | 'cad', or an inventory note)
      * @returns {Promise<boolean>} - Success status
      */
     static async setData(tableId, tabName, updates, mapping = null, options = {}) {
         const {
             username = null,
             skipMetadata = false,
-            identifierKey = null,
             source = 'web'
         } = options;
 
         let updatesWithMetadata = updates;
+        let deletedRows = [];
 
         // Add edithistory tracking if not skipped
-        if (!skipMetadata && mapping && mapping.edithistory) {
+        // Contract: docs/notes/metadata-implementation.md
+        if (!skipMetadata && mapping && mapping.edithistory && Array.isArray(updates)) {
             try {
                 // Get original data for comparison (use Database.getData to leverage cache)
                 const transformedOriginal = await Database.getData(tableId, tabName, mapping);
 
-                // Add edithistory to updated rows
-                updatesWithMetadata = await _addMetadataToRows(
-                    transformedOriginal,
-                    updates,
-                    username,
-                    mapping,
-                    source
-                );
-
-                // Detect and archive deleted rows
-                if (identifierKey) {
-                    const deletedRows = EditHistoryUtils.detectDeletedRows(
-                        transformedOriginal,
-                        updates,
-                        identifierKey
-                    );
-
-                    if (deletedRows.length > 0) {
-                        await _archiveDeletedRows(
-                            tableId,
-                            tabName,
-                            deletedRows,
-                            username
-                        );
-                    }
-                }
+                // Match rows by EditHistory.i, assign missing identities, append history
+                const result = _addMetadataToRows(transformedOriginal, updates, username, source);
+                updatesWithMetadata = result.rows;
+                deletedRows = result.deletedRows;
             } catch (error) {
                 console.warn('Failed to add edithistory, continuing with save:', error);
                 // Continue with save even if edithistory fails
@@ -289,11 +268,16 @@ class database_uncached {
         invalidateCache([
             { namespace: 'database', methodName: 'getData', args: [tableId, tabName] }
         ], true);
-        
+
+        // Archive only after the main write succeeded
+        if (deletedRows.length > 0) {
+            await _archiveDeletedRows(tableId, tabName, deletedRows, username);
+        }
+
         return result;
     }
 
-    
+
     /**
      * Updates a single row in a table/tab using a unique identifier.
      * @param {Object} deps - Dependency decorator for tracking calls
@@ -315,12 +299,19 @@ class database_uncached {
             ? GoogleSheetsService.transformSheetData(existingData, mapping, tabName)
             : GoogleSheetsService.sheetArrayToObjects(existingData);
 
-        const rowIndex = transformedData.findIndex(row => {
-            const identifierKey = mapping ? Object.keys(mapping).find(k => k.includes('Number') || k.includes('Id')) : 'id';
-            const updateKey = Object.keys(update).find(k => k.includes('Number') || k.includes('Id')) || Object.keys(update)[0];
-            return row[identifierKey] === update[updateKey];
-        });
-        
+        // Prefer row identity (EditHistory.i); fall back to the legacy key guess for rows not yet touched
+        const updateIdentity = EditHistoryUtils.getRowIndex(update.edithistory);
+        let rowIndex = updateIdentity !== null
+            ? transformedData.findIndex(row => EditHistoryUtils.getRowIndex(row.edithistory) === updateIdentity)
+            : -1;
+        if (rowIndex === -1) {
+            rowIndex = transformedData.findIndex(row => {
+                const identifierKey = mapping ? Object.keys(mapping).find(k => k.includes('Number') || k.includes('Id')) : 'id';
+                const updateKey = Object.keys(update).find(k => k.includes('Number') || k.includes('Id')) || Object.keys(update)[0];
+                return row[identifierKey] === update[updateKey];
+            });
+        }
+
         if (rowIndex === -1) {
             throw new Error(`Row with identifier not found in tab ${tabName}`);
         }
@@ -329,14 +320,17 @@ class database_uncached {
 
         // Calculate changes and add edithistory if mapping includes it
         let updatedRow = { ...originalRow, ...update };
-        if (mapping && mapping.edithistory && username) {
-            const changes = EditHistoryUtils.calculateRowDiff(originalRow, update);
-            if (changes.length > 0) {
-                const metaEntry = EditHistoryUtils.createEditHistoryEntry(username, changes, source);
-                const existingMetadata = originalRow.edithistory || originalRow.EditHistory || '';
-                const newMetadata = EditHistoryUtils.appendToEditHistory(existingMetadata, metaEntry);
-                updatedRow.edithistory = newMetadata;
+        if (mapping && mapping.edithistory) {
+            const edithistory = { ...(EditHistoryUtils.parseEditHistory(originalRow.edithistory) || {}) };
+            if (EditHistoryUtils.getRowIndex(edithistory) === null) {
+                edithistory.i = EditHistoryUtils.nextRowIndex([transformedData]);
             }
+            const changes = EditHistoryUtils.calculateRowDiff(originalRow, updatedRow);
+            if (changes.length > 0 && username) {
+                const metaEntry = EditHistoryUtils.createEditHistoryEntry(username, changes, source);
+                EditHistoryUtils._addEntry(edithistory, metaEntry, undefined, updatedRow);
+            }
+            updatedRow.edithistory = JSON.stringify(edithistory);
         }
 
         // Update the transformed row
@@ -540,94 +534,99 @@ export const Database = wrapMethods(
 
 
 /**
- * Add edithistory to rows that have changed
+ * Match incoming rows to stored rows by EditHistory.i, assign missing identities,
+ * and append history entries for changed rows.
+ * Contract: docs/notes/metadata-implementation.md "Row Identity" and "Write Rules".
  * @private
+ * @returns {{ rows: Array<Object>, deletedRows: Array<{identifier: string, rowData: Object}> }}
  */
-async function _addMetadataToRows(originalRows, updatedRows, username, mapping, source = 'web') {
-    if (!Array.isArray(updatedRows)) {
-        return updatedRows;
-    }
+function _addMetadataToRows(originalRows, updatedRows, username, source = 'web') {
+    const originals = Array.isArray(originalRows) ? originalRows : [];
+    const { matchOf, duplicates, deleted } = EditHistoryUtils.matchRows(originals, updatedRows);
+    let nextIndex = EditHistoryUtils.nextRowIndex([originals, updatedRows]);
+    const creationHistory = () => username ? [EditHistoryUtils.createEditHistoryEntry(username, [], source)] : [];
 
-    return updatedRows.map((updatedRow, index) => {
-        const originalRow = originalRows[index];
+    const rows = updatedRows.map((updatedRow, u) => {
+        const o = matchOf[u];
 
-        // Calculate changes for this row
-        const changes = EditHistoryUtils.calculateRowDiff(originalRow, updatedRow);
-
-        // If changes exist, append to edithistory
-        if (changes.length > 0 && username) {
-            const metaEntry = EditHistoryUtils.createEditHistoryEntry(username, changes, source);
-            const existingMetadata = updatedRow.edithistory || '';
-            const newMetadata = EditHistoryUtils.appendToEditHistory(existingMetadata, metaEntry);
-
-            // Update the edithistory field using the mapping key (always 'edithistory')
-            return { ...updatedRow, edithistory: newMetadata };
+        if (o !== -1) {
+            // Existing row: stored history is authoritative, the incoming copy may be stale
+            const originalRow = originals[o];
+            const edithistory = {
+                ...(EditHistoryUtils.parseEditHistory(originalRow.edithistory)
+                    || EditHistoryUtils.parseEditHistory(updatedRow.edithistory)
+                    || {})
+            };
+            if (EditHistoryUtils.getRowIndex(edithistory) === null) {
+                edithistory.i = nextIndex++;
+            }
+            const changes = EditHistoryUtils.calculateRowDiff(originalRow, updatedRow);
+            if (changes.length > 0 && username) {
+                const entry = EditHistoryUtils.createEditHistoryEntry(username, changes, source);
+                EditHistoryUtils._addEntry(edithistory, entry, undefined, updatedRow);
+            }
+            return { ...updatedRow, edithistory: JSON.stringify(edithistory) };
         }
 
-        return updatedRow;
+        if (duplicates.has(u)) {
+            // Copy of another row: new identity, history restarts (copied h and p are dropped)
+            return { ...updatedRow, edithistory: JSON.stringify({ i: nextIndex++, h: creationHistory() }) };
+        }
+
+        const edithistory = { ...(EditHistoryUtils.parseEditHistory(updatedRow.edithistory) || {}) };
+        if (EditHistoryUtils.getRowIndex(edithistory) !== null) {
+            // Carries an identity not stored in this tab (moved in from elsewhere): keep as-is
+            return updatedRow;
+        }
+        edithistory.i = nextIndex++;
+        if (!Array.isArray(edithistory.h) || edithistory.h.length === 0) {
+            edithistory.h = creationHistory();
+        }
+        return { ...updatedRow, edithistory: JSON.stringify(edithistory) };
     });
+
+    const deletedRows = deleted
+        .filter(o => !EditHistoryUtils.isBlankRow(originals[o]))
+        .map(o => ({
+            identifier: String(EditHistoryUtils.getRowIndex(originals[o].edithistory) ?? `row_${o + 1}`),
+            rowData: originals[o]
+        }));
+
+    return { rows, deletedRows };
 }
 
+
 /**
- * Archive deleted rows to EditHistory table
+ * Append deleted rows to the _EditHistory tab of the same spreadsheet.
+ * Existing archive rows are never rewritten.
  * @private
  */
 async function _archiveDeletedRows(sourceTable, sourceTab, deletedRows, username) {
     try {
-        // Get existing edithistory table data (use Database to leverage cache if available)
-        let edithistoryTableData = [];
-        try {
-            // Try to get with mapping first
-            const edithistoryMapping = {
-                SourceTable: 'SourceTable',
-                SourceTab: 'SourceTab',
-                RowIdentifier: 'RowIdentifier',
-                Username: 'Username',
-                Timestamp: 'Timestamp',
-                Operation: 'Operation',
-                RowData: 'RowData'
-            };
-            
-            edithistoryTableData = await Database.getData(sourceTable, 'EditHistory', edithistoryMapping);
-        } catch (error) {
-            // EditHistory tab doesn't exist yet, will be created
-            //console.log('EditHistory tab does not exist yet, will create');
-            edithistoryTableData = [];
+        const tabs = await Database.getTabs(sourceTable);
+        if (!tabs.some(tab => tab.title === ARCHIVE_TAB_NAME)) {
+            await Database.createTab(sourceTable, null, ARCHIVE_TAB_NAME);
         }
 
-        // Create archive entries for deleted rows
-        const archiveEntries = deletedRows.map(deleted => 
-            EditHistoryUtils.createArchiveEntry(
+        // Use the tab's own header order; write headers if the tab is new or unrecognized
+        const rawData = await GoogleSheetsService.getSheetData(sourceTable, ARCHIVE_TAB_NAME);
+        let headers = (rawData?.[0] || []).map(h => String(h ?? '').trim());
+        if (!ARCHIVE_HEADERS.every(h => headers.includes(h))) {
+            headers = ARCHIVE_HEADERS;
+            const endCol = _numberToColumnLetter(headers.length);
+            await GoogleSheetsService.setSheetData(sourceTable, `${ARCHIVE_TAB_NAME}!A1:${endCol}1`, [headers], null);
+        }
+
+        for (const deleted of deletedRows) {
+            const entry = EditHistoryUtils.createArchiveEntry(
                 sourceTable,
                 sourceTab,
                 deleted.identifier,
                 deleted.rowData,
                 username
-            )
-        );
-
-        // Append to existing edithistory
-        const updatedMetadata = [...edithistoryTableData, ...archiveEntries];
-
-        // Save to EditHistory table (skip edithistory for this table itself)
-        const edithistoryMapping = {
-            SourceTable: 'SourceTable',
-            SourceTab: 'SourceTab',
-            RowIdentifier: 'RowIdentifier',
-            Username: 'Username',
-            Timestamp: 'Timestamp',
-            Operation: 'Operation',
-            RowData: 'RowData'
-        };
-
-        await GoogleSheetsService.setSheetData(
-            sourceTable,
-            '_EditHistory',
-            updatedMetadata,
-            edithistoryMapping
-        );
-
-        //console.log(`Archived ${deletedRows.length} deleted rows to EditHistory table`);
+            );
+            await Database.appendSheetRow(sourceTable, ARCHIVE_TAB_NAME, headers.map(h => entry[h] ?? ''));
+        }
     } catch (error) {
         console.error('Failed to archive deleted rows:', error);
         // Don't throw - archival failure shouldn't block the main save

@@ -9,7 +9,7 @@ import { hamburgerMenuRegistry } from './index.js';
 import { undoRegistry } from './index.js';
 import { Requests, getReactiveStore, appSettings } from './index.js';
 import { BannerNotifications, NotificationBubbleOverlay, notificationBus } from './index.js';
-import { isLocalhost } from '../google_sheets_services/FakeGoogle.js';
+import { isLocalhost } from '../data_management/utils/helpers.js';
 
 const { createApp } = Vue;
 
@@ -355,7 +355,12 @@ const App = {
         this.appLoading = false;
 
         if (isLocalhost()) {
-            import('../tests/tests.js').then(m => m.runTests());
+            import('../tests/fakeGoogleDevTools.js').then(devTools => {
+                devTools.installFakeGoogleDevTools();
+                if (devTools.autoTestsEnabled()) {
+                    import('../tests/tests.js').then(m => m.runTests());
+                }
+            });
         }
     },
     beforeUnmount() {

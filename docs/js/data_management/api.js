@@ -1,7 +1,11 @@
-import { wrapMethods, normalizeHeaderName, Database, InventoryUtils, PackListUtils, ProductionUtils, ApplicationUtils, EditHistoryUtils, InstantWriteUtils, todayISOString, offsetToISO, sanitizeTabName, mapWithConcurrency, ProgressBus, getRandomLoadingQuote } from './index.js';
+import { wrapMethods, normalizeHeaderName, Database, InventoryUtils, PackListUtils, ProductionUtils, ApplicationUtils, EditHistoryUtils, InstantWriteUtils, ARCHIVE_TAB_NAME, ARCHIVE_HEADERS, todayISOString, offsetToISO, sanitizeTabName, mapWithConcurrency, ProgressBus, getRandomLoadingQuote, DEFAULT_INVENTORY_MAPPING, ProposalUtils, PROPOSALS_TAB_NAME, PROPOSAL_MAPPING, resolveInventoryNoteMaxLength } from './index.js';
 import { authState } from '../application/utils/auth.js';
 import { instantWriteEntry, identityText, parseColoredName } from './utils/instant-write-config.js';
 import { columnTypesEntry } from './utils/column-types.js';
+
+// CACHE tabs with tracked history. EditHistory is always mapped to the key 'edithistory'.
+const NOTES_MAPPING = { Path: 'Path', Note: 'Note', Color: 'Color', Size: 'Size', edithistory: 'EditHistory' };
+const PREFERENCES_MAPPING = { id: 'ID', name: 'Name', description: 'Description', page: 'Page', type: 'Type', value: 'Value', edithistory: 'EditHistory' };
 
 /**
  * CACHING ARCHITECTURE NOTES:
@@ -404,10 +408,12 @@ class Requests_uncached {
     static async saveInventoryTabData(mappedData, tabOrItemName, mapping, filters, referenceDate, options = {}) {
         const username = authState.user?.email || null;
         const { scheduledDate, note, ...rest } = options;
+        const noteMaxLength = await Requests.getInventoryNoteMaxLength();
         return await InventoryUtils.saveInventoryTabData(mappedData, tabOrItemName, mapping, filters, username, {
             source: 'web',
             scheduledDate,
             note,
+            noteMaxLength,
             ...rest
         });
     }
@@ -1441,7 +1447,8 @@ class Requests_uncached {
      */
     static async savePendingChangeEntry(tabOrItemName, originalRows, editedRows, effectiveDateDeciseconds, note) {
         const username = authState.user?.email || null;
-        return await InventoryUtils.savePendingChangeEntry(tabOrItemName, originalRows, editedRows, effectiveDateDeciseconds, note, username);
+        const noteMaxLength = await Requests.getInventoryNoteMaxLength();
+        return await InventoryUtils.savePendingChangeEntry(tabOrItemName, originalRows, editedRows, effectiveDateDeciseconds, note, username, undefined, noteMaxLength);
     }
 
     /**
@@ -1457,25 +1464,67 @@ class Requests_uncached {
     }
 
     /**
-     * Get all page notes from the CACHE Notes tab.
+     * Get rows archived (deleted) from one tab, newest first.
+     * Reads the _EditHistory tab of the same spreadsheet (contract: "Archive Table").
      * @param {Object} deps - Dependency decorator for tracking calls
-     * @returns {Promise<Array<{Path: string, Note: string, Color: string, Size: string, EditHistory: string}>>}
+     * @param {string} tableId - Spreadsheet id (INVENTORY, PACK_LISTS, CACHE)
+     * @param {string} tabName - Source tab whose deleted rows to return
+     * @returns {Promise<Array<{RowIdentifier: string, Username: string, Timestamp: number, Operation: string, RowData: Object}>>}
      */
-    static async getPageNotes(deps) {
-        return await deps.call(Database.getData, 'CACHE', 'Notes', { Path: 'Path', Note: 'Note', Color: 'Color', Size: 'Size', EditHistory: 'EditHistory' });
+    static async getArchivedRows(deps, tableId, tabName) {
+        // Reading a missing tab throws on real Sheets, so check that the archive exists first
+        const tabs = await deps.call(Database.getTabs, tableId);
+        if (!tabs.some(tab => tab.title === ARCHIVE_TAB_NAME)) return [];
+
+        const mapping = Object.fromEntries(ARCHIVE_HEADERS.map(header => [header, header]));
+        const rows = await deps.call(Database.getData, tableId, ARCHIVE_TAB_NAME, mapping);
+        return rows
+            .filter(row => row.SourceTable === tableId && row.SourceTab === tabName)
+            .map(row => {
+                let rowData = {};
+                try { rowData = JSON.parse(row.RowData || '{}'); } catch { /* unreadable archive row */ }
+                return { ...row, Timestamp: Number(row.Timestamp) || 0, RowData: rowData };
+            })
+            .sort((a, b) => b.Timestamp - a.Timestamp);
     }
 
+    /**
+     * Get all page notes from the CACHE Notes tab.
+     * @param {Object} deps - Dependency decorator for tracking calls
+     * @returns {Promise<Array<{Path: string, Note: string, Color: string, Size: string, edithistory: string}>>}
+     */
+    static async getPageNotes(deps) {
+        return await deps.call(Database.getData, 'CACHE', 'Notes', NOTES_MAPPING);
+    }
+
+    // MUTATION METHOD — excluded from caching. History is tracked by Database.setData.
     static async savePageNotes(data) {
-        return await Database.setData('CACHE', 'Notes', data, { Path: 'Path', Note: 'Note', Color: 'Color', Size: 'Size', EditHistory: 'EditHistory' });
+        const username = authState.user?.email || null;
+        return await Database.setData('CACHE', 'Notes', data, NOTES_MAPPING, { username, source: 'web' });
     }
 
     static async getPreferences(deps) {
-        return await deps.call(Database.getData, 'CACHE', 'Preferences', { id: 'ID', name: 'Name', description: 'Description', page: 'Page', type: 'Type', value: 'Value', editHistory: 'EditHistory' });
+        return await deps.call(Database.getData, 'CACHE', 'Preferences', PREFERENCES_MAPPING);
     }
 
-    // MUTATION METHOD — excluded from caching
+    /**
+     * Maximum length of an inventory save note (InventoryNoteMaxLength preference, default 25).
+     * @param {Object} deps - Dependency decorator for tracking calls
+     * @returns {Promise<number>}
+     */
+    static async getInventoryNoteMaxLength(deps) {
+        try {
+            return resolveInventoryNoteMaxLength(await deps.call(Requests.getPreferences));
+        } catch (error) {
+            console.warn('[getInventoryNoteMaxLength] Preferences unavailable, using the default:', error);
+            return resolveInventoryNoteMaxLength(null);
+        }
+    }
+
+    // MUTATION METHOD — excluded from caching. History is tracked by Database.setData.
     static async savePreferences(data) {
-        return await Database.setData('CACHE', 'Preferences', data, { id: 'ID', name: 'Name', description: 'Description', page: 'Page', type: 'Type', value: 'Value', editHistory: 'EditHistory' });
+        const username = authState.user?.email || null;
+        return await Database.setData('CACHE', 'Preferences', data, PREFERENCES_MAPPING, { username, source: 'web' });
     }
 
     /**
@@ -1485,7 +1534,7 @@ class Requests_uncached {
      * @param {*} [fallback]
      */
     static async getJsonPreference(deps, id, fallback = null) {
-        const prefs = await deps.call(Database.getData, 'CACHE', 'Preferences', { id: 'ID', name: 'Name', description: 'Description', page: 'Page', type: 'Type', value: 'Value', editHistory: 'EditHistory' });
+        const prefs = await deps.call(Database.getData, 'CACHE', 'Preferences', PREFERENCES_MAPPING);
         const pref = (prefs || []).find(p => p.id === id);
         if (!pref || pref.value === undefined || pref.value === null || pref.value === '') return fallback;
         try { return JSON.parse(pref.value); } catch { return fallback; }
@@ -1547,10 +1596,10 @@ class Requests_uncached {
         return await InstantWriteUtils.writeCellsVerified(database, tab, items);
     }
 
-    /** Show notes from CACHE/ShowNotes as [{ Identifier, Note, EditHistory }] ([] if the tab is missing). */
+    /** Show notes from CACHE/ShowNotes as [{ Identifier, Note, edithistory }] ([] if the tab is missing). */
     static async getShowNotes(deps) {
         try {
-            const data = await deps.call(Database.getData, 'CACHE', 'ShowNotes', { Identifier: 'Identifier', Note: 'Note', EditHistory: 'EditHistory' });
+            const data = await deps.call(Database.getData, 'CACHE', 'ShowNotes', { Identifier: 'Identifier', Note: 'Note', edithistory: 'EditHistory' });
             return Array.isArray(data) ? data.filter(r => r && r.Identifier) : [];
         } catch (e) {
             console.warn('[Requests.getShowNotes] ShowNotes tab unavailable:', e?.message || e);
@@ -1587,6 +1636,101 @@ class Requests_uncached {
         return await InstantWriteUtils.saveShowNote(identifier, text, username);
     }
 
+    // ── Inventory proposals ───────────────────────────────────────────────────
+    // CACHE/InventoryProposals, one row per proposed item change; no EditHistory column, so
+    // writes are never tracked. Plan: docs/notes/inventory-proposals-plan.md
+
+    /**
+     * Every proposal entry (active and committed), parsed.
+     * @param {Object} deps - Dependency decorator for tracking calls
+     * @returns {Promise<Array>} See ProposalUtils.parseRows
+     */
+    static async getInventoryProposals(deps) {
+        // Reading a missing tab throws on real Sheets; the tab is created by the first proposal
+        const tabs = await deps.call(Database.getTabs, 'CACHE');
+        if (!tabs.some(tab => tab.title === PROPOSALS_TAB_NAME)) return [];
+        const rows = await deps.call(Database.getData, 'CACHE', PROPOSALS_TAB_NAME, PROPOSAL_MAPPING);
+        return ProposalUtils.parseRows(rows);
+    }
+
+    /**
+     * Rows for the proposal page: the proposal's active entries (all entries once committed),
+     * joined with each item's current inventory values. See ProposalUtils.toTableRow.
+     * @param {Object} deps - Dependency decorator for tracking calls
+     * @param {string} name - Proposal name (case-insensitive)
+     */
+    static async getInventoryProposalTable(deps, name) {
+        const entries = ProposalUtils.entriesOf(await deps.call(Requests.getInventoryProposals), name);
+        const shown = ProposalUtils.isCommitted(entries) ? entries : ProposalUtils.activeEntries(entries);
+        const inventoryByCategory = {};
+        for (const category of new Set(shown.map(entry => entry.category))) {
+            try {
+                inventoryByCategory[category] = await deps.call(Database.getData, 'INVENTORY', category, DEFAULT_INVENTORY_MAPPING);
+            } catch (error) {
+                console.warn(`[getInventoryProposalTable] Could not read inventory tab ${category}:`, error);
+                inventoryByCategory[category] = [];
+            }
+        }
+        return shown.map(entry => ProposalUtils.toTableRow(
+            entry,
+            inventoryByCategory[entry.category].find(row => row.itemNumber === entry.itemNumber)
+        ));
+    }
+
+    /**
+     * Merge item changes from a category page into a proposal (created if new).
+     * MUTATION METHOD — excluded from caching.
+     * @param {string} name - Proposal name
+     * @param {string} category - Inventory tab
+     * @param {Array<{itemNumber: string, changes: Array<{n, ne}>}>} updates
+     */
+    static async updateInventoryProposal(name, category, updates) {
+        return await _updateProposalEntries((entries, user, now) =>
+            ProposalUtils.mergeIntoProposal(entries, name, category, updates, user, now));
+    }
+
+    /**
+     * Save edits from the proposal page (see ProposalUtils.replaceActiveEntries). Signature matches
+     * the reactive store save call: (data, ...apiArgs, options).
+     * MUTATION METHOD — excluded from caching.
+     * @param {Array<Object>} rows - Proposal page rows (see ProposalUtils.toTableRow)
+     * @param {string} name - Proposal name
+     */
+    static async saveInventoryProposalTable(rows, name) {
+        return await _updateProposalEntries((entries, user, now) =>
+            ProposalUtils.replaceActiveEntries(entries, name, rows, user, now));
+    }
+
+    /**
+     * Mark a proposal's active rows in the given categories as committed.
+     * MUTATION METHOD — excluded from caching.
+     * @param {string} name - Proposal name
+     * @param {Array<string>} categories - Inventory tabs that were committed
+     */
+    static async markInventoryProposalCommitted(name, categories) {
+        return await _updateProposalEntries((entries, user, now) =>
+            ProposalUtils.markCommitted(entries, name, categories, user, now));
+    }
+
+}
+
+// ── Proposal storage (used by the mutation methods above) ─────────────────────
+
+/**
+ * Read every proposal entry, transform the list, and write it back (creating the tab on first use).
+ * No edithistory in the mapping: Database.setData writes without history tracking.
+ * @param {function(Array, string, number): Array} transform - (entries, short user, now in deciseconds) → entries
+ */
+async function _updateProposalEntries(transform) {
+    const tabs = await Database.getTabs('CACHE');
+    const tabExists = tabs.some(tab => tab.title === PROPOSALS_TAB_NAME);
+    const entries = tabExists
+        ? ProposalUtils.parseRows(await Database.getData('CACHE', PROPOSALS_TAB_NAME, PROPOSAL_MAPPING))
+        : [];
+    const user = (authState.user?.email || 'unknown').split('@')[0];
+    const updated = transform(entries, user, Math.floor(Date.now() / 100));
+    if (!tabExists) await Database.createTab('CACHE', null, PROPOSALS_TAB_NAME);
+    return await Database.setData('CACHE', PROPOSALS_TAB_NAME, ProposalUtils.toRows(updated), PROPOSAL_MAPPING);
 }
 
 /**
@@ -1623,6 +1767,7 @@ export const Requests = wrapMethods(
         'removeTransshipLink',
         'savePageNotes',
         'savePreferences',
+        'updateInventoryProposal', 'saveInventoryProposalTable', 'markInventoryProposalCommitted',
         'getDriveFileBlob', // Uncached read: callers own the Blob
         'writeCellsVerified',
         'saveShowNote'

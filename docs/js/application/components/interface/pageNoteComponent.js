@@ -1,4 +1,4 @@
-import { html, Requests, getReactiveStore, modalManager, authState, EditHistoryUtils } from '../../index.js';
+import { html, Requests, getReactiveStore, modalManager, authState } from '../../index.js';
 
 // Shared store for all page notes — loaded once, reused across all container instances
 function getNotesStore() {
@@ -196,24 +196,16 @@ export const PageNoteMenuComponent = {
             );
         },
         async saveNote(text, color, size) {
-            const user = authState.user?.email || 'unknown';
+            // History is recorded by the database layer on save (Requests.savePageNotes)
             const store = this.notesStore;
             const existingIndex = store.data.findIndex(n => n.Path === this.cleanPath);
-            const oldNote = existingIndex >= 0 ? store.data[existingIndex].Note : '';
-
-            const entry = EditHistoryUtils.createEditHistoryEntry(user, [{ column: 'Note', old: oldNote }]);
-            const newHistory = EditHistoryUtils.appendToEditHistory(
-                existingIndex >= 0 ? store.data[existingIndex].EditHistory : '',
-                entry
-            );
 
             if (existingIndex >= 0) {
                 store.data[existingIndex].Note = text;
                 store.data[existingIndex].Color = color;
                 store.data[existingIndex].Size = size;
-                store.data[existingIndex].EditHistory = newHistory;
             } else {
-                store.addRow({ Path: this.cleanPath, Note: text, Color: color, Size: size, EditHistory: newHistory });
+                store.addRow({ Path: this.cleanPath, Note: text, Color: color, Size: size, edithistory: '' });
             }
             const saved = await store.save('Saving note...');
             if (!saved) {

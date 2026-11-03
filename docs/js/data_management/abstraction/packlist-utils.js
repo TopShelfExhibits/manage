@@ -3,6 +3,10 @@ import { Database, InventoryUtils, ProductionUtils, wrapMethods, GetParagraphMat
 /** Normalize an identifier for loose matching (strips spaces, case, non-alphanumeric) */
 function _normalizeId(v) { return String(v || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, ''); }
 
+/** Packlist metadata columns: row object key → sheet header. Always the last columns of a packlist tab. */
+const PACKLIST_METADATA_COLUMNS = { metadata: 'MetaData', edithistory: 'EditHistory' };
+const _isMetadataHeader = (header) => Object.values(PACKLIST_METADATA_COLUMNS).includes(String(header ?? '').trim());
+
 /**
  * Utility functions for pack list operations
  */
@@ -178,15 +182,15 @@ class packListUtils_uncached {
         
         // Find metadata columns - they should be at the end of the header row
         // Support both old format (MetaData/EditHistory in item section) and new format (at the end)
-        const metadataIndex = headerRow.findIndex(header => header === 'MetaData');
-        const editHistoryIndex = headerRow.findIndex(header => header === 'EditHistory');
+        const metadataIndex = headerRow.findIndex(header => header === PACKLIST_METADATA_COLUMNS.metadata);
+        const editHistoryIndex = headerRow.findIndex(header => header === PACKLIST_METADATA_COLUMNS.edithistory);
         
-        // Filter out MetaData and EditHistory from headers (will be attached to objects as properties)
+        // Filter out MetaData and EditHistory headers (attached to objects as metadata / edithistory)
         const filteredMainHeaders = mainHeaders.filter(h => {
-            return h !== 'MetaData' && h !== 'EditHistory';
+            return !_isMetadataHeader(h);
         });
         const filteredItemHeaders = itemHeaders.filter(h => {
-            return h !== 'MetaData' && h !== 'EditHistory';
+            return !_isMetadataHeader(h);
         });
         
         const crates = [];
@@ -223,10 +227,10 @@ class packListUtils_uncached {
                 
                 // Extract metadata from unified end columns
                 if (metadataIndex !== -1 && metadataIndex < rowValues.length) {
-                    crateInfoObj.MetaData = rowValues[metadataIndex] || '';
+                    crateInfoObj.metadata = rowValues[metadataIndex] || '';
                 }
                 if (editHistoryIndex !== -1 && editHistoryIndex < rowValues.length) {
-                    crateInfoObj.EditHistory = rowValues[editHistoryIndex] || '';
+                    crateInfoObj.edithistory = rowValues[editHistoryIndex] || '';
                 }
                 
                 currentCrate = {
@@ -255,10 +259,10 @@ class packListUtils_uncached {
                 
                 // Extract metadata from unified end columns
                 if (metadataIndex !== -1 && metadataIndex < rowValues.length) {
-                    itemObj.MetaData = rowValues[metadataIndex] || '';
+                    itemObj.metadata = rowValues[metadataIndex] || '';
                 }
                 if (editHistoryIndex !== -1 && editHistoryIndex < rowValues.length) {
-                    itemObj.EditHistory = rowValues[editHistoryIndex] || '';
+                    itemObj.edithistory = rowValues[editHistoryIndex] || '';
                 }
                 
                 currentCrate.Items.push(itemObj);
@@ -290,10 +294,10 @@ class packListUtils_uncached {
             if (Array.isArray(crate.Items)) {
                 for (const itemObj of crate.Items) {
                     // For each property in the item object, check for item codes
-                    // Skip metadata fields — EditHistory contains old description values that
+                    // Skip metadata fields — edithistory contains old description values that
                     // would be picked up by the item-code regex and inflate quantities.
                     for (const [key, cell] of Object.entries(itemObj)) {
-                        if (key === 'EditHistory' || key === 'MetaData') continue;
+                        if (key === 'edithistory' || key === 'metadata') continue;
                         if (!cell) continue;
                         const extracted = await deps.call(PackListUtils.extractItemFromText, cell, ctgFilter);
                         if (extracted.itemNumber) {
@@ -418,43 +422,44 @@ class packListUtils_uncached {
         
         // Remove MetaData and EditHistory from both sections - they go at the end
         mainHeaders = mainHeaders.filter(h => {
-            const normalizedHeader = String(h ?? '').trim();
-            return normalizedHeader !== 'MetaData' && normalizedHeader !== 'EditHistory';
+            return !_isMetadataHeader(h);
         });
         itemHeaders = itemHeaders.filter(h => {
-            const normalizedHeader = String(h ?? '').trim();
-            return normalizedHeader !== 'MetaData' && normalizedHeader !== 'EditHistory';
+            return !_isMetadataHeader(h);
         });
         
         // Unified metadata columns at the END of all columns (after main + item)
-        // This way both crate rows and item rows use the same column positions for metadata
-        const metadataHeaders = ['MetaData', 'EditHistory'];
+        // This way both crate rows and item rows use the same column positions for metadata.
+        // Row objects use the lowercase keys; the sheet uses the capitalized headers.
+        const metadataHeaders = Object.values(PACKLIST_METADATA_COLUMNS);
+        const metadataKeys = Object.keys(PACKLIST_METADATA_COLUMNS);
 
-        // Clean crates: only keep properties in mainHeaders/itemHeaders, plus metadata
-        // Metadata (MetaData, EditHistory) is preserved separately for both crate and item objects
+        // Read rows are keyed by normalized header names (getPackList collapses newlines, e.g.
+        // "Packing/shop\nnotes" → "Packing/shop notes"); the sheet keeps the raw header
+        const valueFor = (obj, header) => {
+            if (obj[header] !== undefined) return obj[header];
+            const normalized = obj[normalizeHeaderName(header)];
+            return normalized !== undefined ? normalized : '';
+        };
+
+        // Clean crates: only keep properties in mainHeaders/itemHeaders, plus metadata keys
         const cleanCrates = Array.isArray(mappedData) ? mappedData.map(crate => {
             const cleanCrate = {};
             mainHeaders.forEach(h => {
-                cleanCrate[h] = crate[h] !== undefined ? crate[h] : '';
+                cleanCrate[h] = valueFor(crate, h);
             });
-            // Preserve metadata from crate object
-            metadataHeaders.forEach(h => {
-                if (crate[h] !== undefined) {
-                    cleanCrate[h] = crate[h];
-                }
+            metadataKeys.forEach(key => {
+                if (crate[key] !== undefined) cleanCrate[key] = crate[key];
             });
             
             cleanCrate.Items = Array.isArray(crate.Items)
                 ? crate.Items.map(itemObj => {
                     const cleanItem = {};
                     itemHeaders.forEach(h => {
-                        cleanItem[h] = itemObj[h] !== undefined ? itemObj[h] : '';
+                        cleanItem[h] = valueFor(itemObj, h);
                     });
-                    // Preserve metadata from item object
-                    metadataHeaders.forEach(h => {
-                        if (itemObj[h] !== undefined) {
-                            cleanItem[h] = itemObj[h];
-                        }
+                    metadataKeys.forEach(key => {
+                        if (itemObj[key] !== undefined) cleanItem[key] = itemObj[key];
                     });
                     return cleanItem;
                 })
@@ -475,22 +480,17 @@ class packListUtils_uncached {
         // Create full mapping for all columns (enables automatic edithistory tracking)
         // Order: main columns + item columns + metadata columns (MetaData, EditHistory)
         const allHeaders = [...headers.main, ...headers.items, ...headers.metadata];
+        const keyForHeader = Object.fromEntries(Object.entries(PACKLIST_METADATA_COLUMNS).map(([key, header]) => [header, key]));
         const packlistMapping = {};
         allHeaders.forEach(header => {
-            if (header === 'EditHistory') {
-                packlistMapping['edithistory'] = 'EditHistory'; // Map to lowercase for Database layer
-            } else if (header === 'MetaData') {
-                packlistMapping['metadata'] = 'MetaData'; // Map to lowercase for consistency
-            } else {
-                packlistMapping[header] = header; // 1:1 mapping for all other columns
-            }
+            packlistMapping[keyForHeader[header] || header] = header; // metadata columns → lowercase keys, others 1:1
         });
         
         // Add _orderedHeaders property to preserve column order (Object.values doesn't guarantee order)
         packlistMapping._orderedHeaders = allHeaders;
+        const rowMetadataKeys = headers.metadata.map(header => keyForHeader[header]).filter(Boolean);
         
         // Flatten crates into row objects with ALL column properties
-        // IMPORTANT: Use lowercase property names for metadata to match Database layer expectations
         const rowObjects = [];
         cleanCrates.forEach(crate => {
             // Crate row: main columns filled, item columns empty, metadata at end
@@ -501,13 +501,8 @@ class packListUtils_uncached {
             headers.items.forEach(h => {
                 crateRow[h] = ''; // Item columns empty for crate rows
             });
-            // Add metadata columns at the end for this crate row
-            headers.metadata.forEach(h => {
-                if (h === 'EditHistory') {
-                    crateRow['edithistory'] = crate[h] !== undefined ? crate[h] : '';
-                } else if (h === 'MetaData') {
-                    crateRow['metadata'] = crate[h] !== undefined ? crate[h] : '';
-                }
+            rowMetadataKeys.forEach(key => {
+                crateRow[key] = crate[key] !== undefined ? crate[key] : '';
             });
             rowObjects.push(crateRow);
             
@@ -521,13 +516,8 @@ class packListUtils_uncached {
                     headers.items.forEach(h => {
                         itemRow[h] = itemObj[h] !== undefined ? itemObj[h] : '';
                     });
-                    // Add metadata columns at the end for this item row
-                    headers.metadata.forEach(h => {
-                        if (h === 'EditHistory') {
-                            itemRow['edithistory'] = itemObj[h] !== undefined ? itemObj[h] : '';
-                        } else if (h === 'MetaData') {
-                            itemRow['metadata'] = itemObj[h] !== undefined ? itemObj[h] : '';
-                        }
+                    rowMetadataKeys.forEach(key => {
+                        itemRow[key] = itemObj[key] !== undefined ? itemObj[key] : '';
                     });
                     rowObjects.push(itemRow);
                 });

@@ -1,5 +1,7 @@
 # Move Tracking Simplification Analysis
 
+> **Superseded (2026-10-21):** the position-based `i` design below was not implemented. Row identity is now a stable `EditHistory.i` assigned on first touch — see `metadata-implementation.md` (EditHistory Contract) for the current contract.
+
 **Date**: June 4, 2026  
 **Original Complexity**: 6.5/10  
 **Revised Complexity**: 4.5/10 ⬇️  

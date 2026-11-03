@@ -1181,6 +1181,67 @@ tr.in-group:not(:has(+ .in-group)) > td:not(.row-drag-handle) {
     box-shadow: inset 0 -12px 12px -12px var(--color-shadow);
 }
 
+/* Inventory sub-rows (InventoryTable): tr.detail-row plus .detail-row-pending (scheduled
+   changes, category table) or .detail-row-history (past states, Edit History page) */
+
+/* Edit History: Date / User / Note columns, and the deleted-items table. Main rows get the
+   background from the view's columnColor (on <col>) and draw the text in a span.history-meta;
+   sub-rows mark the td. */
+td.history-meta,
+col.history-meta {
+    background-color: var(--color-purple-bg);
+}
+td.history-meta,
+span.history-meta {
+    color: var(--color-text-light);
+    font-size: 0.85em;
+}
+
+/* Red marks:
+   .history-changed       sub-row value that the row above replaced (HIGHLIGHT_CHANGES flag)
+   .history-unsaved       main-row value not saved yet, e.g. after a revert
+   .history-unsaved-label "Unsaved" in the main row's Date column */
+td.history-changed,
+td.history-unsaved,
+.history-unsaved-label {
+    color: var(--color-red);
+    font-weight: bold;
+}
+td.history-unsaved {
+    background-color: var(--color-red-bg-transparent);
+}
+
+/* Placeholders: "(empty)" in a highlighted cell, and the "Unsaved" label */
+.history-empty,
+.history-unsaved-label {
+    font-style: italic;
+}
+.history-empty {
+    font-weight: normal;
+    opacity: 0.75;
+}
+
+/* Inventory proposals: rows under items on the category table, and the proposal page */
+tr.detail-row-proposal > td {
+    color: var(--color-purple);
+    font-style: italic;
+}
+td.proposal-increase {
+    color: var(--color-green);
+    font-weight: bold;
+}
+td.proposal-decrease,
+td.proposal-changed {
+    color: var(--color-red);
+    font-weight: bold;
+}
+.proposal-choice {
+    display: flex;
+    align-items: center;
+    gap: 0.5em;
+    font-weight: normal;
+}
+
 /* Group Toggle Button */
 .group-toggle {
     position: absolute;
