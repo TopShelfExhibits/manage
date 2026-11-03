@@ -54,7 +54,7 @@ const DESIGN_QUEUE_VIEWS = {
             columns: [...DESIGN_QUEUE_DEFAULT_FIELDS],
             hidden: ['_identifier'],
             sort: { key: 'Ship', dir: 'asc' },
-            sortable: ['Client', 'Show', 'Size', 'Ship', 'Assignee'],
+            sortable: ['Client', 'Show', 'Size', 'Ship', 'Assignee', 'Account Manager'],
             // A row whose Setups is checked turns gray (and stays in place)
             rowColor: { field: 'Setups', rule: 'checked:gray' },
             fullWidth: true,
