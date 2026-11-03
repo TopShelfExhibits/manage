@@ -1,4 +1,4 @@
-import { Database, EditHistoryUtils, normalizeHeaderName } from '../index.js';
+import { Database, EditHistoryUtils } from '../index.js';
 import { instantWriteEntry, isInstantColumn, joinKey, identityText, columnText, identityParts, identityKey, cellKey } from '../utils/instant-write-config.js';
 
 /**
@@ -23,7 +23,7 @@ import { instantWriteEntry, isInstantColumn, joinKey, identityText, columnText, 
  *      value went to the cell that took the target's place; that cell's row is found in the
  *      step 2 read by its other cells (by column name) and its value restored, or, when the row or
  *      column wasn't there before (added mid-write), the result carries a warning to check it
- * checkSheetHealth reports, read-only, whether a tab is in a state these writes can rely on.
+ * tests/sheetHealth.js (test only) reports whether a fixture tab is in a state these writes rely on.
  */
 
 const PREFERENCES_MAPPING = { id: 'ID', name: 'Name', description: 'Description', page: 'Page', type: 'Type', value: 'Value', editHistory: 'EditHistory' };
@@ -310,54 +310,6 @@ export class InstantWriteUtils {
         await Database.setCellValues(database, tab, [{ rowNumber, columnNumber: colIdx + 1, value: original }]);
         const [after] = await Database.readFreshRanges(database, [range]);
         return matches(after?.[0], header) && String(after?.[0]?.[colIdx] ?? '') === original;
-    }
-
-    /**
-     * Read-only health check of an instant-write tab: can writes by identity rely on it?
-     * @returns {Promise<{ ok: boolean, issues: Array<{ kind: string, message: string, rows?: number[] }> }>}
-     *          rows are 1-based sheet rows
-     */
-    static async checkSheetHealth(database, tab) {
-        const issues = [];
-        const config = await InstantWriteUtils.getInstantWriteConfig(database, tab);
-        if (!config) return { ok: false, issues: [{ kind: 'no-config', message: `No InstantWriteTables entry for ${database}/${tab}` }] };
-        const raw = await Database.readFresh(database, tab);
-        const header = raw?.[0] || [];
-        if (!header.length || header.every(h => !String(h ?? '').trim())) {
-            return { ok: false, issues: [{ kind: 'no-header', message: `${tab} has no header row` }] };
-        }
-
-        // Header names must be unique (columns are found by name)
-        const seen = new Map();
-        header.forEach((h, c) => {
-            const name = columnText(h);
-            if (!name) return;
-            if (seen.has(name)) issues.push({ kind: 'duplicate-header', message: `Header "${normalizeHeaderName(h)}" appears in columns ${Database.columnLetter(seen.get(name) + 1)} and ${Database.columnLetter(c + 1)}` });
-            else seen.set(name, c);
-        });
-        const idCols = config.identity.map(n => headerIndex(header, n));
-        config.identity.forEach((n, k) => { if (idCols[k] < 0) issues.push({ kind: 'missing-identity-column', message: `Identity column "${n}" is missing` }); });
-        config.columns.forEach(n => { if (headerIndex(header, n) < 0) issues.push({ kind: 'missing-writable-column', message: `Writable column "${n}" is missing` }); });
-
-        if (idCols.every(c => c >= 0)) {
-            const byIdentity = new Map();
-            for (let r = 1; r < raw.length; r++) {
-                const line = raw[r] || [];
-                if (!line.some(v => String(v ?? '').trim())) continue; // blank row
-                const parts = identityParts(config.identity, (name, k) => line[idCols[k]]);
-                if (parts.every(v => !v)) {
-                    issues.push({ kind: 'blank-identity', message: `Row ${r + 1} has data but no identity`, rows: [r + 1] });
-                    continue;
-                }
-                const key = joinKey(...parts);
-                if (!byIdentity.has(key)) byIdentity.set(key, { parts, rows: [] });
-                byIdentity.get(key).rows.push(r + 1);
-            }
-            for (const { parts, rows } of byIdentity.values()) {
-                if (rows.length > 1) issues.push({ kind: 'duplicate-identity', message: `Rows ${rows.join(', ')} share the identity ${parts.join(' / ')}`, rows });
-            }
-        }
-        return { ok: issues.length === 0, issues };
     }
 
     /** All show notes as [{ Identifier, Note, EditHistory }] (cached read). */

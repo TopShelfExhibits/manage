@@ -1555,14 +1555,6 @@ class Requests_uncached {
         return await InstantWriteUtils.writeCellsVerified(database, tab, items);
     }
 
-    /**
-     * Read-only health check of an instant-write tab (fresh read, so excluded from caching).
-     * @returns {Promise<{ ok: boolean, issues: Array<{ kind: string, message: string, rows?: number[] }> }>}
-     */
-    static async checkSheetHealth(database, tab) {
-        return await InstantWriteUtils.checkSheetHealth(database, tab);
-    }
-
     /** Show notes from CACHE/ShowNotes as [{ Identifier, Note, EditHistory }] ([] if the tab is missing). */
     static async getShowNotes(deps) {
         try {
@@ -1640,7 +1632,6 @@ export const Requests = wrapMethods(
         'savePageNotes',
         'savePreferences',
         'writeCellsVerified',
-        'checkSheetHealth',
         'saveShowNote'
     ], // Mutation methods (and fresh reads that must not be cached)
     ['computeIdentifier'], // Infinite cache methods

@@ -43,6 +43,7 @@ import { columnKind, columnKindsOfRows } from '../data_management/utils/checkbox
 import { instantWriteEntry, identityKey, cellKey, joinKey } from '../data_management/utils/instant-write-config.js';
 import { estimateShipDate } from '../data_management/utils/ship-date.js';
 import { getReactiveStore, createAnalysisConfig } from '../application/index.js';
+import { checkSheetHealth } from './sheetHealth.js';
 import { withShipDate } from '../application/utils/scheduleShipping.js';
 
 // ── Runner ────────────────────────────────────────────────────────────────────
@@ -2467,38 +2468,47 @@ test('INSTANT WRITE', 'randomized faults never change cells outside the batch (s
     function normalize(h) { return String(h ?? '').replace(/\s+/g, ' ').trim(); }
 });
 
-// The fake schedule deliberately holds multi-booth shows (two rows, one Client + Year + Show);
-// writes to those rows are refused. Any other issue means the fixture data is in a bad state.
-const IW_KNOWN_DUPLICATES = ['multiboothco / 2026 / multi booth', 'qgenda / 2024 / himss', 'qgenda / 2025 / himss'];
-
-test('INSTANT WRITE', 'sheet health: the fake Production Schedule has only its known multi-booth duplicates', async () => {
-    const health = await Requests.checkSheetHealth(IW_DB, IW_TAB);
-    const other = health.issues.filter(i => i.kind !== 'duplicate-identity').map(i => i.message);
-    assertEqual(other, [], 'no other issues');
-    const dups = health.issues.filter(i => i.kind === 'duplicate-identity').map(i => i.message.replace(/^Rows [\d, ]+ share the identity /, '')).sort();
-    assertEqual(dups, IW_KNOWN_DUPLICATES, 'known duplicates only');
-});
-
-test('INSTANT WRITE', 'sheet health reports duplicate identities, duplicate headers and missing columns', async () => {
+test('INSTANT WRITE', 'sheet health (test only) reports duplicate identities, duplicate headers and missing columns', async () => {
     const snap = iwSnapshot();
     const s = iwSheet();
     try {
         s.push(iwUniqueRows()[0].slice());
         s[0][iwHeaderIndex('Setups')] = 'Elev';
-        const health = await Requests.checkSheetHealth(IW_DB, IW_TAB);
+        const health = await checkSheetHealth(IW_DB, IW_TAB);
         const kinds = health.issues.map(i => i.kind);
         assertEqual(health.ok, false, 'not ok');
         ['duplicate-identity', 'duplicate-header', 'missing-writable-column'].forEach(k => assertContains(kinds, k, k));
         const dup = health.issues.find(i => i.kind === 'duplicate-identity');
         assertEqual(dup.rows.length, 2, 'both rows listed');
-        const noConfig = await Requests.checkSheetHealth(IW_DB, 'Some Other Tab');
-        assertEqual(noConfig.issues.map(i => i.kind), ['no-config'], 'no config');
+        const noIdentity = await checkSheetHealth(IW_DB, IW_TAB, { identity: [], columns: [] });
+        assertEqual(noIdentity.issues.map(i => i.kind), ['duplicate-header'], 'a spec without identity skips identity rules');
     } finally {
         iwRestore(snap);
     }
 });
 
 // ── Runner export ─────────────────────────────────────────────────────────────
+
+// ── Sheet health: last, after every test that writes to the fixture sheets ─────
+// A test (or the process it covers) that leaves a sheet in a state the app can't rely on fails
+// here before it is deployed. tests/sheetHealth.js is test-only and never loads on the live site.
+
+// The fake schedule deliberately holds multi-booth shows (two rows, one Client + Year + Show);
+// writes to those rows are refused. Any other issue means the fixture data is in a bad state.
+const IW_KNOWN_DUPLICATES = ['multiboothco / 2026 / multi booth', 'qgenda / 2024 / himss', 'qgenda / 2025 / himss'];
+
+test('SHEET HEALTH', 'the Production Schedule has only its known multi-booth duplicates', async () => {
+    const health = await checkSheetHealth(IW_DB, IW_TAB);
+    const other = health.issues.filter(i => i.kind !== 'duplicate-identity').map(i => i.message);
+    assertEqual(other, [], 'no other issues');
+    const dups = health.issues.filter(i => i.kind === 'duplicate-identity').map(i => i.message.replace(/^Rows [\d, ]+ share the identity /, '')).sort();
+    assertEqual(dups, IW_KNOWN_DUPLICATES, 'known duplicates only');
+});
+
+test('SHEET HEALTH', 'ShowNotes has one row per show identifier', async () => {
+    const health = await checkSheetHealth('CACHE', 'ShowNotes', { identity: ['Identifier'], columns: ['Identifier', 'Note', 'EditHistory'] });
+    assertEqual(health.issues.map(i => i.message), [], 'no issues');
+});
 
 export async function runTests() {
     setFakeDelaysEnabled(false);
