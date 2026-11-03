@@ -1915,6 +1915,14 @@ test('INSTANT WRITE', 'column kinds come from the data', async () => {
     assertEqual([kinds.Elev, kinds.Panels, kinds.Setups, kinds.Client, kinds.Assignee], ['checkbox', 'checkbox', 'checkbox', 'text', 'text'], 'schedule kinds');
 });
 
+test('INSTANT WRITE', 'design queue setup: instant config, shown fields, assignees and column kinds in one call', async () => {
+    const [setup] = await Requests.getDesignQueueSetup('PROD_SCHED', 'Production Schedule');
+    assertEqual(setup.instant, { identity: ['Client', 'Year', 'Show'], columns: ['Elev', 'Panels', 'Setups', 'Assignee'] }, 'instant config');
+    assertContains(setup.fields, 'Note', 'DesignQueueFields');
+    assertEqual(setup.assignees, ['Alex', 'Sam'], 'assignees');
+    assertEqual([setup.kinds.elev, setup.kinds.setups, setup.kinds['account manager']], ['checkbox', 'checkbox', 'text'], 'kinds by matched column name');
+});
+
 test('INSTANT WRITE', 'Ship shows the estimate (with year, from show dates when missing); transship uses the source end', async () => {
     const row = { Ship: '', 'S. Start': '3/20', 'S. End': '3/23', Year: '2026' };
     assertEqual(withShipDate(row).Ship, '03/06/2026', 'S. Start minus 14 days');

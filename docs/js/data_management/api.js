@@ -1,6 +1,6 @@
 import { wrapMethods, normalizeHeaderName, Database, InventoryUtils, PackListUtils, ProductionUtils, ApplicationUtils, EditHistoryUtils, InstantWriteUtils, todayISOString, offsetToISO, sanitizeTabName, mapWithConcurrency, ProgressBus, getRandomLoadingQuote } from './index.js';
 import { authState } from '../application/utils/auth.js';
-import { instantWriteEntry } from './utils/instant-write-config.js';
+import { instantWriteEntry, columnText } from './utils/instant-write-config.js';
 import { columnKind } from './utils/checkbox-values.js';
 
 /**
@@ -1516,6 +1516,29 @@ class Requests_uncached {
             .map((h, c) => ({ column: normalizeHeaderName(h), c }))
             .filter(({ column }) => column)
             .map(({ column, c }) => ({ column, kind: columnKind(body.map(line => line?.[c])) }));
+    }
+
+    /**
+     * What the design queue needs besides its rows, in one cached call (it follows the Preferences
+     * and the tab's data). A one-item list, so it can back a reactive store:
+     * [{ instant: { identity, columns } | null   InstantWriteTables entry for the tab
+     *    fields: string[] | null                 DesignQueueFields (shown columns)
+     *    assignees: string[]                     DesignQueueAssignees
+     *    kinds: { [columnText]: kind } }]        getColumnKinds, keyed by matched column name
+     */
+    static async getDesignQueueSetup(deps, database, tab) {
+        const [instant, fields, assignees, kinds] = await Promise.all([
+            deps.call(Requests.getInstantWriteConfig, database, tab),
+            deps.call(Requests.getJsonPreference, 'DesignQueueFields', null),
+            deps.call(Requests.getJsonPreference, 'DesignQueueAssignees', []),
+            deps.call(Requests.getColumnKinds, database, tab)
+        ]);
+        return [{
+            instant,
+            fields: Array.isArray(fields) && fields.length ? fields.map(String) : null,
+            assignees: Array.isArray(assignees) ? assignees.map(String) : [],
+            kinds: Object.fromEntries((kinds || []).map(k => [columnText(k.column), k.kind]))
+        }];
     }
 
     /**

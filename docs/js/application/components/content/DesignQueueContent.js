@@ -1,7 +1,7 @@
 import { html, Requests, DataView, getReactiveStore, invalidateCache, ScheduleFilterSelect } from '../../index.js';
 import { buildScheduleFields } from '../../../data_management/abstraction/scheduleFields.js';
 import { isCheckedValue } from '../../../data_management/utils/checkbox-values.js';
-import { instantWriteEntry, isInstantColumn, identityKey, identityText, columnText } from '../../../data_management/utils/instant-write-config.js';
+import { isInstantColumn, identityKey, identityText, columnText } from '../../../data_management/utils/instant-write-config.js';
 import { textFiltersToSearchParams } from '../../../data_management/utils/helpers.js';
 import { shipReturnAnalysis, withShipDate, shipReturnCards, SHIP_RETURN_DECORATION_KEYS } from '../../utils/scheduleShipping.js';
 
@@ -14,10 +14,11 @@ import { shipReturnAnalysis, withShipDate, shipReturnCards, SHIP_RETURN_DECORATI
  *  - editMode 'instant': edits to the instant-write columns are verified writes after a short
  *    delay. Edits made close together go as one batch (DataView queue → commitCells →
  *    Requests.writeCellsVerified for Schedule columns, saveShowNote for each note).
- *  - The InstantWriteTables preference names the row identity and the columns written
- *    immediately. Each column's cell comes from the data: a select when the page has options for
- *    it (Assignee, from DesignQueueAssignees), a checkbox when the sheet's values are checkbox
- *    values, text otherwise. The shown columns come from DesignQueueFields (a view patch).
+ *  - Setup (Requests.getDesignQueueSetup, one store): the InstantWriteTables preference names the
+ *    row identity and the columns written immediately. Each column's cell comes from the data: a
+ *    select when the page has options for it (Assignee, from DesignQueueAssignees), a checkbox
+ *    when the sheet's values are checkbox values, text otherwise. The shown columns come from
+ *    DesignQueueFields (a view patch). Until setup loads, instant cells render read-only.
  *  - Note is not a Schedule column: it is joined from CACHE/ShowNotes by computeIdentifier.
  *  - Rows whose Setups is checked (X) stay in place and turn gray via a derived colour field
  *    (_rowColor) recomputed from the local row, so the row grays as soon as the box is clicked.
@@ -90,9 +91,8 @@ export const DesignQueueContent = {
         return {
             filter: null,
             scheduleStore: null,
-            prefsStore: null,
+            setupStore: null,
             notesStore: null,
-            kindsStore: null,
             identifiers: {},            // showKey → computeIdentifier result
             DESIGN_QUEUE_VIEWS,
             SHIP_RETURN_DECORATION_KEYS
@@ -102,19 +102,13 @@ export const DesignQueueContent = {
         basePath() {
             return (this.containerPath || 'schedule/design-queue').split('?')[0];
         },
-        prefs() {
-            return this.prefsStore?.data || [];
-        },
-        jsonPref() {
-            return (id, fallback) => {
-                const p = this.prefs.find(x => x.id === id);
-                if (!p || p.value === undefined || p.value === '') return fallback;
-                try { return JSON.parse(p.value); } catch { return fallback; }
-            };
+        // Preferences and column kinds (Requests.getDesignQueueSetup); null until loaded
+        setup() {
+            return this.setupStore?.data?.[0] || null;
         },
         // { identity, columns } from InstantWriteTables, or null (cells then render read-only)
         instantConfig() {
-            return instantWriteEntry(this.jsonPref('InstantWriteTables', {}), DQ_DATABASE, DQ_TAB);
+            return this.setup?.instant || null;
         },
         instantColumns() {
             return this.instantConfig?.columns || DEFAULT_INSTANT_COLUMNS;
@@ -123,8 +117,7 @@ export const DesignQueueContent = {
             return this.instantConfig?.identity || DEFAULT_IDENTITY;
         },
         assignees() {
-            const list = this.jsonPref('DesignQueueAssignees', []);
-            return Array.isArray(list) ? list.map(String) : [];
+            return this.setup?.assignees || [];
         },
         // Options lists the page has for select cells, by column
         selectOptions() {
@@ -132,17 +125,15 @@ export const DesignQueueContent = {
         },
         // DesignQueueFields preference → one view patch (affects only this page)
         patches() {
-            const cols = this.jsonPref('DesignQueueFields', null);
-            return Array.isArray(cols) && cols.length ? [{ patch: { columns: cols } }] : [];
+            const cols = this.setup?.fields;
+            return cols ? [{ patch: { columns: cols } }] : [];
         },
         rawRows() {
             return this.scheduleStore?.data || [];
         },
-        // What each column holds, from the whole sheet (cached); null until it loads
+        // What each column holds (by matched column name), from the whole sheet; null until loaded
         columnKinds() {
-            const sheet = this.kindsStore?.data;
-            if (!Array.isArray(sheet) || !sheet.length) return null;
-            return Object.fromEntries(sheet.map(k => [columnText(k.column), k.kind]));
+            return this.setup?.kinds || null;
         },
         // FieldDefs: Schedule fields, instant cells typed by their data, the joined Note, derived fields
         fields() {
@@ -222,9 +213,8 @@ export const DesignQueueContent = {
         }
     },
     mounted() {
-        this.prefsStore = getReactiveStore(Requests.getPreferences, null, []);
+        this.setupStore = getReactiveStore(Requests.getDesignQueueSetup, null, [DQ_DATABASE, DQ_TAB]);
         this.notesStore = getReactiveStore(Requests.getShowNotes, null, []);
-        this.kindsStore = getReactiveStore(Requests.getColumnKinds, null, [DQ_DATABASE, DQ_TAB]);
     },
     methods: {
         // Cell for an instant-write column: select (page options), checkbox (the data), else text
