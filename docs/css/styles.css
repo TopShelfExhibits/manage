@@ -1,5 +1,12 @@
 @import url('theme.css');
 
+/*
+ * Styling conventions (see CLAUDE.md, "Styling"): shared structural classes (.content,
+ * .button-bar, .card, .details-grid/.detail-item, .cell-button-list), adapted to a context by one
+ * parent-scoped rule; no layout-only wrappers; one size scale per context as custom properties;
+ * fix the generic rule you're fighting instead of patching single elements.
+ */
+
 body, #app {
     color: var(--color-text);
     background: var(--color-primary-gradient);
