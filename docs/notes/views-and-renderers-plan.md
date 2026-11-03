@@ -655,7 +655,7 @@ The system's only extension input is a list of view patches supplied by the comp
 - **Application:** patches apply after variants, in order, with the same merge rules. An omitted `sizes` means all sizes.
 - **Narrow toggle (R2.4):** an override created at narrow size defaults to `sizes: ['narrow']`, and a UI can toggle each override per size later.
 - **Scope:** per page type (registry `id`), not per path (R2.11).
-- **First source: the design queue fields preference (R6.1, R7.2).** The `DesignQueueFields` preference (§4.16) is a plain array of column names. The design queue page passes it as one patch, `{ patch: { columns } }`. It affects only the design queue, never the Schedule page. Unknown names are ignored as usual, so the list can name a sheet column before it exists.
+- **First source: the design queue fields preference (R6.1, R7.2).** The `DesignQueueFields` preference (§4.16) is a plain array of column names that chooses which columns show. The view orders them: the page passes one patch, `{ patch: { columns } }`, with the view's columns that the preference names, in the view's order, then any other named columns in the preference's order. It affects only the design queue, never the Schedule page. Unknown names are ignored as usual, so the list can name a sheet column before it exists.
 - **Still not decided** (R2.5): other sources (session, local, per-user), which other pages allow patches, and any UI. Code-defined default views _are_ the app defaults; a preference only patches them.
 
 ### 4.16 Edit modes and other data concerns (R2.1, R2.2, R3.9)
@@ -826,7 +826,7 @@ Depends only on Phases 0–1.
    - the `row` trigger is refused, as for any editable table.
 4. **Design queue page** under Schedule (R6.1, R7.1): its own content component and registry (`design-queue`), sharing `scheduleFields.js` and the Schedule data, with `editMode: 'instant'`. The Schedule page itself stays read-only (`none`).
    - **Route:** `schedule/design-queue`, one view (`table`). It gets its own dashboard card, as a separate page (R2.9).
-   - **Fields** use the production sheet's header names. Shown columns come from the `DesignQueueFields` preference (§4.15), and the code default is the same list:
+   - **Fields** use the production sheet's header names. The `DesignQueueFields` preference (§4.15) chooses the shown columns; the view's list (below) sets their order:
      `Client`, `Show`, `Size`, `Elev`, `Panels`, `Setups`, `Assignee`, `Account Manager`, `Ship`, `Note`, `Booth#`.
    - **`Elev`, `Panels`, `Setups`** are shown directly as checkboxes. There is no Task aggregation for now (R7.1).
    - **Completed rows** (Setups checked) stay in the list, unchanged in order. They are styled gray through a derived colour field: `_rowColor = 'gray'`, with `rowColor: { field: '_rowColor', rule: 'value' }` (R3.5). The field recomputes from the local row, so the row greys as soon as Setups is checked.
@@ -1061,7 +1061,7 @@ Run per migrated page at desktop width, in a 360px dashboard card, in a double-w
 - [ ] Failed write: cell reverts, error shown, data refreshed; no Save prompt or dirty marker
 - [ ] Assignee pick list shows `DesignQueueAssignees`; an existing value outside the list still shows
 - [ ] Note saves on blur, creates its `ShowNotes` row the first time, and survives refresh
-- [ ] Design queue: upcoming shows by default, sorted by Ship; columns follow `DesignQueueFields`; a row turns gray when Setups is checked, and stays in place
+- [ ] Design queue: upcoming shows by default, sorted by Ship; shown columns follow `DesignQueueFields`, in the view's order; a row turns gray when Setups is checked, and stays in place
 - [ ] Schedule page unchanged and read-only; it shows the written values after refresh
 
 **Modals (Phase 6)**

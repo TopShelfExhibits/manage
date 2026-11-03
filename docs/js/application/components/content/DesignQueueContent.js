@@ -18,8 +18,9 @@ import { shipReturnAnalysis, withShipDate, shipReturnCards, SHIP_RETURN_DECORATI
  *    row identity and the columns written immediately; the ColumnTypes preference says what each
  *    column holds, and the table draws an editable column's cell from that type (checkbox,
  *    select, else text). A select names its option list; this page supplies its lists by name
- *    (optionLists: DesignQueueAssignees from preferences). The shown columns come from
- *    DesignQueueFields (a view patch). Until setup loads, instant cells render read-only.
+ *    (optionLists: DesignQueueAssignees from preferences). The DesignQueueFields preference
+ *    chooses which columns show; the view orders them. Until setup loads, instant cells render
+ *    read-only.
  *  - Note is not a Schedule column: a per-row analysis on the schedule store reads it from
  *    CACHE/ShowNotes by computeIdentifier (Requests.getShowNoteForRow). It keeps the last note
  *    while refreshing, and re-runs when the notes tab changes.
@@ -33,7 +34,8 @@ import { shipReturnAnalysis, withShipDate, shipReturnCards, SHIP_RETURN_DECORATI
 const DQ_DATABASE = 'PROD_SCHED';
 const DQ_TAB = 'Production Schedule';
 
-// Code default for the shown columns; the DesignQueueFields preference patches it.
+// The shown columns, in order. The DesignQueueFields preference may choose a subset (or add
+// columns, which follow these); it never reorders them.
 export const DESIGN_QUEUE_DEFAULT_FIELDS = Object.freeze(['Client', 'Show', 'Size', 'Note', 'Elev', 'Panels', 'Setups', 'Assignee', 'Account Manager', 'Ship', 'Booth#']);
 // Instant columns assumed when the InstantWriteTables preference is missing (they render read-only).
 const DEFAULT_INSTANT_COLUMNS = Object.freeze(['Elev', 'Panels', 'Setups', 'Assignee']);
@@ -138,10 +140,18 @@ export const DesignQueueContent = {
                 DesignQueueAssignees: { options: this.setup?.assignees || [], colors: this.setup?.assigneeColors || {} }
             };
         },
-        // DesignQueueFields preference → one view patch (affects only this page)
+        // DesignQueueFields chooses the shown columns (one view patch, this page only). The view
+        // orders them; chosen columns the view doesn't list follow, in the preference's order.
         patches() {
-            const cols = this.setup?.fields;
-            return cols ? [{ patch: { columns: cols } }] : [];
+            const chosen = this.setup?.fields;
+            if (!chosen) return [];
+            const wanted = new Set(chosen.map(columnText));
+            const inView = new Set(DESIGN_QUEUE_DEFAULT_FIELDS.map(columnText));
+            const columns = [
+                ...DESIGN_QUEUE_DEFAULT_FIELDS.filter(k => wanted.has(columnText(k))),
+                ...chosen.filter(k => !inView.has(columnText(k)))
+            ];
+            return [{ patch: { columns } }];
         },
         rawRows() {
             return this.scheduleStore?.data || [];
