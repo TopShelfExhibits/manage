@@ -138,8 +138,10 @@ const App = {
                     const containerId = typeof container === 'string' ? container : container.path;
                     const containerClasses = typeof container === 'string' ? '' : (container.classes || '');
                     const type = NavigationRegistry.getTypeFromPath(containerId);
+                    // Key on the clean path: URL parameters (search, view, filters) update the page in
+                    // place instead of rebuilding it. Shared links still carry the parameters.
                     return {
-                        key: `${type}-${containerId.replace(/[^a-zA-Z0-9]/g, '_')}`,
+                        key: `${type}-${containerId.split('?')[0].replace(/[^a-zA-Z0-9]/g, '_')}`,
                         path: containerId,
                         type,
                         title: NavigationRegistry.getDisplayName(containerId),
@@ -152,8 +154,9 @@ const App = {
                 });
             } else {
                 const type = NavigationRegistry.getTypeFromPath(this.currentPath);
+                // Key on the clean path (see above): parameter-only changes don't remount the page
                 return [{
-                    key: `${type}-${this.currentPath.replace(/[^a-zA-Z0-9]/g, '_')}`,
+                    key: `${type}-${this.currentPath.split('?')[0].replace(/[^a-zA-Z0-9]/g, '_')}`,
                     path: this.currentPath,
                     type,
                     title: NavigationRegistry.getDisplayName(this.currentPath),
@@ -424,13 +427,13 @@ const App = {
             if ((event.ctrlKey || event.metaKey) && event.key === 'z' && !event.shiftKey) {
                 event.preventDefault();
                 const alert = undoRegistry.undo();
-                if (alert) modalManager.confirm(alert, () => {}, null, 'Note', 'OK', null, 'small-menu');
+                if (alert) modalManager.confirm(alert, () => {}, null, 'Note', 'OK', null, '');
             }
             // Ctrl+Y or Ctrl+Shift+Z or Cmd+Shift+Z for redo
             else if ((event.ctrlKey || event.metaKey) && (event.key === 'y' || (event.shiftKey && event.key === 'z'))) {
                 event.preventDefault();
                 const alert = undoRegistry.redo();
-                if (alert) modalManager.confirm(alert, () => {}, null, 'Note', 'OK', null, 'small-menu');
+                if (alert) modalManager.confirm(alert, () => {}, null, 'Note', 'OK', null, '');
             }
         },
     },
@@ -553,6 +556,8 @@ const App = {
                         :is-visible="modal.isVisible"
                         :components="modal.components"
                         :modal-class="modal.modalClass"
+                        :size="modal.size"
+                        :tall="modal.tall"
                         :message="modal.message"
                         :content-class="modal.contentClass"
                         :component-props="modal.componentProps"

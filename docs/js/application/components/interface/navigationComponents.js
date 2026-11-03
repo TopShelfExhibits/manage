@@ -1,5 +1,6 @@
 import { html, NavigationRegistry, appSettings, runNonessentialAnalysisOnAllStores } from '../../index.js';
 import { PriorityQueue } from '../../utils/priorityQueue.js';
+import { viewportTier } from '../../utils/useContainerSize.js';
 
 // Settings Menu Component
 const SettingsMenuComponent = {
@@ -100,8 +101,8 @@ export const PrimaryNavComponent = {
             return this.isDarkMode ? 'assets/logoW.png' : 'assets/logo.png';
         },
         isMobileView() {
-            // Mobile view is max-width: 800px
-            return window.innerWidth <= 800;
+            // Compact chrome: viewport medium and narrow tiers (size model §4.10, R4.4)
+            return viewportTier(window.innerWidth) !== 'wide';
         },
         onlyEssentialAnalysis() {
             return appSettings.onlyRunEssentialAnalysis;
@@ -126,7 +127,8 @@ export const PrimaryNavComponent = {
     methods: {
         openSettingsMenu() {
             this.$modal.custom(SettingsMenuComponent, {
-                modalClass: 'hamburger-menu small-menu',
+                modalClass: 'hamburger-menu',
+                size: 'card',
                 darkMode: this.darkMode,
                 onlyEssentialAnalysis: this.onlyEssentialAnalysis,
                 showDashboardHeaders: this.showDashboardHeaders,
@@ -488,7 +490,7 @@ export const DashboardToggleComponent = {
     props: {
         containerPath: String,
         containerType: String,
-        currentView: String,
+        currentSegment: String,
         title: String
     },
     inject: ['appContext'],
@@ -580,97 +582,5 @@ export const DashboardToggleComponent = {
                 {{ isOnDashboard ? 'Remove from Dashboard' : 'Add to Dashboard' }}
             </button>
         </div>
-    `
-};
-
-/**
- * ViewChangeComponent: A flexible component for switching between different view modes
- * 
- * Props:
- * - containerPath: The path of the container using this component
- * - navigateToPath: Function to navigate to a new path
- * - viewModes: Array of view mode objects with structure:
- *   [
- *     { paramName: 'layout', paramValue: null, symbol: 'table', title: 'Table view' },
- *     { paramName: 'layout', paramValue: 'calendar', symbol: 'calendar_month', title: 'Calendar view' }
- *   ]
- *   Where:
- *   - paramName: The URL parameter name to update
- *   - paramValue: The value to set (null/undefined removes the parameter)
- *   - symbol: Material symbol icon name to display
- *   - title: Tooltip text for the button
- */
-export const ViewChangeComponent = {
-    name: 'ViewChangeComponent',
-    inject: ['appContext'],
-    props: {
-        containerPath: { type: String, required: true },
-        navigateToPath: { type: Function, required: true },
-        viewModes: { type: Array, required: true }
-    },
-    computed: {
-        currentViewMode() {
-            if (!this.viewModes || this.viewModes.length === 0) return null;
-            
-            const params = NavigationRegistry.getNavigationParameters(this.containerPath);
-            
-            // Find the current view mode by matching the param value
-            for (const mode of this.viewModes) {
-                const currentValue = params[mode.paramName];
-                if (mode.paramValue === null || mode.paramValue === undefined) {
-                    // This mode represents "no parameter set"
-                    if (!currentValue) return mode;
-                } else if (currentValue === mode.paramValue) {
-                    return mode;
-                }
-            }
-            
-            // Default to first mode if no match
-            return this.viewModes[0];
-        },
-        nextViewMode() {
-            if (!this.viewModes || this.viewModes.length === 0) return null;
-            
-            const currentIndex = this.viewModes.indexOf(this.currentViewMode);
-            const nextIndex = (currentIndex + 1) % this.viewModes.length;
-            return this.viewModes[nextIndex];
-        }
-    },
-    methods: {
-        toggle() {
-            if (!this.nextViewMode) return;
-            
-            const cleanPath = this.containerPath.split('?')[0];
-            const isOnDashboard = this.appContext?.currentPath?.split('?')[0].split('/')[0] === 'dashboard';
-            
-            // Build new params object with the toggled parameter
-            // Use null/undefined to signal removal, which buildPathWithCurrentParams will handle
-            const newParams = {
-                [this.nextViewMode.paramName]: this.nextViewMode.paramValue
-            };
-            
-            // Use buildPathWithCurrentParams to merge params AND clear cache when params are removed
-            const togglePath = NavigationRegistry.buildPathWithCurrentParams(
-                cleanPath,
-                this.appContext?.currentPath,
-                newParams
-            );
-            
-            if (isOnDashboard) {
-                NavigationRegistry.dashboardRegistry.updatePath(cleanPath, togglePath);
-            } else {
-                this.navigateToPath(togglePath);
-            }
-        }
-    },
-    template: html`
-        <button
-            v-if="nextViewMode"
-            class="white button-symbol"
-            :title="nextViewMode.title || 'Switch view'"
-            @click="toggle()"
-        >
-            <span class="material-symbols-outlined">{{ nextViewMode.symbol }}</span>
-        </button>
     `
 };

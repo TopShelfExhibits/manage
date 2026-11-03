@@ -21,7 +21,7 @@ export const undoRegistry = Vue.reactive({
     selectionCooldown: 1000, // 1 second cooldown for selection state changes
     
     // Track current edit capture to prevent duplicate captures
-    _currentEditCapture: null, // { routeKey, tableId, rowIndex, colIndex }
+    _currentEditCapture: null, // { routeKey, tableId, rowIndex, columnKey }
     
     // Track current selection capture for cooldown
     _currentSelectionCapture: null, // { routeKey, timestamp, arrayRefs: Set }
@@ -91,7 +91,7 @@ export const undoRegistry = Vue.reactive({
                 this._currentEditCapture.routeKey === routeKey &&
                 this._currentEditCapture.tableId === tableId &&
                 this._currentEditCapture.rowIndex === cellInfo.rowIndex &&
-                this._currentEditCapture.colIndex === cellInfo.colIndex) {
+                this._currentEditCapture.columnKey === cellInfo.columnKey) {
                 //console.log(`[Undo] Skipping duplicate capture for cell [${cellInfo.rowIndex}, ${cellInfo.colIndex}]`);
                 return;
             }
@@ -196,7 +196,7 @@ export const undoRegistry = Vue.reactive({
         // Mark cell as captured if this was a cell edit with duplicate prevention
         if (preventDuplicates && cellInfo) {
             const tableId = arrayList[0]._tableId || 'unknown';
-            this._currentEditCapture = { routeKey, tableId, rowIndex: cellInfo.rowIndex, colIndex: cellInfo.colIndex };
+            this._currentEditCapture = { routeKey, tableId, rowIndex: cellInfo.rowIndex, columnKey: cellInfo.columnKey };
         }
         
         // Mark selection as captured if this was a selection-toggle operation
@@ -213,7 +213,7 @@ export const undoRegistry = Vue.reactive({
         }
         
         const selectionDesc = capturedSelections ? ` with ${capturedSelections.selections.length} selection(s)` : '';
-        const opDesc = cellInfo ? `cell edit [${cellInfo.rowIndex}, ${cellInfo.colIndex}]` : `${type} with ${arrayList.length} array(s)`;
+        const opDesc = cellInfo ? `cell edit [${cellInfo.rowIndex}, ${cellInfo.columnKey}]` : `${type} with ${arrayList.length} array(s)`;
         //console.log(`[Undo] Captured ${opDesc}${selectionDesc} for route: ${routeKey} (stack: ${stacks.undoStack.length})`);
     },
     

@@ -1,6 +1,7 @@
-import { html, Requests, TableComponent, getReactiveStore, NavigationRegistry, invalidateCache, authState, undoRegistry, EditHistoryUtils, todayISOString, appSettings } from '../../index.js';
+import { html, Requests, TableComponent, DataView, getReactiveStore, createAnalysisConfig, NavigationRegistry, Priority, invalidateCache, authState, undoRegistry, EditHistoryUtils, todayISOString, appSettings } from '../../index.js';
 import { sheetLockMixin } from '../../utils/sheetLockMixin.js';
 import { ThumbnailCache } from '../../utils/thumbnailCache.js';
+import { itemImageStyle } from '../../utils/views/viewStyles.js';
 
 /**
  * Modal displayed before any inventory save.
@@ -635,7 +636,8 @@ export const ItemImageComponent = {
                 this.$modal.custom(ImageViewWithReplaceComponent, {
                     thumbnailUrl: this.imageUrl,
                     fileId: this.displayedFileId,
-                    modalClass: 'page-menu',
+                    size: 'page',
+                    tall: true,
                     onReplace: (this.editable && this.itemNumber) ? () => this.showUploadModal() : null
                 }, `Image: ${this.itemNumber}`);
             }
@@ -701,10 +703,31 @@ export const ItemImageComponent = {
 
 
 
+// Inventory category table view (views-and-renderers-plan §5, Phase 4). Batch edit mode.
+const INVENTORY_TABLE_VIEWS = {
+    id: 'inventory-category',
+    default: 'table',
+    theme: 'purple',
+    views: [{
+        id: 'table',
+        name: 'Items',
+        layout: 'table',
+        columns: ['image', 'itemNumber', 'quantity', 'description', 'notes'],
+        sortable: ['itemNumber', 'quantity', 'description'],
+        style: {
+            image: itemImageStyle('itemNumber', { size: 64, editable: true }),
+            itemNumber: { width: 120 },
+            quantity: { width: 120 }
+        },
+        table: { sticky: { start: ['image'] } },
+        sort: { key: 'itemNumber', dir: 'asc' }
+    }]
+};
+
 export const InventoryTableComponent = {
     mixins: [sheetLockMixin],
     components: {
-        TableComponent,
+        DataView,
         ItemImageComponent
     },
     inject: ['appContext', '$modal', '$notify'],
@@ -720,74 +743,47 @@ export const InventoryTableComponent = {
         tabTitle: {
             type: String,
             default: undefined
-        },
-        editMode: {
-            type: Boolean,
-            default: true
         }
     },
     data() {
         return {
             inventoryTableStore: null,
+            INVENTORY_TABLE_VIEWS,
             lockNamespace: 'INVENTORY',
             tabMetaFlags: { hideQuantity: false, hideItemNumber: false }
         };
     },
     computed: {
-        columns() {
-            // Dynamically set columns' editable property based on allowEdit
-            const cols = [
-                { 
-                    key: 'image', 
-                    labelHtml: '<span class="material-symbols-outlined">imagesmode</span>',
-                    label: 'IMG',
-                    width: 1,
-                    sortable: false,
-                    sticky: 'start'
-                },
-                { 
-                    key: 'itemNumber', 
-                    label: 'Item#',
-                    type: 'item',
-                    width: 120,
-                    sortable: true
-                },
-                { 
-                    key: 'quantity', 
-                    label: 'Qty',
-                    format: 'number',
-                    editable: this.allowEdit,
-                    autoColor: false,
-                    width: 120,
-                    sortable: true
-                },
-                { 
-                    key: 'description', 
-                    label: 'Description (visible in pack lists)',
-                    editable: this.allowEdit,
-                    sortable: true
-                },
-                { 
-                    key: 'notes', 
-                    label: 'Notes (internal only)',
-                    editable: this.allowEdit,
-                    sortable: false
-                },
-                {
-                    key: '_navigate',
-                    labelHtml: '<span class="material-symbols-outlined">calendar_month</span>',
-                    label: '',
-                    width: 36,
-                    sortable: false,
-                    sticky: 'end'
-                }
+        // What each inventory key is; edits apply only while the page's edit mode is 'batch' (§4.16).
+        // image holds no data: the thumbnail column (see itemImageStyle).
+        fields() {
+            return [
+                { key: 'image', label: 'IMG' },
+                { key: 'itemNumber', label: 'Item#', type: 'item' },
+                { key: 'quantity', label: 'Qty', format: 'number', type: 'number', editable: true },
+                { key: 'description', label: 'Description (visible in pack lists)', editable: true },
+                { key: 'notes', label: 'Notes (internal only)', editable: true }
             ];
-            // Apply column filters based on metadata flags
-            return cols.filter(c => {
-                if (this.tabMetaFlags.hideQuantity && c.key === 'quantity') return false;
-                if (this.tabMetaFlags.hideItemNumber && c.key === 'itemNumber') return false;
-                return true;
-            });
+        },
+        // Row action: the item's timeline (the standard action button under a calendar header icon)
+        timelineAction() {
+            return {
+                to: (row) => (row.itemNumber && this.tabTitle) ? `inventory/${this.tabTitle.toLowerCase()}/${row.itemNumber}` : null,
+                disabled: (row) => !row.itemNumber,
+                headerIcon: 'calendar_month',
+                title: 'View item timeline'
+            };
+        },
+        // Tab metadata flags hide columns for this tab (data configuration → a view patch)
+        viewPatches() {
+            const hide = [];
+            if (this.tabMetaFlags.hideQuantity) hide.push('quantity');
+            if (this.tabMetaFlags.hideItemNumber) hide.push('itemNumber');
+            if (!hide.length) return [];
+            return [{ patch: { columns: INVENTORY_TABLE_VIEWS.views[0].columns.filter(k => !hide.includes(k)), hidden: hide } }];
+        },
+        editModeName() {
+            return this.allowEdit ? 'batch' : 'none';
         },
         tableData() {
             return this.inventoryTableStore ? this.inventoryTableStore.data : [];
@@ -857,8 +853,8 @@ export const InventoryTableComponent = {
             ];
         },
         allowEdit() {
-            // Allow editing only if editMode is true AND not locked by another user AND lock check is complete
-            return this.editMode && !this.lockedByOther && this.lockCheckComplete;
+            // Inventory is always in edit mode, unless another user or device holds the lock
+            return !this.lockedByOther && this.lockCheckComplete;
         },
         allowSave() {
             const result = this.isDirty && !this.lockedByOther && this.lockCheckComplete;
@@ -912,28 +908,9 @@ export const InventoryTableComponent = {
         this.$notify.clearBanners(this.containerPath);
     },
     methods: {
-        onForeignLockWhileClean() {
-            if (!this.appContext?.navigateToPath) return;
-
-            const viewPath = NavigationRegistry.buildPathWithCurrentParams(
-                this.containerPath,
-                this.appContext?.currentPath,
-                { edit: undefined }
-            );
-            this.appContext.navigateToPath(viewPath);
-        },
-
-        onLockAcquireFailed(lockInfo) {
+        onLockAcquireFailed() {
             if (this.inventoryTableStore) {
                 this.inventoryTableStore.setData(this.inventoryTableStore.originalData);
-            }
-            if (this.appContext?.navigateToPath) {
-                const viewPath = NavigationRegistry.buildPathWithCurrentParams(
-                    this.containerPath,
-                    this.appContext?.currentPath,
-                    { edit: undefined }
-                );
-                this.appContext.navigateToPath(viewPath);
             }
         },
 
@@ -959,11 +936,11 @@ export const InventoryTableComponent = {
             );
         },
         
-        async handleCellEdit(rowIdx, colIdx, value) {
+        // cell-edit contract: (rowIndex, columnKey, value) — keyed by column, not position (fixes D4)
+        async handleCellEdit(rowIdx, colKey, value) {
             const user = authState.user?.email;
             if (!user || !this.tabTitle) return;
 
-            const colKey = this.columns[colIdx]?.key;
             const originalValue = colKey && this.inventoryTableStore ? this.inventoryTableStore.data[rowIdx]?.[colKey] : undefined;
 
             // Apply the value immediately to prevent flicker during async lock operations.
@@ -992,7 +969,7 @@ export const InventoryTableComponent = {
                 onConfirm: (itemNumber) => {
                     this.addNewRow(itemNumber, positionData);
                 },
-                modalClass: ''
+                size: 'card'
             }, 'New Item');
         },
         
@@ -1178,14 +1155,16 @@ export const InventoryTableComponent = {
     },
     template: html `
         <slot>
-            <TableComponent
+            <DataView
                 ref="tableComponent"
-                theme="purple"
-                :data="tableData"
+                :fields="fields"
+                :rows="tableData"
+                :registry="INVENTORY_TABLE_VIEWS"
+                :action="timelineAction"
+                :patches="viewPatches"
+                :edit-mode="editModeName"
                 :title="inventoryName || tabTitle"
-                :originalData="originalData"
-                :columns="columns"
-                default-sort-column="itemNumber"
+                :original-data="originalData"
                 :isLoading="isLoading"
                 :error="error"
                 :showRefresh="true"
@@ -1195,13 +1174,11 @@ export const InventoryTableComponent = {
                 :container-path="containerPath"
                 :navigate-to-path="appContext.navigateToPath"
                 :newRow="allowEdit"
-                :external-dirty-state="isDirty"
-                :allowDetails="true"
-                :forceDetails="editMode"
+                :forceDetails="true"
                 :rowDetailsVisible="row => getPendingEntries(row).length > 0"
                 emptyMessage="No inventory items found"
                 :loading-message="loadingMessage"
-                class="inventory-table-component mark-dirty"
+                class="inventory-table-component"
                 @refresh="handleRefresh"
                 @cell-edit="handleCellEdit"
                 @new-row="handleNewRow"
@@ -1209,19 +1186,6 @@ export const InventoryTableComponent = {
             >
                 <template #header-area>
                     <div class="button-bar" style="display: none;"></div>
-                </template>
-                <template #default="{ row, column, rowIndex, cellRowIndex, cellColIndex }">
-                    <ItemImageComponent 
-                        v-if="column.key === 'image'"
-                        :itemNumber="row.itemNumber"
-                        :editable="true"
-                    />
-                    <button
-                        v-else-if="column.key === '_navigate'"
-                        class="button-symbol purple"
-                        @click.stop="navigateToItemPage(row)"
-                        title="View item timeline"
-                    >☷</button>
                 </template>
                 <template #row-detail-rows="{ row }">
                     <tr
@@ -1237,7 +1201,7 @@ export const InventoryTableComponent = {
                         <td class="detail-value-cell">{{ entry.fields.notes !== undefined ? entry.fields.notes : '' }}</td>
                     </tr>
                 </template>
-            </TableComponent>
+            </DataView>
         </slot>
     `
 };

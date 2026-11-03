@@ -1,15 +1,63 @@
-import { html, InventoryTableComponent, hamburgerMenuRegistry, NavigationRegistry, Requests, CardsComponent, DashboardToggleComponent, getReactiveStore, findMatchingStores, createAnalysisConfig, generateStoreKey, authState, invalidateCache, todayISOString } from '../../index.js';
-import { InventoryOverviewTableComponent } from './InventoryOverviewTable.js';
+import { html, InventoryTableComponent, hamburgerMenuRegistry, NavigationRegistry, Requests, DataView, DashboardToggleComponent, getReactiveStore, findMatchingStores, createAnalysisConfig, generateStoreKey, authState, invalidateCache, todayISOString } from '../../index.js';
 import { ShowInventoryReport } from './ShowInventoryReport.js';
 import { InventoryItemReport } from './InventoryItemReport.js';
 import { InventoryItemTimeline } from './InventoryItemTimeline.js';
+import { itemImageStyle } from '../../utils/views/viewStyles.js';
+
+// What each inventory overview key is (rows from Requests.getAllInventoryData).
+// image holds no data: the thumbnail column (see itemImageStyle).
+const INVENTORY_FIELDS = [
+    { key: 'tab', label: 'Category' },
+    { key: 'image', label: 'I' },
+    { key: 'itemNumber', label: 'Item#', type: 'item' },
+    { key: 'quantity', label: 'Qty', format: 'number', type: 'number' },
+    { key: 'description', label: 'Description' },
+    { key: 'notes', label: 'Notes' }
+];
+
+/**
+ * Inventory page view registry (views-and-renderers-plan §4.3, §5): the all-items overview table
+ * and the category cards are two views of the same item rows. Category cards are buckets of the
+ * rows by `tab` (unrelated to packlist row groups) and search every non-hidden item field (R2.12).
+ */
+const INVENTORY_VIEWS = {
+    id: 'inventory',
+    default: 'items',
+    theme: 'purple',
+    // Shared by both views: the page draws Category (#cell); the item thumbnail
+    sortable: ['tab', 'itemNumber', 'quantity', 'description'],
+    style: { tab: { cell: 'slot' }, image: itemImageStyle('itemNumber', { size: 32 }) },
+    views: [
+        {
+            id: 'items',
+            name: 'All items',
+            icon: 'table',
+            layout: 'table',
+            columns: ['tab', 'image', 'itemNumber', 'quantity'],
+            details: ['description', 'notes'],
+            style: { tab: { width: 120 } },
+            table: { sticky: { start: ['image'] } },
+            sort: [{ key: 'tab', dir: 'asc' }, { key: 'itemNumber', dir: 'asc' }],
+            action: 'button'
+        },
+        {
+            id: 'categories',
+            name: 'Categories',
+            icon: 'grid_view',
+            layout: 'cards',
+            cards: { bucketBy: 'tab' },
+            sort: { key: 'title', dir: 'asc' },
+            action: 'row'
+        }
+    ]
+};
 
 // Inventory Hamburger Menu Component (content only)
 export const InventoryMenuComponent = {
     props: {
         containerPath: String,
         containerType: String, 
-        currentView: String,
+        currentSegment: String,
         title: String,
         refreshCallback: Function,
         navigateToPath: Function,
@@ -81,8 +129,7 @@ export const InventoryMenuComponent = {
 export const InventoryContent = {
     components: {
         'inventory-table': InventoryTableComponent,
-        'inventory-overview-table': InventoryOverviewTableComponent,
-        'cards-grid': CardsComponent,
+        DataView,
         'show-inventory-report': ShowInventoryReport,
         'inventory-item-report': InventoryItemReport,
         'inventory-item-timeline': InventoryItemTimeline
@@ -97,12 +144,23 @@ export const InventoryContent = {
     inject: ['$modal'],
     data() {
         return {
-            categoriesStore: null, // Reactive store for inventory categories
+            categoriesStore: null, // Reactive store for inventory categories (lock analysis)
+            inventoryStore: null, // All inventory item rows (overview table and category card members)
+            suppressedTabs: new Set(), // Description-only tabs hidden from the overview table
             autoSavedCategories: new Set(), // Track which categories have auto-saved data
-            viewModes: [
-                { paramName: 'view', paramValue: 'categories', symbol: 'grid_view', title: 'Switch to categories view' },
-                { paramName: 'view', paramValue: null, symbol: 'table', title: 'Switch to inventory overview' }
-            ]
+            INVENTORY_FIELDS,
+            INVENTORY_VIEWS,
+            // Primary action: category cards → the category; overview rows → the item timeline (R3.8),
+            // the standard action button under a calendar header icon
+            inventoryAction: {
+                to: (row) => {
+                    if (!row?.tab) return null;
+                    if (row._bucket !== undefined) return 'inventory/' + String(row.tab).toLowerCase();
+                    return row.itemNumber ? `inventory/${String(row.tab).toLowerCase()}/${row.itemNumber}` : null;
+                },
+                headerIcon: 'calendar_month',
+                title: 'View item timeline'
+            }
         };
     },
     computed: {
@@ -110,77 +168,53 @@ export const InventoryContent = {
         cleanContainerPath() {
             return this.containerPath.split('?')[0];
         },
+        // Category names (bucketKeys) and per-category state from the categories store
         categoryList() {
-            // Return loaded categories from store with formatted title
             const categories = this.categoriesStore?.data || [];
-            
-            // Add explicit dependency on analysis state to trigger reactivity
-            // when analysis completes (including lock info analysis)
+            // Explicit dependency on analysis state so lock info updates re-render
             const isAnalyzing = this.categoriesStore?.isAnalyzing;
             const analysisProgress = this.categoriesStore?.analysisProgress;
-            
             return categories
                 .filter(cat => cat.title !== 'INDEX')
-                .map(cat => {
-                    const categoryTitle = cat.title ? cat.title.charAt(0).toUpperCase() + cat.title.slice(1).toLowerCase() : '';
-                    
-                    // Find any reactive stores for this inventory category (regardless of analysis config)
-                    // Note: Stores are created with [tabTitle, undefined, undefined, undefined] where tabTitle is uppercase
-                    const matchingStores = findMatchingStores(
-                        Requests.getInventoryTabData,
-                        [cat.title, undefined, undefined, undefined]
-                    );
-                    
-                    // If a reactive store exists, use its state. Otherwise check userData for auto-save
-                    const hasUnsavedChanges = matchingStores.length > 0
-                        ? matchingStores.some(match => match.isModified)
-                        : this.autoSavedCategories.has(cat.title);
-                    
-                    // Check if the category is locked
-                    const isLocked = cat.lockInfo && cat.lockInfo !== null;
-                    
-                    // Determine card styling based on lock state and unsaved changes
-                    // Priority: locked (white) > unsaved changes (red) > normal (purple)
-                    const cardClass = 'button purple';
-                    
-                    // Build content footer
-                    let contentFooter = undefined;
-                    if (isLocked) {
-                        const lockOwner = cat.lockInfo.user || 'Unknown';
-                        const username = lockOwner.includes('@') ? lockOwner.split('@')[0] : lockOwner;
-                        contentFooter = `Locked for edit by: ${username}`;
-                    } else if (hasUnsavedChanges) {
-                        contentFooter = 'Unsaved changes';
-                    }
-                    
-                    // Build footer action buttons
-                    let footerActions = [];
-                    
-                    // Add green Save button for unsaved categories
-                    if (hasUnsavedChanges) {
-                        footerActions.push({
-                            label: 'Save',
-                            class: 'green',
-                            onClick: () => this.saveCategory(cat.title)
-                        });
-                    }
-                    
-                    // Only set footerActions if there are any actions; otherwise undefined
-                    if (footerActions.length === 0) {
-                        footerActions = undefined;
-                    }
-                    
-                    return {
-                        id: cat.sheetId,
-                        title: categoryTitle,
-                        originalTitle: cat.title, // Keep original uppercase tab name
-                        cardClass: cardClass,
-                        contentFooter: contentFooter,
-                        footerActions: footerActions,
-                        AppData: cat.AppData, // Pass through AppData for analyzing state
-                        hiddenSearchData: cat._hiddenSearchData || [] // Hidden search fields for item#, description, notes
-                    };
-                });
+                .map(cat => ({
+                    id: cat.sheetId,
+                    title: this.formatCategoryLabel(cat.title),
+                    originalTitle: cat.title,
+                    lockInfo: cat.lockInfo || null,
+                    AppData: cat.AppData
+                }));
+        },
+        bucketKeys() {
+            return this.categoryList.map(c => c.originalTitle);
+        },
+        allItemRows() {
+            return this.inventoryStore?.data || [];
+        },
+        overviewRows() {
+            if (!this.suppressedTabs.size) return this.allItemRows;
+            return this.allItemRows.filter(item => !this.suppressedTabs.has(item.tab));
+        },
+        // The page owns its data: category cards bucket every item; the overview hides description-only tabs
+        inventoryRows() {
+            return this.isCategoriesView ? this.allItemRows : this.overviewRows;
+        },
+        inventoryLoading() {
+            return this.isCategoriesView ? this.isLoadingCategories : !!this.inventoryStore?.isLoading;
+        },
+        inventoryAnalyzing() {
+            return this.isCategoriesView ? !!this.categoriesStore?.isAnalyzing : !!this.inventoryStore?.isAnalyzing;
+        },
+        inventoryProgress() {
+            const store = this.isCategoriesView ? this.categoriesStore : this.inventoryStore;
+            if (!store) return -1;
+            if (store.isLoading) return store.loadingProgress ?? -1;
+            if (store.isAnalyzing) return store.analysisProgress ?? -1;
+            return -1;
+        },
+        inventoryLoadingMessage() {
+            if (this.isCategoriesView) return 'Loading...';
+            const s = this.inventoryStore;
+            return s?.isAnalyzing ? s.analysisMessage : (s?.loadingMessage || 'Loading all inventory data...');
         },
         // Get current category name from path for specific category views
         currentCategoryName() {
@@ -189,7 +223,7 @@ export const InventoryContent = {
                 if (parts.length >= 2) {
                     const categorySlug = parts[1];
                     const match = this.categoryList.find(c => {
-                        return c.title.toLowerCase() === categorySlug.toLowerCase();
+                        return c.originalTitle.toLowerCase() === categorySlug.toLowerCase();
                     });
                     return match ? match.originalTitle : categorySlug.toUpperCase();
                 }
@@ -262,7 +296,52 @@ export const InventoryContent = {
                 console.error('[InventoryContent] Error checking auto-saved categories:', error);
             }
         },
+        formatCategoryLabel(tabName) {
+            if (!tabName) return '';
+            const lower = String(tabName).toLowerCase();
+            return lower.charAt(0).toUpperCase() + lower.slice(1);
+        },
+        hasUnsavedCategory(title) {
+            const matchingStores = findMatchingStores(Requests.getInventoryTabData, [title, undefined, undefined, undefined]);
+            return matchingStores.length > 0
+                ? matchingStores.some(match => match.isModified)
+                : this.autoSavedCategories.has(title);
+        },
+        // Bucket decorations (§4.6): lock / unsaved status text and the Save action per category
+        categoryDecorations(key) {
+            const cat = this.categoryList.find(c => c.originalTitle === key);
+            const cards = [];
+            const unsaved = this.hasUnsavedCategory(key);
+            if (cat?.lockInfo) {
+                const lockOwner = cat.lockInfo.user || 'Unknown';
+                cards.push({ status: true, message: `Locked for edit by: ${lockOwner.includes('@') ? lockOwner.split('@')[0] : lockOwner}` });
+            } else if (unsaved) {
+                cards.push({ status: true, message: 'Unsaved changes' });
+            }
+            if (unsaved) cards.push({ message: 'Save', class: 'green', action: () => this.saveCategory(key) });
+            return cards;
+        },
+        categoryAppData(key) {
+            return this.categoryList.find(c => c.originalTitle === key)?.AppData;
+        },
+        handleCategoryClick(row) {
+            if (!row?.tab) return;
+            const currentParams = NavigationRegistry.getParametersForContainer(this.containerPath, this.containerPath);
+            this.navigateToPath(NavigationRegistry.buildPath(`inventory/${String(row.tab).toLowerCase()}`, { searchTerm: currentParams.searchTerm }));
+        },
+        initializeInventoryStore() {
+            // Hide tabs whose prefixes are all description-only from the overview table
+            Requests.getPreferences().then(prefs => {
+                const descPref = prefs?.find(p => p.id === 'InventoryDescriptionOnly');
+                let descOnlyTabs = [];
+                try { descOnlyTabs = JSON.parse(descPref?.value || '[]'); } catch {}
+                this.suppressedTabs = new Set(descOnlyTabs);
+            }).catch(() => {});
+            // All inventory rows (pending changes applied as of today); autoLoad
+            this.inventoryStore = getReactiveStore(Requests.getAllInventoryData, null, [todayISOString()]);
+        },
         initializeCategoriesStore() {
+            // Category search reads the item rows directly (R1.5/R2.12), so no hidden-search indexing (D7)
             const analysisConfig = [
                 createAnalysisConfig(
                     Requests.getInventoryLock,
@@ -271,15 +350,6 @@ export const InventoryContent = {
                     ['title'],
                     [authState.user?.email],
                     'lockInfo'
-                ),
-                createAnalysisConfig(
-                    Requests.getInventoryHiddenSearchData,
-                    '_hiddenSearchData',
-                    'Indexing searchable fields...',
-                    [],  // Pass entire category object; function extracts title
-                    [],
-                    '_hiddenSearchData',
-                    { priority: 'low', optional: true }
                 )
             ];
             this.categoriesStore = getReactiveStore(
@@ -328,10 +398,10 @@ export const InventoryContent = {
             this.navigateToPath(NavigationRegistry.buildPath('inventory', { view: 'categories' }));
         },
         async handleRefresh() {
-            //console.log('InventoryContent: Refresh requested');
-            // Invalidate the categories store cache to force reload with fresh lock status
+            // Invalidate the categories (lock status) and the item rows
             invalidateCache([
-                { namespace: 'database', methodName: 'getTabs', args: ['INVENTORY'] }
+                { namespace: 'database', methodName: 'getTabs', args: ['INVENTORY'] },
+                { namespace: 'database', methodName: 'getData', args: ['INVENTORY'] }
             ], true);
             
             // If viewing an inventory table, refresh its lock status
@@ -341,8 +411,9 @@ export const InventoryContent = {
         }
     },
     async mounted() {
-        // Initialize categories store with lock analysis
+        // Initialize categories store with lock analysis, and the item rows
         this.initializeCategoriesStore();
+        this.initializeInventoryStore();
         
         // Note: checkAutoSavedCategories will be called by the watcher when data loads
 
@@ -383,36 +454,45 @@ export const InventoryContent = {
     },
     template: html `
         <slot>
-            <!-- Main Inventory View -->
-            <slot v-if="cleanContainerPath === 'inventory' && !isCategoriesView">
-                <inventory-overview-table
-                    :container-path="containerPath"
-                    :view-modes="viewModes"
-                    @navigate-to-path="navigateToPath"
-                />
-            </slot>
-            
-            <!-- Categories View -->
-            <cards-grid
-                v-else-if="isCategoriesView"
-                theme="purple"
-                :items="categoryList"
-                :sort-columns="[{ key: 'title', label: 'Category', type: 'string', sortable: true }]"
-                default-sort-column="title"
-                :on-item-click="handleCategorySelect"
-                :is-loading="isLoadingCategories"
-                :is-analyzing="categoriesStore?.isAnalyzing"
-                :analysis-progress="categoriesStore?.analysisProgress"
-                loading-message="Loading..."
-                empty-message="No categories available"
-                show-search="true"
-                :sync-search-with-url="true"
+            <!-- Inventory overview and category cards: two views of the item rows -->
+            <DataView
+                v-if="cleanContainerPath === 'inventory' || cleanContainerPath === 'inventory/categories'"
+                :fields="INVENTORY_FIELDS"
+                :rows="inventoryRows"
+                :registry="INVENTORY_VIEWS"
+                :view-id="cleanContainerPath === 'inventory/categories' ? 'categories' : null"
                 :container-path="containerPath"
                 :navigate-to-path="navigateToPath"
-                :show-header="true"
-                :view-modes="viewModes"
-            />
-            
+                :action="inventoryAction"
+                :bucket-keys="bucketKeys"
+                :bucket-decorations="categoryDecorations"
+                :bucket-label="formatCategoryLabel"
+                :bucket-app-data="categoryAppData"
+                title="All Inventory Overview"
+                :is-loading="inventoryLoading"
+                :is-analyzing="inventoryAnalyzing"
+                :loading-progress="inventoryProgress"
+                :loading-message="inventoryLoadingMessage"
+                :error="inventoryStore?.error || null"
+                :show-refresh="isCategoriesView"
+                :show-search="true"
+                :sync-search-with-url="true"
+                :show-footer="true"
+                :empty-message="isCategoriesView ? 'No categories available' : 'No inventory items found across all categories'"
+                @refresh="handleRefresh"
+            >
+                <template #header-area>
+                    <div class="button-bar" style="display: none;"></div>
+                </template>
+                <template #cell="{ row, field }">
+                    <button
+                        v-if="field.key === 'tab'"
+                        @click.stop="handleCategoryClick(row)"
+                        class="card purple"
+                    >{{ formatCategoryLabel(row.tab) }}</button>
+                </template>
+            </DataView>
+
             <!-- Item Timeline Subpage: inventory/<cat>/<item#> -->
             <inventory-item-timeline
                 v-else-if="containerPath.startsWith('inventory/') && cleanContainerPath.split('/').length >= 3"

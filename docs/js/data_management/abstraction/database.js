@@ -359,6 +359,62 @@ class database_uncached {
     }
 
     /**
+     * Read a tab or an A1 range straight from the sheet, bypassing the cache.
+     * Used by verified writes (read → write → re-read), which must see the live sheet.
+     * NOT cached (listed with the mutation methods in wrapMethods below).
+     * @param {string} tableId
+     * @param {string} rangeOrTab - Tab name, or "Tab!A1:B2"
+     * @returns {Promise<Array<Array<string>>>} raw 2D array
+     */
+    static async readFresh(tableId, rangeOrTab) {
+        return await GoogleSheetsService.getSheetData(tableId, rangeOrTab);
+    }
+
+    /** 1-based column number → A1 column letters (1 → A, 27 → AA). */
+    static columnLetter(columnNumber) {
+        return _numberToColumnLetter(columnNumber);
+    }
+
+    /** A1 range on a tab, quoting the sheet name when needed: a1Range('Production Schedule', 'A5:Z5'). */
+    static a1Range(tabName, ref) {
+        return `${_quoteSheetName(tabName)}!${ref}`;
+    }
+
+    /**
+     * Read several ranges of one table in a single uncached request (values.batchGet).
+     * @param {string} tableId
+     * @param {string[]} ranges - full A1 ranges (see a1Range)
+     * @returns {Promise<Array<Array<Array<string>>>>} one 2D array per range
+     */
+    static async readFreshRanges(tableId, ranges) {
+        return await GoogleSheetsService.batchGetValues(tableId, ranges);
+    }
+
+    /**
+     * Write several single cells of one tab in a single request (values.batchUpdate), then
+     * invalidate the tab's cached data once.
+     * @param {string} tableId
+     * @param {string} tabName
+     * @param {Array<{ rowNumber: number, columnNumber: number, value: string }>} cells - 1-based
+     * @returns {Promise<boolean>}
+     */
+    static async setCellValues(tableId, tabName, cells) {
+        if (!cells || !cells.length) return true;
+        const data = cells.map(c => {
+            const col = _numberToColumnLetter(c.columnNumber);
+            return { range: Database.a1Range(tabName, `${col}${c.rowNumber}:${col}${c.rowNumber}`), values: [[c.value ?? '']] };
+        });
+        await GoogleSheetsService.batchSetValues(tableId, data);
+
+        stampDataChange(`database:getData:"${tableId}","${tabName}"`);
+        invalidateCache([
+            { namespace: 'database', methodName: 'getData', args: [tableId, tabName] }
+        ], true);
+
+        return true;
+    }
+
+    /**
      * Write a single cell value using A1 notation range.
      * This avoids full-table writes for high-concurrency updates.
      * @param {string} tableId - Identifier for the table
@@ -370,9 +426,29 @@ class database_uncached {
      */
     static async setCellValue(tableId, tabName, rowNumber, columnNumber, value) {
         const colLetter = _numberToColumnLetter(columnNumber);
-        const range = `${tabName}!${colLetter}${rowNumber}:${colLetter}${rowNumber}`;
+        const range = Database.a1Range(tabName, `${colLetter}${rowNumber}:${colLetter}${rowNumber}`);
 
         await GoogleSheetsService.setSheetData(tableId, range, [[value ?? '']], null);
+
+        stampDataChange(`database:getData:"${tableId}","${tabName}"`);
+        invalidateCache([
+            { namespace: 'database', methodName: 'getData', args: [tableId, tabName] }
+        ], true);
+
+        return true;
+    }
+
+    /**
+     * Delete whole rows of one tab in a single request, then invalidate the tab's cached data.
+     * Positional: callers check the rows just before and verify after (rows move under it).
+     * @param {string} tableId
+     * @param {string} tabName
+     * @param {number[]} rowNumbers - 1-based sheet rows (the header row is never deleted)
+     * @returns {Promise<boolean>}
+     */
+    static async deleteSheetRows(tableId, tabName, rowNumbers) {
+        if (!rowNumbers || !rowNumbers.length) return true;
+        await GoogleSheetsService.deleteSheetRows(tableId, tabName, rowNumbers);
 
         stampDataChange(`database:getData:"${tableId}","${tabName}"`);
         invalidateCache([
@@ -453,7 +529,7 @@ class database_uncached {
 export const Database = wrapMethods(
     database_uncached, 
     'database', 
-    ['createTab', 'hideTabs', 'showTabs', 'setData', 'updateRow', 'setCellValue', 'appendSheetRow', 'uploadItemImage', 'getDriveFileBlob'], // getDriveFileBlob: uncached read (callers own the Blob)
+    ['createTab', 'hideTabs', 'showTabs', 'setData', 'updateRow', 'setCellValue', 'setCellValues', 'deleteSheetRows', 'appendSheetRow', 'uploadItemImage', 'getDriveFileBlob', 'readFresh', 'readFreshRanges', 'columnLetter', 'a1Range'], // getDriveFileBlob: uncached read (callers own the Blob)
     ['getTabs'], // Infinite cache
     {
         // Sheet data: infinite for INVENTORY and PACK_LISTS (cross-session poller handles freshness);
@@ -571,4 +647,14 @@ function _numberToColumnLetter(num) {
         n = Math.floor((n - 1) / 26);
     }
     return letter;
+}
+
+/**
+ * Quote a sheet name for an A1 range when it holds anything but letters, digits and underscores
+ * ("Production Schedule" → "'Production Schedule'"); quotes inside are doubled.
+ * @private
+ */
+function _quoteSheetName(name) {
+    const s = String(name);
+    return /^[A-Za-z0-9_]+$/.test(s) ? s : `'${s.replace(/'/g, "''")}'`;
 }

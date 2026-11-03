@@ -121,6 +121,7 @@ const PageNoteEditModal = {
         }
     },
     template: html`
+      <div class="page-note-edit-menu">
         <div v-if="isLockedByOther" class="card red">
             <p>Notes are currently being edited by <strong>{{ lockOwnerDisplay }}</strong>.</p>
         </div>
@@ -159,6 +160,7 @@ const PageNoteEditModal = {
                     @click="remove">Remove Note</button>
             <button class="gray" @click="cancel">Cancel</button>
         </div>
+      </div>
     `
 };
 
@@ -185,7 +187,7 @@ export const PageNoteMenuComponent = {
                 PageNoteEditModal,
                 {
                     existingNote: this.currentNote,
-                    modalClass: 'page-note-edit-menu',
+                    size: 'card',
                     containerPath: this.cleanPath,
                     onSaved: (text, color, size) => this.saveNote(text, color, size),
                     onRemoved: () => this.removeNote()

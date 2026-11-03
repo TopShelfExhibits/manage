@@ -1,5 +1,65 @@
-import { html, TableComponent, CalendarComponent, Requests, getReactiveStore, createAnalysisConfig, NavigationRegistry, ItemImageComponent, ScheduleFilterSelect, InventoryCategoryFilter, Priority, invalidateCache, toISODateString, todayISOString, offsetToISO, getAutoColorClass, OverlappingShowsModal } from '../../index.js';
-import { normalizeFilterValues } from '../../../data_management/utils/helpers.js';
+import { html, DataView, Requests, getReactiveStore, createAnalysisConfig, NavigationRegistry, ItemImageComponent, ScheduleFilterSelect, InventoryCategoryFilter, Priority, invalidateCache, toISODateString, todayISOString, offsetToISO } from '../../index.js';
+import { textFiltersToSearchParams } from '../../../data_management/utils/helpers.js';
+import { itemImageStyle } from '../../utils/views/viewStyles.js';
+
+// What each report key is (calendarStart/End are derived ranges on a computed copy of the rows).
+// image holds no data: the thumbnail column (see itemImageStyle).
+const ITEM_REPORT_FIELDS = [
+    { key: 'image', label: 'IMG' },
+    { key: 'itemId', label: 'Item#', type: 'item' },
+    { key: 'description', label: 'Description' },
+    { key: 'startDate', label: 'Start', format: 'date', type: 'date' },
+    { key: 'endDate', label: 'End', format: 'date', type: 'date' },
+    { key: 'inventoryQty', label: 'Inv Qty', format: 'number', type: 'number' },
+    { key: 'minQty', label: 'Min Qty', format: 'number', type: 'number' },
+    { key: 'overlappingShows', label: 'Overlapping Shows' },
+    { key: 'tabName', label: 'Category' },
+    { key: 'calendarStart', label: 'Start', format: 'date', type: 'date' },
+    { key: 'calendarEnd', label: 'End', format: 'date', type: 'date' }
+];
+
+// Item shortage report view registry (views-and-renderers-plan §4.3, §5)
+const ITEM_REPORT_VIEWS = {
+    id: 'item-shortages',
+    default: 'table',
+    theme: 'blue',
+    // Shared by both views: the thumbnail; Item# is the primary action's button (the item page,
+    // purple); Overlapping Shows is a list of show buttons (two inline, more in a modal)
+    sortable: ['itemId', 'description', 'startDate', 'endDate', 'inventoryQty', 'minQty'],
+    style: {
+        image: itemImageStyle('itemId'),
+        itemId: { cell: 'action', cellOptions: { class: 'purple' } },
+        overlappingShows: { cell: 'showList', cellOptions: { max: 2, to: 'packlist/{value}' } }
+    },
+    views: [
+        {
+            id: 'table',
+            name: 'Report',
+            icon: 'table',
+            layout: 'table',
+            columns: ['image', 'itemId', 'startDate', 'endDate', 'inventoryQty', 'minQty', 'overlappingShows'],
+            hidden: ['tabName', 'calendarStart', 'calendarEnd'],
+            style: {
+                minQty: { color: 'auto' },
+                overlappingShows: { columnColor: 'gray' }
+            },
+            table: { sticky: { start: ['image'] }, hideRowsOnSearch: false },
+            // Printing lists every show (never the "N shows" button)
+            variants: { print: { style: { overlappingShows: { cellOptions: { max: null } } } } }
+        },
+        {
+            id: 'calendar',
+            name: 'Calendar',
+            icon: 'calendar_month',
+            layout: 'calendar',
+            // Item# and the shows summary ("N shows", always the modal) in the chip's end button bar
+            calendar: { start: 'calendarStart', end: 'calendarEnd', chip: [['minQty', 'description']], actions: ['itemId', 'overlappingShows'] },
+            hidden: ['tabName', 'calendarStart', 'calendarEnd', 'image'],
+            style: { overlappingShows: { cellOptions: { max: 0 } } },
+            rowColor: { field: 'minQty', rule: 'auto', fallback: 'green' }
+        }
+    ]
+};
 
 /**
  * Item-centric inventory report.
@@ -7,7 +67,7 @@ import { normalizeFilterValues } from '../../../data_management/utils/helpers.js
  *   item# | description | startDate | endDate | Inv Qty | Min Qty | Overlapping Shows
  */
 export const InventoryItemReport = {
-    components: { TableComponent, CalendarComponent, ItemImageComponent, ScheduleFilterSelect, InventoryCategoryFilter, OverlappingShowsModal },
+    components: { DataView, ItemImageComponent, ScheduleFilterSelect, InventoryCategoryFilter },
     inject: ['$modal', 'appContext'],
     props: {
         containerPath: { type: String, default: '' },
@@ -25,40 +85,12 @@ export const InventoryItemReport = {
             qtyFilter: 1,
             hasPerformedInitialSync: false,
             isPrinting: false,
-            viewModes: [
-                { paramName: 'layout', paramValue: 'calendar', symbol: 'calendar_month', title: 'Switch to calendar view' },
-                { paramName: 'layout', paramValue: null, symbol: 'table', title: 'Switch to table view' }
-            ],
+            ITEM_REPORT_FIELDS,
+            ITEM_REPORT_VIEWS,
             NavigationRegistry
         };
     },
     computed: {
-        tableColumns() {
-            return [
-                {
-                    key: 'image',
-                    labelHtml: '<span class="material-symbols-outlined">imagesmode</span>',
-                    label: 'IMG',
-                    width: 1,
-                    sortable: false,
-                    sticky: 'start'
-                },
-                { key: 'itemId', label: 'Item#', type: 'item', sortable: true },
-                // { key: 'description', label: 'Description', details: true, sortable: true },
-                { key: 'startDate', label: 'Start', format: 'date', sortable: true },
-                { key: 'endDate', label: 'End', format: 'date', sortable: true },
-                { key: 'inventoryQty', label: 'Inv Qty', format: 'number', sortable: true },
-                {
-                    key: 'minQty',
-                    label: 'Min Qty',
-                    format: 'number',
-                    sortable: true,
-                    cellClass: (value) => getAutoColorClass(value)
-                },
-                { key: 'overlappingShows', label: 'Overlapping Shows', sortable: false, columnClass: 'gray' }
-            ];
-        },
-
         isLoading() {
             return this.reportStore?.isLoading || false;
         },
@@ -164,7 +196,30 @@ export const InventoryItemReport = {
                 }
             }
 
-            return result;
+            // Derived calendar range on a computed copy: rows without dates span the report range
+            let reportStart = null;
+            let reportEnd = null;
+            for (const row of result) {
+                if (row.startDate) {
+                    if (!reportStart || row.startDate < reportStart) reportStart = row.startDate;
+                    if (!reportEnd || (row.endDate && row.endDate > reportEnd)) reportEnd = row.endDate || row.startDate;
+                }
+            }
+            if (reportStart && !reportEnd) reportEnd = reportStart;
+            return result.map(row => ({
+                ...row,
+                calendarStart: row.startDate || reportStart,
+                calendarEnd: row.endDate || row.startDate || reportEnd
+            }));
+        },
+
+        // Primary action: the item page, drawn as the Item# button (action cell) in both views
+        reportAction() {
+            return {
+                to: (row) => this.itemPagePath(row),
+                disabled: (row) => !row.tabName || !row.itemId,
+                title: 'View item timeline'
+            };
         },
 
         loadingMessage() {
@@ -179,68 +234,12 @@ export const InventoryItemReport = {
             return -1;
         },
 
-        isCalendarView() {
-            return NavigationRegistry.getNavigationParameters(this.containerPath || 'reports/item-shortages').layout === 'calendar';
-        },
-
-        calendarColumns() {
-            return [
-                { key: 'minQty', label: 'Min', width: 40, sortable: false, format: 'number', firstRow: true },
-                { key: 'itemId', label: 'Item#', width: 60, sortable: false, firstRow: true },
-                { key: 'description', label: 'Description', sortable: false, firstRow: true }
-            ];
-        },
-
-        calendarData() {
-            // Get all rows including those without dates
-            const allRows = this.tableData;
-            
-            // Find report date range from rows that have dates
-            let reportStart = null;
-            let reportEnd = null;
-            
-            for (const row of allRows) {
-                if (row.startDate) {
-                    if (!reportStart || row.startDate < reportStart) {
-                        reportStart = row.startDate;
-                    }
-                    if (!reportEnd || (row.endDate && row.endDate > reportEnd)) {
-                        reportEnd = row.endDate || row.startDate;
-                    }
-                }
-            }
-            
-            // Ensure we have end date if we have start date
-            if (reportStart && !reportEnd) {
-                reportEnd = reportStart;
-            }
-            
-            return allRows
-                .filter(row => {
-                    // In calendar view, hide group masters but show group members and single items
-                    try {
-                        const meta = JSON.parse(row.MetaData || '{}');
-                        if (meta.grouping?.isGroupMaster) return false;
-                    } catch (e) {}
-                    return true;
-                })
-                .map(row => ({
-                    ...row,
-                    calendarStart: row.startDate || reportStart,
-                    calendarEnd: row.endDate || row.startDate || reportEnd
-                }));
-        },
-
-        chipColorClassProvider() {
-            return (row) => getAutoColorClass(row.minQty) || 'green';
-        },
-
         emptyMessage() {
             const params = NavigationRegistry.getParametersForContainer(
                 this.containerPath || 'reports/item-shortages',
                 this.appContext?.currentPath
             );
-            const hasSearchParams = params && (params.dateFilters || params.textFilters || params.view);
+            const hasSearchParams = params && (params.dateFilters || params.textFilters || params.dateFilter);
 
             if (hasSearchParams && !this.reportStore && !this.isLoading) {
                 return 'No packlists found for the selected search criteria';
@@ -252,14 +251,6 @@ export const InventoryItemReport = {
                 return 'No items found for the selected search criteria.';
             }
             return 'Select a schedule filter to load shows and generate report';
-        },
-
-        currentSearchText() {
-            const params = NavigationRegistry.getParametersForContainer(
-                this.containerPath || 'reports/item-shortages',
-                this.appContext?.currentPath
-            );
-            return params?.searchText || '';
         }
     },
     watch: {
@@ -315,16 +306,8 @@ export const InventoryItemReport = {
             this.referenceDate = resolvedStart ?? todayISOString();
             this.endDate = resolvedEnd ?? null;
 
-            if (searchData.textFilters && searchData.textFilters.length > 0) {
-                searchData.textFilters.forEach(textFilter => {
-                    if (textFilter.column && (textFilter.values || textFilter.value)) {
-                        searchParams[textFilter.column] = {
-                            values: normalizeFilterValues(textFilter),
-                            type: textFilter.type || 'contains'
-                        };
-                    }
-                });
-            }
+            // Apply text filters (filters on the same column are kept together and OR'd)
+            Object.assign(searchParams, textFiltersToSearchParams(searchData.textFilters));
 
             this.searchFilter = filter;
             this.searchParams = searchParams;
@@ -401,8 +384,8 @@ export const InventoryItemReport = {
             this.initializeReportStore();
         },
 
-        navigateToItemPage(row) {
-            if (!row.tabName || !row.itemId) return;
+        itemPagePath(row) {
+            if (!row.tabName || !row.itemId) return null;
             const basePath = `inventory/${row.tabName.toLowerCase()}/${row.itemId}`;
             const dateFilters = (row.startDate || row.endDate)
                 ? [
@@ -410,10 +393,14 @@ export const InventoryItemReport = {
                     ...(row.endDate   ? [{ column: 'Date', value: row.endDate,   type: 'before' }] : [])
                   ]
                 : null;
-            const finalPath = dateFilters
+            return dateFilters
                 ? NavigationRegistry.buildPath(basePath, { dateFilters })
                 : basePath;
-            this.navigateToPath(finalPath);
+        },
+
+        navigateToItemPage(row) {
+            const path = this.itemPagePath(row);
+            if (path) this.navigateToPath(path);
         },
 
         handleCategorySelected(categoryName) {
@@ -490,18 +477,6 @@ export const InventoryItemReport = {
             }, 100);
         },
 
-        openOverlappingShowsModal(shows) {
-            this.$modal.custom(OverlappingShowsModal, { shows, modalClass: 'hamburger-menu small-menu' }, `${shows.length} Overlapping Shows`, { modalClass: 'hamburger-menu' });
-        },
-
-        showsMatchSearch(shows) {
-            if (!this.currentSearchText || !this.currentSearchText.trim() || !Array.isArray(shows)) {
-                return false;
-            }
-            const searchWords = this.currentSearchText.toLowerCase().trim().split(/\s+/).filter(word => word.length > 0);
-            const showsText = shows.join(' ').toLowerCase();
-            return searchWords.some(word => showsText.includes(word));
-        }
     },
     mounted() {
         const params = NavigationRegistry.getParametersForContainer(
@@ -528,66 +503,18 @@ export const InventoryItemReport = {
                 <p>{{ error }}</p>
             </div>
 
-            <CalendarComponent
-                v-if="isCalendarView"
-                theme="blue"
-                :data="calendarData"
-                :columns="calendarColumns"
-                event-start-column="calendarStart"
-                event-end-column="calendarEnd"
-                :chip-color-class="chipColorClassProvider"
-                :is-loading="isLoading"
-                :is-analyzing="isAnalyzing"
-                :loading-message="loadingMessage"
-                :loading-progress="loadingProgress"
-                :show-refresh="true"
-                :show-search="true"
-                :sync-search-with-url="true"
-                :empty-message="emptyMessage"
+            <DataView
+                :fields="ITEM_REPORT_FIELDS"
+                :rows="tableData"
+                :registry="ITEM_REPORT_VIEWS"
                 :container-path="containerPath || 'reports/item-shortages'"
                 :navigate-to-path="navigateToPath"
-                :view-modes="viewModes"
-                @event-click="navigateToItemPage"
-                @refresh="handleRefresh"
-            >
-                <template #header-area>
-                    <div class="button-bar">
-                        <ScheduleFilterSelect
-                            :container-path="containerPath || 'reports/item-shortages'"
-                            :navigate-to-path="navigateToPath"
-                            :show-advanced-button="true"
-                            :default-search="null"
-                            @search-selected="handleSearchSelected"
-                        />
-                        <InventoryCategoryFilter
-                            :container-path="containerPath || 'reports/item-shortages'"
-                            :navigate-to-path="navigateToPath"
-                            @category-selected="handleCategorySelected"
-                        />
-                        <input type="number" :title="'Show items with less than ' + qtyFilter + ' remaining'" :value="qtyFilter" @change="handleMinThresholdChange" style="width:60px" />
-                        <button @click="handlePrint" :disabled="isLoading || isAnalyzing" class="button-symbol white" title="Print Item Shortage Report">
-                            <span class="material-symbols-outlined">print</span>
-                        </button>
-                    </div>
-                </template>
-            </CalendarComponent>
-
-            <TableComponent
-                v-else
-                theme="blue"
-                :data="tableData"
-                :columns="tableColumns"
-                :hide-columns="['tabName']"
+                :action="reportAction"
+                :printing="isPrinting"
                 :hide-group-members="false"
                 :show-search="true"
                 :sync-search-with-url="true"
-                :container-path="containerPath || 'reports/item-shortages'"
-                :navigate-to-path="navigateToPath"
-                :view-modes="viewModes"
-                :hide-rows-on-search="false"
-                :readonly="true"
-                :allowDetails="false"
-                :show-search="true"
+                :show-refresh="true"
                 :is-loading="isLoading"
                 :is-analyzing="isAnalyzing"
                 :loading-message="loadingMessage"
@@ -615,51 +542,7 @@ export const InventoryItemReport = {
                         </button>
                     </div>
                 </template>
-
-                <template #default="{ row, column }">
-                    <slot v-if="column.key === 'image'">
-                        <ItemImageComponent
-                            :imageSize="48"
-                            :itemNumber="row.itemId"
-                        />
-                    </slot>
-                    <slot v-else-if="column.key === 'itemId'">
-                        <button v-if="row.tabName"
-                                @click="navigateToItemPage(row)"
-                                class="purple card"
-                                :title="'View timeline for ' + row.itemId">
-                            {{ row.itemId }}
-                        </button>
-                        <span v-else>{{ row.itemId }}</span>
-                    </slot>
-                    <slot v-else-if="column.key === 'minQty'">
-                        {{ row.minQty !== null && row.minQty !== undefined ? row.minQty : '—' }}
-                    </slot>
-                    <slot v-else-if="column.key === 'overlappingShows'">
-                        <slot v-if="!Array.isArray(row.overlappingShows) || row.overlappingShows.length === 0">
-                            —
-                        </slot>
-                        <slot v-else-if="row.overlappingShows.length <= 2" class="overlapping-shows-buttons">
-                            <button v-for="showId in row.overlappingShows"
-                                    :key="showId"
-                                    @click="navigateToPath && navigateToPath('packlist/' + showId)"
-                                    class="card white">
-                                {{ showId }}
-                            </button>
-                        </slot>
-                        <slot v-else>
-                            <span style="position: absolute; left: -9999px; opacity: 0; pointer-events: none;">{{ row.overlappingShows.join(' ') }}</span>
-                            <button @click="openOverlappingShowsModal(row.overlappingShows)" 
-                                    :class="['card', 'white', 'font-black', showsMatchSearch(row.overlappingShows) ? 'search-highlight' : '']">
-                                {{ row.overlappingShows.length }} shows
-                            </button>
-                        </slot>
-                    </slot>
-                    <div v-else>
-                        {{ row[column.key] !== null && row[column.key] !== undefined ? row[column.key] : '—' }}
-                    </div>
-                </template>
-            </TableComponent>
+            </DataView>
         </div>
     `
 };

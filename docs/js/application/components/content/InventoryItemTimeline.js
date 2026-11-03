@@ -1,5 +1,56 @@
-import { html, Requests, NavigationRegistry, TableComponent, ScheduleFilterSelect, getReactiveStore, toISODateString, todayISOString, offsetToISO, CalendarComponent, ItemImageComponent, getAutoColorClass } from '../../index.js';
+import { html, Requests, NavigationRegistry, DataView, ScheduleFilterSelect, getReactiveStore, toISODateString, todayISOString, offsetToISO, ItemImageComponent } from '../../index.js';
 import { useSearch } from '../../utils/useSearch.js';
+import { valueMatchesAny } from '../../utils/views/searchMatch.js';
+
+// What each timeline key is (calendarStart/End are derived on a computed copy of the rows)
+const TIMELINE_FIELDS = [
+    { key: 'date', label: 'Date', format: 'date', type: 'date' },
+    { key: 'quantity', label: 'Quantity', format: 'number', type: 'number' },
+    { key: 'event', label: 'Event' },
+    { key: 'note', label: 'Note' },
+    { key: 'change', label: 'Change' },
+    { key: 'calendarStart', label: 'Start', format: 'date', type: 'date' },
+    { key: 'calendarEnd', label: 'End', format: 'date', type: 'date' }
+];
+
+// Timeline view registry (views-and-renderers-plan §4.3, §5)
+const TIMELINE_VIEWS = {
+    id: 'item-timeline',
+    default: 'table',
+    theme: 'purple',
+    sortable: ['date'],
+    views: [
+        {
+            id: 'table',
+            name: 'Timeline',
+            icon: 'table',
+            layout: 'table',
+            columns: ['date', 'quantity', 'event', 'note', 'change'],
+            hidden: ['calendarStart', 'calendarEnd'],
+            table: { hideRowsOnSearch: false },
+            style: {
+                date: { width: 120 },
+                quantity: { width: 90, color: 'auto' },
+                event: { width: 120 },
+                change: { width: 160 }
+            }
+        },
+        {
+            id: 'calendar',
+            name: 'Calendar',
+            icon: 'calendar_month',
+            layout: 'calendar',
+            calendar: {
+                start: 'calendarStart',
+                end: 'calendarEnd',
+                chip: [['quantity', 'event', 'note'], ['change']]
+            },
+            hidden: ['calendarStart', 'calendarEnd'],
+            rowColor: { field: 'quantity', rule: 'auto', fallback: 'green' },
+            action: 'row'
+        }
+    ]
+};
 
 /**
  * Lightweight item timeline component.
@@ -11,7 +62,7 @@ import { useSearch } from '../../utils/useSearch.js';
  *   endDate    YYYY-MM-DD
  */
 export const InventoryItemTimeline = {
-    components: { TableComponent, ScheduleFilterSelect, CalendarComponent, ItemImageComponent },
+    components: { DataView, ScheduleFilterSelect, ItemImageComponent },
     inject: ['$modal', 'appContext'],
     props: {
         containerPath: { type: String, default: '' },
@@ -24,7 +75,6 @@ export const InventoryItemTimeline = {
     setup(props) {
         // Initialize search composable
         const search = useSearch({
-            formatValue: null,
             syncWithUrl: true,
             navigationRegistry: NavigationRegistry,
             containerPath: props.containerPath,
@@ -41,29 +91,11 @@ export const InventoryItemTimeline = {
             filterStartDate: null,
             filterEndDate: null,
             resolvedItemId: null,
-            viewModes: [
-                { paramName: 'layout', paramValue: 'calendar', symbol: 'calendar_month', title: 'Switch to calendar view' },
-                { paramName: 'layout', paramValue: null, symbol: 'table', title: 'Switch to table view' }
-            ]
+            TIMELINE_FIELDS,
+            TIMELINE_VIEWS
         };
     },
     computed: {
-        columns() {
-            return [
-                { key: 'date',     label: 'Date',     width: 120, sortable: true, format: 'date' },
-                { key: 'quantity', label: 'Quantity', width: 90,  sortable: false, format: 'number', autoColor: true, firstRow: true },
-                { key: 'event',    label: 'Event',    width: 120, sortable: false, firstRow: true },
-                { key: 'note',     label: 'Note',     sortable: false, firstRow: true },
-                { key: 'change',   label: 'Change',   width: 160, sortable: false, secondRow: true }
-            ];
-        },
-        chipColorClassProvider() {
-            return (row) => getAutoColorClass(row.quantity) || 'green';
-        },
-        isCalendarView() {
-            const params = NavigationRegistry.getNavigationParameters(this.containerPath);
-            return params.layout === 'calendar';
-        },
         timelineStore() {
             if (!this.resolvedItemId) return null;
             const effectiveStart = this.startDate || this.filterStartDate;
@@ -163,29 +195,8 @@ export const InventoryItemTimeline = {
             this.filterEndDate   = endDate;
             // timelineStore computed reacts automatically to the filter change
         },
-        handleCalendarEventClick(row) {
-            const DetailModalComponent = {
-                props: { row: Object, columns: Array },
-                template: html`
-                    <div class="details-grid">
-                        <template v-for="col in columns" :key="col.key">
-                            <div class="detail-item" v-if="row[col.key] != null && row[col.key] !== ''">
-                                <label>{{ col.label }}</label>
-                                <span>{{ row[col.key] }}</span>
-                            </div>
-                        </template>
-                    </div>
-                `
-            };
-            const title = [row.event, row.note].filter(Boolean).join(' — ') || 'Event Details';
-            this.$modal.custom(DetailModalComponent, { row, columns: this.columns }, title);
-        },
         hasSearchMatch(value) {
-            if (!this.search.hasActiveSearch.value || !value) return false;
-            const stringValue = String(value).toLowerCase();
-            return this.search.searchWords.value.some(word => 
-                stringValue.includes(word.toLowerCase())
-            );
+            return valueMatchesAny(value, this.search.searchWords.value);
         }
     },
     mounted() {
@@ -232,50 +243,19 @@ export const InventoryItemTimeline = {
                     </div>
                 </div>
             </div>
-            <CalendarComponent
-                v-if="isCalendarView"
-                theme="purple"
-                :data="calendarData"
-                :columns="columns"
-                event-start-column="calendarStart"
-                event-end-column="calendarEnd"
-                :chip-color-class="chipColorClassProvider"
-                :is-loading="timelineStore?.isLoading ?? false"
-                :loading-message="timelineStore?.loadingMessage || 'Loading timeline...'"
-                :error="timelineStore?.error ?? null"
-                :empty-message="(filterStartDate || filterEndDate) ? 'No inventory usage found in this date range. Try expanding the date filters.' : 'This item has no inventory changes. Set a date filter to see usage data.'"
+            <DataView
+                :fields="TIMELINE_FIELDS"
+                :rows="calendarData"
+                :registry="TIMELINE_VIEWS"
                 :container-path="containerPath"
                 :navigate-to-path="navigateToPath"
-                :view-modes="viewModes"
-                @event-click="handleCalendarEventClick"
-            >
-                <template #header-area>
-                    <div class="button-bar">
-                        <ScheduleFilterSelect
-                            :container-path="containerPath"
-                            :navigate-to-path="navigateToPath"
-                            :show-advanced-button="true"
-                            @search-selected="handleScheduleSearch"
-                        />
-                    </div>
-                </template>
-            </CalendarComponent>
-            <TableComponent
-                v-else
-                theme="purple"
-                :data="timelineStore?.data ?? []"
-                :columns="columns"
-                :readonly="true"
+                :details-title="row => [row.event, row.note].filter(Boolean).join(' — ') || 'Event Details'"
                 :show-search="false"
-                :hide-rows-on-search="false"
                 :show-refresh="false"
                 :is-loading="timelineStore?.isLoading ?? false"
                 :loading-message="timelineStore?.loadingMessage || 'Loading timeline...'"
                 :error="timelineStore?.error ?? null"
                 :empty-message="(filterStartDate || filterEndDate) ? 'No inventory usage found in this date range. Try expanding the date filters.' : 'This item has no inventory changes. Set a date filter to see usage data.'"
-                :container-path="containerPath"
-                :navigate-to-path="navigateToPath"
-                :view-modes="viewModes"
             >
                 <template #header-area>
                     <div class="button-bar">
@@ -287,7 +267,7 @@ export const InventoryItemTimeline = {
                         />
                     </div>
                 </template>
-            </TableComponent>
+            </DataView>
         </div>
     `
 };

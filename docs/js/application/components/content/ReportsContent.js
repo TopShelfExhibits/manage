@@ -1,11 +1,10 @@
-import { html, CardsComponent, hamburgerMenuRegistry, NavigationRegistry, DashboardToggleComponent } from '../../index.js';
+import { html, hamburgerMenuRegistry, NavigationRegistry, DashboardToggleComponent } from '../../index.js';
 import { ShowInventoryReport } from './ShowInventoryReport.js';
 import { InventoryItemReport } from './InventoryItemReport.js';
 import { IndexMismatchReport } from './IndexMismatchReport.js';
 
 export const ReportsContent = {
     components: {
-        'cards-grid': CardsComponent,
         'show-inventory-report': ShowInventoryReport,
         'inventory-item-report': InventoryItemReport,
         'index-mismatch-report': IndexMismatchReport
@@ -32,10 +31,14 @@ export const ReportsContent = {
         }
     },
     methods: {
-        handleReportSelect(reportTitle) {
-            // Map title to report id for navigation
-            const reportId = reportTitle.toLowerCase().replace(/\s+/g, '-');
-            this.navigateToPath(`reports/${reportId}`);
+        handleReportSelect(report) {
+            this.navigateToPath(`reports/${report.id}`);
+        },
+        handleReportKey(event, report) {
+            if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                this.handleReportSelect(report);
+            }
         }
     },
     mounted() {
@@ -68,14 +71,28 @@ export const ReportsContent = {
     template: html`
         
         <slot>
-            <!-- Reports Landing -->
-            <cards-grid
-                v-if="cleanContainerPath === 'reports'"
-                :items="items"
-                :on-item-click="handleReportSelect"
-                container-path="reports"
-                :navigate-to-path="navigateToPath"
-            />
+            <!-- Reports Landing: a static menu built with the shared card CSS (R3.7) -->
+            <div v-if="cleanContainerPath === 'reports'" style="width: 100%;">
+                <div class="cards-grid">
+                    <div
+                        v-for="item in items"
+                        :key="item.id"
+                        :class="['card', 'clickable', item.cardClass]"
+                        tabindex="0"
+                        :title="item.title"
+                        :aria-label="item.title + ': ' + item.content"
+                        @click="handleReportSelect(item)"
+                        @keydown="handleReportKey($event, item)"
+                    >
+                        <div class="content-header">
+                            <h3>{{ item.title }}</h3>
+                        </div>
+                        <div class="content">
+                            <div>{{ item.content }}</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
 
             <!-- Show Inventory Report View -->
             <show-inventory-report

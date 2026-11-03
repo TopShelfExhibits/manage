@@ -1,5 +1,7 @@
-import { wrapMethods, Database, InventoryUtils, PackListUtils, ProductionUtils, ApplicationUtils, EditHistoryUtils, todayISOString, offsetToISO, sanitizeTabName, mapWithConcurrency, ProgressBus, getRandomLoadingQuote } from './index.js';
+import { wrapMethods, normalizeHeaderName, Database, InventoryUtils, PackListUtils, ProductionUtils, ApplicationUtils, EditHistoryUtils, InstantWriteUtils, todayISOString, offsetToISO, sanitizeTabName, mapWithConcurrency, ProgressBus, getRandomLoadingQuote } from './index.js';
 import { authState } from '../application/utils/auth.js';
+import { instantWriteEntry, identityText, parseColoredName } from './utils/instant-write-config.js';
+import { columnTypesEntry } from './utils/column-types.js';
 
 /**
  * CACHING ARCHITECTURE NOTES:
@@ -323,75 +325,6 @@ class Requests_uncached {
      */
     static async getInventoryLock(deps, tabName, currentUser = null) {
         return await deps.call(ApplicationUtils.getSheetLock, 'INVENTORY', tabName, currentUser);
-    }
-    
-    /**
-     * Get hidden search data for inventory category cards.
-     * Extracts item numbers, descriptions, and notes for searchable card content.
-     * This is marked as low-priority, optional analysis that runs asynchronously.
-     * 
-     * @param {Object} deps - Dependency decorator for tracking calls
-     * @param {string|Object} tabNameOrCategory - The inventory category tab name or category object
-     * @returns {Promise<Array<Object>>} Array of {fieldName, value} objects for searchable fields
-     */
-    static async getInventoryHiddenSearchData(deps, tabNameOrCategory) {
-        try {
-            // Handle both string (direct tab name) and object (category with title property) inputs
-            const tabName = typeof tabNameOrCategory === 'string' 
-                ? tabNameOrCategory 
-                : tabNameOrCategory?.title;
-            
-            if (!tabName) {
-                console.warn('[Requests.getInventoryHiddenSearchData] Missing tab name');
-                return [];
-            }
-            
-            // Fetch inventory data for this category
-            const itemData = await deps.call(InventoryUtils.getInventoryTabData, tabName, undefined, undefined, undefined);
-            
-            if (!Array.isArray(itemData) || itemData.length === 0) {
-                return [];
-            }
-            
-            // Extract searchable fields from all items
-            const hiddenFields = [];
-            const seenValues = new Set(); // Deduplicate identical values
-            
-            itemData.forEach(item => {
-                // Add item number if present and unique
-                if (item.itemNumber && !seenValues.has(`itemNumber:${item.itemNumber}`)) {
-                    hiddenFields.push({ 
-                        fieldName: 'Item#', 
-                        value: item.itemNumber 
-                    });
-                    seenValues.add(`itemNumber:${item.itemNumber}`);
-                }
-                
-                // Add description if present and unique
-                if (item.description && !seenValues.has(`description:${item.description}`)) {
-                    hiddenFields.push({ 
-                        fieldName: 'Description', 
-                        value: item.description 
-                    });
-                    seenValues.add(`description:${item.description}`);
-                }
-                
-                // Add notes if present and unique
-                if (item.notes && !seenValues.has(`notes:${item.notes}`)) {
-                    hiddenFields.push({ 
-                        fieldName: 'Notes', 
-                        value: item.notes 
-                    });
-                    seenValues.add(`notes:${item.notes}`);
-                }
-            });
-            
-            return hiddenFields;
-        } catch (error) {
-            // Silently fail - this is low priority and optional
-            console.warn(`[Requests.getInventoryHiddenSearchData] Failed for ${tabName}:`, error);
-            return [];
-        }
     }
     
     /**
@@ -1545,6 +1478,115 @@ class Requests_uncached {
         return await Database.setData('CACHE', 'Preferences', data, { id: 'ID', name: 'Name', description: 'Description', page: 'Page', type: 'Type', value: 'Value', editHistory: 'EditHistory' });
     }
 
+    /**
+     * Parsed value of a json-type preference (e.g. DesignQueueFields), or the fallback.
+     * @param {Object} deps
+     * @param {string} id
+     * @param {*} [fallback]
+     */
+    static async getJsonPreference(deps, id, fallback = null) {
+        const prefs = await deps.call(Database.getData, 'CACHE', 'Preferences', { id: 'ID', name: 'Name', description: 'Description', page: 'Page', type: 'Type', value: 'Value', editHistory: 'EditHistory' });
+        const pref = (prefs || []).find(p => p.id === id);
+        if (!pref || pref.value === undefined || pref.value === null || pref.value === '') return fallback;
+        try { return JSON.parse(pref.value); } catch { return fallback; }
+    }
+
+    /**
+     * The InstantWriteTables entry for a database/tab, normalized ({ identity, columns: [names] }),
+     * or null (see utils/instant-write-config.js).
+     */
+    static async getInstantWriteConfig(deps, database, tab) {
+        const all = await deps.call(Requests.getJsonPreference, 'InstantWriteTables', {});
+        return instantWriteEntry(all, database, tab);
+    }
+
+    /**
+     * The declared column types of a tab, from the ColumnTypes preference (see
+     * utils/column-types.js): [{ column, type, options? }]. Undeclared columns are not listed;
+     * columnTypeOf gives them the name guess. The one cached read of column types for every page.
+     */
+    static async getColumnTypes(deps, database, tab) {
+        const all = await deps.call(Requests.getJsonPreference, 'ColumnTypes', {});
+        return columnTypesEntry(all, database, tab);
+    }
+
+    /**
+     * What the design queue needs besides its rows, in one cached call (it follows the Preferences
+     * and the tab's data). A one-item list, so it can back a reactive store:
+     * [{ instant: { identity, columns } | null   InstantWriteTables entry for the tab
+     *    fields: string[] | null                 DesignQueueFields (shown columns)
+     *    assignees: string[]                     DesignQueueAssignees names (["Alex", "red"]: name + colour word)
+     *    assigneeColors: { [name]: colour }      the colour words, for the names that have one
+     *    types: [{ column, type, options? }] }]  getColumnTypes (declared column types)
+     */
+    static async getDesignQueueSetup(deps, database, tab) {
+        const [instant, fields, assignees, types] = await Promise.all([
+            deps.call(Requests.getInstantWriteConfig, database, tab),
+            deps.call(Requests.getJsonPreference, 'DesignQueueFields', null),
+            deps.call(Requests.getJsonPreference, 'DesignQueueAssignees', []),
+            deps.call(Requests.getColumnTypes, database, tab)
+        ]);
+        const parsedAssignees = (Array.isArray(assignees) ? assignees : []).map(parseColoredName);
+        return [{
+            instant,
+            fields: Array.isArray(fields) && fields.length ? fields.map(String) : null,
+            assignees: parsedAssignees.map(a => a.name),
+            assigneeColors: Object.fromEntries(parsedAssignees.filter(a => a.color).map(a => [a.name, a.color])),
+            types
+        }];
+    }
+
+    /**
+     * MUTATION METHOD — excluded from caching.
+     * Verified writes of several cells of one tab in one batch, each located by row identity and
+     * column header (see instant-write-utils.js).
+     * @param {Array<{ row: Object, column: string, value: string }>} items
+     * @returns {Promise<Array<{ ok: boolean, reason?: string, warning?: string }>>} one result per item
+     */
+    static async writeCellsVerified(database, tab, items) {
+        return await InstantWriteUtils.writeCellsVerified(database, tab, items);
+    }
+
+    /** Show notes from CACHE/ShowNotes as [{ Identifier, Note, EditHistory }] ([] if the tab is missing). */
+    static async getShowNotes(deps) {
+        try {
+            const data = await deps.call(Database.getData, 'CACHE', 'ShowNotes', { Identifier: 'Identifier', Note: 'Note', EditHistory: 'EditHistory' });
+            return Array.isArray(data) ? data.filter(r => r && r.Identifier) : [];
+        } catch (e) {
+            console.warn('[Requests.getShowNotes] ShowNotes tab unavailable:', e?.message || e);
+            return [];
+        }
+    }
+
+    /**
+     * A schedule row's show note, for per-row analysis: { identifier, note }. identifier is
+     * computeIdentifier(Show, Client, Year), '' when it can't be computed; note is '' when the show
+     * has none. Cached, so it follows CACHE/ShowNotes and the identifier reference data.
+     * @param {{ Show, Client, Year }} row
+     */
+    static async getShowNoteForRow(deps, row) {
+        let identifier = '';
+        try {
+            identifier = (await deps.call(Requests.computeIdentifier, row?.Show, row?.Client, row?.Year)) || '';
+        } catch {
+            identifier = '';
+        }
+        if (!identifier) return { identifier: '', note: '' };
+        const notes = await deps.call(Requests.getShowNotes);
+        const key = identityText(identifier);
+        const hit = notes.find(n => identityText(n.Identifier) === key);
+        return { identifier, note: hit?.Note ?? '' };
+    }
+
+    /**
+     * MUTATION METHOD — excluded from caching.
+     * Upsert one show note keyed by computeIdentifier, verified by re-reading.
+     */
+    static async saveShowNote(identifier, text) {
+        const username = authState.user?.email || null;
+        return await InstantWriteUtils.saveShowNote(identifier, text, username);
+    }
+
 }
 
 /**
@@ -1581,8 +1623,10 @@ export const Requests = wrapMethods(
         'removeTransshipLink',
         'savePageNotes',
         'savePreferences',
-        'getDriveFileBlob' // Uncached read: callers own the Blob
-    ], // Mutation methods
+        'getDriveFileBlob', // Uncached read: callers own the Blob
+        'writeCellsVerified',
+        'saveShowNote'
+    ], // Mutation methods (and fresh reads that must not be cached)
     ['computeIdentifier'], // Infinite cache methods
     {} // No custom cache durations needed - lock methods delegate to ApplicationUtils caching
 );

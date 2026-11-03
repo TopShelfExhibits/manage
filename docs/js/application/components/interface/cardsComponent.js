@@ -1,6 +1,11 @@
-import { html, LoadingBarComponent, ViewChangeComponent, NavigationRegistry, parseDate } from '../../index.js';
-import { useSearch, SearchBoxComponent, scrollToSearchResult, scrollToActiveResult } from '../../utils/useSearch.js';
+import { html, LoadingBarComponent, NavigationRegistry, parseDate } from '../../index.js';
+import { useSearch, SearchBoxComponent, scrollToActiveResult } from '../../utils/useSearch.js';
 import { useStickyHeader } from '../../utils/useStickyHeader.js';
+import { matchRows, valueContains } from '../../utils/views/searchMatch.js';
+import { formatText, escapeHtml } from '../../utils/views/fieldFormat.js';
+import { searchTiers } from '../../utils/views/resolveView.js';
+import { rowsToCards, bucketRowsToCards } from '../../utils/views/cardsAdapter.js';
+import { ContentHeaderComponent } from './contentHeaderComponent.js';
 
 function normalizeItemSortWords(value) {
     return String(value)
@@ -30,122 +35,63 @@ function compareItemLikeValues(aValue, bValue) {
     return String(aValue).localeCompare(String(bValue), undefined, { numeric: true, sensitivity: 'base' });
 }
 
-// Cards Grid Component: Simple responsive grid layout with clickable cards
+// Max matched-field entries listed on a card during a search
+const MAX_MATCHED_FIELDS = 6;
+
+/**
+ * CardsComponent — the cards renderer (views-and-renderers-plan §4.6). Same contract as the table
+ * and calendar: `resolved` (the ResolvedView), `data` (rows), `action`, decorations. Cards are built
+ * by the cards adapter: one per row, or one per bucket (cards.bucketBy) with the bucket hooks.
+ * Search: one matcher over the member rows (shown and details keys; hidden never searched), with
+ *   the minimum term length and the broad-search abort (§4.5). Cards whose match comes from fields
+ *   not on the card list the matched fields; with a row trigger they also get `details-match`,
+ *   with a button trigger the action button glows.
+ * Sort: the view's sort; the sort select lists sortable fields (bucket cards sort by title).
+ * Primary action (§4.8): `action.trigger === 'row'` → the whole card; 'button' → a footer button.
+ */
 export const CardsComponent = {
-    components: { LoadingBarComponent, ViewChangeComponent, SearchBoxComponent },
+    name: 'CardsComponent',
+    components: { LoadingBarComponent, SearchBoxComponent, ContentHeaderComponent },
     inject: ['appContext'],
     props: {
-        theme: {
-            type: String,
-            default: 'gray'
-        },
-        items: {
-            type: Array,
-            required: true,
-            // Expected format: [{ id, title, content?, contentFooter?, onClick?, cardClass? }]
-            // content and contentFooter support HTML (rendered with v-html)
-            // cardClass options: 'gray' (default), 'blue', 'green', 'yellow', 'red'
-        },
-        onItemClick: {
-            type: Function,
-            required: true
-        },
-        isLoading: {
-            type: Boolean,
-            default: false
-        },
-        isAnalyzing: {
-            type: Boolean,
-            default: false
-        },
-        loadingProgress: {
-            type: Number,
-            default: -1
-        },
-        loadingMessage: {
-            type: String,
-            default: 'Loading...'
-        },
-        emptyMessage: {
-            type: String,
-            default: 'No items available'
-        },
-        showHeader: {
-            type: Boolean,
-            default: false
-        },
-        showRefresh: {
-            type: Boolean,
-            default: false
-        },
-        showSearch: {
-            type: Boolean,
-            default: false
-        },
-        syncSearchWithUrl: {
-            type: Boolean,
-            default: false
-        },
-        containerPath: {
-            type: String,
-            default: ''
-        },
-        navigateToPath: {
-            type: Function,
-            default: null
-        },
-        viewModes: {
-            type: Array,
-            default: null
-        },
-        hideCardsOnSearch: {
-            type: Boolean,
-            default: true
-        },
-        showPinButtons: {
-            type: Boolean,
-            default: false
-        },
-        pinnedItems: {
-            type: Set,
-            default: () => new Set()
-        },
-        showPinnedOnly: {
-            type: Boolean,
-            default: false
-        },
-        showSort: {
-            type: Boolean,
-            default: false
-        },
-        sortColumns: {
-            type: Array,
-            default: () => []
-        },
-        defaultSortColumn: {
-            type: [String, Array],
-            default: null
-        },
-        defaultSortDirection: {
-            type: String,
-            default: 'asc',
-            validator: (value) => ['asc', 'desc'].includes(String(value || '').toLowerCase())
-        }
+        resolved: { type: Object, required: true },
+        data: { type: Array, default: () => [] },
+        // ResolvedAction + perform(row, ctx) from DataView
+        action: { type: Object, default: null },
+        // decorations(row, key) → Card[] with decorationKeys (the keys the page decorates)
+        decorations: { type: Function, default: null },
+        decorationKeys: { type: Array, default: () => [] },
+        // Bucket cards: bucketKeys seed empty buckets; bucketDecorations(key, rows) → Card[]
+        bucketKeys: { type: Array, default: () => [] },
+        bucketDecorations: { type: Function, default: null },
+        bucketLabel: { type: Function, default: null },
+        bucketAppData: { type: Function, default: null },
+        isLoading: { type: Boolean, default: false },
+        isAnalyzing: { type: Boolean, default: false },
+        loadingProgress: { type: Number, default: -1 },
+        loadingMessage: { type: String, default: 'Loading...' },
+        emptyMessage: { type: String, default: 'No items available' },
+        showHeader: { type: Boolean, default: true },
+        showRefresh: { type: Boolean, default: false },
+        showSearch: { type: Boolean, default: false },
+        syncSearchWithUrl: { type: Boolean, default: false },
+        containerPath: { type: String, default: '' },
+        navigateToPath: { type: Function, default: null },
+        viewSelect: { type: Object, default: null },
+        showPinButtons: { type: Boolean, default: false },
+        pinnedItems: { type: Set, default: () => new Set() },
+        showPinnedOnly: { type: Boolean, default: false },
+        showSort: { type: Boolean, default: false }
     },
+    emits: ['refresh', 'toggle-pin', 'row-action'],
     setup(props) {
-        // Initialize search composable
         const search = useSearch({
-            formatValue: null,
             syncWithUrl: props.syncSearchWithUrl,
             navigationRegistry: NavigationRegistry,
             containerPath: props.containerPath,
             appContext: Vue.inject('appContext')
         });
-
-        // Return search properties and methods to be available in component
-        return {
-            search
-        };
+        return { search };
     },
     data() {
         return {
@@ -159,164 +105,168 @@ export const CardsComponent = {
         };
     },
     computed: {
-        sortableColumns() {
-            return (this.sortColumns || [])
-                .filter(col => col && typeof col.key === 'string' && col.key.trim())
-                .filter(col => col.sortable !== false)
-                .map(col => ({
-                    key: col.key.trim(),
-                    label: col.label || col.key,
-                    type: col.type || null,
-                    sortable: true
-                }));
+        theme() {
+            return this.resolved.theme || 'gray';
         },
-        shouldShowEmpty() {
-            return !this.isLoading && !this.isAnalyzing && this.items && this.items.length === 0;
-        },
-        shouldShowCards() {
-            // Show cards if we have items, even during analysis
-            return this.items && this.items.length > 0;
-        },
-        visibleCards() {
-            // Filter rows based on search value but keep all rows including marked for deletion
-            if (!Array.isArray(this.items)) return [];
-
-            let filteredData = this.items
-                .filter(row => row); // Only filter out null/undefined rows
-
-            // Apply search filter if searchValue is provided and hideCardsOnSearch is enabled
-            if (this.search.hasActiveSearch.value && this.hideCardsOnSearch) {
-                const searchWords = this.search.searchWords.value;
-                
-                filteredData = filteredData.filter(row => {
-                    if (!row) return false;
-                    
-                    // Clear any previous matched hidden fields
-                    delete row._matchedHiddenFields;
-                    
-                    // Search in title, content, and contentFooter fields
-                    const visibleFields = [
-                        row.title,
-                        row.content,
-                        row.contentFooter
-                    ];
-                    
-                    // All search words must match somewhere in the visible fields (AND logic)
-                    const visibleMatch = searchWords.every(word =>
-                        visibleFields.some(field =>
-                            // Skip null/undefined to prevent matching "undefined" or "null" strings
-                            field != null && String(field).toLowerCase().includes(word.toLowerCase())
-                        )
-                    );
-                    
-                    if (visibleMatch) return true;
-                    
-                    // Search hidden fields if no visible match
-                    if (Array.isArray(row.hiddenSearchData) && row.hiddenSearchData.length > 0) {
-                        const hiddenMatch = searchWords.every(word =>
-                            row.hiddenSearchData.some(item =>
-                                item.value != null && String(item.value).toLowerCase().includes(word.toLowerCase())
-                            )
-                        );
-                        
-                        if (hiddenMatch) {
-                            // Mark which hidden fields matched (for display)
-                            row._matchedHiddenFields = row.hiddenSearchData.filter(item =>
-                                searchWords.some(word =>
-                                    String(item.value || '').toLowerCase().includes(word.toLowerCase())
-                                )
-                            );
-                            return true;
-                        }
-                    }
-                    
-                    return false;
+        cards() {
+            const r = this.resolved;
+            if (r.cards?.bucketBy) {
+                return bucketRowsToCards(this.data, r, {
+                    bucketKeys: this.bucketKeys,
+                    bucketDecorations: this.bucketDecorations,
+                    bucketLabel: this.bucketLabel,
+                    bucketAppData: this.bucketAppData
                 });
             }
-
-            const sortCriteria = this.isUsingDefaultSort
-                ? this.getDefaultSortCriteria()
-                : this.getCurrentSortCriteria();
-
+            return rowsToCards(this.data, r, { decorations: this.decorations, decorationKeys: this.decorationKeys });
+        },
+        // { shown, details } keys searched on member rows
+        searchTiers() {
+            return searchTiers(this.resolved);
+        },
+        hideCardsOnSearch() {
+            return this.resolved.cards?.hideOnSearch !== false;
+        },
+        // The sort select: sortable fields, or the title for bucket cards
+        sortableColumns() {
+            const r = this.resolved;
+            if (r.cards?.bucketBy) return [{ key: 'title', label: r.fieldMap.get(r.cards.bucketBy)?.label || 'Title', type: 'string' }];
+            return r.fields.filter(f => f.sortable).map(f => ({ key: f.key, label: f.label ?? f.key, type: f.type || null }));
+        },
+        sortableSignature() {
+            return this.sortableColumns.map(c => c.key).join('|');
+        },
+        defaultSortSignature() {
+            return JSON.stringify(this.resolved.sort || []);
+        },
+        shouldShowEmpty() {
+            return !this.isLoading && !this.isAnalyzing && this.cards && this.cards.length === 0;
+        },
+        shouldShowCards() {
+            return this.cards && this.cards.length > 0;
+        },
+        effectiveAction() {
+            return this.action || { kind: 'none', trigger: 'button' };
+        },
+        cardIsTrigger() {
+            const a = this.effectiveAction;
+            return a.kind !== 'none' && a.trigger === 'row';
+        },
+        hasActionButton() {
+            const a = this.effectiveAction;
+            return a.kind !== 'none' && a.trigger === 'button';
+        },
+        // Member rows searched (for bucket cards the members, not the buckets), with their card index
+        memberIndex() {
+            const rows = [];
+            const owner = [];
+            (this.cards || []).forEach((card, ci) => {
+                for (const r of (card.rows || (card.row ? [card.row] : []))) {
+                    rows.push(r);
+                    owner.push(ci);
+                }
+            });
+            return { rows, owner };
+        },
+        searchResult() {
+            return matchRows(this.memberIndex.rows, this.searchTiers, this.search.searchWords.value);
+        },
+        searchActive() {
+            return this.searchResult.active && !this.searchResult.aborted;
+        },
+        // card index → { matched, shownMatch, matchedFields[] }
+        cardMatches() {
+            const map = new Map();
+            if (!this.searchActive) return map;
+            const words = this.search.searchWords.value;
+            const { rows, owner } = this.memberIndex;
+            this.searchResult.results.forEach((r, i) => {
+                if (!r) return;
+                const ci = owner[i];
+                const entry = map.get(ci) || { matched: true, shownMatch: false, matchedFields: [] };
+                if (r.shownMatch) entry.shownMatch = true;
+                if (entry.matchedFields.length < MAX_MATCHED_FIELDS) {
+                    const row = rows[i];
+                    const keys = [...this.searchTiers.shown, ...this.searchTiers.details];
+                    for (const k of keys) {
+                        if (entry.matchedFields.length >= MAX_MATCHED_FIELDS) break;
+                        if (words.some(w => valueContains(row[k], w))) {
+                            entry.matchedFields.push({ fieldName: this.resolved.fieldMap.get(k)?.label || k, value: formatText(row[k], { key: k }) });
+                        }
+                    }
+                }
+                map.set(ci, entry);
+            });
+            // A bucket's title matches on its own (e.g. a category name with no member match)
+            (this.cards || []).forEach((card, ci) => {
+                if (map.has(ci) || !card.bucket) return;
+                const title = String(card.title || '').toLowerCase();
+                if (words.every(w => title.includes(w))) map.set(ci, { matched: true, shownMatch: true, matchedFields: [] });
+            });
+            return map;
+        },
+        visibleCards() {
+            if (!Array.isArray(this.cards)) return [];
+            let list = this.cards.map((card, ci) => ({ card, ci })).filter(({ card }) => card);
+            if (this.searchActive && this.hideCardsOnSearch) {
+                list = list.filter(({ ci }) => this.cardMatches.has(ci));
+            }
+            const sortCriteria = this.isUsingDefaultSort ? this.getDefaultSortCriteria() : this.getCurrentSortCriteria();
             if (sortCriteria.length > 0) {
-                const sortedData = [...filteredData].sort((a, b) => {
+                list = [...list].sort((a, b) => {
                     for (const criterion of sortCriteria) {
-                        const comparison = this.compareCardsByColumn(a, b, criterion.column, criterion.direction);
+                        const comparison = this.compareCardsByColumn(a.card, b.card, criterion.column, criterion.direction);
                         if (comparison !== 0) return comparison;
                     }
                     return 0;
                 });
-                filteredData = sortedData;
             }
-
-            return filteredData;
+            return list;
         },
-        // Map from visibleCards index to 0-based match index; only used in navigate mode (!hideCardsOnSearch)
-        searchMatchedCards() {
-            if (!this.search.hasActiveSearch.value || this.hideCardsOnSearch) return [];
-            const words = this.search.searchWords.value;
-            return this.visibleCards
-                .map((card, idx) => ({ card, idx }))
-                .filter(({ card }) => {
-                    const fields = [card.title, card.content, card.contentFooter];
-                    return words.every(w => fields.some(f => f != null && String(f).toLowerCase().includes(w.toLowerCase())));
-                });
-        },
+        // Navigate mode (!hideCardsOnSearch): position in visibleCards → 0-based match index
         searchMatchedCardIndices() {
             const map = new Map();
-            this.searchMatchedCards.forEach(({ idx }, matchIdx) => map.set(idx, matchIdx));
+            if (!this.searchActive || this.hideCardsOnSearch) return map;
+            let m = 0;
+            this.visibleCards.forEach(({ ci }, idx) => { if (this.cardMatches.has(ci)) map.set(idx, m++); });
             return map;
+        },
+        searchMatchCount() {
+            if (this.searchResult.aborted) return Infinity;
+            return this.hideCardsOnSearch ? this.cardMatches.size : this.searchMatchedCardIndices.size;
         },
         activeSearchIndex() { return this.search.searchIndex.value; }
     },
     watch: {
-        sortColumns: {
-            handler() {
-                const selectedColumnStillExists = this.sortableColumns.some(col => col.key === this.selectedSortKey);
-                if (!selectedColumnStillExists) {
-                    this.applyDefaultSortColumn({ force: true });
-                }
-            },
-            deep: true
-        },
-        defaultSortColumn() {
-            this.applyDefaultSortColumn({ force: true });
-        },
-        defaultSortDirection() {
-            if (this.isUsingDefaultSort) {
-                this.selectedSortDirection = this.getNormalizedDefaultSortDirection();
+        sortableSignature() {
+            const selectedColumnStillExists = this.sortableColumns.some(col => col.key === this.selectedSortKey);
+            if (!selectedColumnStillExists) {
+                this.applyDefaultSortColumn({ force: true });
             }
+        },
+        // The view's sort changed (view switch, patch): apply it
+        defaultSortSignature() {
+            this.applyDefaultSortColumn({ force: true });
         },
         activeSearchIndex(newIndex) {
             if (newIndex == null) return;
-            scrollToActiveResult(this, this.activeSearchIndex, this.searchMatchedCards.length);
+            scrollToActiveResult(this, this.activeSearchIndex, this.searchMatchedCardIndices.size);
         },
-        searchMatchedCards(newCards) {
-            if (this.activeSearchIndex != null && newCards.length > 0) {
-                scrollToActiveResult(this, this.activeSearchIndex, this.searchMatchedCards.length);
+        searchMatchedCardIndices(newMap) {
+            if (this.activeSearchIndex != null && newMap.size > 0) {
+                scrollToActiveResult(this, this.activeSearchIndex, newMap.size);
             }
         },
-        // Trigger sticky header recalculation when parameters change on the same route
-        // (parameter-only changes don't cause component remount, unlike full route changes)
+        // Parameter-only changes on the same route don't remount: recalculate the sticky header
         'appContext.currentPath'(newPath, oldPath) {
             if (!newPath || !oldPath || newPath === oldPath) return;
-            
-            // Extract base path (without query params) for both old and new
-            const oldBasePath = oldPath.split('?')[0];
-            const newBasePath = newPath.split('?')[0];
-            
-            // Only update if it's a parameter-only change on the same base route
-            // Full route changes cause component remount, so skip those
-            if (oldBasePath === newBasePath && this._stickyHeader) {
+            if (oldPath.split('?')[0] === newPath.split('?')[0] && this._stickyHeader) {
                 this._stickyHeader.reset();
-                this.$nextTick(() => {
-                    this._stickyHeader.update();
-                });
+                this.$nextTick(() => this._stickyHeader.update());
             }
         }
     },
     mounted() {
-        // Initialize search from URL and setup watcher if syncSearchWithUrl is enabled
         this.search.initializeFromUrl();
         this.search.setupUrlWatcher();
         this.applyDefaultSortColumn();
@@ -343,7 +293,6 @@ export const CardsComponent = {
                 this.stickyActive = false;
             },
         });
-        // Use requestAnimationFrame to ensure layout measurements are accurate after all DOM updates
         this.$nextTick(() => {
             requestAnimationFrame(() => {
                 if (this._stickyHeader) this._stickyHeader.setup();
@@ -354,61 +303,63 @@ export const CardsComponent = {
         this._stickyHeader?.teardown();
     },
     methods: {
-        handleCardClick(item) {
-            if (this.search.hasActiveSearch.value && !this.hideCardsOnSearch) {
-                const visibleIdx = this.visibleCards.indexOf(item);
-                const matchIdx = this.searchMatchedCardIndices.get(visibleIdx);
-                if (matchIdx !== undefined) this.search.setSearchIndex(matchIdx + 1);
-            }
-            // Call item-specific onClick handler if provided, otherwise use component-level handler
-            if (item.onClick && typeof item.onClick === 'function') {
-                item.onClick(item);
-            } else {
-                this.onItemClick(item.title || item.id);
-            }
+        highlightText(text) {
+            return this.searchActive ? this.search.highlightRawText(text) : escapeHtml(text);
         },
-        handleKeyDown(event, item) {
-            // Handle keyboard navigation for accessibility
+        highlightHtml(htmlContent) {
+            return this.searchActive ? this.search.highlightHtmlContent(htmlContent) : (htmlContent || '');
+        },
+        matchFor(ci) {
+            return this.cardMatches.get(ci) || null;
+        },
+        // Fields to list on the card: matches not visible on the card itself
+        matchedFieldsFor(ci) {
+            const m = this.matchFor(ci);
+            if (!m || m.shownMatch) return [];
+            return m.matchedFields;
+        },
+        isDetailsOnlyMatch(ci) {
+            const m = this.matchFor(ci);
+            return !!(m && !m.shownMatch);
+        },
+        isActionDisabled(card) {
+            const fn = this.effectiveAction.disabled;
+            try { return typeof fn === 'function' ? !!fn(card.row) : false; } catch { return false; }
+        },
+        selectSearchResultFor(visibleIdx) {
+            if (!this.searchActive || this.hideCardsOnSearch) return;
+            const matchIdx = this.searchMatchedCardIndices.get(visibleIdx);
+            if (matchIdx !== undefined) this.search.setSearchIndex(matchIdx + 1);
+        },
+        performAction(card) {
+            const a = this.effectiveAction;
+            if (a.kind === 'none' || this.isActionDisabled(card)) return;
+            const ctx = { searchTerm: (this.search.searchValue.value || '').trim() };
+            if (typeof a.perform === 'function') a.perform(card.row, ctx);
+            else this.$emit('row-action', card.row, ctx);
+        },
+        handleCardClick(card, visibleIdx, event) {
+            if (event?.target?.closest?.('button, a, input, select, textarea, .column-button')) return;
+            this.selectSearchResultFor(visibleIdx);
+            if (this.cardIsTrigger) this.performAction(card);
+        },
+        handleKeyDown(event, card, visibleIdx) {
+            if (event.target !== event.currentTarget) return;
             if (event.key === 'Enter' || event.key === ' ') {
                 event.preventDefault();
-                this.handleCardClick(item);
+                this.selectSearchResultFor(visibleIdx);
+                this.performAction(card);
             }
         },
         handleRefresh() {
-            //console.log('CardsComponent: Refresh requested');
             this.$emit('refresh');
         },
-        getNormalizedDefaultSortDirection() {
-            return String(this.defaultSortDirection || '').toLowerCase() === 'desc' ? 'desc' : 'asc';
-        },
-        normalizeDefaultSortColumnConfig() {
-            const config = this.defaultSortColumn;
-            if (Array.isArray(config)) return config;
-            if (typeof config === 'string' && config.trim()) return [config.trim()];
-            return [];
-        },
+        // The view's sort (resolveView normalizes it to [{ key, direction }])
         getDefaultSortCriteria() {
-            const fallbackDirection = this.getNormalizedDefaultSortDirection();
-            return this.normalizeDefaultSortColumnConfig()
-                .map((entry) => {
-                    if (typeof entry === 'string') {
-                        return { key: entry.trim(), direction: fallbackDirection };
-                    }
-
-                    if (entry && typeof entry === 'object') {
-                        const key = typeof entry.key === 'string' ? entry.key.trim() : '';
-                        const direction = String(entry.direction || fallbackDirection).toLowerCase() === 'desc' ? 'desc' : 'asc';
-                        return { key, direction };
-                    }
-
-                    return null;
-                })
-                .filter(item => item && item.key)
-                .map(item => {
-                    const column = this.sortableColumns.find(col => col.key === item.key);
-                    return column ? { column, direction: item.direction } : null;
-                })
-                .filter(Boolean);
+            return (this.resolved.sort || []).map(({ key, direction }) => ({
+                column: this.sortableColumns.find(col => col.key === key) || { key, type: null },
+                direction
+            }));
         },
         getCurrentSortCriteria() {
             if (!this.selectedSortKey) return [];
@@ -420,19 +371,20 @@ export const CardsComponent = {
             const { force = false } = options;
             const defaultSortCriteria = this.getDefaultSortCriteria();
             if (defaultSortCriteria.length === 0) return;
-
             const currentSortColumn = this.sortableColumns.find(col => col.key === this.selectedSortKey);
             const hasValidCurrentSort = !!(this.selectedSortKey && currentSortColumn);
-
             if (!force && hasValidCurrentSort) return;
-
             this.selectedSortKey = defaultSortCriteria[0].column.key;
             this.selectedSortDirection = defaultSortCriteria[0].direction;
             this.isUsingDefaultSort = true;
         },
+        cardValue(card, key) {
+            if (card?.row && Object.prototype.hasOwnProperty.call(card.row, key)) return card.row[key];
+            return card?.[key];
+        },
         compareCardsByColumn(aCard, bCard, column, direction) {
-            const aValue = aCard?.[column.key];
-            const bValue = bCard?.[column.key];
+            const aValue = this.cardValue(aCard, column.key);
+            const bValue = this.cardValue(bCard, column.key);
 
             const aMissing = aValue === null || aValue === undefined || aValue === '';
             const bMissing = bValue === null || bValue === undefined || bValue === '';
@@ -466,7 +418,6 @@ export const CardsComponent = {
             } else {
                 comparison = String(aValue).localeCompare(String(bValue), undefined, { numeric: true, sensitivity: 'base' });
             }
-
             return direction === 'desc' ? -comparison : comparison;
         },
         handleSortSelectionChange() {
@@ -477,121 +428,109 @@ export const CardsComponent = {
             this.selectedSortDirection = 'asc';
             this.isUsingDefaultSort = false;
         },
-        isCardAnalyzing(cardIndex) {
-            // Check if this card is currently being analyzed
-            const card = this.visibleCards[cardIndex];
-            return card && card.AppData && card.AppData._analyzing === true;
+        isCardAnalyzing(card) {
+            return !!(card && card.AppData && card.AppData._analyzing === true);
         },
-        handlePinClick(event, item) {
-            // Prevent card click event from firing
+        handlePinClick(event, card) {
             event.stopPropagation();
-            this.$emit('toggle-pin', item.title || item.id);
+            this.$emit('toggle-pin', card.title || card.id);
         },
-        isPinned(item) {
-            return this.pinnedItems.has(item.title || item.id);
+        isPinned(card) {
+            return this.pinnedItems.has(card.title || card.id);
         }
     },
     template: html`
-        <slot>
-            <div style="width: 100%;">
+        <div style="width: 100%;">
             <template v-if="showHeader">
             <div ref="stickySpacerEl" class="sticky-header-spacer" :style="stickyActive ? { height: stickySpacerHeight + 'px', marginBottom: 'var(--padding-md)' } : { height: '0', marginBottom: '0' }"></div>
             <div ref="stickyWrapperEl" class="sticky-header-wrapper" :style="stickyActive ? { position: 'fixed', left: stickyLeft + 'px', width: stickyWidth + 'px', zIndex: '1000' } : { marginBottom: 'var(--padding-md)' }">
-            <div key="content-header" :class="['content-header', theme]">
-                <slot 
-                    name="header-area" 
-                ></slot>
-                <div class="spacer"></div>
-                <div v-if="showRefresh || showSearch || showSort || (viewModes && containerPath && navigateToPath)" class="button-bar">
-                    <SearchBoxComponent
-                        v-if="showSearch"
-                        :search="search"
-                        :match-count="searchMatchedCards.length"
-                        :show-navigate="!hideCardsOnSearch"
-                    />
-                    <select v-if="showSort && sortableColumns.length > 0" v-model="selectedSortKey" @change="handleSortSelectionChange" class="search-input" title="Sort cards">
-                        <option v-if="!selectedSortKey" value="">Default sort</option>
-                        <option v-for="col in sortableColumns" :key="col.key" :value="col.key">Sort by: {{ col.label }}</option>
-                    </select>
-                    <button 
-                        v-if="showRefresh" 
-                        @click="handleRefresh" 
-                        :disabled="isLoading" 
-                        class="refresh-button"
-                    >
-                        {{ isLoading ? 'Loading...' : 'Refresh' }}
-                    </button>
-                    <ViewChangeComponent
-                        v-if="viewModes && containerPath && navigateToPath"
-                        :container-path="containerPath"
-                        :navigate-to-path="navigateToPath"
-                        :view-modes="viewModes"
-                    />
-                </div>
-                <!-- Loading/Analysis Progress Indicator -->
-                <LoadingBarComponent
+                <ContentHeaderComponent
+                    :theme="theme"
+                    :search="search"
+                    :show-search="showSearch"
+                    :match-count="searchMatchCount"
+                    :show-navigate="!hideCardsOnSearch"
+                    :show-refresh="showRefresh"
                     :is-loading="isLoading"
+                    :view-select="viewSelect"
+                    :embedded-loading="true"
                     :is-analyzing="isAnalyzing"
-                    :percent-complete="loadingProgress"
-                    class="embedded"
-                />
-            </div>
+                    :loading-progress="loadingProgress"
+                    @refresh="handleRefresh"
+                >
+                    <template #header-area><slot name="header-area"></slot></template>
+                    <template #actions>
+                        <select v-if="showSort && sortableColumns.length > 0" v-model="selectedSortKey" @change="handleSortSelectionChange" class="search-input" title="Sort cards">
+                            <option v-if="!selectedSortKey" value="">Default sort</option>
+                            <option v-for="col in sortableColumns" :key="col.key" :value="col.key">Sort by: {{ col.label }}</option>
+                        </select>
+                    </template>
+                </ContentHeaderComponent>
             </div>
             </template>
 
             <!-- Cards Grid (shows during analysis with progressive updates) -->
             <div ref="cardsGridEl" v-if="shouldShowCards" class="cards-grid">
                 <div
-                    v-for="(item, idx) in visibleCards"
-                    :key="(item.id || item.sheetId || item.title) + '_' + idx"
+                    v-for="({ card, ci }, idx) in visibleCards"
+                    :key="(card.id ?? card.title) + '_' + ci"
                     :data-search-match-idx="searchMatchedCardIndices.get(idx)"
-                    :class="['card', 'clickable', { 'analyzing': isCardAnalyzing(idx), 'search-active-result': !hideCardsOnSearch && searchMatchedCardIndices.get(idx) === search.searchIndex.value - 1 }, item.cardClass || theme]"
-                    @click="handleCardClick(item)"
-                    @keydown="handleKeyDown($event, item)"
-                    :title="item.title"
-                    :aria-label="item.title + (item.content ? ': ' + item.content : '')"
+                    :class="['card', { 'clickable': cardIsTrigger, 'analyzing': isCardAnalyzing(card), 'search-active-result': !hideCardsOnSearch && searchMatchedCardIndices.get(idx) === search.searchIndex.value - 1, 'details-match': cardIsTrigger && isDetailsOnlyMatch(ci) }, card.cardClass || theme]"
+                    :tabindex="cardIsTrigger ? 0 : null"
+                    @click="handleCardClick(card, idx, $event)"
+                    @keydown="handleKeyDown($event, card, idx)"
+                    :title="card.title"
+                    :aria-label="card.title"
                 >
                     <div class="content-header">
-                        <h3 v-html="search.highlightRawText(item.title)"></h3>
-                        <slot v-if="showPinButtons">
-                            <button
-                                @click="handlePinClick($event, item)"
-                                :class="['column-button', { 'active': isPinned(item) }]"
-                                :title="isPinned(item) ? 'Unpin' : 'Pin'"
-                            >
-                                <span class="material-symbols-outlined" :title="isPinned(item) ? 'Unpin' : 'Pin'">{{ isPinned(item) ? 'keep' : 'keep_off' }}</span>
-                            </button>
-                        </slot>
+                        <h3 v-html="highlightText(card.title)"></h3>
+                        <button
+                            v-if="showPinButtons"
+                            @click="handlePinClick($event, card)"
+                            :class="['column-button', { 'active': isPinned(card) }]"
+                            :title="isPinned(card) ? 'Unpin' : 'Pin'"
+                        >
+                            <span class="material-symbols-outlined">{{ isPinned(card) ? 'keep' : 'keep_off' }}</span>
+                        </button>
                     </div>
-                    <div class="content" v-if="item.content">
-                        <div v-html="search.highlightHtmlContent(item.content)"></div>
+                    <div class="content" v-if="card.content">
+                        <div v-html="highlightHtml(card.content)"></div>
                     </div>
-                    <!-- Show matched hidden fields when search is active and search term is > 3 chars -->
-                    <div v-if="search.hasActiveSearch.value && search.searchValue.value.length > 3 && item._matchedHiddenFields && item._matchedHiddenFields.length > 0" class="content hidden-matches">
-                        <div v-for="field in item._matchedHiddenFields" :key="field.fieldName + '_' + field.value" class="match-indicator">
-                            <strong>{{ field.fieldName }}:</strong> 
-                            <span v-html="search.highlightRawText(field.value)"></span>
+                    <!-- Matched fields not visible on the card (details fields, bucket member fields) -->
+                    <div v-if="matchedFieldsFor(ci).length > 0" class="content hidden-matches">
+                        <div v-for="field in matchedFieldsFor(ci)" :key="field.fieldName + '_' + field.value" class="match-indicator">
+                            <strong>{{ field.fieldName }}:</strong>
+                            <span v-html="highlightText(field.value)"></span>
                         </div>
                     </div>
-                    <div class="content-footer" v-if="item.contentFooter || (item.footerActions && item.footerActions.length)">
-                        <div v-if="item.contentFooter" v-html="search.highlightHtmlContent(item.contentFooter)"></div>
-                        <div v-if="item.footerActions && item.footerActions.length" class="button-bar">
+                    <div class="content-footer" v-if="card.contentFooter || (card.footerActions && card.footerActions.length) || hasActionButton">
+                        <div v-if="card.contentFooter" v-html="highlightHtml(card.contentFooter)"></div>
+                        <div v-if="(card.footerActions && card.footerActions.length) || hasActionButton" class="button-bar">
                             <button
-                                v-for="action in item.footerActions"
+                                v-for="action in (card.footerActions || [])"
                                 :key="action.label"
                                 :class="['card', action.class || 'red']"
                                 :disabled="!action.onClick"
+                                :title="action.title || null"
                                 @click.stop="action.onClick && action.onClick()"
                                 v-html="action.label"
                             ></button>
+                            <!-- Primary action button (button trigger) -->
+                            <button
+                                v-if="hasActionButton"
+                                :class="['button-symbol', theme, 'card-action-button', isDetailsOnlyMatch(ci) ? 'search-match' : '']"
+                                :disabled="isActionDisabled(card)"
+                                :title="effectiveAction.label || 'Details'"
+                                @click.stop="performAction(card)"
+                            >{{ effectiveAction.label || effectiveAction.icon || '☷' }}</button>
                         </div>
                     </div>
                 </div>
-                
-                <!--show a message "showing x of y cards-->
-                <div v-if="search.hasActiveSearch.value && visibleCards.length !== items.length" class="card" style="align-self: start; height: auto; gap:var(--padding-md);">
+
+                <!-- "Showing x of y" when a search filters cards -->
+                <div v-if="searchActive && hideCardsOnSearch && visibleCards.length !== cards.length" class="card" style="align-self: start; height: auto; gap:var(--padding-md);">
                     <p>
-                        Showing {{ visibleCards.length }} of {{ items.length }} cards.
+                        Showing {{ visibleCards.length }} of {{ cards.length }} cards.
                     </p>
                     <button
                         @click="search.clearSearch"
@@ -601,17 +540,14 @@ export const CardsComponent = {
                         Show all
                     </button>
                 </div>
-
             </div>
 
-            
-            <!-- Initial Loading State (no items yet) -->
+            <!-- Loading / empty -->
             <div v-if="isLoading || isAnalyzing" class="loading-message">
                 <img v-if="!showHeader && !shouldShowCards" src="assets/loading.gif" alt="Loading..."/>
                 <p>{{ loadingMessage || 'Loading...' }}</p>
             </div>
             <p v-else-if="shouldShowEmpty" class="empty-message">{{ emptyMessage }}</p>
-            </div>
-        </slot>
+        </div>
     `
 };

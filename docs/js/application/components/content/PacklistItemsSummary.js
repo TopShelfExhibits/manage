@@ -1,11 +1,47 @@
-import { html, TableComponent, Requests, getReactiveStore, createAnalysisConfig, NavigationRegistry, ItemImageComponent, InventoryCategoryFilter, Priority, invalidateCache, todayISOString, OverlappingShowsModal } from '../../index.js';
+import { html, DataView, Requests, getReactiveStore, createAnalysisConfig, NavigationRegistry, ItemImageComponent, InventoryCategoryFilter, Priority, invalidateCache, todayISOString } from '../../index.js';
+import { itemImageStyle } from '../../utils/views/viewStyles.js';
+
+// What each summary key is. image holds no data: the thumbnail column (see itemImageStyle).
+const SUMMARY_FIELDS = [
+    { key: 'image', label: 'IMG' },
+    { key: 'itemId', label: 'Item#', type: 'item' },
+    { key: 'quantity', label: 'Quantity' },
+    { key: 'available', label: 'Inv. Qty.' },
+    { key: 'tabName', label: 'Tab' },
+    { key: 'remaining', label: 'Remaining', format: 'number', type: 'number' },
+    { key: 'overlappingShows', label: 'Overlapping Shows' }
+];
+
+// Packlist items summary view (views-and-renderers-plan §5, Phase 4)
+const SUMMARY_VIEWS = {
+    id: 'packlist-items-summary',
+    default: 'table',
+    theme: '',
+    views: [{
+        id: 'table',
+        name: 'Items',
+        layout: 'table',
+        columns: ['image', 'itemId', 'quantity', 'available', 'remaining', 'overlappingShows'],
+        hidden: ['tabName'],
+        sortable: ['itemId', 'quantity', 'available', 'tabName', 'remaining'],
+        // Item# is the primary action's button (the item page, purple); Overlapping Shows is a list
+        // of show buttons (four inline, more in a modal)
+        style: {
+            image: itemImageStyle('itemId'),
+            itemId: { cell: 'action', cellOptions: { class: 'purple' } },
+            remaining: { color: 'auto' },
+            overlappingShows: { cell: 'showList', cellOptions: { max: 4 }, columnColor: 'gray' }
+        },
+        table: { sticky: { start: ['image'] }, hideRowsOnSearch: false }
+    }]
+};
 
 /**
  * Component for displaying item quantities summary with progressive analysis
  * Shows: Item ID, Quantity, Available, Remaining, Overlapping Shows
  */
 export const PacklistItemsSummary = {
-    components: { TableComponent, ItemImageComponent, InventoryCategoryFilter, OverlappingShowsModal },
+    components: { DataView, ItemImageComponent, InventoryCategoryFilter },
     props: {
         projectIdentifier: { type: String, required: true },
         containerPath: { type: String, default: '' },
@@ -23,54 +59,33 @@ export const PacklistItemsSummary = {
             projectReturnDate: null,
             error: null,
             selectedCategoryFilter: null, // Filter by inventory category
-            NavigationRegistry // Make NavigationRegistry available in template
+            NavigationRegistry, // Make NavigationRegistry available in template
+            SUMMARY_FIELDS,
+            SUMMARY_VIEWS
         };
     },
     computed: {
-        tableColumns() {
-            return [
-                { 
-                    key: 'image', 
-                    labelHtml: '<span class="material-symbols-outlined">imagesmode</span>',
-                    label: 'IMG',
-                    width: 1,
-                    sortable: false,
-                    sticky: 'start'
-                },
-                { key: 'itemId', label: 'Item#', type: 'item', sortable: true},
-                { key: 'quantity', label: 'Quantity', sortable: true},
-                { key: 'available', label: 'Inv. Qty.', sortable: true},
-                { key: 'tabName', label: 'Tab', sortable: true},
-                { 
-                    key: 'remaining', 
-                    label: 'Remaining', 
-                    format: 'number',
-                    autoColor: true,
-                    sortable: true
-                },
-                { key: 'overlappingShows', label: 'Overlapping Shows', sortable: false, columnClass: 'gray' }
-            ];
-        },
         isLoading() {
             return this.itemsSummaryStore ? this.itemsSummaryStore.isLoading : false;
         },
         tableData() {
             const data = this.itemsSummaryStore ? this.itemsSummaryStore.data : [];
-            
+
             // Apply category filter if selected
             if (this.selectedCategoryFilter) {
                 return data.filter(item => item.tabName === this.selectedCategoryFilter);
             }
-            
+
             return data;
         },
 
-        currentSearchText() {
-            const params = NavigationRegistry.getParametersForContainer(
-                this.containerPath || ('packlist/' + this.projectIdentifier + '/details'),
-                this.appContext?.currentPath
-            );
-            return params?.searchText || '';
+        // Primary action: the item page, drawn as the Item# button (action cell)
+        itemAction() {
+            return {
+                to: (row) => this.itemPagePath(row),
+                disabled: (row) => !row.tabName || !row.itemId,
+                title: 'View item timeline'
+            };
         }
     },
     watch: {
@@ -152,8 +167,9 @@ export const PacklistItemsSummary = {
             ], true);
         },
 
-        navigateToItemPage(row) {
-            if (!row.tabName || !row.itemId) return;
+        // The item's page, filtered to this show's ship-to-return dates when known
+        itemPagePath(row) {
+            if (!row.tabName || !row.itemId) return null;
             const basePath = `inventory/${row.tabName.toLowerCase()}/${row.itemId}`;
             const dateFilters = (this.projectShipDate && this.projectReturnDate)
                 ? [
@@ -161,10 +177,7 @@ export const PacklistItemsSummary = {
                     { column: 'Date', value: this.projectReturnDate, type: 'before' }
                   ]
                 : null;
-            const finalPath = dateFilters
-                ? NavigationRegistry.buildPath(basePath, { dateFilters })
-                : basePath;
-            this.appContext.navigateToPath(finalPath);
+            return dateFilters ? NavigationRegistry.buildPath(basePath, { dateFilters }) : basePath;
         },
 
         handleCategorySelected(categoryName) {
@@ -173,22 +186,22 @@ export const PacklistItemsSummary = {
 
         navigateBackToPacklist() {
             if (!this.projectIdentifier || !this.appContext?.navigateToPath) return;
-            
+
             // Guard: Only navigate if we're still on the details page
             const currentPath = this.appContext.currentPath?.split('?')[0] || '';
             const expectedPath = `packlist/${this.projectIdentifier}/details`;
-            
+
             if (!currentPath.includes(expectedPath)) {
                 //console.log('[PacklistItemsSummary] Skipping navigation - user already navigated away');
                 return;
             }
-            
+
             this.appContext.navigateToPath(`packlist/${this.projectIdentifier}`);
         },
 
         async loadShowDetails() {
             if (!this.projectIdentifier) return;
-            
+
             try {
                 this.showDetails = await Requests.getShowDetails(this.projectIdentifier);
             } catch (err) {
@@ -197,18 +210,6 @@ export const PacklistItemsSummary = {
             }
         },
 
-        openOverlappingShowsModal(shows) {
-            this.$modal.custom(OverlappingShowsModal, { shows, modalClass: 'hamburger-menu small-menu'}, `${shows.length} Overlapping Shows`, { modalClass: 'hamburger-menu' });
-        },
-
-        showsMatchSearch(shows) {
-            if (!this.currentSearchText || !this.currentSearchText.trim() || !Array.isArray(shows)) {
-                return false;
-            }
-            const searchWords = this.currentSearchText.toLowerCase().trim().split(/\s+/).filter(word => word.length > 0);
-            const showsText = shows.join(' ').toLowerCase();
-            return searchWords.some(word => showsText.includes(word));
-        }
     },
     template: html`
         <slot class="packlist-items-summary">
@@ -221,21 +222,20 @@ export const PacklistItemsSummary = {
                     <span v-else>...</span>
                 </div>
             </div>
-            
-            <TableComponent
-                :data="tableData"
-                :columns="tableColumns"
-                :hide-columns="['tabName']"
+
+            <DataView
+                :fields="SUMMARY_FIELDS"
+                :rows="tableData"
+                :registry="SUMMARY_VIEWS"
+                :action="itemAction"
                 :show-search="true"
                 :showRefresh="false"
                 :sync-search-with-url="true"
                 :container-path="containerPath || 'packlist/' + projectIdentifier + '/details'"
                 :navigate-to-path="appContext.navigateToPath"
-                :hide-rows-on-search="false"
-                :readonly="true"
                 :is-loading="itemsSummaryStore ? itemsSummaryStore.isLoading : false"
                 :is-analyzing="itemsSummaryStore ? itemsSummaryStore.isAnalyzing : false"
-                :loading-message="itemsSummaryStore && itemsSummaryStore.isLoading ? itemsSummaryStore.analysisMessage.loadingMessage : (itemsSummaryStore ? itemsSummaryStore.analysisMessage : null)"
+                :loading-message="itemsSummaryStore?.isLoading ? itemsSummaryStore.loadingMessage : itemsSummaryStore?.analysisMessage"
                 :loading-progress="itemsSummaryStore && itemsSummaryStore.isAnalyzing ? itemsSummaryStore.analysisProgress : -1"
                 empty-message="No item data available"
                 class="items-summary-table"
@@ -248,56 +248,7 @@ export const PacklistItemsSummary = {
                         @category-selected="handleCategorySelected"
                     />
                 </template>
-                <template #default="{ row, column }">
-                    <slot v-if="column.key === 'image'">
-                        <ItemImageComponent 
-                            :imageSize="48"
-                            :itemNumber="row.itemId"
-                        />
-                    </slot>
-                    <slot v-else-if="column.key === 'itemId'">
-                        <button v-if="row.tabName" 
-                                @click="navigateToItemPage(row)"
-                                class="purple card"
-                                :title="'View timeline for ' + row.itemId">
-                            {{ row.itemId }}
-                        </button>
-                        <span v-else>{{ row.itemId }}</span>
-                    </slot>
-                    <slot v-else-if="column.key === 'overlappingShows'">
-                        <slot v-if="!Array.isArray(row.overlappingShows) || row.overlappingShows.length === 0">
-                            —
-                        </slot>
-                        <slot v-else-if="row.overlappingShows.length <= 4" class="overlapping-shows-buttons">
-                            <button v-for="packlistId in row.overlappingShows" 
-                                    :key="packlistId"
-                                    @click="appContext.navigateToPath('packlist/' + packlistId + '/details')"
-                                    class="card white">
-                                {{ packlistId }}
-                            </button>
-                        </slot>
-                        <slot v-else>
-                            <span style="position: absolute; left: -9999px; opacity: 0; pointer-events: none;">{{ row.overlappingShows.join(' ') }}</span>
-                            <button @click="openOverlappingShowsModal(row.overlappingShows)" 
-                                    :class="['card', 'white', 'font-black', showsMatchSearch(row.overlappingShows) ? 'search-highlight' : '']">
-                                {{ row.overlappingShows.length }} shows
-                            </button>
-                        </slot>
-                    </slot>
-                    <!--div v-else-if="column.key === 'remaining'">
-                        {{ row.remaining !== null ? row.remaining : '...' }}
-                    </div>
-                    <div v-else-if="column.key === 'available'">
-                        {{ row.available !== null ? row.available : '...' }}
-                    </div>
-                    <div v-else-if="column.key === 'tabName'">
-                        {{ row.tabName !== null ? row.tabName : '...' }}
-                    </div-->
-                    <div v-else>
-                        {{ row[column.key] }}
-                    </div>
-                </template>
-            </TableComponent>
+            </DataView>
         </slot>
         `
 };

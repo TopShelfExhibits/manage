@@ -1,4 +1,6 @@
-import { html, TableComponent, Requests, getReactiveStore, NavigationRegistry, createAnalysisConfig, invalidateCache, Priority, tableRowSelectionState, EditHistoryUtils, authState, undoRegistry, todayISOString, getAutoColorClass } from '../../index.js';
+import { html, TableComponent, DataView, Requests, getReactiveStore, NavigationRegistry, createAnalysisConfig, invalidateCache, Priority, tableRowSelectionState, EditHistoryUtils, authState, undoRegistry, todayISOString, getAutoColorClass } from '../../index.js';
+import { resolveView } from '../../utils/views/resolveView.js';
+import { itemImageStyle } from '../../utils/views/viewStyles.js';
 import { ItemImageComponent } from './InventoryTable.js';
 import { sheetLockMixin } from '../../utils/sheetLockMixin.js';
 import { packlistIndexResolutionMixin } from '../interface/IndexResolutionModal.js';
@@ -137,6 +139,36 @@ const RowOptionsMenuComponent = {
 };
 
 // Use getReactiveStore for packlist table data
+// Item rows inside each crate (views-and-renderers-plan §4.12, §5). Resolved once and shared by
+// every crate's nested table. Pack/Check are hidden on screen and shown in print (variants.print).
+const PACKLIST_ITEMS_VIEW = {
+    id: 'packlist-items',
+    layout: 'table',
+    hidden: ['Pack', 'Check', 'Extracted Item', 'Extracted Qty'],
+    table: { hideRowsOnSearch: false },
+    style: {
+        '*': { width: 40, font: 'narrow' },
+        'Description': { width: 200, font: '' },
+        'Packing/shop notes': { width: 200, font: '' }
+    },
+    variants: { print: { hidden: ['Extracted Item', 'Extracted Qty'] } }
+};
+
+// Editable headers; edits apply only while the page is in edit mode (tableEditMode 'batch')
+const CRATE_EDITABLE = ['Type', 'L', 'W', 'H', 'Weight'];
+const ITEM_EDITABLE = ['Description', 'Packing/shop notes'];
+
+// The crates table's row number column (drawn by the page: the visible row count)
+const PIECE_NUMBER = 'Piece #';
+
+// Width/font by header for the crates table (structural class packlist-table, R3.6)
+function crateColumnStyle(label) {
+    if (label === PIECE_NUMBER) return { width: 10, font: 'narrow' };
+    const width = ['Description', 'Packing/shop notes'].includes(label) ? 200 : ['L', 'W', 'H'].includes(label) ? 20 : 40;
+    const font = ['Pack', 'Check', 'Weight'].includes(label) ? 'narrow' : undefined;
+    return font ? { width, font } : { width };
+}
+
 export const PacklistTable = {
     mixins: [sheetLockMixin, packlistIndexResolutionMixin],
     components: { TableComponent },
@@ -151,8 +183,8 @@ export const PacklistTable = {
             packlistTableStore: null,
             isPrinting: false,
             databaseItemHeaders: null,
-            hiddenColumns: ['Pack', 'Check', 'Extracted Item', 'Extracted Qty'],
             NavigationRegistry,
+            PIECE_NUMBER,
             lockNamespace: 'PACK_LISTS',
             itemGroupVisibilityOverride: null,
             descriptionOnlyTabs: [],
@@ -160,6 +192,35 @@ export const PacklistTable = {
         };
     },
     computed: {
+        // Items view resolved once (print variant while printing); shared by all crates
+        itemsResolved() {
+            const fields = this.itemHeaders.map(key => ({ key, label: key, editable: ITEM_EDITABLE.includes(key) }));
+            return resolveView(fields, PACKLIST_ITEMS_VIEW, { print: this.isPrinting, editMode: this.tableEditMode });
+        },
+        tableEditMode() {
+            return this.editMode ? 'batch' : 'none';
+        },
+        // Item headers hidden by the items view (screen: Pack, Check, Extracted…; print: Extracted…)
+        hiddenColumns() {
+            return this.itemHeaders.filter(k => this.itemsResolved.hidden.has(k));
+        },
+        // Crates view: the sheet's crate headers, in sheet order. Piece # and the nested item table
+        // are page cells (#cell); the item table's cell spans the item headers after it.
+        cratesResolved() {
+            const fields = this.mainHeaders.map(key => ({ key, label: key, editable: CRATE_EDITABLE.includes(key) }));
+            const style = {};
+            for (const key of this.mainHeaders) style[key] = crateColumnStyle(key);
+            if (style[PIECE_NUMBER]) style[PIECE_NUMBER].cell = 'slot';
+            if (style[this.itemHeadersStart]) Object.assign(style[this.itemHeadersStart], { cell: 'slot', colspan: this.itemHeaders.length });
+            return resolveView(fields, {
+                id: 'packlist-crates',
+                layout: 'table',
+                className: 'packlist-table',
+                columns: this.mainHeaders,
+                style,
+                table: { hideRowsOnSearch: false }
+            }, { editMode: this.tableEditMode });
+        },
         mainHeaders() {
             // Use headers from the first crate if available, else use default schema
             const crates = this.mainTableData;
@@ -174,37 +235,6 @@ export const PacklistTable = {
             // Default schema when no data is available
             return ['Piece #', 'Type', 'L', 'W', 'H', 'Weight', 'Pack', 'Check', 'Description', 'Packing/shop notes'];
         },
-        mainColumns() {
-            return this.mainHeaders.map((label, idx) => {
-                if (label === 'Piece #') {
-                    return { key: label, label, editable: false, isIndex: true, width: 10, font: 'narrow'};
-                }
-                // Only make columns editable if editMode is true
-                const isEditable = this.editMode && ['Type','L','W','H','Weight'].includes(label);
-
-                // When not in edit mode, move Type, L, W, H, Weight to details
-                //const isDetailsColumn = !this.editMode && ['Type','L','W','H','Weight'].includes(label);
-
-                if (label === this.itemHeadersStart) {
-                    return {
-                        key: label,
-                        label,
-                        width: ['Description','Packing/shop notes'].includes(label) ? 200 : ['L','W','H'].includes(label) ? 20 : 40,
-                        colspan: this.itemHeaders.length,
-                        font: ['Pack','Check','Weight'].includes(label) ? 'narrow' : undefined
-                    };
-                } else {
-                    return {
-                        key: label,
-                        label,
-                        editable: isEditable,
-                        details: null,
-                        width:  ['Description','Packing/shop notes'].includes(label) ? 200 : ['L','W','H'].includes(label) ? 20 : 40,
-                        font: ['Pack','Check','Weight'].includes(label) ? 'narrow' : undefined
-                    };
-                };
-            });
-        },
         mainTableData() {
             // Use the reactive array directly from the store
             if (this.packlistTableStore && Array.isArray(this.packlistTableStore.data)) {
@@ -217,6 +247,10 @@ export const PacklistTable = {
                 return JSON.parse(JSON.stringify(this.packlistTableStore.originalData));
             }
             return [];
+        },
+        // Loaded crates by row id, so a moved crate's item table compares with its own loaded items
+        originalCratesById() {
+            return new Map(this.originalData.map(crate => [crate?.AppData?._rowId, crate]));
         },
         itemHeaders() {
             // Try to infer item headers from the first crate's Items array
@@ -241,7 +275,9 @@ export const PacklistTable = {
             return this.packlistTableStore ? this.packlistTableStore.isLoading : false;
         },
         loadingMessage() {
-            return this.packlistTableStore ? (this.packlistTableStore.loadingMessage || 'Loading data...') : 'Loading data...';
+            const store = this.packlistTableStore;
+            if (store?.isAnalyzing && !store.isLoading) return store.analysisMessage || 'Analyzing data...';
+            return store?.loadingMessage || 'Loading data...';
         },
         // Check if data has been modified (uses reactive store's computed property)
         isDirty() {
@@ -377,6 +413,13 @@ export const PacklistTable = {
                 this.$notify.setBanners(this.containerPath, newBanners);
             },
             immediate: true
+        },
+        // Entering edit is a parameter-only change (the page isn't remounted), so re-check the
+        // lock here as mount used to, and leave edit mode when another user holds it
+        async editMode(isEdit) {
+            if (!isEdit || !this.tabName) return;
+            await this.checkLockStatus();
+            if (this.editMode && this.lockedByOther) this.onForeignLockWhileClean();
         },
         isDirty(newValue) {
             if (newValue && !this.editMode && this.tabName && !this.lockedByOther && this.lockCheckComplete) {
@@ -621,7 +664,8 @@ export const PacklistTable = {
             this.$modal.alert(`Cannot edit: this pack list is locked by ${lockInfo?.user || 'another user'}`, 'Locked');
         },
         
-        async handleCellEdit(rowIdx, colIdx, value, type = 'main') {
+        // cell-edit contract: (rowIndex, columnKey, value)
+        async handleCellEdit(rowIdx, colKey, value, type = 'main') {
             const user = authState.user?.email;
             if (user && this.tabName) {
                 if (!await this.acquireLockForEdit()) {
@@ -644,7 +688,6 @@ export const PacklistTable = {
             }
             
             if (type === 'main') {
-                const colKey = this.mainColumns[colIdx]?.key;
                 if (colKey && this.mainTableData[rowIdx]) {
                     this.mainTableData[rowIdx][colKey] = value;
                 }
@@ -703,7 +746,7 @@ export const PacklistTable = {
             // position: { position: 'above'|'below', targetIndex: number } or null
             const tabName = this.tabName; // Capture for use inside modal
             const InventorySelectorModal = {
-                components: { TableComponent, ItemImageComponent },
+                components: { DataView, ItemImageComponent },
                 props: ['onAddEmpty', 'onItemSelected', 'tabName'],
                 data() {
                     return {
@@ -714,14 +757,35 @@ export const PacklistTable = {
                     };
                 },
                 computed: {
-                    columns() {
+                    // image holds no data: the thumbnail column (see itemImageStyle)
+                    fields() {
                         return [
-                            { key: 'image', labelHtml: '<span class="material-symbols-outlined">imagesmode</span>', label: 'IMG', width: 1, sortable: false, sticky: 'start' },
-                            { key: 'itemNumber', label: 'Item#', type: 'item', width: 120, sortable: true },
-                            { key: 'description', label: 'Description', sortable: true },
-                            { key: 'quantity', label: 'Available', width: 100, sortable: true },
-                            { key: 'actions', label: '', width: 100, sortable: false }
+                            { key: 'image', label: 'IMG' },
+                            { key: 'itemNumber', label: 'Item#', type: 'item' },
+                            { key: 'description', label: 'Description' },
+                            { key: 'quantity', label: 'Available' }
                         ];
+                    },
+                    // Single-view registry in a modal (no URL); adding the item is the primary action (a row click)
+                    registry() {
+                        return {
+                            id: 'packlist-inventory-selector',
+                            default: 'table',
+                            theme: 'purple',
+                            views: [{
+                                id: 'table', name: 'Inventory', layout: 'table',
+                                columns: ['image', 'itemNumber', 'description', 'quantity'],
+                                sortable: ['itemNumber', 'description', 'quantity'],
+                                style: { image: itemImageStyle('itemNumber'), itemNumber: { width: 120 }, quantity: { width: 100 } },
+                                table: { sticky: { start: ['image'] } },
+                                sort: { key: 'itemNumber', dir: 'asc' },
+                                // Clicking a row adds the item
+                                action: 'row'
+                            }]
+                        };
+                    },
+                    addAction() {
+                        return { run: (row) => this.selectItem(row), label: '+ Add Item' };
                     },
                     allInventoryData() {
                         return this.inventoryStore ? this.inventoryStore.data : [];
@@ -784,19 +848,18 @@ export const PacklistTable = {
                 },
                 template: html`
                     <div v-if="error" class="error-message">{{ error }}</div>
-                    <TableComponent
+                    <DataView
                         v-else
-                        theme="purple hover-highlight"
-                        :data="inventoryData"
-                        :originalData="originalData"
-                        :columns="columns"
+                        :fields="fields"
+                        :rows="inventoryData"
+                        :registry="registry"
+                        :action="addAction"
+                        :original-data="originalData"
                         :isLoading="isLoading"
                         :isAnalyzing="inventoryStore && inventoryStore.isAnalyzing"
                         :showSearch="true"
                         :showRefresh="false"
                         :showFooter="true"
-                        :sortable="true"
-                        default-sort-column="itemNumber"
                         :emptyMessage="'No inventory items found'"
                         :loadingMessage="inventoryStore && inventoryStore.isAnalyzing ? 'Loading images...' : 'Loading inventory...'"
                     >
@@ -808,29 +871,15 @@ export const PacklistTable = {
                                 <option v-for="cat in availableCategories" :key="cat" :value="cat">{{ cat.charAt(0) + cat.slice(1).toLowerCase() }}</option>
                             </select>
                         </template>
-                        <template #default="{ row, column }">
-                            <template v-if="column.key === 'image'">
-                                <ItemImageComponent
-                                    :itemNumber="row.itemNumber"
-                                    :imageSize="48"
-                                    :editable="false"
-                                />
-                            </template>
-                            <template v-else-if="column.key === 'actions'">
-                                <button @click="selectItem(row)" class="purple">+ Add Item</button>
-                            </template>
-                            <template v-else>
-                                {{ row[column.key] }}
-                            </template>
-                        </template>
-                    </TableComponent>
+                    </DataView>
                 `
             };
 
             // Show the inventory selector modal
             this.$modal.custom(InventorySelectorModal, {
                 onItemSelected: (item) => this.addItemFromInventory(crateIdx, item, position),
-                modalClass: 'page-menu',
+                size: 'page',
+                tall: true,
                 onAddEmpty: () => this.addEmptyItem(crateIdx, position),
                 tabName
             }, 'Add Item');
@@ -899,11 +948,6 @@ export const PacklistTable = {
             await this.packlistTableStore.save('Saving packlist...');
         },
 
-        handleInnerTableDirty(isDirty, rowIndex) {
-            if (this.$refs.mainTableComponent && this.$refs.mainTableComponent.checkDirtyCells) {
-                this.$refs.mainTableComponent.checkDirtyCells();
-            }
-        },
 
         /**
          * Get card color for an alert
@@ -1179,7 +1223,8 @@ export const PacklistTable = {
                     if (!item?.AppData) return;
                     delete item.AppData.cadSourceAlert;
                 },
-                modalClass: 'reading-menu'
+                modalClass: 'reading-menu',
+                size: 'wide'
             }, 'CAD Source Change');
         },
 
@@ -1241,7 +1286,8 @@ export const PacklistTable = {
                     const newDescription = `(${extractedQty}) ${itemNumber} ${inventoryDescription}`;
                     this.applyItemChanges(item, [{ n: 'Description', o: newDescription }], 'descriptionAlert');
                 },
-                modalClass: 'reading-menu'
+                modalClass: 'reading-menu',
+                size: 'wide'
             }, `${itemNumber}`);
         },
 
@@ -1295,11 +1341,8 @@ export const PacklistTable = {
             //if not on the packlist page, navigate to the packlist page first
             this.$emit('navigate-to-path', this.containerPath);
 
+            // The items view's print variant shows Pack and Check while printing
             this.isPrinting = true;
-            
-            // Temporarily remove 'Pack' and 'Check' from hidden columns for printing
-            const originalHidden = [...this.hiddenColumns];
-            this.hiddenColumns = this.hiddenColumns.filter(col => col !== 'Pack' && col !== 'Check');
 
             // Wait for DOM update
             await this.$nextTick();
@@ -1307,9 +1350,8 @@ export const PacklistTable = {
             // Print
             window.print();
             
-            // Restore hidden columns after printing
+            // Back to the screen view after printing
             setTimeout(() => {
-                this.hiddenColumns = originalHidden;
                 this.isPrinting = false;
             }, 100);
         },
@@ -1388,26 +1430,24 @@ export const PacklistTable = {
                     ref="mainTableComponent"
                     :data="mainTableData"
                     :originalData="originalData"
-                    :columns="mainColumns"
-                    :rowKey="'Piece #'"
+                    :resolved="cratesResolved"
+                    :edit-mode="tableEditMode"
+                    :class="cratesResolved.className"
+                    :rowKey="'AppData._rowId'"
                     :title="tabName"
-                    theme="packlist-table"
                     :showRefresh="!editMode"
                     :showSearch="true"
                     :sync-search-with-url="true"
                     :container-path="containerPath || 'packlist/' + tabName"
                     :navigate-to-path="(path) => $emit('navigate-to-path', path)"
-                    :hideRowsOnSearch="false"
                     :emptyMessage="'No crates'"
                     :draggable="editMode"
                     :newRow="editMode"
                     :isLoading="isLoading"
                     :isAnalyzing="packlistTableStore ? packlistTableStore.isAnalyzing : false"
-                    :loading-message="packlistTableStore && packlistTableStore.isLoading ? (packlistTableStore.loadingMessage || 'Loading data...') : (packlistTableStore && packlistTableStore.isAnalyzing ? (packlistTableStore.analysisMessage.loadingMessage || 'Analyzing data...') : loadingMessage)"
-                    :loading-progress="packlistTableStore && packlistTableStore.isAnalyzing ? packlistTableStore.analysisProgress : -1"
                     :loading-message="loadingMessage"
+                    :loading-progress="packlistTableStore && packlistTableStore.isAnalyzing ? packlistTableStore.analysisProgress : -1"
                     :drag-id="'packlist-crates'"
-                    :drag-label="'Crates'"
                     :hide-group-members="true"
                     @refresh="handleRefresh"
                     @cell-edit="handleCellEdit"
@@ -1455,8 +1495,8 @@ export const PacklistTable = {
                             </span-->
                         </div>
                     </template>
-                    <template #default="{ row, rowIndex, column, cellRowIndex, cellColIndex, onInnerTableDirty }">
-                        <template v-if="column && column.isIndex">
+                    <template #cell="{ row, rowIndex, field: column, onInnerTableDirty }">
+                        <template v-if="column && column.key === PIECE_NUMBER">
                             <!-- Only count visible (not marked-for-deletion) rows for Piece # -->
                             {{
                                 mainTableData
@@ -1476,16 +1516,10 @@ export const PacklistTable = {
                             <TableComponent
                                 v-if="row.Items"
                                 :data="row.Items"
-                                :originalData="originalData && originalData[rowIndex] ? originalData[rowIndex].Items : []"
+                                :originalData="originalCratesById.get(row.AppData?._rowId)?.Items || []"
                                 :rowKey="'AppData._rowId'"
-                                :columns="itemHeaders.map(label => ({ 
-                                    key: label, 
-                                    label, 
-                                    editable: editMode && ['Description','Packing/shop notes'].includes(label),
-                                    width: ['Description','Packing/shop notes'].includes(label) ? 200 : 40,
-                                    font: ['Description','Packing/shop notes'].includes(label) ? '' : 'narrow'
-                                }))"
-                                :hide-columns="hiddenColumns"
+                                :resolved="itemsResolved"
+                                :edit-mode="tableEditMode"
                                 :emptyMessage="'No items'"
                                 :draggable="editMode"
                                 :newRow="editMode"
@@ -1496,19 +1530,12 @@ export const PacklistTable = {
                                 :showHeader="false"
                                 :isLoading="isLoading"
                                 :drag-id="'packlist-items'"
-                                :drag-label="'Items'"
-                                :parent-search-value="$refs.mainTableComponent?.search?.searchValue?.value || ''"
+                                :parent-search-value="$refs.mainTableComponent?.search?.debouncedValue?.value || ''"
                                 :showSearch="true"
-                                :hideRowsOnSearch="false"
                                 :showSelectionBubble="editMode"
-                                @cell-edit="(itemRowIdx, itemColIdx, value) => { row.Items[itemRowIdx][itemHeaders[itemColIdx]] = value; }"
+                                @cell-edit="(itemRowIdx, itemColKey, value) => { row.Items[itemRowIdx][itemColKey] = value; }"
                                 @new-row="(positionData) => { handleAddItem(rowIndex, positionData); }"
-                                @inner-table-dirty="(isDirty) => { 
-                                    if (typeof onInnerTableDirty === 'function') {
-                                        onInnerTableDirty(isDirty, rowIndex, column ? mainColumns.findIndex(c => c.key === column.key) : 0);
-                                    }
-                                    handleInnerTableDirty(isDirty, rowIndex);
-                                }"
+                                @inner-table-dirty="onInnerTableDirty"
                                 @row-options="handleRowOptions"
                                 class="table-fixed"
                             >

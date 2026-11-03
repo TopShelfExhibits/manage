@@ -1,14 +1,9 @@
-import { html, Requests, TableComponent, ScheduleFilterSelect, toISODateString, parseDate, getReactiveStore, runNonessentialAnalysisOnAllStores } from '../../index.js';
+import { html, Requests, DataView, ScheduleFilterSelect, toISODateString, parseDate, getReactiveStore, runNonessentialAnalysisOnAllStores } from '../../index.js';
+import { textFiltersToSearchParams } from '../../../data_management/utils/helpers.js';
 
 // Converts ScheduleFilterSelect textFilters array to getProductionScheduleData searchParams format
 function buildSearchParams(textFilters) {
-    if (!textFilters?.length) return null;
-    const result = {};
-    for (const tf of textFilters) {
-        if (!tf.column) continue;
-        const values = tf.values?.filter(v => String(v).trim()) || (tf.value ? [tf.value] : []);
-        if (values.length) result[tf.column] = { values, type: tf.type || 'contains' };
-    }
+    const result = textFiltersToSearchParams(textFilters);
     return Object.keys(result).length ? result : null;
 }
 
@@ -18,7 +13,7 @@ function buildSearchParams(textFilters) {
  * Stage 2: pick the partner show (filtered to same client/size, within 90 days).
  */
 export const TransshipmentModal = {
-    components: { TableComponent, ScheduleFilterSelect },
+    components: { DataView, ScheduleFilterSelect },
     inject: ['$modal'],
     props: {
         preselectedRow: { type: Object, default: null },
@@ -61,26 +56,59 @@ export const TransshipmentModal = {
         stage1Loading() {
             return this.stage1Store?.isLoading ?? false;
         },
-        stage1Columns() {
+        // Modal tables: single-view registries with no URL (views-and-renderers-plan §4.3).
+        // The per-row buttons stay as cell content (two actions per row; no primary action).
+        stage1Fields() {
             return [
-                { key: 'Show', label: 'Show', sortable: true },
-                { key: 'Client', label: 'Client', sortable: true },
+                { key: 'Show', label: 'Show' },
+                { key: 'Client', label: 'Client' },
                 { key: 'Year', label: 'Year' },
-                { key: 'Size', label: 'Size', sortable: true },
-                { key: 'Ship', label: 'Ship', sortable: true },
-                { key: '_actionFrom', label: 'Ships From', width: 105, sortable: false },
-                { key: '_actionTo',   label: 'Ships To',   width: 95,  sortable: false }
+                { key: 'Size', label: 'Size' },
+                { key: 'Ship', label: 'Ship' },
+                { key: '_actionFrom', label: 'Ships From' },
+                { key: '_actionTo', label: 'Ships To' }
             ];
         },
-        stage2Columns() {
+        stage1Registry() {
+            return {
+                id: 'transship-stage1',
+                default: 'table',
+                theme: 'gray',
+                views: [{
+                    id: 'table', name: 'Shows', layout: 'table',
+                    columns: ['Show', 'Client', 'Size', 'Ship', '_actionFrom', '_actionTo'],
+                    hidden: ['Year'],
+                    sortable: ['Show', 'Client', 'Size', 'Ship'],
+                    style: { _actionFrom: { width: 105 }, _actionTo: { width: 95 } },
+                    sort: { key: 'Ship', dir: 'asc' }
+                }]
+            };
+        },
+        stage2Fields() {
             return [
-                { key: 'Show', label: 'Show', sortable: true },
-                { key: 'Client', label: 'Client', sortable: true },
+                { key: 'Show', label: 'Show' },
+                { key: 'Client', label: 'Client' },
                 { key: 'Year', label: 'Year' },
-                { key: 'Size', label: 'Size', sortable: true },
-                { key: 'Ship', label: 'Ship', sortable: true },
-                { key: '_action', label: '', width: 90, sortable: false, sticky: 'end' }
+                { key: 'Size', label: 'Size' },
+                { key: 'Ship', label: 'Ship' },
+                { key: '_action', label: '' }
             ];
+        },
+        stage2Registry() {
+            return {
+                id: 'transship-stage2',
+                default: 'table',
+                theme: 'gray',
+                views: [{
+                    id: 'table', name: 'Partner shows', layout: 'table',
+                    columns: ['Show', 'Client', 'Size', 'Ship', '_action'],
+                    hidden: ['Year'],
+                    sortable: ['Show', 'Client', 'Size', 'Ship'],
+                    style: { _action: { width: 90 } },
+                    table: { sticky: { end: ['_action'] } },
+                    sort: { key: 'Ship', dir: 'asc' }
+                }]
+            };
         },
         selectedShipISO() {
             if (!this.selectedRow?.Ship) return null;
@@ -286,16 +314,14 @@ export const TransshipmentModal = {
 
             <!-- Stage 1: pick which show to manage -->
             <template v-if="stage === 1">
-                <TableComponent
-                    :data="stage1Data"
-                    :theme="'gray hover-highlight'"
-                    :columns="stage1Columns"
-                    :hide-columns="['Year']"
+                <DataView
+                    :fields="stage1Fields"
+                    :rows="stage1Data"
+                    :registry="stage1Registry"
                     :isLoading="stage1Loading"
                     :showSearch="true"
                     :showRefresh="false"
                     :syncSearchWithUrl="false"
-                    defaultSortColumn="Ship"
                     emptyMessage="No shows found."
                     loadingMessage="Loading shows..."
                 >
@@ -335,7 +361,7 @@ export const TransshipmentModal = {
                             >+ To</button>
                         </template>
                     </template>
-                </TableComponent>
+                </DataView>
             </template>
 
             <!-- Stage 2: pick partner show -->
@@ -360,17 +386,15 @@ export const TransshipmentModal = {
                 <div v-if="error" class="card red">{{ error }}</div>
 
                 <div v-if="saving" class="card">Adding transshipment...</div>
-                <TableComponent
+                <DataView
                     v-else
-                    :data="stage2Data"
-                    :theme="'gray hover-highlight'"
-                    :columns="stage2Columns"
-                    :hide-columns="['Year']"
+                    :fields="stage2Fields"
+                    :rows="stage2Data"
+                    :registry="stage2Registry"
                     :isLoading="stage2Loading"
                     :showSearch="false"
                     :showRefresh="false"
                     :syncSearchWithUrl="false"
-                    defaultSortColumn="Ship"
                     emptyMessage="No matching shows found within 90 days with the same client."
                     loadingMessage="Finding nearby shows..."
                 >
@@ -392,7 +416,7 @@ export const TransshipmentModal = {
                             Link
                         </button>
                     </template>
-                </TableComponent>
+                </DataView>
             </template>
 
         </div>

@@ -28,8 +28,24 @@
  */
 
 import { Requests } from '../data_management/api.js';
-import { FakeGoogleSheetsAuth, setFakeDelaysEnabled } from '../google_sheets_services/FakeGoogle.js';
+import { FakeGoogleSheetsAuth, FakeGoogleSheetsService, setFakeDelaysEnabled } from '../google_sheets_services/FakeGoogle.js';
+import { isCheckedValue } from '../data_management/utils/checkbox-values.js';
+import { useBatchEdits, useInstantEdits } from '../application/utils/cellEdits.js';
 import { CacheInvalidationBus, ApplicationUtils, ProductionUtils, triggerCachePoll } from '../data_management/index.js';
+import { resolveView, resolveAction, pickView, mergeView, matchesKeyPattern, setViewWarningHandler, withRegistryDefaults } from '../application/utils/views/resolveView.js';
+import { SEARCH_LIMITS, searchWords, matchRow, matchRows, makeHighlighter } from '../application/utils/views/searchMatch.js';
+import { formatValue, formatText } from '../application/utils/views/fieldFormat.js';
+import { rowsToCards, bucketRowsToCards } from '../application/utils/views/cardsAdapter.js';
+import { applyColorRule, colorFor, rowColorFor } from '../application/utils/views/viewColor.js';
+import { containerTier, viewportTier, BREAKPOINTS } from '../application/utils/useContainerSize.js';
+import { todayISOString, searchFilter, textFiltersToSearchParams, parseSearchParameters } from '../data_management/utils/helpers.js';
+import { instantWriteEntry, identityKey, cellKey, joinKey } from '../data_management/utils/instant-write-config.js';
+import { estimateShipDate } from '../data_management/utils/ship-date.js';
+import { getReactiveStore, createAnalysisConfig } from '../application/index.js';
+import { checkSheetHealth } from './sheetHealth.js';
+import { guessColumnType, columnTypesEntry, columnTypeMap, columnTypeOf } from '../data_management/utils/column-types.js';
+import { buildScheduleFields } from '../data_management/abstraction/scheduleFields.js';
+import { withShipDate } from '../application/utils/scheduleShipping.js';
 
 // ── Runner ────────────────────────────────────────────────────────────────────
 
@@ -912,11 +928,12 @@ test('INVENTORY TAB AND INDEX', 'InventoryCustomItemNumbers preference contains 
     assertContains(tabs, 'HARDWARE', 'InventoryCustomItemNumbers must include HARDWARE');
 });
 
-test('INVENTORY TAB AND INDEX', 'getInventoryHiddenSearchData FURNITURE includes TABLE-001 item number', async () => {
-    const fields = await Requests.getInventoryHiddenSearchData('FURNITURE');
-    if (!Array.isArray(fields)) throw new Error('expected array from getInventoryHiddenSearchData');
-    const entry = fields.find(f => f.fieldName === 'Item#' && f.value === 'TABLE-001');
-    if (!entry) throw new Error('TABLE-001 item# field not found in FURNITURE hidden search data');
+test('INVENTORY TAB AND INDEX', 'category cards search item rows: getAllInventoryData has TABLE-001 in FURNITURE', async () => {
+    // Category cards bucket the overview rows by tab and search them directly (views plan R2.12, D7)
+    const rows = await Requests.getAllInventoryData(todayISOString());
+    if (!Array.isArray(rows)) throw new Error('expected array from getAllInventoryData');
+    const entry = rows.find(r => r.itemNumber === 'TABLE-001');
+    if (!entry || String(entry.tab).toUpperCase() !== 'FURNITURE') throw new Error('TABLE-001 not found in FURNITURE rows');
 });
 
 // ── Group 23: Item Details ────────────────────────────────────────────────────
@@ -1466,9 +1483,9 @@ test('PREFERENCES', 'getPreferences returns an array', async () => {
     if (!Array.isArray(result)) throw new Error(`expected array, got ${typeof result}`);
 });
 
-test('PREFERENCES', 'getPreferences returns 7 rows', async () => {
+test('PREFERENCES', 'getPreferences returns every fixture row', async () => {
     const result = await Requests.getPreferences();
-    assertEqual(result.length, 7, 'getPreferences row count');
+    assertEqual(result.length, 11, 'getPreferences row count');
 });
 
 test('PREFERENCES', 'all rows have required fields', async () => {
@@ -1506,7 +1523,1049 @@ test('PREFERENCES', 'schedule prefs have page "schedule*"', async () => {
     }
 });
 
+// ── Views system: pure functions (views-and-renderers-plan §4) ───────────────
+// resolveView / resolveAction, the shared search matcher, value formatting,
+// colour rules and size tiers. These are pure and run without the DOM; they lock in the
+// contracts every renderer relies on.
+
+const V_FIELDS = ['Show', 'Client', 'Ship', 'Recieved', 'S. Start', 'S. End', 'City', 'Size', 'Year', 'Booth#', 'AppData', 'packlist']
+    .map(key => ({ key, label: key }));
+const V_TABLE = {
+    id: 'table', layout: 'table',
+    columns: ['Show', 'Client', ['Ship', 'Recieved'], ['S. Start', 'S. End'], 'City', 'Size', 'packlist'],
+    style: { Ship: { color: 'auto', width: 120 }, 'S*': { font: 'narrow' } },
+    variants: { narrow: { columns: [['Show', 'Client'], ['Ship', 'Recieved'], ['S. Start', 'S. End'], 'packlist'] } }
+};
+const V_CAL = { id: 'calendar', layout: 'calendar', calendar: { start: 'S. Start', end: 'S. End', chip: [['Show', 'Client'], ['City', 'Size']] } };
+
+function withViewWarnings(fn) {
+    const warnings = [];
+    setViewWarningHandler(m => warnings.push(m));
+    try { return { result: fn(), warnings }; } finally { setViewWarningHandler(null); }
+}
+
+test('VIEWS ENGINE', 'tiers: columns shown, unlisted to details (rest), AppData always hidden', async () => {
+    const { result: r } = withViewWarnings(() => resolveView(V_FIELDS, V_TABLE));
+    assertEqual(r.slots.map(s => s.lines), [[['Show']], [['Client']], [['Ship'], ['Recieved']], [['S. Start'], ['S. End']], [['City']], [['Size']], [['packlist']]], 'slots');
+    assertEqual(r.details.map(f => f.key), ['Year', 'Booth#'], 'details rest');
+    assertEqual(r.hidden.has('AppData'), true, 'AppData hidden');
+    assertEqual(r.hasDetails, true, 'hasDetails');
+});
+
+test('VIEWS ENGINE', 'hidden list removes fields from every tier; hidden rest hides unlisted', async () => {
+    const { result: r1 } = withViewWarnings(() => resolveView(V_FIELDS, { ...V_TABLE, hidden: ['Year'] }));
+    assertEqual(r1.details.map(f => f.key), ['Booth#'], 'Year hidden');
+    const { result: r2 } = withViewWarnings(() => resolveView(V_FIELDS, { ...V_TABLE, details: ['Year'], hidden: 'rest' }));
+    assertEqual(r2.details.map(f => f.key), ['Year'], 'explicit details');
+    assertEqual(r2.hidden.has('Booth#'), true, 'Booth# hidden by rest');
+});
+
+test('VIEWS ENGINE', 'first tier wins on duplicates and unknown keys are ignored with a warning', async () => {
+    const { result: r, warnings } = withViewWarnings(() => resolveView(V_FIELDS, { id: 'x', layout: 'table', columns: ['Show', 'Nope', 'Show'], details: ['Show', 'Year'] }));
+    assertEqual(r.slots.map(s => s.key), ['Show'], 'Show once');
+    assertEqual(r.details.map(f => f.key).includes('Show'), false, 'Show not in details');
+    if (!warnings.some(w => w.includes('"Nope"'))) throw new Error('expected unknown-key warning');
+    if (!warnings.some(w => w.includes('duplicate key "Show"'))) throw new Error('expected duplicate warning');
+});
+
+test('VIEWS ENGINE', 'narrow variant replaces columns; medium/wide keep them', async () => {
+    const { result: wide } = withViewWarnings(() => resolveView(V_FIELDS, V_TABLE, { size: 'wide' }));
+    const { result: medium } = withViewWarnings(() => resolveView(V_FIELDS, V_TABLE, { size: 'medium' }));
+    const { result: narrow } = withViewWarnings(() => resolveView(V_FIELDS, V_TABLE, { size: 'narrow' }));
+    assertEqual(wide.slots.length, 7, 'wide');
+    assertEqual(medium.slots.length, 7, 'medium');
+    assertEqual(narrow.slots[0].lines, [['Show'], ['Client']], 'narrow stacks Client under Show');
+    assertEqual(narrow.details.map(f => f.key).includes('City'), true, 'City moves to details when narrow');
+});
+
+test('VIEWS ENGINE', 'presentation comes from the view: style props, sortable list, type cells; fields keep data only', async () => {
+    const fields = [
+        { key: 'item', label: 'Item#', type: 'item' },
+        { key: 'done', label: 'Done', type: 'checkbox' },
+        { key: 'who', label: 'Who', type: 'select', options: ['A', 'B'] },
+        { key: 'pic', label: 'IMG', cell: 'image', sortable: true }
+    ];
+    const view = {
+        id: 'v', layout: 'table', columns: ['pic', 'item', 'done', 'who'],
+        sortable: ['item', 'w*'],
+        style: { pic: { width: 1, cell: 'image', labelHtml: '<i>img</i>', cellOptions: { itemKey: 'item' } }, item: { label: 'No.', title: 'Item number' } }
+    };
+    const { result: r, warnings } = withViewWarnings(() => resolveView(fields, view));
+    const f = (k) => r.fieldMap.get(k);
+    assertEqual([f('item').label, f('item').title, f('item').sortable, f('who').sortable, f('done').sortable], ['No.', 'Item number', true, true, false], 'label, title, sortable (patterns)');
+    assertEqual([f('pic').cell, f('pic').labelHtml, f('pic').cellOptions, f('done').cell, f('who').cell, f('who').options], ['image', '<i>img</i>', { itemKey: 'item' }, 'checkbox', 'select', ['A', 'B']], 'view cells, type cells, data options');
+    assertEqual(warnings.filter(w => /presentation props \(sortable, cell\)/.test(w)).length, 1, 'presentation on a field warns');
+    const bare = resolveView([{ key: 'pic', cell: 'image' }], { id: 'b', layout: 'table', columns: ['pic'] });
+    assertEqual(bare.fieldMap.get('pic').cell, undefined, 'and is ignored');
+});
+
+test('VIEWS ENGINE', 'calendar.actions: keys drawn in the chip end bar are shown; print variants can change cell options', async () => {
+    const fields = ['s', 'e', 'a', 'b', 'c'].map(key => ({ key, label: key }));
+    const view = {
+        id: 'cal', layout: 'calendar',
+        calendar: { start: 's', end: 'e', chip: [['a']], actions: ['b', 'nope'] },
+        hidden: ['s', 'e', 'c'],
+        style: { b: { cell: 'showList', cellOptions: { max: 2 } } },
+        variants: { print: { style: { b: { cellOptions: { max: null } } } } }
+    };
+    const { result: r, warnings } = withViewWarnings(() => resolveView(fields, view));
+    assertEqual([r.calendar.actions, r.shown], [['b'], ['a', 'b']], 'actions shown after the chip lines');
+    assertEqual(warnings.some(w => /unknown key "nope" in calendar.actions/.test(w)), true, 'unknown key warns');
+    const printed = resolveView(fields, view, { print: true });
+    assertEqual([r.fieldMap.get('b').cellOptions.max, printed.fieldMap.get('b').cellOptions.max], [2, null], 'print variant');
+});
+
+test('VIEWS ENGINE', 'registry style and sortable apply to every view; a view overrides them', async () => {
+    const registry = { style: { a: { width: 10, cell: 'slot' } }, sortable: ['a'], views: [] };
+    const merged = withRegistryDefaults(registry, { id: 'v', style: { a: { width: 20 } }, sortable: ['b'] });
+    assertEqual([merged.style.a, merged.sortable], [{ width: 20, cell: 'slot' }, ['b']], 'style merges, lists replace');
+    const plain = { id: 'p' };
+    assertEqual(withRegistryDefaults({ views: [] }, plain) === plain, true, 'no registry defaults: the view itself');
+});
+
+test('VIEWS ENGINE', 'patches apply after variants and respect sizes', async () => {
+    const patches = [{ patch: { columns: ['Client', 'Show'] }, sizes: ['narrow'] }, { patch: { hidden: ['Booth#'] } }];
+    const { result: wide } = withViewWarnings(() => resolveView(V_FIELDS, V_TABLE, { size: 'wide', patches }));
+    const { result: narrow } = withViewWarnings(() => resolveView(V_FIELDS, V_TABLE, { size: 'narrow', patches }));
+    assertEqual(wide.slots.length, 7, 'narrow-only patch ignored when wide');
+    assertEqual(wide.hidden.has('Booth#'), true, 'all-size patch applied');
+    assertEqual(narrow.slots.map(s => s.key), ['Client', 'Show'], 'narrow patch applied');
+});
+
+test('VIEWS ENGINE', 'print variant applies last (PacklistTable items: Pack/Check shown when printing)', async () => {
+    const fields = ['Pack', 'Check', 'Description', 'Packing/shop notes'].map(key => ({ key }));
+    const view = { id: 'items', layout: 'table', hidden: ['Pack', 'Check'], variants: { narrow: { hidden: ['Pack', 'Check', 'Packing/shop notes'] }, print: { hidden: [] } } };
+    const screen = withViewWarnings(() => resolveView(fields, view)).result;
+    const printed = withViewWarnings(() => resolveView(fields, view, { print: true, size: 'narrow' })).result;
+    assertEqual(screen.slots.map(s => s.key), ['Description', 'Packing/shop notes'], 'screen');
+    assertEqual(printed.slots.map(s => s.key), ['Pack', 'Check', 'Description', 'Packing/shop notes'], 'print wins over narrow');
+});
+
+test('VIEWS ENGINE', 'mergeView merges objects deeply and replaces arrays', async () => {
+    const merged = mergeView({ a: { b: 1, c: [1, 2] }, d: 1 }, { a: { c: [3] }, e: 2 });
+    assertEqual(merged, { a: { b: 1, c: [3] }, d: 1, e: 2 }, 'merge');
+});
+
+test('VIEWS ENGINE', 'key patterns expand in lists and style', async () => {
+    const fields = ['itemId', 'show_A', 'show_B', 'qty'].map(key => ({ key }));
+    const { result: r } = withViewWarnings(() => resolveView(fields, { id: 'p', layout: 'table', columns: ['itemId', 'show_*'], style: { 'show_*': { columnColor: 'striped gray' }, show_B: { width: 50 } } }));
+    assertEqual(r.slots.map(s => s.key), ['itemId', 'show_A', 'show_B'], 'pattern columns');
+    assertEqual(r.style.show_B, { columnColor: 'striped gray', width: 50 }, 'pattern + exact style');
+    assertEqual(matchesKeyPattern('show_*', 'show_X'), true, 'pattern match');
+    assertEqual(matchesKeyPattern('show', 'show_X'), false, 'exact');
+});
+
+test('VIEWS ENGINE', 'table without columns shows every non-placed field', async () => {
+    const { result: r } = withViewWarnings(() => resolveView([{ key: 'a' }, { key: 'b' }, { key: 'c' }], { id: 'all', layout: 'table', hidden: ['c'] }));
+    assertEqual(r.slots.map(s => s.key), ['a', 'b'], 'all shown');
+    assertEqual(r.hasDetails, false, 'no details');
+});
+
+test('VIEWS ENGINE', "action 'row' falls back to 'button' when editMode is not none", async () => {
+    const { result: r, warnings } = withViewWarnings(() => resolveView(V_FIELDS, { ...V_TABLE, action: 'row' }, { editMode: 'batch' }));
+    assertEqual(r.trigger, 'button', 'trigger');
+    if (!warnings.some(w => w.includes("action 'row'"))) throw new Error('expected warning');
+    const { result: r2 } = withViewWarnings(() => resolveView(V_FIELDS, { ...V_TABLE, action: 'row' }));
+    assertEqual(r2.trigger, 'row', 'row allowed read-only');
+});
+
+test('VIEWS ENGINE', 'calendar view: chip lines shown, missing start/end flagged invalid', async () => {
+    const { result: r } = withViewWarnings(() => resolveView(V_FIELDS, V_CAL));
+    assertEqual(r.shown, ['Show', 'Client', 'City', 'Size'], 'chip keys shown');
+    assertEqual(r.invalid, null, 'valid');
+    const { result: bad } = withViewWarnings(() => resolveView(V_FIELDS, { ...V_CAL, calendar: { ...V_CAL.calendar, start: 'Nope' } }));
+    assertEqual(bad.invalid, 'calendar-fields', 'invalid');
+});
+
+test('VIEWS ENGINE', 'pickView: view param, legacy layout fallback, unknown id → default', async () => {
+    const reg = { id: 'schedule', default: 'table', views: [V_TABLE, V_CAL] };
+    withViewWarnings(() => {
+        assertEqual(pickView(reg, {}).id, 'table', 'default');
+        assertEqual(pickView(reg, { view: 'calendar' }).id, 'calendar', 'view param');
+        assertEqual(pickView(reg, { layout: 'calendar' }).id, 'calendar', 'layout fallback');
+        assertEqual(pickView(reg, { view: 'bogus' }).id, 'table', 'unknown → default');
+    });
+});
+
+test('VIEWS ENGINE', 'resolved output: stacked lines, style, sticky, colour rules, hidden omitted', async () => {
+    const view = { ...V_TABLE, table: { sticky: { start: ['Show'] } } };
+    const { result: r } = withViewWarnings(() => resolveView(V_FIELDS, view));
+    const ship = r.slots.find(s => s.key === 'Ship');
+    assertEqual(ship.lines, [['Ship'], ['Recieved']], 'stack lines');
+    assertEqual([ship.width, ship.color], [120, 'auto'], 'slot style');
+    assertEqual(r.slots.find(s => s.key === 'Show').sticky, 'start', 'sticky');
+    assertEqual(r.slots.some(s => s.key === 'AppData'), false, 'hidden omitted');
+    assertEqual(r.shown.includes('Recieved'), true, 'stacked keys are shown');
+    const { result: cal } = withViewWarnings(() => resolveView(V_FIELDS, V_CAL));
+    assertEqual(cal.calendar.chip, [['Show', 'Client'], ['City', 'Size']], 'chip lines');
+    const legacy = withViewWarnings(() => resolveView([{ key: 'a', width: 50 }], { id: 'l', layout: 'table' }));
+    assertEqual([legacy.result.style.a, legacy.warnings.length > 0], [undefined, true], 'legacy field props ignored with a warning');
+});
+
+test('VIEWS ACTION', 'page action wins, then details, then none', async () => {
+    const { result: r } = withViewWarnings(() => resolveView(V_FIELDS, V_TABLE));
+    assertEqual(resolveAction({ to: () => 'x' }, r).kind, 'navigate', 'to');
+    assertEqual(withViewWarnings(() => resolveAction({ run: () => {}, label: 'Select' }, r)).result.label, 'Select', 'run label');
+    assertEqual(resolveAction(null, r).kind, 'details', 'details');
+    const { result: noDetails } = withViewWarnings(() => resolveView([{ key: 'a' }], { id: 'n', layout: 'table', columns: ['a'] }));
+    assertEqual(resolveAction(null, noDetails).kind, 'none', 'none');
+    assertEqual(resolveAction(null, noDetails, { hasRowDetails: true }).kind, 'details', 'row-details slot');
+});
+
+test('VIEWS ACTION', 'both to and run → to, with a warning', async () => {
+    const { result: r } = withViewWarnings(() => resolveView([{ key: 'a' }], { id: 'n', layout: 'table', columns: ['a'] }));
+    const { result: a, warnings } = withViewWarnings(() => resolveAction({ to: () => 'x', run: () => {} }, r));
+    assertEqual(a.kind, 'navigate', 'to wins');
+    if (!warnings.length) throw new Error('expected warning');
+});
+
+test('VIEWS SEARCH', 'makeHighlighter escapes, wraps matches and merges overlaps', async () => {
+    const h = makeHighlighter(['ab', 'bc']);
+    assertEqual(h('xABCx <b>'), 'x<span class="search-match">ABC</span>x &lt;b&gt;', 'merged, case-insensitive, escaped');
+    assertEqual([makeHighlighter([])('<i>'), h(null), h(0)], ['&lt;i&gt;', '', '0'], 'no words only escapes');
+    assertEqual(makeHighlighter(['a.b'])('a.b axb'), '<span class="search-match">a.b</span> axb', 'regex characters are literal');
+});
+
+test('VIEWS SEARCH', 'searchWords drops words shorter than 2 characters', async () => {
+    assertEqual(searchWords('a TV  15 x'), ['tv', '15'], 'words');
+    assertEqual(searchWords('a b'), [], 'inactive');
+    assertEqual(SEARCH_LIMITS.minTermLength, 2, 'limit');
+});
+
+test('VIEWS SEARCH', 'matchRow: AND across words, shown vs details, arrays matched', async () => {
+    const tiers = { shown: ['Show', 'Client'], details: ['Notes', 'Shows'] };
+    const row = { Show: 'Expo', Client: 'ACME', Notes: 'blue booth', Shows: ['NAB 2025', 'CES'] };
+    assertEqual(matchRow(row, tiers, ['acme', 'expo']).shownMatch, true, 'shown match');
+    const d = matchRow(row, tiers, ['acme', 'booth']);
+    assertEqual([d.matched, d.shownMatch, d.detailMatches], [true, false, ['Notes']], 'details-only');
+    assertEqual(matchRow(row, tiers, ['nab']).matched, true, 'array element');
+    assertEqual(matchRow(row, tiers, ['acme', 'zzz']).matched, false, 'AND');
+});
+
+test('VIEWS SEARCH', 'matchRows aborts a broad search over 100 rows', async () => {
+    const rows = Array.from({ length: 150 }, (_, i) => ({ Show: 'S' + i, Client: i < 10 ? 'ACME' : 'other' }));
+    const tiers = { shown: ['Show', 'Client'], details: [] };
+    const precise = matchRows(rows, tiers, searchWords('acme'));
+    assertEqual([precise.aborted, precise.matchCount], [false, 10], 'precise');
+    const broad = matchRows(rows, tiers, searchWords('other'));
+    assertEqual([broad.aborted, broad.matchCount, broad.results.length], [true, Infinity, 0], 'aborted');
+    const small = matchRows(rows.slice(0, 50), tiers, searchWords('s'));
+    assertEqual(small.active, false, 'single char inactive');
+    const smallBroad = matchRows(rows.slice(10, 60), tiers, searchWords('other'));
+    assertEqual(smallBroad.aborted, false, 'no abort at or under 100 rows');
+});
+
+test('VIEWS FORMAT', 'formatValue matches the table formatter', async () => {
+    assertEqual(formatValue(null, { format: 'date' }), '', 'null');
+    assertEqual(formatValue('2026-03-05', { format: 'date' }), '03/05/2026', 'date');
+    assertEqual(formatValue('12.5', { format: 'currency' }), '$12.50', 'currency');
+    assertEqual(formatValue('abc', {}), 'abc', 'passthrough');
+    assertEqual(formatText(['a', 'b'], {}), 'a, b', 'array text');
+});
+
+test('VIEWS COLOR', 'colour rules: auto numbers/dates, value, literal; rowColor fallback', async () => {
+    assertEqual(applyColorRule('auto', -1, { format: 'number' }), 'red', 'negative');
+    assertEqual(applyColorRule('auto', 0, { format: 'number' }), 'orange', 'zero');
+    assertEqual(applyColorRule('auto', 5, { format: 'number' }), '', 'positive');
+    assertEqual(applyColorRule('auto', '', { format: 'number' }), '', 'blank');
+    assertEqual(['X', 'true', '', '-', '8/1'].map(v => applyColorRule('checked:gray', v)), ['gray', 'gray', '', '', ''], 'checked:<class>');
+    assertEqual(applyColorRule('value', 'gray', {}), 'gray', 'value');
+    assertEqual(applyColorRule('purple', 'x', {}), 'purple', 'literal');
+    const today = todayISOString();
+    assertEqual(applyColorRule('auto', today, { format: 'date' }), 'red', 'date today');
+    const resolved = { rowColor: { field: 'quantity', rule: 'auto', fallback: 'green' }, fieldMap: new Map([['quantity', { key: 'quantity', format: 'number' }]]), style: { quantity: { color: 'auto' } } };
+    assertEqual(rowColorFor({ quantity: 3 }, resolved), 'green', 'fallback');
+    assertEqual(rowColorFor({ quantity: -2 }, resolved), 'red', 'auto row');
+    assertEqual(colorFor({ quantity: 0 }, { key: 'quantity', format: 'number' }, resolved), 'orange', 'cell colour');
+});
+
+test('VIEWS SIZE', 'container and viewport tiers use the shared breakpoints', async () => {
+    assertEqual([containerTier(360), containerTier(599), containerTier(600), containerTier(999), containerTier(1000)], ['narrow', 'narrow', 'medium', 'medium', 'wide'], 'container');
+    assertEqual([viewportTier(615), viewportTier(616), viewportTier(1023), viewportTier(1024)], ['narrow', 'medium', 'medium', 'wide'], 'viewport');
+    assertEqual(BREAKPOINTS, { narrow: 600, wide: 1000, gutterCompact: 8, gutterFull: 12 }, 'constants');
+});
+
+test('VIEWS CARDS', 'rowsToCards: title, escaped content lines, footer, rowColor, decorations', async () => {
+    const fields = [{ key: 'title' }, { key: 'ship' }, { key: 'desc', format: 'multiline' }, { key: '_status' }, { key: '_color' }];
+    const view = { id: 'cards', layout: 'cards', cards: { card: [['title'], ['ship'], ['desc']], footer: [['_status']] }, hidden: ['_color'], rowColor: { field: '_color', rule: 'value' } };
+    const r = withViewWarnings(() => resolveView(fields, view)).result;
+    const rows = [{ title: 'ACME 2026 <EXPO>', ship: 'Ship: 1/2', desc: '2 crates<br>5 items', _status: 'Unsaved changes', _color: 'red', sheetId: 7 }];
+    const decorations = (row, key) => key === null ? [{ message: 'Save', class: 'green', action: () => {} }, { status: true, message: 'Locked' }] : [];
+    const [card] = rowsToCards(rows, r, { decorations, idKey: 'sheetId' });
+    assertEqual(card.title, 'ACME 2026 <EXPO>', 'title is plain text');
+    assertEqual(card.content, 'Ship: 1/2<br>2 crates<br>5 items', 'content lines, multiline breaks');
+    assertEqual(card.contentFooter, 'Unsaved changes<br>Locked', 'footer line + status decoration');
+    assertEqual(card.footerActions.map(a => a.label), ['Save'], 'footer actions');
+    assertEqual([card.cardClass, card.id], ['red', 7], 'rowColor and id');
+    const [escaped] = rowsToCards([{ title: 'x', ship: '<b>bold</b>', desc: '' }], r);
+    assertEqual(escaped.content, '&lt;b&gt;bold&lt;/b&gt;', 'values escaped');
+});
+
+test('VIEWS CARDS', 'bucketRowsToCards: buckets by key, empty buckets seeded, no details', async () => {
+    const fields = [{ key: 'tab' }, { key: 'itemNumber' }, { key: 'description' }];
+    const r = withViewWarnings(() => resolveView(fields, { id: 'categories', layout: 'cards', cards: { bucketBy: 'tab' }, theme: 'purple' }, { theme: 'purple' })).result;
+    const rows = [{ tab: 'FURNITURE', itemNumber: 'T-1' }, { tab: 'FURNITURE', itemNumber: 'C-1' }, { tab: 'SIGNS', itemNumber: 'S-1' }];
+    const cards = bucketRowsToCards(rows, r, {
+        bucketKeys: ['ADDITIONS', 'FURNITURE'],
+        bucketLabel: k => k.charAt(0) + k.slice(1).toLowerCase(),
+        bucketDecorations: (k, members) => members.length > 1 ? [{ status: true, message: members.length + ' items' }] : []
+    });
+    assertEqual(cards.map(c => c.title), ['Additions', 'Furniture', 'Signs'], 'titles in seed order then data order');
+    assertEqual(cards.map(c => c.rows.length), [0, 2, 1], 'members');
+    assertEqual(cards[1].contentFooter, '2 items', 'bucket decorations');
+    assertEqual([cards[1].row.tab, cards[1].hasDetails, cards[1].cardClass], ['FURNITURE', false, 'purple'], 'synthetic row, no details');
+});
+
+// ── Instant write (views-and-renderers-plan §4.16) ───────────────────────────
+// writeCellsVerified locates rows by identity (Client + Year + Show) and columns by header name,
+// reads, writes, re-reads, and retries once if rows moved. These tests run against FakeGoogle's
+// Production Schedule and restore every cell they touch.
+
+const IW_DB = 'PROD_SCHED';
+const IW_TAB = 'Production Schedule';
+const IW_ROW = { Client: 'Gearfire', Year: '2025', Show: 'SHOT Show' };
+
+// One verified cell write (a batch of one); resolves to its result
+async function writeOneVerified(database, tab, row, column, value) {
+    const [result] = await Requests.writeCellsVerified(database, tab, [{ row, column, value }]);
+    return result;
+}
+
+function iwSheet() {
+    return FakeGoogleSheetsService.mockData[IW_DB][IW_TAB];
+}
+function iwCell(row, header) {
+    const sheet = iwSheet();
+    const c = sheet[0].findIndex(h => String(h).replace(/\s+/g, ' ').trim().toLowerCase() === header.toLowerCase());
+    const r = sheet.findIndex((line, i) => i > 0 && line[0] === row.Show && line[1] === row.Client && String(line[2]) === row.Year);
+    return { r, c, value: sheet[r]?.[c] };
+}
+
+test('INSTANT WRITE', 'checkbox reading: X/TRUE checked, any other value unchecked', async () => {
+    assertEqual(['X', 'x', ' TRUE ', '-', 'N/a', '1/10', '', null].map(isCheckedValue), [true, true, true, false, false, false, false, false], 'isChecked');
+});
+
+test('INSTANT WRITE', 'a verified write changes one cell by identity and verifies it', async () => {
+    const before = iwCell(IW_ROW, 'Elev');
+    try {
+        const res = await writeOneVerified(IW_DB, IW_TAB, IW_ROW, 'Elev', 'X');
+        assertEqual(res.ok, true, 'ok');
+        assertEqual(iwCell(IW_ROW, 'Elev').value, 'X', 'cell written');
+        const res2 = await writeOneVerified(IW_DB, IW_TAB, IW_ROW, 'Elev', '');
+        assertEqual([res2.ok, iwCell(IW_ROW, 'Elev').value], [true, ''], 'uncheck writes blank');
+    } finally {
+        iwSheet()[before.r][before.c] = before.value;
+    }
+});
+
+test('INSTANT WRITE', 'refuses columns not listed in InstantWriteTables and tables without an entry', async () => {
+    const r1 = await writeOneVerified(IW_DB, IW_TAB, IW_ROW, 'City', 'X');
+    assertEqual(r1, { ok: false, reason: 'column-not-writable' }, 'column refused');
+    const r2 = await writeOneVerified(IW_DB, 'Some Other Tab', IW_ROW, 'Elev', 'X');
+    assertEqual(r2, { ok: false, reason: 'no-config' }, 'no config');
+});
+
+test('INSTANT WRITE', 'duplicate identity is never guessed', async () => {
+    const sheet = iwSheet();
+    const src = iwCell(IW_ROW, 'Elev');
+    const copy = [...sheet[src.r]];
+    sheet.push(copy);
+    try {
+        const res = await writeOneVerified(IW_DB, IW_TAB, IW_ROW, 'Elev', 'X');
+        assertEqual(res, { ok: false, reason: 'duplicate' }, 'duplicate');
+        assertEqual(sheet[src.r][src.c], src.value, 'original untouched');
+    } finally {
+        sheet.splice(sheet.indexOf(copy), 1);
+    }
+});
+
+test('INSTANT WRITE', 'row moved mid-write: re-located by identity and written correctly', async () => {
+    const sheet = iwSheet();
+    const before = iwCell(IW_ROW, 'Panels');
+    const original = FakeGoogleSheetsService.getSheetData;
+    let inserted = null;
+    // The first single-row range read happens after the row was located: insert a row above it then.
+    FakeGoogleSheetsService.getSheetData = async function (tableId, range) {
+        if (!inserted && tableId === IW_DB && /!A\d+:/.test(range)) {
+            inserted = new Array(sheet[0].length).fill('');
+            inserted[0] = 'Inserted Show'; inserted[1] = 'Inserted Client'; inserted[2] = '2025';
+            sheet.splice(1, 0, inserted);
+        }
+        return original.call(this, tableId, range);
+    };
+    try {
+        const res = await writeOneVerified(IW_DB, IW_TAB, IW_ROW, 'Panels', 'X');
+        assertEqual(res.ok, true, 'ok after retry');
+        const after = iwCell(IW_ROW, 'Panels');
+        assertEqual([after.r, after.value], [before.r + 1, 'X'], 'written at the moved row');
+        assertEqual(inserted[after.c], '', 'inserted row untouched');
+    } finally {
+        FakeGoogleSheetsService.getSheetData = original;
+        if (inserted) sheet.splice(sheet.indexOf(inserted), 1);
+        const cur = iwCell(IW_ROW, 'Panels');
+        sheet[cur.r][cur.c] = before.value;
+    }
+});
+
+test('INSTANT WRITE', 'saveShowNote creates the row the first time, then updates it', async () => {
+    const sheet = FakeGoogleSheetsService.mockData.CACHE.ShowNotes;
+    const startLen = sheet.length;
+    const id = 'TESTCO 2099 NOTE TEST';
+    try {
+        const r1 = await Requests.saveShowNote(id, 'first note');
+        assertEqual(r1.ok, true, 'create ok');
+        assertEqual(sheet.length, startLen + 1, 'row appended');
+        const r2 = await Requests.saveShowNote(id, 'second note');
+        assertEqual(r2.ok, true, 'update ok');
+        assertEqual(sheet.length, startLen + 1, 'no second row');
+        const notes = await Requests.getShowNotes();
+        assertEqual(notes.find(n => n.Identifier === id)?.Note, 'second note', 'read back');
+    } finally {
+        const i = sheet.findIndex(r => r[0] === id);
+        if (i > 0) sheet.splice(i, 1);
+    }
+});
+
+test('INSTANT WRITE', 'design queue preferences are readable as json', async () => {
+    const fields = await Requests.getJsonPreference('DesignQueueFields', []);
+    assertContains(fields, 'Assignee', 'DesignQueueFields');
+    const cfg = await Requests.getInstantWriteConfig('PROD_SCHED', 'Production Schedule');
+    assertEqual(cfg.identity, ['Client', 'Year', 'Show'], 'identity');
+    assertEqual(cfg.columns, ['Elev', 'Panels', 'Setups', 'Assignee'], 'columns');
+});
+
+// ── Instant-write preference, column kinds, ship estimate ────────────────────
+
+test('INSTANT WRITE', 'InstantWriteTables: columns as a list, the older typed object still read', async () => {
+    const key = 'PROD_SCHED/Production Schedule';
+    assertEqual(instantWriteEntry({ [key]: { identity: ['Client', 'Year', 'Show', 'Size'], columns: ['Elev', 'Assignee'] } }, 'PROD_SCHED', 'Production Schedule'),
+        { identity: ['Client', 'Year', 'Show', 'Size'], columns: ['Elev', 'Assignee'] }, 'list form');
+    assertEqual(instantWriteEntry({ [key]: { identity: ['Client'], columns: { Elev: 'checkbox', Assignee: 'select' } } }, 'PROD_SCHED', 'Production Schedule'),
+        { identity: ['Client'], columns: ['Elev', 'Assignee'] }, 'object form');
+    assertEqual([instantWriteEntry({ [key]: { identity: [], columns: ['Elev'] } }, 'PROD_SCHED', 'Production Schedule'), instantWriteEntry({}, 'PROD_SCHED', 'Production Schedule')], [null, null], 'incomplete');
+});
+
+test('INSTANT WRITE', 'keys: identities match trimmed and case-insensitively; cells by normalized column', async () => {
+    const id = ['Client', 'Year', 'Show'];
+    const key = (row) => identityKey(id, k => row[k]);
+    assertEqual(key({ Client: ' QGenda ', Year: 2025, Show: 'HIMSS' }), key({ Client: 'qgenda', Year: '2025', Show: 'himss ' }), 'same identity');
+    assertEqual(key({ Client: 'A|B', Year: '', Show: 'C' }) === key({ Client: 'A', Year: 'B', Show: 'C' }), false, 'a value with | is not split');
+    assertEqual(cellKey('r', 'Account  Manager'), cellKey('r', 'account manager'), 'column names normalized');
+    assertEqual(joinKey('a', null, 1).split(''), ['a', '', '1'], 'parts');
+});
+
+test('COLUMN TYPES', 'declared types win; undeclared columns are text unless the name reads as a date, number or currency', async () => {
+    const all = { 'DB/Tab': { 'Ship BKD': 'checkbox', Owner: { type: 'select', options: 'People' }, Odd: 'colour', ' ': 'text' } };
+    const list = columnTypesEntry(all, 'DB', 'Tab');
+    assertEqual(list, [{ column: 'Ship BKD', type: 'checkbox' }, { column: 'Owner', type: 'select', options: 'People' }], 'unknown types and blank names skipped');
+    assertEqual(columnTypesEntry(all, 'DB', 'Other'), [], 'other tab');
+    const map = columnTypeMap(list);
+    assertEqual([columnTypeOf(map, 'ship  bkd'), columnTypeOf(map, 'Owner'), columnTypeOf(map, 'Ship'), columnTypeOf(map, 'Notes')],
+        [{ type: 'checkbox' }, { type: 'select', options: 'People' }, { type: 'date' }, { type: 'text' }], 'declared, then guessed');
+    assertEqual(['S. Start', 'Qty', 'Total Cost', 'Booth#'].map(guessColumnType), ['date', 'number', 'currency', 'text'], 'name guesses');
+});
+
+test('COLUMN TYPES', 'getColumnTypes reads the ColumnTypes preference; schedule fields carry the types', async () => {
+    const types = await Requests.getColumnTypes('PROD_SCHED', 'Production Schedule');
+    const byName = Object.fromEntries(types.map(t => [t.column, t]));
+    assertEqual([byName.Elev?.type, byName.Assignee], ['checkbox', { column: 'Assignee', type: 'select', options: 'DesignQueueAssignees' }], 'declared');
+    const fields = Object.fromEntries(buildScheduleFields([{ Elev: '', 'Ship BKD': '', Ship: '', Client: '', Assignee: '' }], { packlist: false, types }).map(f => [f.key, f]));
+    assertEqual([fields.Elev.type, fields['Ship BKD'].type, fields.Ship.type, fields.Client.type, fields.Assignee.optionList], ['checkbox', 'checkbox', 'date', undefined, 'DesignQueueAssignees'], 'field types');
+});
+
+test('INSTANT WRITE', 'design queue setup: instant config, shown fields, assignees and column types in one call', async () => {
+    const [setup] = await Requests.getDesignQueueSetup('PROD_SCHED', 'Production Schedule');
+    assertEqual(setup.instant, { identity: ['Client', 'Year', 'Show'], columns: ['Elev', 'Panels', 'Setups', 'Assignee'] }, 'instant config');
+    assertContains(setup.fields, 'Note', 'DesignQueueFields');
+    assertEqual(setup.assignees, ['Alex', 'Sam Smith'], 'assignees');
+    assertEqual(setup.assigneeColors, { Alex: 'red', 'Sam Smith': 'blue' }, 'assignee colour words');
+    assertEqual(setup.types, await Requests.getColumnTypes('PROD_SCHED', 'Production Schedule'), 'the declared column types');
+});
+
+test('INSTANT WRITE', 'Ship shows the estimate (with year, from show dates when missing); transship uses the source end', async () => {
+    const row = { Ship: '', 'S. Start': '3/20', 'S. End': '3/23', Year: '2026' };
+    assertEqual(withShipDate(row).Ship, '03/06/2026', 'S. Start minus 14 days');
+    assertEqual(withShipDate({ ...row, Ship: '3/1' }).Ship, '03/01/2026', 'sheet value gains its year');
+    assertEqual(withShipDate({ ...row, AppData: { transshipSource: 'X', transshipSourceEndDate: '03/02/2026' } }).Ship, '03/02/2026', 'transship');
+    assertEqual(estimateShipDate({ Year: '2026' }), null, 'no dates');
+});
+
+// ── Filters: same-column OR, is empty, checked / unchecked ───────────────────
+
+test('FILTERS', 'filters on one column match rows meeting either; excludes still apply', async () => {
+    const rows = [{ N: 'Bob' }, { N: '' }, { N: 'Ann' }, { N: 'Bobby' }];
+    const sp = textFiltersToSearchParams([
+        { column: 'N', values: ['bob'], type: 'contains' },
+        { column: 'N', values: [], type: 'empty' },
+        { column: 'N', values: ['bobby'], type: 'excludes' }
+    ]);
+    assertEqual(searchFilter(rows, sp).map(r => r.N), ['Bob', ''], 'Bob or empty, not Bobby');
+    assertEqual(searchFilter(rows, textFiltersToSearchParams([{ column: 'N', values: [], type: 'empty' }])).map(r => r.N), [''], 'is empty alone');
+    assertEqual(searchFilter(rows, textFiltersToSearchParams([{ column: 'N', values: [''], type: 'contains' }])).length, 4, 'a contains filter without a value is ignored');
+});
+
+test('FILTERS', 'checkbox filters: checked is X or TRUE, unchecked is anything else', async () => {
+    const rows = [{ E: 'X' }, { E: '' }, { E: '-' }, { E: 'TRUE' }, { E: 'N/a' }];
+    assertEqual(searchFilter(rows, textFiltersToSearchParams([{ column: 'E', type: 'checked' }])).map(r => r.E), ['X', 'TRUE'], 'checked');
+    assertEqual(searchFilter(rows, textFiltersToSearchParams([{ column: 'E', type: 'unchecked' }])).map(r => r.E), ['', '-', 'N/a'], 'unchecked');
+});
+
+test('FILTERS', 'URL filter parameters keep same-column filters and value-less types', async () => {
+    const sp = parseSearchParameters({ Col1: 'Client', Val1: 'a|b', Type1: 'contains', Col2: 'Client', Val2: '', Type2: 'empty' }).searchParams;
+    assertEqual(sp, { Client: [{ values: ['a', 'b'], type: 'contains' }, { values: [], type: 'empty' }] }, 'grouped');
+    const all = await Requests.getProductionScheduleData(null, null);
+    const want = all.filter(r => isCheckedValue(r.Setups) && (/o/i.test(r.Client) || !String(r.Client).trim()));
+    const data = await Requests.getProductionScheduleData(null, textFiltersToSearchParams([
+        { column: 'Setups', type: 'checked' },
+        { column: 'Client', values: ['o'], type: 'contains' },
+        { column: 'Client', values: [], type: 'empty' }
+    ]));
+    assertEqual([data.length > 0, data.length], [true, want.length], 'schedule data filtered');
+});
+
+// ── Show notes: empty notes are removed, never appended ──────────────────────
+
+function notesSheet() {
+    return FakeGoogleSheetsService.mockData.CACHE.ShowNotes;
+}
+function notesSnapshot() {
+    return notesSheet().map(r => r.slice());
+}
+function notesRestore(snap) {
+    const s = notesSheet();
+    s.length = 0;
+    snap.forEach(r => s.push(r.slice()));
+}
+
+test('SHOW NOTES', "a schedule row's note comes from its show identifier and follows note saves", async () => {
+    const snap = notesSnapshot();
+    const id = 'CHAINCO 2026 SPRING EXPO';
+    const row = { Show: 'Spring Expo', Client: 'ChainCo', Year: '2026' };
+    try {
+        await Requests.saveShowNote(id, 'first');
+        assertEqual(await Requests.getShowNoteForRow(row), { identifier: id, note: 'first' }, 'note by identifier');
+        await Requests.saveShowNote(id, 'second');
+        assertEqual((await Requests.getShowNoteForRow(row)).note, 'second', 'a save refreshes the cached note');
+        assertEqual(await Requests.getShowNoteForRow({ Show: null, Client: null, Year: null }), { identifier: '', note: '' }, 'no identifier');
+    } finally {
+        await Requests.saveShowNote(id, '');
+        notesRestore(snap);
+    }
+});
+
+test('SHOW NOTES', 'clearing a note removes its row; an empty note is never appended', async () => {
+    const snap = notesSnapshot();
+    try {
+        const id = 'TESTCO 2099 CLEAR TEST';
+        await Requests.saveShowNote(id, 'to be cleared');
+        assertEqual(notesSheet().some(r => r[0] === id), true, 'created');
+        const res = await Requests.saveShowNote(id, '   ');
+        assertEqual([res.ok, notesSheet().some(r => r[0] === id)], [true, false], 'row removed');
+        const len = notesSheet().length;
+        const res2 = await Requests.saveShowNote('TESTCO 2099 NEVER', '');
+        assertEqual([res2.ok, notesSheet().length], [true, len], 'nothing appended');
+        assertEqual(notesSheet()[0], ['Identifier', 'Note', 'EditHistory'], 'header kept');
+    } finally {
+        notesRestore(snap);
+    }
+});
+
+test('SHOW NOTES', 'any save removes rows with empty notes and keeps every other note', async () => {
+    const snap = notesSnapshot();
+    const s = notesSheet();
+    try {
+        s.push(['TESTCO 2099 EMPTY A', '', 'old history'], ['', '', ''], ['TESTCO 2099 KEEP', 'keep me', ''], ['TESTCO 2099 EMPTY B', ' ', '']);
+        const res = await Requests.saveShowNote('TESTCO 2099 NEW', 'a new note');
+        assertEqual(res.ok, true, 'ok');
+        const ids = s.slice(1).map(r => r[0]);
+        assertEqual(ids.filter(id => /EMPTY/.test(id)).length + ids.filter(id => !id).length, 0, 'empty rows removed');
+        assertContains(ids, 'TESTCO 2099 KEEP', 'other note kept');
+        assertEqual(s.find(r => r[0] === 'TESTCO 2099 NEW')?.[1], 'a new note', 'new note written');
+        snap.slice(1).forEach(r => assertContains(ids, r[0], 'fixture note kept'));
+    } finally {
+        notesRestore(snap);
+    }
+});
+
+test('SHOW NOTES', 'rows moving before a removal never lose a note', async () => {
+    const snap = notesSnapshot();
+    const s = notesSheet();
+    try {
+        s.push(['TESTCO 2099 EMPTY', '', ''], ['TESTCO 2099 A', 'note a', ''], ['TESTCO 2099 B', 'note b', '']);
+        let fired = false;
+        const res = await withFaults({
+            // Another save inserts a note at the top just before the removal: positions shift by one
+            beforeDelete: () => { if (!fired) { fired = true; s.splice(1, 0, ['TESTCO 2099 OTHER', 'other note', '']); } }
+        }, () => Requests.saveShowNote('TESTCO 2099 A', 'note a, edited'));
+        assertEqual(res.ok, true, 'ok');
+        const notes = Object.fromEntries(s.slice(1).map(r => [r[0], r[1]]));
+        assertEqual([notes['TESTCO 2099 A'], notes['TESTCO 2099 B'], notes['TESTCO 2099 OTHER']], ['note a, edited', 'note b', 'other note'], 'every note present');
+        snap.slice(1).forEach(r => assertEqual(notes[r[0]], r[1], 'fixture note ' + r[0]));
+    } finally {
+        notesRestore(snap);
+    }
+});
+
+test('SHOW NOTES', 'a note write that lands on a moved row is undone and retried', async () => {
+    const snap = notesSnapshot();
+    const s = notesSheet();
+    try {
+        s.push(['TESTCO 2099 FIRST', 'first note', ''], ['TESTCO 2099 TARGET', 'target note', '']);
+        let fired = false;
+        const res = await withFaults({
+            beforeBatchWrite: (t) => { if (t === 'CACHE' && !fired) { fired = true; s.splice(1, 0, ['TESTCO 2099 INSERTED', 'inserted note', '']); } }
+        }, () => Requests.saveShowNote('TESTCO 2099 TARGET', 'target, edited'));
+        assertEqual(res.ok, true, 'ok');
+        const notes = Object.fromEntries(s.slice(1).map(r => [r[0], r[1]]));
+        assertEqual([notes['TESTCO 2099 TARGET'], notes['TESTCO 2099 FIRST'], notes['TESTCO 2099 INSERTED']], ['target, edited', 'first note', 'inserted note'], 'only the target changed');
+    } finally {
+        notesRestore(snap);
+    }
+});
+
+// ── Cell edits (utils/cellEdits.js): batch and instant edits ─────────────────
+
+const editWait = (ms) => new Promise(r => setTimeout(r, ms));
+
+function batchHarness(rowKey = null) {
+    const rows = [{ k: '1', A: 'x', MetaData: 'm' }, { k: '2', A: 'y' }];
+    const originals = rows.map(r => ({ ...r }));
+    const emitted = [];
+    const edits = useBatchEdits({
+        rows: () => rows,
+        originalRows: () => originals,
+        rowKey: () => rowKey,
+        undoRoute: () => null,
+        // The page writes its rows on cell-edit
+        emitEdit: (i, key, value) => { emitted.push([i, key, value]); rows[i][key] = value; }
+    });
+    return { rows, emitted, edits };
+}
+
+test('CELL EDITS', 'batch: an edit marks the cell unsaved until it is back to the loaded value', async () => {
+    const { edits, emitted } = batchHarness();
+    edits.edit(0, 'A', 'z');
+    assertEqual([edits.cellState(0, 'A'), edits.hasUnsaved.value, emitted.length], ['unsaved', true, 1], 'changed');
+    edits.edit(0, 'A', 'x');
+    assertEqual([edits.cellState(0, 'A'), edits.hasUnsaved.value], ['', false], 'back to loaded');
+});
+
+test('CELL EDITS', 'batch: revert, nested tables, and recompare (with MetaData)', async () => {
+    const { rows, edits, emitted } = batchHarness();
+    edits.edit(1, 'A', 'q');
+    edits.revert(1, 'A');
+    assertEqual([rows[1].A, edits.cellState(1, 'A'), emitted[emitted.length - 1]], ['y', '', [1, 'A', 'y']], 'reverted');
+    edits.setNested(0, 'Items', true);
+    assertEqual([edits.cellState(0, 'Items'), edits.hasUnsaved.value], ['unsaved', true], 'nested changed');
+    edits.setNested(0, 'Items', false);
+    assertEqual(edits.hasUnsaved.value, false, 'nested back');
+    rows[0].MetaData = 'changed';
+    edits.compareAll(['A']);
+    assertEqual([edits.cellState(0, 'A'), edits.hasUnsaved.value], ['', true], 'MetaData counts as a change');
+});
+
+test('CELL EDITS', 'batch: loaded values follow the row key when rows move', async () => {
+    const { rows, edits } = batchHarness('k');
+    rows.reverse();
+    assertEqual([edits.originalValue(rows[0], 0, 'A'), edits.originalValue(rows[1], 1, 'A')], ['y', 'x'], 'by key');
+});
+
+test('CELL EDITS', 'batch with a row key: moved rows mark the table, not cells; edits compare by key', async () => {
+    const { rows, edits } = batchHarness('k');
+    rows.reverse();
+    edits.compareAll(['A']);
+    assertEqual([edits.cellState(0, 'A'), edits.cellState(1, 'A'), edits.hasUnsaved.value], ['', '', true], 'moved: unsaved, no cells');
+    edits.edit(0, 'A', 'q');
+    assertEqual(edits.cellState(0, 'A'), 'unsaved', 'edit after a move');
+    edits.edit(0, 'A', 'y');
+    assertEqual(edits.cellState(0, 'A'), '', 'back to its own loaded value');
+    rows.reverse();
+    edits.compareAll(['A']);
+    assertEqual(edits.hasUnsaved.value, false, 'order restored');
+    rows.pop();
+    edits.compareAll(['A']);
+    assertEqual(edits.hasUnsaved.value, true, 'a removed row counts as a change');
+});
+
+function instantHarness(commit) {
+    const rows = [{ id: 'a', Elev: '', Note: '' }, { id: 'b', Elev: 'X', Note: 'n' }];
+    const calls = { commits: [], errors: [], refreshes: 0 };
+    const edits = useInstantEdits({
+        enabled: () => true,
+        rows: () => rows,
+        rowId: (r) => r.id,
+        commitCells: async (entries) => {
+            calls.commits.push(entries.map(e => `${e.row.id}.${e.key}=${e.value}`));
+            return commit(entries);
+        },
+        derive: (r) => ({ ...r, done: r.Elev === 'X' }),
+        field: (key) => (key === 'Elev' ? { key, label: 'Elev', type: 'checkbox' } : { key, label: key }),
+        delay: () => 20,
+        modal: () => ({ error: (m) => calls.errors.push(m), alert: () => {} }),
+        refresh: () => { calls.refreshes++; }
+    });
+    return { rows, calls, edits };
+}
+const allOk = async (entries) => entries.map(() => ({ ok: true }));
+
+test('CELL EDITS', 'instant: edits show at once and nearby edits are written as one batch', async () => {
+    const { rows, calls, edits } = instantHarness(allOk);
+    edits.edit(rows[0], 'Elev', 'X');
+    edits.edit(rows[1], 'Note', 'new');
+    assertEqual([edits.cellState(rows[0], 'Elev'), edits.overlay(rows)[0]], ['unsaved', { id: 'a', Elev: 'X', Note: '', done: true }], 'shown and derived');
+    await editWait(80);
+    assertEqual(calls.commits, [['a.Elev=X', 'b.Note=new']], 'one batch');
+    assertEqual(edits.cellState(rows[0], 'Elev'), '', 'saved');
+    rows[0].Elev = 'X';
+    rows[1].Note = 'new';
+    edits.reconcile();
+    assertEqual(Object.keys(edits.pending).length, 0, 'overlay dropped once the rows carry the values');
+});
+
+test('CELL EDITS', 'instant: a cell back to its loaded value within the delay is not written', async () => {
+    const { rows, calls, edits } = instantHarness(allOk);
+    edits.edit(rows[0], 'Elev', 'X');
+    edits.edit(rows[0], 'Elev', '');
+    edits.edit(rows[1], 'Elev', 'TRUE'); // checked, like the loaded X
+    await editWait(80);
+    assertEqual([calls.commits, Object.keys(edits.pending).length], [[], 0], 'nothing written');
+});
+
+test('CELL EDITS', 'instant: a failed write reverts, reports once and asks for a refresh', async () => {
+    const { rows, calls, edits } = instantHarness(async (entries) => entries.map(() => ({ ok: false, reason: 'not-found' })));
+    edits.edit(rows[0], 'Elev', 'X');
+    await editWait(80);
+    assertEqual([edits.cellState(rows[0], 'Elev'), edits.overlay(rows), calls.refreshes], ['failed', rows, 1], 'reverted');
+    assertEqual(calls.errors.length === 1 && calls.errors[0].includes('Elev: the row was not found in the sheet'), true, 'message');
+});
+
+test('CELL EDITS', 'instant: an edit made while its cell is being written is written next', async () => {
+    const { rows, calls, edits } = instantHarness(async (entries) => { await editWait(60); return entries.map(() => ({ ok: true })); });
+    edits.edit(rows[0], 'Note', 'one');
+    await editWait(40); // the write is in flight
+    edits.edit(rows[0], 'Note', 'two');
+    await editWait(250);
+    assertEqual(calls.commits, [['a.Note=one'], ['a.Note=two']], 'two writes in order');
+});
+
+// ── Reactive stores: eviction ────────────────────────────────────────────────
+
+test('REACTIVE STORES', 'an evicted store that is read loads again; an unread one stays evicted', async () => {
+    const calls = { shown: 0, unread: 0 };
+    const tag = Date.now();
+    const shown = getReactiveStore(async () => { calls.shown++; return [{ a: 1 }]; }, null, [`evict-shown-${tag}`], null, false);
+    const unread = getReactiveStore(async () => { calls.unread++; return [{ a: 1 }]; }, null, [`evict-unread-${tag}`], null, false);
+    await shown.load();
+    await unread.load();
+    const el = document.createElement('div');
+    const app = Vue.createApp({ render: () => Vue.h('span', String(shown.data.length)) });
+    app.mount(el);
+    try {
+        shown.evict();
+        unread.evict();
+        await editWait(300);
+        assertEqual([calls.shown, shown.data.length, el.textContent], [2, 1, '1'], 'rendered store reloaded');
+        assertEqual([calls.unread, unread.needsReload], [1, true], 'unread store stays evicted');
+    } finally {
+        app.unmount();
+    }
+});
+
+test('REACTIVE STORES', 'a keepWhileRefreshing analysis keeps its last result through reloads and re-runs', async () => {
+    let rows = [{ k: 'a' }, { k: 'b' }];
+    let gate = null; // while set, the analysis waits for it
+    const analyze = async (k) => { const n = rows.length; if (gate) await gate; return `${k}${n}`; };
+    const config = { ...createAnalysisConfig(analyze, 'res', 'test', ['k']), keepWhileRefreshing: true };
+    const store = getReactiveStore(async () => rows.map(r => ({ ...r })), null, [`keep-${Date.now()}`], [config], false);
+    await store.load();
+    assertEqual(store.data.map(r => r.AppData.res), ['a2', 'b2'], 'analysed');
+    let release;
+    gate = new Promise(r => { release = r; });
+    rows = [{ k: 'b' }, { k: 'c' }, { k: 'a' }];
+    const reload = store.load();
+    await editWait(50);
+    assertEqual(store.data.map(r => r.AppData.res), ['b2', null, 'a2'], 'kept by input value while the re-run waits');
+    gate = null;
+    release();
+    await reload;
+    assertEqual(store.data.map(r => r.AppData.res), ['b3', 'c3', 'a3'], 'replaced by the re-run');
+    store.clearSpecificAnalysisResults(['res']);
+    assertEqual(store.data[0].AppData.res, 'b3', 'an invalidation does not clear it first');
+});
+
+// ── Batched verified writes, fault injection, sheet health ───────────────────
+// writeCellsVerified writes any cells of one tab as one batch with the same safety steps as a
+// single cell. FakeGoogleSheetsService.faults injects what a concurrent editor could do to the
+// live sheet mid-save (insert, sort, drop, duplicate, rename); the randomized test checks that no
+// cell outside the batch ever changes in rows the save could know about, and that a change it
+// can't undo (a row or column added mid-save) is always reported.
+
+const IW_WRITABLE = ['Elev', 'Panels', 'Setups', 'Assignee'];
+
+function iwHeaderIndex(name, header = iwSheet()[0]) {
+    return header.findIndex(h => String(h).replace(/\s+/g, ' ').trim().toLowerCase() === name.toLowerCase());
+}
+function iwIdentityKey(line) {
+    return [line[0], line[1], line[2]].map(v => String(v ?? '').trim().toLowerCase()).join('|');
+}
+// Data rows (array references) whose Show + Client + Year is complete and unique
+function iwUniqueRows() {
+    const s = iwSheet();
+    const counts = new Map();
+    const complete = s.slice(1).filter(l => l && l[0] && l[1] && l[2]);
+    complete.forEach(l => counts.set(iwIdentityKey(l), (counts.get(iwIdentityKey(l)) || 0) + 1));
+    return complete.filter(l => counts.get(iwIdentityKey(l)) === 1);
+}
+function iwRowObj(line) {
+    return { Show: line[0], Client: line[1], Year: String(line[2]) };
+}
+// Snapshot by row reference (faults move rows; writes change them in place) and restore in place
+function iwSnapshot() {
+    const s = iwSheet();
+    return { rows: s.slice(), copies: s.map(r => r.slice()) };
+}
+function iwRestore(snap) {
+    const s = iwSheet();
+    s.length = 0;
+    snap.rows.forEach((r, i) => { r.length = 0; r.push(...snap.copies[i]); s.push(r); });
+}
+async function withFaults(faults, fn) {
+    FakeGoogleSheetsService.faults = faults;
+    try { return await fn(); } finally { FakeGoogleSheetsService.faults = null; }
+}
+function iwNewRow(label) {
+    const row = new Array(iwSheet()[0].length).fill('');
+    row[0] = `${label} Show`; row[1] = `${label} Client`; row[2] = '2025';
+    return row;
+}
+// Deterministic RNG (mulberry32) so a failing run can be replayed from its seed
+function seededRandom(seed) {
+    let a = seed >>> 0;
+    return () => {
+        a = (a + 0x6D2B79F5) >>> 0;
+        let t = a;
+        t = Math.imul(t ^ (t >>> 15), t | 1);
+        t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+}
+
+test('INSTANT WRITE', 'writeCellsVerified writes cells on several rows with one write request', async () => {
+    const snap = iwSnapshot();
+    const [a, b] = iwUniqueRows();
+    let batches = 0, fullReads = 0;
+    try {
+        const res = await withFaults({
+            beforeBatchWrite: () => { batches++; },
+            beforeRead: (t, range) => { if (t === IW_DB && !range.includes('!')) fullReads++; }
+        }, () => Requests.writeCellsVerified(IW_DB, IW_TAB, [
+            { row: iwRowObj(a), column: 'Elev', value: 'X' },
+            { row: iwRowObj(a), column: 'Panels', value: '-' },
+            { row: iwRowObj(b), column: 'Setups', value: 'X' }
+        ]));
+        assertEqual(res.map(r => r.ok), [true, true, true], 'all ok');
+        assertEqual([a[iwHeaderIndex('Elev')], a[iwHeaderIndex('Panels')], b[iwHeaderIndex('Setups')]], ['X', '-', 'X'], 'written');
+        assertEqual([batches, fullReads], [1, 1], 'one write request, one full read');
+    } finally {
+        iwRestore(snap);
+    }
+});
+
+test('INSTANT WRITE', 'batch results are per cell: refused and unmatched cells do not stop the others', async () => {
+    const snap = iwSnapshot();
+    const [a, b] = iwUniqueRows();
+    try {
+        const res = await Requests.writeCellsVerified(IW_DB, IW_TAB, [
+            { row: iwRowObj(a), column: 'Elev', value: 'X' },
+            { row: iwRowObj(a), column: 'City', value: 'X' },
+            { row: { Show: 'Nope', Client: 'Nobody', Year: '2099' }, column: 'Elev', value: 'X' },
+            { row: iwRowObj(b), column: 'Elev', value: 'X' }
+        ]);
+        assertEqual(res.map(r => r.ok ? 'ok' : r.reason), ['ok', 'column-not-writable', 'not-found', 'ok'], 'results');
+        assertEqual([a[iwHeaderIndex('Elev')], b[iwHeaderIndex('Elev')]], ['X', 'X'], 'written');
+    } finally {
+        iwRestore(snap);
+    }
+});
+
+test('INSTANT WRITE', 'rows shifted just before the write: the displaced value is restored and the target retried', async () => {
+    const snap = iwSnapshot();
+    const s = iwSheet();
+    const target = iwUniqueRows()[2];
+    const col = iwHeaderIndex('Panels');
+    const neighbour = s[s.indexOf(target) - 1];
+    const neighbourValue = neighbour[col];
+    const inserted = iwNewRow('Inserted');
+    let fired = false;
+    try {
+        const res = await withFaults({
+            beforeBatchWrite: () => { if (!fired) { fired = true; s.splice(1, 0, inserted); } }
+        }, () => Requests.writeCellsVerified(IW_DB, IW_TAB, [{ row: iwRowObj(target), column: 'Panels', value: neighbourValue === 'X' ? '-' : 'X' }]));
+        const want = neighbourValue === 'X' ? '-' : 'X';
+        assertEqual([res[0].ok, res[0].warning], [true, undefined], 'ok without warning');
+        assertEqual(target[col], want, 'target written');
+        assertEqual(neighbour[col], neighbourValue, 'neighbour restored');
+        assertEqual(inserted[col], '', 'inserted row untouched');
+    } finally {
+        iwRestore(snap);
+    }
+});
+
+test('INSTANT WRITE', 'a row added at the target mid-write is reported, and the target still written', async () => {
+    const snap = iwSnapshot();
+    const s = iwSheet();
+    const target = iwUniqueRows()[2];
+    const col = iwHeaderIndex('Elev');
+    const inserted = iwNewRow('Added');
+    let fired = false;
+    try {
+        const res = await withFaults({
+            beforeBatchWrite: () => { if (!fired) { fired = true; s.splice(s.indexOf(target), 0, inserted); } }
+        }, () => Requests.writeCellsVerified(IW_DB, IW_TAB, [{ row: iwRowObj(target), column: 'Elev', value: 'X' }]));
+        assertEqual(res[0].ok, true, 'ok');
+        assertEqual(target[col], 'X', 'target written');
+        assertEqual(/Added Show/.test(res[0].warning || '') && /added while saving/.test(res[0].warning), true, 'warning names the added row');
+    } finally {
+        iwRestore(snap);
+    }
+});
+
+test('INSTANT WRITE', 'a dropped write fails verification and is retried', async () => {
+    const snap = iwSnapshot();
+    const target = iwUniqueRows()[1];
+    const want = target[iwHeaderIndex('Setups')] === 'X' ? '-' : 'X';
+    let drops = 0;
+    try {
+        const res = await withFaults({
+            beforeBatchWrite: () => (drops++ === 0 ? 'drop' : undefined)
+        }, () => Requests.writeCellsVerified(IW_DB, IW_TAB, [{ row: iwRowObj(target), column: 'Setups', value: want }]));
+        assertEqual([res[0].ok, drops, target[iwHeaderIndex('Setups')]], [true, 2, want], 'retried and written');
+    } finally {
+        iwRestore(snap);
+    }
+});
+
+test('INSTANT WRITE', 'randomized faults never change cells outside the batch (seeded)', async () => {
+    const SEED = 20261031;
+    const RUNS = 60;
+    const rng = seededRandom(SEED);
+    const pick = (arr) => arr[Math.floor(rng() * arr.length)];
+    const once = (fn) => { let done = false; return (...args) => { if (done) return undefined; const r = fn(...args); if (r !== false) done = true; return r === false ? undefined : r; }; };
+
+    // Each fault plays one concurrent editor action at a moment the save can't control
+    const FAULTS = {
+        none: () => ({}),
+        insertAbove: (ctx) => ({ beforeBatchWrite: once(() => { const s = iwSheet(); const row = iwNewRow('Rand'); ctx.added.push([row, row.slice()]); s.splice(1 + Math.floor(rng() * (s.length - 1)), 0, row); }) }),
+        insertAtTarget: (ctx) => ({ beforeBatchWrite: once(() => { const s = iwSheet(); const row = iwNewRow('Rand'); ctx.added.push([row, row.slice()]); s.splice(s.indexOf(pick(ctx.targets)), 0, row); }) }),
+        shuffle: () => ({ beforeBatchWrite: once(() => { const s = iwSheet(); const body = s.slice(1); for (let i = body.length - 1; i > 0; i--) { const j = Math.floor(rng() * (i + 1)); [body[i], body[j]] = [body[j], body[i]]; } s.splice(1, body.length, ...body); }) }),
+        dropAll: () => ({ beforeBatchWrite: once(() => 'drop') }),
+        dropSome: () => ({ beforeBatchWrite: once(() => new Set([0])) }),
+        moveAfterWrite: (ctx) => { let written = false; return { beforeBatchWrite: () => { written = true; }, beforeRead: once((t, range) => { if (!written || !range.includes('!')) return false; const row = iwNewRow('Late'); ctx.added.push([row, row.slice()]); iwSheet().splice(1, 0, row); }) }; },
+        duplicate: (ctx) => ({ beforeRead: once((t, range) => { if (range.includes('!')) return false; const copy = pick(ctx.targets).slice(); ctx.added.push([copy, copy.slice()]); iwSheet().push(copy); }) }),
+        renameHeader: () => ({ beforeRead: once((t, range) => { if (range.includes('!')) return false; iwSheet()[0][1] = 'Customer'; }) }),
+        insertColumn: (ctx) => ({ beforeBatchWrite: once(() => { const s = iwSheet(); const c = iwHeaderIndex(pick(ctx.columns)); ctx.insertedCol = c; s.forEach((r, i) => r.splice(c, 0, i === 0 ? 'Inserted' : '')); }) })
+    };
+    const faultNames = Object.keys(FAULTS);
+    const failures = [];
+
+    for (let run = 0; run < RUNS; run++) {
+        const snap = iwSnapshot();
+        const header = snap.copies[0];
+        const faultName = faultNames[run % faultNames.length];
+        const unique = iwUniqueRows();
+        // 1–4 distinct cells
+        const cells = new Map();
+        const n = 1 + Math.floor(rng() * 4);
+        while (cells.size < n) {
+            const ref = pick(unique);
+            const column = pick(IW_WRITABLE);
+            const value = column === 'Assignee' ? pick(['Ann', 'Bo', '']) : pick(['X', '', '-']);
+            cells.set(snap.rows.indexOf(ref) + ':' + column, { ref, column, value });
+        }
+        const items = [...cells.values()];
+        const ctx = { targets: items.map(i => i.ref), columns: items.map(i => i.column), added: [], insertedCol: -1 };
+        let results;
+        try {
+            results = await withFaults(FAULTS[faultName](ctx), () =>
+                Requests.writeCellsVerified(IW_DB, IW_TAB, items.map(i => ({ row: iwRowObj(i.ref), column: i.column, value: i.value }))));
+        } catch (e) {
+            failures.push(`run ${run} (${faultName}): threw ${e?.message || e}`);
+            iwRestore(snap);
+            continue;
+        }
+
+        const warned = results.some(r => r.warning);
+        const mapCol = (c) => (ctx.insertedCol >= 0 && c >= ctx.insertedCol ? c + 1 : c);
+        const problems = [];
+        // Rows known before the save: only cells of successful items may change, to their value
+        for (let i = 1; i < snap.rows.length; i++) {
+            const ref = snap.rows[i];
+            const copy = snap.copies[i];
+            for (let c = 0; c < copy.length; c++) {
+                let expected = copy[c] ?? '';
+                items.forEach((it, k) => { if (it.ref === ref && results[k].ok && iwHeaderIndex(it.column, header) === c) expected = it.value; });
+                const actual = ref[mapCol(c)] ?? '';
+                if (String(actual) !== String(expected)) problems.push(`${copy[1]} / ${copy[0]} ${normalize(header[c])}: "${copy[c] ?? ''}" became "${actual}" (expected "${expected}")`);
+            }
+        }
+        // Rows and columns added mid-save may change only when the save reported it
+        if (!warned) {
+            ctx.added.forEach(([row, original]) => {
+                const now = ctx.insertedCol >= 0 ? row.filter((_, c) => c !== ctx.insertedCol) : row;
+                if (JSON.stringify(now.map(v => v ?? '')) !== JSON.stringify(original.map(v => v ?? ''))) problems.push(`added row ${original[0]} changed without a warning`);
+            });
+            if (ctx.insertedCol >= 0 && iwSheet().slice(1).some(r => String(r[ctx.insertedCol] ?? '') !== '')) problems.push('inserted column changed without a warning');
+        }
+        if (faultName === 'none' && results.some(r => !r.ok)) problems.push('a clean save failed: ' + results.map(r => r.reason).join(','));
+        if (problems.length) failures.push(`run ${run} (${faultName}, seed ${SEED}): ${problems.join('; ')}`);
+        iwRestore(snap);
+    }
+    assertEqual(failures, [], `${RUNS} randomized saves`);
+
+    function normalize(h) { return String(h ?? '').replace(/\s+/g, ' ').trim(); }
+});
+
+test('INSTANT WRITE', 'sheet health (test only) reports duplicate identities, duplicate headers and missing columns', async () => {
+    const snap = iwSnapshot();
+    const s = iwSheet();
+    try {
+        s.push(iwUniqueRows()[0].slice());
+        s[0][iwHeaderIndex('Setups')] = 'Elev';
+        const health = await checkSheetHealth(IW_DB, IW_TAB);
+        const kinds = health.issues.map(i => i.kind);
+        assertEqual(health.ok, false, 'not ok');
+        ['duplicate-identity', 'duplicate-header', 'missing-writable-column'].forEach(k => assertContains(kinds, k, k));
+        const dup = health.issues.find(i => i.kind === 'duplicate-identity');
+        assertEqual(dup.rows.length, 2, 'both rows listed');
+        const noIdentity = await checkSheetHealth(IW_DB, IW_TAB, { identity: [], columns: [] });
+        assertEqual(noIdentity.issues.map(i => i.kind), ['duplicate-header'], 'a spec without identity skips identity rules');
+    } finally {
+        iwRestore(snap);
+    }
+});
+
 // ── Runner export ─────────────────────────────────────────────────────────────
+
+// ── Sheet health: last, after every test that writes to the fixture sheets ─────
+// A test (or the process it covers) that leaves a sheet in a state the app can't rely on fails
+// here before it is deployed. tests/sheetHealth.js is test-only and never loads on the live site.
+
+// The fake schedule deliberately holds multi-booth shows (two rows, one Client + Year + Show);
+// writes to those rows are refused. Any other issue means the fixture data is in a bad state.
+const IW_KNOWN_DUPLICATES = ['multiboothco / 2026 / multi booth', 'qgenda / 2024 / himss', 'qgenda / 2025 / himss'];
+
+test('SHEET HEALTH', 'the Production Schedule has only its known multi-booth duplicates', async () => {
+    const health = await checkSheetHealth(IW_DB, IW_TAB);
+    const other = health.issues.filter(i => i.kind !== 'duplicate-identity').map(i => i.message);
+    assertEqual(other, [], 'no other issues');
+    const dups = health.issues.filter(i => i.kind === 'duplicate-identity').map(i => i.message.replace(/^Rows [\d, ]+ share the identity /, '')).sort();
+    assertEqual(dups, IW_KNOWN_DUPLICATES, 'known duplicates only');
+});
+
+test('SHEET HEALTH', 'ShowNotes has one row per show identifier', async () => {
+    const health = await checkSheetHealth('CACHE', 'ShowNotes', { identity: ['Identifier'], columns: ['Identifier', 'Note', 'EditHistory'] });
+    assertEqual(health.issues.map(i => i.message), [], 'no issues');
+});
 
 export async function runTests() {
     setFakeDelaysEnabled(false);

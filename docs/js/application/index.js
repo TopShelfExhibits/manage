@@ -13,7 +13,7 @@ export { undoRegistry, setTableRowSelectionState } from './utils/undoRegistry.js
 export { getAutoColorClass, shouldAutoColor } from './utils/autoColor.js';
 
 // Navigation components
-export { BreadcrumbComponent, PrimaryNavComponent, ViewChangeComponent } from './components/interface/navigationComponents.js';
+export { BreadcrumbComponent, PrimaryNavComponent } from './components/interface/navigationComponents.js';
 export { NavigationRegistry } from './utils/navigationSystem.js';
 
 // Interface components export
@@ -27,6 +27,11 @@ export { BannerNotifications, NotificationBubbleOverlay } from './components/int
 export { TableComponent, tableRowSelectionState } from './components/interface/tableComponent.js';
 export { CardsComponent } from './components/interface/cardsComponent.js';
 export { CalendarComponent } from './components/interface/calendarComponent.js';
+// Views system (see docs/notes/views-and-renderers-plan.md)
+export { DataView } from './components/interface/dataViewComponent.js';
+export { ViewSelectComponent } from './components/interface/viewSelectComponent.js';
+export { ContentHeaderComponent } from './components/interface/contentHeaderComponent.js';
+export { RowDetailsComponent, RowDetailsModal } from './components/interface/rowDetailsComponent.js';
 export { DashboardToggleComponent } from './components/interface/navigationComponents.js';
 export { ScheduleFilterSelect, ScheduleDateRangeCard, InventoryCategoryFilter } from './components/interface/filterComponents.js';
 

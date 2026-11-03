@@ -1,13 +1,26 @@
-import { html, parseDate, LoadingBarComponent, ViewChangeComponent, NavigationRegistry } from '../../index.js';
+import { html, parseDate, LoadingBarComponent, NavigationRegistry } from '../../index.js';
 import { useSearch, SearchBoxComponent, scrollToSearchResult, scrollToActiveResult } from '../../utils/useSearch.js';
 import { useStickyHeader } from '../../utils/useStickyHeader.js';
+import { formatText, escapeHtml } from '../../utils/views/fieldFormat.js';
+import { matchRows } from '../../utils/views/searchMatch.js';
+import { ContentHeaderComponent } from './contentHeaderComponent.js';
+import { CellRenderer, DecorationCards } from './cells.js';
+import { placeDecorations } from '../../utils/views/decorations.js';
+import { colorFor, rowColorFor } from '../../utils/views/viewColor.js';
 
 export const CalendarComponent = {
     name: 'CalendarComponent',
-    components: { LoadingBarComponent, ViewChangeComponent, SearchBoxComponent },
+    components: { LoadingBarComponent, SearchBoxComponent, ContentHeaderComponent, CellRenderer, DecorationCards },
     props: {
+        // Renderer contract (views-and-renderers-plan §4.4): calendar fields, chip lines (N lines),
+        // chip colour (rowColor), value colours and theme all come from the resolved view.
+        resolved: { type: Object, required: true },
+        // Primary action (ResolvedAction + perform(row, ctx) from DataView)
+        action: { type: Object, default: null },
+        decorations: { type: Function, default: null },
+        decorationKeys: { type: Array, default: () => [] },
+        viewSelect: { type: Object, default: null },
         data: { type: Array, default: () => [] },
-        columns: { type: Array, default: () => [] },
         isLoading: { type: Boolean, default: false },
         isAnalyzing: { type: Boolean, default: false },
         loadingProgress: { type: Number, default: 0 },
@@ -18,20 +31,12 @@ export const CalendarComponent = {
         showSearch: { type: Boolean, default: false },
         syncSearchWithUrl: { type: Boolean, default: false },
         showRefresh: { type: Boolean, default: false },
-        eventStartColumn: { type: String, required: true },
-        eventEndColumn: { type: String, required: true },
-        weekStart: { type: String, default: 'sunday' },
-        yearColumn: { type: String, default: null },
-        chipActions: { type: Function, default: null },
-        chipColorClass: { type: Function, default: null },
         containerPath: { type: String, default: '' },
-        navigateToPath: { type: Function, default: null },
-        viewModes: { type: Array, default: null }
+        navigateToPath: { type: Function, default: null }
     },
-    emits: ['refresh', 'event-click'],
+    emits: ['refresh', 'row-action'],
     setup(props) {
         const search = useSearch({
-            formatValue: null,
             syncWithUrl: props.syncSearchWithUrl,
             navigationRegistry: NavigationRegistry,
             containerPath: props.containerPath,
@@ -49,6 +54,42 @@ export const CalendarComponent = {
         };
     },
     computed: {
+        theme() {
+            return this.resolved?.theme || '';
+        },
+        eventStartColumn() {
+            return this.resolved?.calendar?.start;
+        },
+        eventEndColumn() {
+            return this.resolved?.calendar?.end;
+        },
+        weekStart() {
+            return this.resolved?.calendar?.weekStart || 'sunday';
+        },
+        yearColumn() {
+            return this.resolved?.calendar?.yearColumn || null;
+        },
+        // Chip lines: N lines, each a list of fields shown inline
+        chipLines() {
+            const r = this.resolved;
+            if (!r?.calendar) return [];
+            return r.calendar.chip.map(line => line.map(key => {
+                const f = r.fieldMap.get(key) || { key };
+                return { ...f, label: f.label ?? key, colorRule: r.style[key]?.color || null };
+            }));
+        },
+        // Cells in the chip's end button bar (view calendar.actions), before the decoration cards
+        chipActionFields() {
+            const r = this.resolved;
+            return (r?.calendar?.actions || []).map(key => r.fieldMap.get(key) || { key });
+        },
+        // A shown action cell (style cell 'action') is the primary action's button
+        actionInCell() {
+            return [...this.chipLines.flat(), ...this.chipActionFields].some(f => f.cell === 'action');
+        },
+        chipFields() {
+            return this.chipLines.flat();
+        },
         dayNames() {
             const base = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
             if (this.weekStart === 'saturday') {
@@ -60,16 +101,58 @@ export const CalendarComponent = {
             // 0=Sunday, 6=Saturday
             return this.weekStart === 'saturday' ? 6 : 0;
         },
-        firstRowColumns() {
-            return (this.columns || []).filter(c => c.firstRow);
+        // Searched tiers: chip lines are shown; details fields (opened in the modal) are searched too
+        searchTierKeys() {
+            return { shown: this.resolved?.shown || [], details: (this.resolved?.details || []).map(f => f.key) };
         },
-        secondRowColumns() {
-            return (this.columns || []).filter(c => c.secondRow);
+        searchResult() {
+            return matchRows(this.data || [], this.searchTierKeys, this.search.searchWords.value);
+        },
+        searchActive() {
+            return this.searchResult.active && !this.searchResult.aborted;
+        },
+        searchResultByRow() {
+            const map = new Map();
+            if (!this.searchActive) return map;
+            this.searchResult.results.forEach((r, i) => { if (r) map.set(this.data[i], r); });
+            return map;
+        },
+        searchMatchCount() {
+            return this.searchResult.aborted ? Infinity : this.searchMatchedChips.length;
+        },
+        chipKeySet() {
+            return new Set(this.searchTierKeys.shown);
+        },
+        // Decorations placed per row: inline on chip keys, the rest at the chip end
+        rowDecorMap() {
+            const map = new Map();
+            if (!this.decorations) return map;
+            for (const ev of this.parsedEvents) {
+                map.set(ev.row, placeDecorations(this.decorations, this.decorationKeys, ev.row, this.chipKeySet));
+            }
+            return map;
+        },
+        effectiveAction() {
+            return this.action || { kind: 'none', trigger: 'button' };
+        },
+        hasActionButton() {
+            const a = this.effectiveAction;
+            return a.kind !== 'none' && a.trigger === 'button' && !this.actionInCell;
+        },
+        chipIsTrigger() {
+            const a = this.effectiveAction;
+            return a.kind !== 'none' && a.trigger === 'row';
+        },
+        hasEndCards() {
+            return !!this.decorations;
         },
         parsedEvents() {
             if (!this.data || this.data.length === 0) return [];
             return this.data
                 .map((row, idx) => {
+                    // Row groups are a table concept: a group master summarizes its members, which
+                    // are the real events, so the calendar draws the members only.
+                    if (this._isGroupMaster(row)) return null;
                     const defaultYear = this.yearColumn ? (row[this.yearColumn] || null) : null;
                     const start = parseDate(row[this.eventStartColumn], true, defaultYear);
                     const end = parseDate(row[this.eventEndColumn], true, defaultYear) || start;
@@ -184,15 +267,9 @@ export const CalendarComponent = {
             return !this.isLoading && !this.isAnalyzing && (!this.data || this.data.length === 0);
         },
         searchMatchedChips() {
-            if (!this.search.hasActiveSearch.value) return [];
-            const words = this.search.searchWords.value;
-            const cols = [...this.firstRowColumns, ...this.secondRowColumns];
-            return this.parsedEvents.filter(event =>
-                words.every(word => cols.some(col => {
-                    const val = event.row[col.key];
-                    return val != null && String(val).toLowerCase().includes(word.toLowerCase());
-                }))
-            );
+            if (!this.searchActive) return [];
+            const byRow = this.searchResultByRow;
+            return this.parsedEvents.filter(event => byRow.has(event.row));
         },
         searchMatchChipKeyMap() {
             const map = new Map();
@@ -265,6 +342,13 @@ export const CalendarComponent = {
         this._stickyHeader?.teardown();
     },
     methods: {
+        _isGroupMaster(row) {
+            if (!row || !row.MetaData) return false;
+            try {
+                const meta = typeof row.MetaData === 'string' ? JSON.parse(row.MetaData) : row.MetaData;
+                return !!meta?.grouping?.isGroupMaster;
+            } catch { return false; }
+        },
         _getWeekStart(date, weekStartDay) {
             const d = new Date(date.getFullYear(), date.getMonth(), date.getDate());
             let diff = d.getDay() - weekStartDay;
@@ -299,59 +383,99 @@ export const CalendarComponent = {
             return `${seg.startIdx + 1} / ${seg.endIdx + 2}`;
         },
         chipClasses(seg) {
-            const cls = ['clickable'];
+            // Only chips that run the primary action are clickable (and change colour on hover)
+            const cls = this.chipIsTrigger ? ['clickable'] : [];
             if (!seg.isStart) cls.push('chip-continuation');
             if (!seg.isEnd) cls.push('chip-continues');
             if (seg.row && seg.row.AppData && seg.row.AppData._analyzing) cls.push('analyzing');
-            const colorCls = this.chipColorClass ? this.chipColorClass(seg.row) : '';
+            const colorCls = this.resolved?.rowColor ? rowColorFor(seg.row, this.resolved) : '';
             cls.push(colorCls || 'blue');
-            if (this.hoveredKey !== null && this.hoveredKey === seg.chipKey) cls.push('hovered');
-            if (this.search.hasActiveSearch.value && this.searchMatchChipKeyMap.get(seg.chipKey) === this.search.searchIndex.value - 1) {
+            if (!this.chipIsTrigger) cls.push('chip-no-trigger');
+            if (this.chipIsTrigger && this.hoveredKey !== null && this.hoveredKey === seg.chipKey) cls.push('hovered');
+            if (this.searchActive && this.searchMatchChipKeyMap.get(seg.chipKey) === this.search.searchIndex.value - 1) {
                 cls.push('search-active-result');
             }
+            if (this.chipIsTrigger && this.isDetailsOnlyMatch(seg.row)) cls.push('details-match');
             return cls;
         },
         chipTitle(row) {
-            return [...this.firstRowColumns, ...this.secondRowColumns]
-                .map(col => row[col.key])
+            return this.chipFields
+                .map(col => formatText(row[col.key], col))
                 .filter(Boolean)
                 .join(' — ');
         },
-        handleEventClick(row) {
-            if (this.search.hasActiveSearch.value) {
-                const chipKey = this.parsedEvents.findIndex(e => e.row === row);
-                if (chipKey >= 0) {
-                    const matchIdx = this.searchMatchChipKeyMap.get(chipKey);
-                    if (matchIdx !== undefined) this.search.setSearchIndex(matchIdx + 1);
-                }
+        // Escaped, formatted, highlighted chip text (no highlight while the search is inactive or aborted)
+        highlightValue(value, field) {
+            const text = formatText(value, field);
+            return this.searchActive ? this.search.highlightRawText(text) : escapeHtml(text);
+        },
+        isDetailsOnlyMatch(row) {
+            const r = this.searchResultByRow.get(row);
+            return !!(r && !r.shownMatch);
+        },
+        isActionDisabled(row) {
+            const fn = this.effectiveAction.disabled;
+            try { return typeof fn === 'function' ? !!fn(row) : false; } catch { return false; }
+        },
+        inlineCards(row, colKey) {
+            return this.rowDecorMap.get(row)?.byKey.get(colKey) || [];
+        },
+        endCards(row) {
+            return this.rowDecorMap.get(row)?.rowLevel || [];
+        },
+        valueColorClass(row, col) {
+            return col.colorRule ? colorFor(row, col, this.resolved) : '';
+        },
+        selectSearchResultFor(row) {
+            if (!this.searchActive) return;
+            const chipKey = this.parsedEvents.findIndex(e => e.row === row);
+            if (chipKey >= 0) {
+                const matchIdx = this.searchMatchChipKeyMap.get(chipKey);
+                if (matchIdx !== undefined) this.search.setSearchIndex(matchIdx + 1);
             }
-            this.$emit('event-click', row);
+        },
+        // Primary action (§4.8): perform via DataView (row-action if no perform is supplied)
+        performAction(row) {
+            const a = this.effectiveAction;
+            if (a.kind === 'none' || this.isActionDisabled(row)) return;
+            const ctx = { searchTerm: (this.search.searchValue.value || '').trim() };
+            if (typeof a.perform === 'function') a.perform(row, ctx);
+            else this.$emit('row-action', row, ctx);
+        },
+        handleEventClick(row, event) {
+            if (event?.target?.closest?.('button, a, input, select, textarea, .card.clickable')) return;
+            this.selectSearchResultFor(row);
+            if (this.chipIsTrigger) this.performAction(row);
+        },
+        handleActionButton(row) {
+            this.selectSearchResultFor(row);
+            this.performAction(row);
+        },
+        // The row's primary action for an action cell
+        rowActionFor(row) {
+            if (this.effectiveAction.kind === 'none') return null;
+            return {
+                run: () => this.handleActionButton(row),
+                disabled: this.isActionDisabled(row),
+                title: this.effectiveAction.title || this.effectiveAction.label || ''
+            };
+        },
+        // A material symbol name ('calendar_month') rather than a glyph ('☷')
+        isSymbolName(text) {
+            return typeof text === 'string' && /^[a-z][a-z0-9_]*$/.test(text);
         },
         handleKeyDown(event, row) {
+            if (event.target !== event.currentTarget) return;
             if (event.key === 'Enter' || event.key === ' ') {
                 event.preventDefault();
-                this.handleEventClick(row);
+                this.selectSearchResultFor(row);
+                this.performAction(row);
             }
         },
         handleRefresh() {
             this.$emit('refresh');
-        },
-        getChipInlineCards(row, colKey) {
-            if (!this.chipActions) return [];
-            try {
-                return (this.chipActions(row) || []).filter(c => c.colKey === colKey);
-            } catch (e) {
-                return [];
-            }
-        },
-        getChipEndCards(row) {
-            if (!this.chipActions) return [];
-            try {
-                return (this.chipActions(row) || []).filter(c => !c.colKey);
-            } catch (e) {
-                return [];
-            }
         }
+
     },
     template: html`
         <div class="calendar-container">
@@ -366,34 +490,22 @@ export const CalendarComponent = {
 
             <!-- Sticky: filter header + day-of-week row -->
             <div class="sticky-header-wrapper" :style="stickyActive ? { position: 'fixed', left: stickyLeft + 'px', width: stickyWidth + 'px', zIndex: '500' } : {}">
-                <div class="content-header">
-                    <slot name="header-area"></slot>
-                    <div class="spacer"></div>
-                    <div class="button-bar">
-                        <SearchBoxComponent
-                            v-if="showSearch"
-                            :search="search"
-                            :match-count="searchMatchedChips.length"
-                        />
-                        <button
-                            v-if="showRefresh"
-                            @click="handleRefresh"
-                            :disabled="isLoading"
-                        >{{ isLoading ? 'Loading...' : 'Refresh' }}</button>
-                        <ViewChangeComponent
-                            v-if="viewModes && containerPath && navigateToPath"
-                            :container-path="containerPath"
-                            :navigate-to-path="navigateToPath"
-                            :view-modes="viewModes"
-                        />
-                    </div>
-                    <LoadingBarComponent
-                        :is-loading="isLoading"
-                        :is-analyzing="isAnalyzing"
-                        :percent-complete="loadingProgress"
-                        class="embedded"
-                    />
-                </div>
+                <ContentHeaderComponent
+                    :theme="theme"
+                    :search="search"
+                    :show-search="showSearch"
+                    :match-count="searchMatchCount"
+                    :show-refresh="showRefresh"
+                    :is-loading="isLoading"
+                    :view-select="viewSelect"
+                    :embedded-loading="true"
+                    :is-analyzing="isAnalyzing"
+                    :loading-progress="loadingProgress"
+                    :always-show-buttons="true"
+                    @refresh="handleRefresh"
+                >
+                    <template #header-area><slot name="header-area"></slot></template>
+                </ContentHeaderComponent>
                 <div v-if="!isEmpty && calendarWeeks.length > 0" class="calendar-dow-header">
                     <div v-for="name in dayNames" :key="name" class="calendar-dow-cell">{{ name }}</div>
                 </div>
@@ -433,37 +545,47 @@ export const CalendarComponent = {
                             :data-search-match-idx="searchMatchChipKeyMap.get(seg.chipKey)"
                             :style="{ gridColumn: chipGridColumn(seg), gridRow: '1' }"
                             :title="chipTitle(seg.row)"
-                            tabindex="0"
+                            :tabindex="chipIsTrigger ? 0 : -1"
                             @mouseenter="hoveredKey = seg.chipKey"
                             @mouseleave="hoveredKey = null"
-                            @click="handleEventClick(seg.row)"
+                            @click="handleEventClick(seg.row, $event)"
                             @keydown="handleKeyDown($event, seg.row)"
                         >
                             <div class="chip-text">
-                                <span v-if="firstRowColumns.length > 0" class="chip-first-row">
-                                    <template v-for="(col, colIdx) in firstRowColumns" :key="col.key">
+                                <!-- N chip lines (resolved.calendar.chip); the first line is the title line -->
+                                <span v-for="(line, li) in chipLines" :key="li" :class="li === 0 ? 'chip-first-row' : 'chip-second-row'">
+                                    <template v-for="(col, colIdx) in line" :key="col.key">
                                         <span v-if="colIdx > 0" class="chip-sep"> | </span>
-                                        <span class="chip-val" v-html="search.highlightRawText(seg.row[col.key] != null && seg.row[col.key] !== '' ? String(seg.row[col.key]) : '')"></span>
-                                        <span v-for="card in getChipInlineCards(seg.row, col.key)" :key="card.message" :class="['card', card.color || card.class, { 'clickable': card.action && !card.disabled }]" :title="card.title || null" @click.stop="card.action && !card.disabled ? card.action() : null" v-html="card.message"></span>
-                                    </template>
-                                </span>
-                                <span v-if="secondRowColumns.length > 0" class="chip-second-row">
-                                    <template v-for="(col, colIdx) in secondRowColumns" :key="col.key">
-                                        <span v-if="colIdx > 0" class="chip-sep"> | </span>
-                                        <span class="chip-val" v-html="search.highlightRawText(seg.row[col.key] != null && seg.row[col.key] !== '' ? String(seg.row[col.key]) : '')"></span>
-                                        <span v-for="card in getChipInlineCards(seg.row, col.key)" :key="card.message" :class="['card', card.color || card.class, { 'clickable': card.action && !card.disabled }]" :title="card.title || null" @click.stop="card.action && !card.disabled ? card.action() : null" v-html="card.message"></span>
+                                        <span :class="['chip-val', valueColorClass(seg.row, col)]"><CellRenderer :row="seg.row" :field="col" renderer="calendar" density="compact" :highlight="highlightValue" :theme="theme" :search-term="search.searchKey.value" :cell-slot="$slots.cell" :row-action="col.cell === 'action' ? rowActionFor(seg.row) : null" /></span>
+                                        <DecorationCards :cards="inlineCards(seg.row, col.key)" :inline="true" />
                                     </template>
                                 </span>
                             </div>
-                            <div v-if="seg.isEnd && chipActions" class="chip-actions hide-when-narrow">
+                            <!-- Chip end: one button bar with the view's action cells (calendar.actions), the
+                                 decoration cards (hidden when narrow) and the primary action button, last -->
+                            <div v-if="seg.isEnd && (chipActionFields.length || hasActionButton || (hasEndCards && endCards(seg.row).length))" class="chip-actions button-bar">
+                                <template v-for="f in chipActionFields" :key="f.key">
+                                    <CellRenderer :row="seg.row" :field="f" renderer="calendar" density="compact" :highlight="highlightValue" :theme="theme" :search-term="search.searchKey.value" :cell-slot="$slots.cell" :row-action="f.cell === 'action' ? rowActionFor(seg.row) : null" />
+                                    <DecorationCards :cards="inlineCards(seg.row, f.key)" :inline="true" />
+                                </template>
+                                <template v-if="hasEndCards">
+                                    <button
+                                        v-for="(card, ci) in endCards(seg.row)"
+                                        :key="ci + '-' + card.message"
+                                        :class="['card', 'hide-when-narrow', card.color || card.class, { 'clickable': card.action && !card.disabled }]"
+                                        :title="card.title || card.hoverMessage || null"
+                                        :disabled="card.disabled"
+                                        @click.stop="card.action && !card.disabled ? card.action() : null"
+                                        v-html="card.message"
+                                    ></button>
+                                </template>
                                 <button
-                                    v-for="card in getChipEndCards(seg.row)"
-                                    :key="card.message"
-                                    :class="['card', card.color || card.class, { 'clickable': card.action && !card.disabled }]"
-                                    :title="card.title || null"
-                                    @click.stop="card.action && !card.disabled ? card.action() : null"
-                                    v-html="card.message"
-                                ></button>
+                                    v-if="hasActionButton"
+                                    :class="['button-symbol', 'chip-action-button', theme || 'white', isDetailsOnlyMatch(seg.row) ? 'search-match' : '']"
+                                    :disabled="isActionDisabled(seg.row)"
+                                    :title="effectiveAction.title || effectiveAction.label || 'Details'"
+                                    @click.stop="handleActionButton(seg.row)"
+                                ><template v-if="effectiveAction.label">{{ effectiveAction.label }}</template><span v-else-if="isSymbolName(effectiveAction.icon)" class="material-symbols-outlined">{{ effectiveAction.icon }}</span><template v-else>{{ effectiveAction.icon || '☷' }}</template></button>
                             </div>
                         </div>
                     </div>

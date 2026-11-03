@@ -17,7 +17,6 @@
     --page-width-card: 360px;
     --page-height-card: 360px;
     --page-width-large: 1000px;
-    --page-width-small: 800px;
 
     --control-height: 38px;
     --control-height-sm: 24px;
@@ -98,16 +97,30 @@
     --color-row-drag-handle: #666;
 }
 
-/* Responsive: Reduce padding on small screens */
-@media (max-width: 800px) {
+/*
+ * Size model (views-and-renderers-plan §4.10). Two scopes, three tiers each:
+ *   container (@container, useContainerSize): narrow < 600px · medium 600–999px · wide ≥ 1000px
+ *   viewport  (@media, useViewportSize): the same tiers with the #app-content gutter added on the
+ *             larger side of each boundary: narrow < 600 + 2*8 = 616px · wide ≥ 1000 + 2*12 = 1024px
+ * CSS can't read variables in media conditions, so the numbers repeat here as calc() literals.
+ * Keep them in sync with BREAKPOINTS in js/application/utils/useContainerSize.js.
+ */
+
+/* Compact chrome: viewport medium and narrow (BREAKPOINTS.wide + 2 * gutterFull) */
+@media (width < calc(1000px + 2 * 12px)) {
     :root {
         --padding-sm: 2px;
         --padding-md: 8px;
         --padding-lg: 16px;
-        --page-width-card: calc(100vw - 16px);
-        --page-width-small: calc(100vw - 16px);
         --navbar-height: 50px;
         --navbar-sticky-offset: var(--navbar-height);
+    }
+}
+
+/* Narrow viewport: full-width dashboard cards (BREAKPOINTS.narrow + 2 * gutterCompact) */
+@media (width < calc(600px + 2 * 8px)) {
+    :root {
+        --page-width-card: calc(100vw - 16px);
     }
 }
 

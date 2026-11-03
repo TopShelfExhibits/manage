@@ -1,7 +1,65 @@
-import { html, Requests, parseDate, toUSDateString, TableComponent, getReactiveStore, createAnalysisConfig, invalidateCache, Priority, runNonessentialAnalysisOnAllStores } from '../../index.js';
-import { CalendarComponent } from '../interface/calendarComponent.js';
+import { html, Requests, parseDate, toUSDateString, DataView, getReactiveStore, createAnalysisConfig, invalidateCache, Priority, runNonessentialAnalysisOnAllStores } from '../../index.js';
 import { IndexResolutionComponent } from '../interface/IndexResolutionModal.js';
 import { TransshipmentModal } from '../interface/ScheduleModals.js';
+import { buildScheduleFields } from '../../../data_management/abstraction/scheduleFields.js';
+import { shipReturnAnalysis, withShipDate, estimatedShipText, shipReturnCards } from '../../utils/scheduleShipping.js';
+
+/**
+ * Schedule page view registry (views-and-renderers-plan §4.3). Presentation only: which fields
+ * show where, widths, colours and the action trigger. Fields come from scheduleFields.js.
+ * The table reproduces the original columns; narrow containers stack Client under Show (Phase 6).
+ */
+const SCHEDULE_VIEWS = {
+    id: 'schedule',
+    default: 'table',
+    theme: '',
+    // Sortable in every view: the shown columns, except the packlist actions
+    sortable: ['Show', 'Client', 'City', 'Size', 'S. Start', 'S. End', 'Ship', 'Recieved'],
+    views: [
+        {
+            id: 'table',
+            name: 'Schedule',
+            icon: 'table',
+            layout: 'table',
+            columns: ['Show', 'Client', 'City', 'Size', ['S. Start', 'S. End'], ['Ship', 'Recieved'], 'packlist'],
+            style: {
+                'Show': { width: 200 },
+                'Client': { width: 150 },
+                'City': { width: 150 },
+                'Size': { width: 140 },
+                'S. Start': { width: 120 },
+                'Ship': { width: 120, color: 'auto' },
+                'packlist': { width: 120 }
+            },
+            // Search highlights and navigates; it doesn't hide non-matching rows by default
+            table: { hideRowsOnSearch: false },
+            variants: {
+                // Narrow containers (phone, 360px dashboard card): stack Client under Show; City and Size move to details
+                narrow: {
+                    columns: [['Show', 'Client'], ['Ship', 'Recieved'], ['S. Start', 'S. End'], 'packlist']
+                }
+            },
+            action: 'button'
+        },
+        {
+            id: 'calendar',
+            name: 'Calendar',
+            icon: 'calendar_month',
+            layout: 'calendar',
+            calendar: {
+                start: 'S. Start',
+                end: 'S. End',
+                weekStart: 'sunday',
+                yearColumn: 'Year',
+                chip: [['Show', 'Client'], ['City', 'Size']]
+            },
+            action: 'button'
+        }
+    ]
+};
+
+// Keys the Schedule page decorates (packlist actions, index issues, transship badges)
+const SCHEDULE_DECORATION_KEYS = ['packlist', 'Client', 'Show', 'Ship', 'Recieved'];
 
 const PacklistSelectModal = {
     props: ['tabs', 'onNavigate'],
@@ -18,8 +76,7 @@ const PacklistSelectModal = {
 
 export const ScheduleTableComponent = {
     components: {
-        TableComponent,
-        CalendarComponent
+        DataView
     },
     props: {
         filter: {
@@ -30,17 +87,14 @@ export const ScheduleTableComponent = {
             type: Object,
             default: null
         },
-        hideRowsOnSearch: {
-            type: Boolean,
-            default: true
+        // View patches (e.g. a picker that hides non-matching rows: { table: { hideRowsOnSearch: true } })
+        patches: {
+            type: Array,
+            default: () => []
         },
         templateName: {
             type: String,
             default: '_TEMPLATE'
-        },
-        calendarView: {
-            type: Boolean,
-            default: false
         },
         containerPath: {
             type: String,
@@ -50,96 +104,27 @@ export const ScheduleTableComponent = {
             type: Function,
             default: null
         },
-        viewModes: {
-            type: Array,
-            default: null
-        }
     },
     inject: ['$modal'],
     emits: ['navigate-to-path', 'packlist-created'],
     data() {
         return {
-            scheduleTableStore: null
+            scheduleTableStore: null,
+            columnTypesStore: null,
+            SCHEDULE_VIEWS,
+            SCHEDULE_DECORATION_KEYS
         };
     },
 
     computed: {
-        columns() {
-            const rawData = this.scheduleTableStore ? this.scheduleTableStore.data : [];
-            if (!rawData || rawData.length === 0) {
-                // Return a basic set of columns if no data yet (for loading state)
-                return [
-                    { key: 'Show', label: 'Show' },
-                    { key: 'Client', label: 'Client', whenSmall: { stackUnder: 'Show' } },
-                    { key: 'packlist', label: 'Packlist' }
-                ];
-            }
-
-            // Get headers from the first row of data
-            const firstRow = rawData[0];
-            const headers = Object.keys(firstRow).filter(header => header !== 'AppData'); // Exclude AppData from columns
-
-            // Generate columns with rational formatting based on column names
-            const dynamicColumns = headers.map(header => {
-                const column = {
-                    key: header,
-                    label: this.formatColumnLabel(header)
-                };
-
-                // Mark columns as details if they're not Show, Client, Ship, dates, or city/size
-                if (!['Show', 'Client', 'Ship', 'City', 'Size', 'S. Start', 'S. End', 'Recieved'].includes(header)) {
-                    column.details = true;
-                }
-
-                if (header === 'Client') {
-                    column.whenSmall = { stackUnder: 'Show' };
-                }
-                if (header === 'Recieved') {
-                    column.stackUnder = 'Ship';
-                }
-                if (header === 'S. End') {
-                    column.stackUnder = 'S. Start';
-                }
-
-                // Calendar chip row flags
-                if (header === 'Show' || header === 'Client') column.firstRow = true;
-                if (header === 'City' || header === 'Size') column.secondRow = true;
-
-                // Add sortable configuration for useful columns
-                const sortableColumns = ['Show', 'Client', 'Ship', 'City', 'Size', 'S. Start'];
-                const dateColumns = ['Start Date', 'End Date', 'Load In', 'Load Out', 'Event Start', 'Event End'];
-                
-                if (sortableColumns.includes(header) || dateColumns.includes(header)) {
-                    column.sortable = true;
-                } else {
-                    column.sortable = false;
-                }
-
-                // Apply rational formatting based on column name patterns
-                this.applyColumnFormatting(column, header);
-
-                return column;
-            });
-
-            // Always add the packlist column at the end
-            dynamicColumns.push({
-                key: 'packlist',
-                label: 'Packlist',
-                width: 120,
-                sortable: false
-            });
-
-            return dynamicColumns;
+        // FieldDefs built from the sheet headers (shared with other Schedule pages), typed by ColumnTypes
+        fields() {
+            return buildScheduleFields(this.scheduleTableStore ? this.scheduleTableStore.data : [], { types: this.columnTypesStore?.data });
         },
         tableData() {
             const rawData = this.scheduleTableStore ? this.scheduleTableStore.data : [];
             // Use source show's end date as the sort/display ship date for transship rows
-            return rawData.map(row => {
-                if (row.AppData?.transshipSource) {
-                    return { ...row, Ship: row.AppData.transshipSourceEndDate ?? '' };
-                }
-                return row;
-            });
+            return rawData.map(withShipDate);
         },
         originalData() {
             return this.scheduleTableStore && Array.isArray(this.scheduleTableStore.originalData)
@@ -187,12 +172,25 @@ export const ScheduleTableComponent = {
             }
             return 'Production Schedule';
         },
-        chipActionsProvider() {
-            return (row) => [
-                ...this.getPacklistCards(row, 'packlist'),
-                ...this.getIndexIssueCards(row, 'Client').map(c => ({ ...c, colKey: 'Client' })),
-                ...this.getIndexIssueCards(row, 'Show').map(c => ({ ...c, colKey: 'Show' }))
-            ];
+        // Decorations (§4.14): decorations(row, key) → Card[]; renderers place them by key
+        decorations() {
+            return (row, key) => {
+                switch (key) {
+                    case 'packlist': return this.getPacklistCards(row, 'packlist').map(c => ({ ...c, button: true }));
+                    case 'Client':
+                    case 'Show':
+                        return this.getIndexIssueCards(row, key).map(c => ({
+                            ...c,
+                            class: c.color || 'red',
+                            title: 'Missing from index: ' + c.rawValue,
+                            action: c.clickable ? c.action : null
+                        }));
+                    case 'Ship':
+                    case 'Recieved':
+                        return shipReturnCards(row, key, this.$modal);
+                    default: return [];
+                }
+            };
         }
     },
     watch: {
@@ -217,6 +215,7 @@ export const ScheduleTableComponent = {
         }
     },
     async mounted() {
+        this.columnTypesStore = getReactiveStore(Requests.getColumnTypes, null, ['PROD_SCHED', 'Production Schedule']);
         this.recreateStore();
     },
     methods: {
@@ -227,6 +226,8 @@ export const ScheduleTableComponent = {
                 return;
             }
             
+            // Transshipment info (shared with the Design Queue); the shown Ship date comes from withShipDate
+            const transship = shipReturnAnalysis();
             // Create analysis configuration to check packlist existence for each row
             const analysisConfig = [
                 createAnalysisConfig(
@@ -236,18 +237,6 @@ export const ScheduleTableComponent = {
                     ['Show', 'Client', 'Year'],
                     [],
                     null,
-                    false,
-                    Priority.ANALYSIS,
-                    true // extractColumnsAsObject
-                ),
-                // Normalize ship dates to always include year
-                createAnalysisConfig(
-                    Requests.guessShipDate,
-                    'estimatedShipDate',
-                    'Normalizing ship dates...',
-                    ['Ship', 'S. Start', 'S. End', 'Year'],
-                    [],
-                    'Ship', // Store directly in Ship column to display with year
                     false,
                     Priority.ANALYSIS,
                     true // extractColumnsAsObject
@@ -276,43 +265,8 @@ export const ScheduleTableComponent = {
                     Priority.ANALYSIS,
                     true // extractColumnsAsObject
                 ),
-                // Detect transship rows before index checks so the ship cell annotation is visible first
-                createAnalysisConfig(
-                    Requests.getTransshipSourceEndDateForRow,
-                    'transshipSourceEndDate',
-                    'Checking transshipment dates...',
-                    ['Show', 'Client', 'Year'],
-                    [],
-                    null,
-                    false,
-                    Priority.ANALYSIS,
-                    true, // extractColumnsAsObject
-                    false  // nonessential
-                ),
-                createAnalysisConfig(
-                    Requests.getTransshipSourceForScheduleRow,
-                    'transshipSource',
-                    'Checking transshipments...',
-                    ['Show', 'Client', 'Year'],
-                    [],
-                    null,
-                    false,
-                    Priority.ANALYSIS,
-                    true, // extractColumnsAsObject
-                    false  // nonessential
-                ),
-                createAnalysisConfig(
-                    Requests.getTransshipDestinationsForScheduleRow,
-                    'transshipDestination',
-                    'Checking transshipment destinations...',
-                    ['Show', 'Client', 'Year'],
-                    [],
-                    null,
-                    false,
-                    Priority.ANALYSIS,
-                    true, // extractColumnsAsObject
-                    false  // nonessential
-                ),
+                // Transship rows before index checks so the ship cell annotation is visible first
+                ...transship,
                 createAnalysisConfig(
                     Requests.checkScheduleReferenceState,
                     'clientIndexIssue',
@@ -355,114 +309,6 @@ export const ScheduleTableComponent = {
                 { namespace: 'database', methodName: 'getData', args: ['PROD_SCHED'] },
                 { namespace: 'database', methodName: 'getTabs', args: ['PACK_LISTS'] }
             ], true);
-        },
-        formatColumnLabel(header) {
-            // Convert header to a more readable label
-            const labelMap = {
-                'S. Start': 'Start Date',
-                'S. End': 'End Date',
-                'Booth#': 'Booth #',
-                'Year': 'Year',
-                'Show': 'Show',
-                'Client': 'Client',
-                'City': 'City',
-                'Location': 'Location',
-                'Ship': 'Ship Date'
-            };
-
-            // Use mapped label if available
-            if (labelMap[header]) {
-                return labelMap[header];
-            }
-
-            // Auto-format common patterns
-            let formatted = header
-                // Handle camelCase and PascalCase
-                .replace(/([a-z])([A-Z])/g, '$1 $2')
-                // Handle underscores and dashes
-                .replace(/[_-]/g, ' ')
-                // Handle dots followed by letters
-                .replace(/\.([a-zA-Z])/g, '. $1')
-                // Capitalize each word
-                .split(' ')
-                .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
-                .join(' ');
-
-            return formatted;
-        },
-        applyColumnFormatting(column, header) {
-            const key = header.toLowerCase();
-
-            // Apply date formatting for date-related columns
-            if (this.isDateColumn(key)) {
-                column.format = 'date';
-                column.width = 120;
-                
-                // Apply auto-coloring for ship dates and other time-sensitive dates
-                if (key === 'ship' || key.includes('ship') || key.includes('due') || key.includes('deadline')) {
-                    column.autoColor = true;
-                }
-            }
-            // Apply number formatting for numeric columns
-            else if (this.isNumberColumn(key)) {
-                column.format = 'number';
-                column.width = 80;
-            }
-            // Apply currency formatting for monetary columns
-            else if (this.isCurrencyColumn(key)) {
-                column.format = 'currency';
-                column.width = 120;
-            }
-            // Apply specific widths for common columns
-            else {
-                column.width = this.getColumnWidth(key);
-            }
-        },
-        isDateColumn(key) {
-            const dateKeywords = ['date', 'start', 'end', 'ship', 'due', 'deadline', 'created', 'updated', 'modified', 'time', 'return'];
-            return dateKeywords.some(keyword => key.includes(keyword));
-        },
-        isNumberColumn(key) {
-            const numberKeywords = ['qty', 'quantity'];
-            return numberKeywords.some(keyword => key.includes(keyword)) || /^\d+$/.test(key);
-        },
-        isCurrencyColumn(key) {
-            const currencyKeywords = ['price', 'cost', 'amount', 'fee', 'rate', 'budget', 'expense', 'revenue', 'total'];
-            return currencyKeywords.some(keyword => key.includes(keyword));
-        },
-        getColumnWidth(key) {
-            // Apply specific widths based on column content type
-            if (key === 'show' || key.includes('title') || key.includes('name')) {
-                return 200;
-            }
-            else if (key === 'client' || key.includes('company')) {
-                return 150;
-            }
-            else if (key === 'city' || key === 'location' || key.includes('address')) {
-                return 150;
-            }
-            else if (key.includes('manager') || key.includes('contact') || key.includes('person')) {
-                return 180;
-            }
-            else if (key.includes('booth') || key.includes('space')) {
-                return 100;
-            }
-            else if (key.includes('email')) {
-                return 200;
-            }
-            else if (key.includes('phone')) {
-                return 140;
-            }
-            else if (key.includes('status') || key.includes('type')) {
-                return 120;
-            }
-            else if (key.includes('notes') || key.includes('description') || key.includes('comment')) {
-                return 250;
-            }
-            // Default width for other columns
-            else {
-                return 140;
-            }
         },
         async handlePacklistClick(packlistInfo) {
             if (!packlistInfo.exists || !packlistInfo.identifiers?.length) {
@@ -525,47 +371,6 @@ export const ScheduleTableComponent = {
                 console.error('Error creating packlist:', error);
                 this.$modal.error(`Failed to create packlist: ${error.message}`, 'Error');
             }
-        },
-        getShipDateCards(row, columnKey) {
-            // Cards are no longer needed - ship dates are now normalized and displayed directly in the column
-            // Keeping function for backwards compatibility but returning empty array
-            return [];
-        },
-        getTransshipCards(row, columnKey) {
-            const source = row.AppData?.transshipSource;
-            const dest   = row.AppData?.transshipDestination;
-            if (columnKey === 'Ship' && source) {
-                return [{
-                    message: 'TS',
-                    class: 'gray',
-                    hoverMessage: `transship from: ${source}`,
-                    action: () => this.handleTransshipClick(row, source)
-                }];
-            }
-            // Return date for source shows is extended to the destination's return date
-            if (columnKey === 'Recieved' && dest) {
-                return [{
-                    message: 'return extended',
-                    class: 'gray',
-                    hoverMessage: `Items remain out until the later show ends: ${dest}`,
-                    action: () => this.handleTransshipReturnClick(row, dest)
-                }];
-            }
-            return [];
-        },
-        handleTransshipClick(row, sourceId) {
-            const showId = [row.Client, row.Year, row.Show].filter(Boolean).join(' ');
-            this.$modal.alert(
-                `${showId}\ntransships directly from:\n${sourceId}`,
-                'Transshipment'
-            );
-        },
-        handleTransshipReturnClick(row, destId) {
-            const showId = [row.Client, row.Year, row.Show].filter(Boolean).join(' ');
-            this.$modal.alert(
-                `${showId}\ntransships directly to:\n${destId}`,
-                'Extended Return'
-            );
         },
         getPacklistCards(row, columnKey) {
             // Only show packlist cards in the packlist column
@@ -673,60 +478,18 @@ export const ScheduleTableComponent = {
                 this.$modal.error(`Failed to load resolution options: ${error.message}`, 'Index Resolution Error');
             }
         },
-        handleCalendarEventClick(row) {
-            const self = this;
-            const DetailModalComponent = {
-                inject: ['$modal'],
-                props: { row: Object, columns: Array, actionCards: Array },
-                template: html`
-                    <div>
-                        <div class="details-grid" style="margin-bottom: var(--padding-md);">
-                            <template v-for="col in columns" :key="col.key">
-                                <div
-                                    class="detail-item"
-                                    v-if="row[col.key] != null && row[col.key] !== ''"
-                                >
-                                    <label>{{ col.label }}</label>
-                                    <span>{{ row[col.key] }}</span>
-                                </div>
-                            </template>
-                        </div>
-                        <div v-if="actionCards.length > 0" class="button-bar">
-                            <template v-for="card in actionCards" :key="card.message">
-                                <button
-                                    :class="['card', card.class]"
-                                    :disabled="card.disabled"
-                                    @click="!card.disabled && card.action ? card.action() : null"
-                                    v-html="card.message"
-                                ></button>
-                            </template>
-                        </div>
-                    </div>
-                `
-            };
-
-            const actionCards = [
-                ...this.getPacklistCards(row, 'packlist'),
-                ...this.getShipDateCards(row, 'Ship'),
-                ...this.getIndexIssueCards(row, 'Client'),
-                ...this.getIndexIssueCards(row, 'Show')
-            ];
-
-            // Filter out non-action columns for the details view (show all non-AppData fields)
-            const detailColumns = this.columns.filter(c => c.key !== 'packlist');
-
-            const title = row.Show || row.Client || 'Show Details';
-            this.$modal.custom(DetailModalComponent, { row, columns: detailColumns, actionCards, modalClass: 'event-detail' }, title);
-        },
         openTransshipModal(row, direction = null) {
             // Use original store row so the Ship date is present (tableData clears it for transship rows)
             const originalRow = this.scheduleTableStore?.data?.find(r =>
                 r.Client === row.Client && String(r.Year) === String(row.Year) && r.Show === row.Show
             ) || row;
+            // The modal windows its show list around this Ship date: give it the estimate with its year
+            const shipText = estimatedShipText(originalRow);
             this.$modal.custom(TransshipmentModal, {
-                preselectedRow: originalRow,
+                preselectedRow: shipText ? { ...originalRow, Ship: shipText } : originalRow,
                 preselectedDirection: direction,
-                modalClass: 'page-menu'
+                size: 'page',
+                tall: true
             }, 'Set Transshipment');
         },
         async removeTransshipTo(row) {
@@ -799,56 +562,27 @@ export const ScheduleTableComponent = {
         }
     },
     template: html`
-        <CalendarComponent
-            v-if="calendarView"
-            :data="tableData"
-            :columns="columns"
-            :isLoading="isLoading"
-            :isAnalyzing="isAnalyzing"
+        <DataView
+            :fields="fields"
+            :rows="tableData"
+            :original-data="originalData"
+            :registry="SCHEDULE_VIEWS"
+            :container-path="containerPath"
+            :navigate-to-path="navigateToPath"
+            :decorations="decorations"
+            :decoration-keys="SCHEDULE_DECORATION_KEYS"
+            :details-title="row => row.Show || row.Client || 'Show Details'"
+            :is-loading="isLoading"
+            :is-analyzing="isAnalyzing"
             :loading-progress="analysisProgress"
             :error="error"
             :show-refresh="true"
             :title="tableTitle"
-            emptyMessage="No shows found."
+            empty-message="No shows found."
             :loading-message="loadingMessage"
-            eventStartColumn="S. Start"
-            eventEndColumn="S. End"
-            weekStart="sunday"
-            :container-path="containerPath"
-            :navigate-to-path="navigateToPath"
-            :view-modes="viewModes"
-            yearColumn="Year"
-            showSearch="true"
+            :show-search="true"
             :sync-search-with-url="true"
-            :chip-actions="chipActionsProvider"
-            @refresh="handleRefresh"
-            @event-click="handleCalendarEventClick"
-        >
-            <template #header-area>
-                <slot name="header-area"></slot>
-            </template>
-        </CalendarComponent>
-        <TableComponent
-            v-else
-            ref="tableComponent"
-            :data="tableData"
-            :originalData="originalData"
-            :columns="columns"
-            :isLoading="isLoading"
-            :isAnalyzing="isAnalyzing"
-            :loading-progress="analysisProgress"
-            :error="error"
-            :showRefresh="true"
-            :title="tableTitle"
-            emptyMessage="No shows found."
-            :loading-message="loadingMessage"
-            :showSearch="true"
-            :sync-search-with-url="true"
-            :hideRowsOnSearch="hideRowsOnSearch"
-            :allowDetails="true"
-            :container-path="containerPath"
-            :navigate-to-path="navigateToPath"
-            :view-modes="viewModes"
+            :patches="patches"
             @refresh="handleRefresh"
         >
             <template #header-area>
@@ -874,45 +608,6 @@ export const ScheduleTableComponent = {
                     </button>
                 </div>
             </template>
-            <template #cell-extra="{ row, column }">
-                <!-- Add estimated ship date cards in Ship column -->
-                <template v-for="card in getShipDateCards(row, column.key)" :key="'ship-' + card.message">
-                    <span 
-                        :class="['card', card.class]"
-                        :title="card.hoverMessage"
-                        v-html="card.message"
-                    ></span>
-                </template>
-
-                <!-- Transship annotation replaces ship date in Ship column -->
-                <template v-for="card in getTransshipCards(row, column.key)" :key="'transship-' + card.message">
-                    <div
-                        :class="['card', 'clickable', card.class]"
-                        :title="card.hoverMessage"
-                        @click="card.action()"
-                        v-html="card.message"
-                    ></div>
-                </template>
-                
-                <!-- Add packlist cards based on AppData -->
-                <template v-for="card in getPacklistCards(row, column.key)" :key="card.message">
-                    <button 
-                        :class="['card', card.class]"
-                        :disabled="card.disabled"
-                        @click="!card.disabled ? card.action() : null"
-                        v-html="card.message"
-                    ></button>
-                </template>
-
-                <template v-for="card in getIndexIssueCards(row, column.key)" :key="card.referenceType + '-' + card.rawValue">
-                    <div
-                        :class="['card', card.color || 'red', { 'clickable': card.clickable }]"
-                        @click="card.clickable ? card.action() : null"
-                        :title="'Missing from index: ' + card.rawValue"
-                        v-html="card.message"
-                    ></div>
-                </template>
-            </template>
-        </TableComponent>
+        </DataView>
     `
 };
