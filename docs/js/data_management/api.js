@@ -1,6 +1,6 @@
 import { wrapMethods, normalizeHeaderName, Database, InventoryUtils, PackListUtils, ProductionUtils, ApplicationUtils, EditHistoryUtils, InstantWriteUtils, todayISOString, offsetToISO, sanitizeTabName, mapWithConcurrency, ProgressBus, getRandomLoadingQuote } from './index.js';
 import { authState } from '../application/utils/auth.js';
-import { instantWriteEntry, columnText, identityText, parseColoredName } from './utils/instant-write-config.js';
+import { instantWriteEntry, identityText, parseColoredName } from './utils/instant-write-config.js';
 import { columnKind } from './utils/checkbox-values.js';
 import { columnTypesEntry } from './utils/column-types.js';
 
@@ -1536,14 +1536,14 @@ class Requests_uncached {
      *    fields: string[] | null                 DesignQueueFields (shown columns)
      *    assignees: string[]                     DesignQueueAssignees names (["Alex", "red"]: name + colour word)
      *    assigneeColors: { [name]: colour }      the colour words, for the names that have one
-     *    kinds: { [columnText]: kind } }]        getColumnKinds, keyed by matched column name
+     *    types: [{ column, type, options? }] }]  getColumnTypes (declared column types)
      */
     static async getDesignQueueSetup(deps, database, tab) {
-        const [instant, fields, assignees, kinds] = await Promise.all([
+        const [instant, fields, assignees, types] = await Promise.all([
             deps.call(Requests.getInstantWriteConfig, database, tab),
             deps.call(Requests.getJsonPreference, 'DesignQueueFields', null),
             deps.call(Requests.getJsonPreference, 'DesignQueueAssignees', []),
-            deps.call(Requests.getColumnKinds, database, tab)
+            deps.call(Requests.getColumnTypes, database, tab)
         ]);
         const parsedAssignees = (Array.isArray(assignees) ? assignees : []).map(parseColoredName);
         return [{
@@ -1551,7 +1551,7 @@ class Requests_uncached {
             fields: Array.isArray(fields) && fields.length ? fields.map(String) : null,
             assignees: parsedAssignees.map(a => a.name),
             assigneeColors: Object.fromEntries(parsedAssignees.filter(a => a.color).map(a => [a.name, a.color])),
-            kinds: Object.fromEntries((kinds || []).map(k => [columnText(k.column), k.kind]))
+            types
         }];
     }
 

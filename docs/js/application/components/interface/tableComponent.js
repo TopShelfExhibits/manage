@@ -2116,7 +2116,10 @@ export const TableComponent = {
                     editable: this.editMode !== 'none' && !!f.editable,
                     ...extra
                 };
-                if (column.editable && !column.cell && column.format !== 'number' && column.format !== 'external-edit') column.cell = 'text';
+                // An editable field's default cell follows its data type (checkbox, select), else text
+                if (column.editable && !column.cell && column.format !== 'number' && column.format !== 'external-edit') {
+                    column.cell = column.type === 'checkbox' || column.type === 'select' ? column.type : 'text';
+                }
                 return column;
             };
             const slots = r.slots.map(slot => {

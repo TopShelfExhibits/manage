@@ -15,9 +15,10 @@ import { shipReturnAnalysis, withShipDate, shipReturnCards, SHIP_RETURN_DECORATI
  *    delay. Edits made close together go as one batch (DataView queue → commitCells →
  *    Requests.writeCellsVerified for Schedule columns, saveShowNote for each note).
  *  - Setup (Requests.getDesignQueueSetup, one store): the InstantWriteTables preference names the
- *    row identity and the columns written immediately. Each column's cell comes from the data: a
- *    select when the page has options for it (Assignee, from DesignQueueAssignees), a checkbox
- *    when the sheet's values are checkbox values, text otherwise. The shown columns come from
+ *    row identity and the columns written immediately; the ColumnTypes preference says what each
+ *    column holds, and the table draws an editable column's cell from that type (checkbox,
+ *    select, else text). A select names its option list; this page supplies its lists by name
+ *    (optionLists: DesignQueueAssignees from preferences). The shown columns come from
  *    DesignQueueFields (a view patch). Until setup loads, instant cells render read-only.
  *  - Note is not a Schedule column: a per-row analysis on the schedule store reads it from
  *    CACHE/ShowNotes by computeIdentifier (Requests.getShowNoteForRow). It keeps the last note
@@ -130,16 +131,12 @@ export const DesignQueueContent = {
         identity() {
             return this.instantConfig?.identity || DEFAULT_IDENTITY;
         },
-        assignees() {
-            return this.setup?.assignees || [];
-        },
-        // Options lists the page has for select cells, by column
-        selectOptions() {
-            return { assignee: this.assignees };
-        },
-        // Colour word (a global colour class) per option, by column
-        selectColors() {
-            return { assignee: this.setup?.assigneeColors || {} };
+        // Option lists for select columns, by the name ColumnTypes gives them ({ "options": "<list name>" }).
+        // colors: option → colour word (a global colour class)
+        optionLists() {
+            return {
+                DesignQueueAssignees: { options: this.setup?.assignees || [], colors: this.setup?.assigneeColors || {} }
+            };
         },
         // DesignQueueFields preference → one view patch (affects only this page)
         patches() {
@@ -149,13 +146,9 @@ export const DesignQueueContent = {
         rawRows() {
             return this.scheduleStore?.data || [];
         },
-        // What each column holds (by matched column name), from the whole sheet; null until loaded
-        columnKinds() {
-            return this.setup?.kinds || null;
-        },
-        // FieldDefs: Schedule fields, instant cells typed by their data, the joined Note, derived fields
+        // FieldDefs: Schedule fields typed by ColumnTypes, instant columns editable, the Note, derived fields
         fields() {
-            const base = buildScheduleFields(this.rawRows, { packlist: false });
+            const base = buildScheduleFields(this.rawRows, { packlist: false, types: this.setup?.types });
             if (!this.rawRows.length) {
                 // Before data loads, keep the default columns so the header renders without warnings
                 const have = new Set(base.map(f => f.key));
@@ -164,9 +157,11 @@ export const DesignQueueContent = {
             const keys = new Set(base.map(f => columnText(f.key)));
             const fields = base.map(f => {
                 if (!isInstantColumn({ columns: this.instantColumns }, f.key)) return f;
-                const type = this.cellTypeFor(f.key);
-                const field = { ...f, cell: type, editable: true, sortable: f.sortable || type === 'select' };
-                if (type === 'select') field.cellOptions = { options: this.selectOptions[columnText(f.key)] || [], colors: this.selectColors[columnText(f.key)] || {} };
+                const field = { ...f, editable: true, sortable: f.sortable || f.type === 'select' };
+                if (f.type === 'select') {
+                    field.cellOptions = this.optionLists[f.options] || { options: [] };
+                    if (!this.optionLists[f.options]) console.warn(`[DesignQueue] no option list "${f.options}" for select column "${f.key}"`);
+                }
                 return field;
             });
             for (const col of this.instantColumns) {
@@ -220,12 +215,6 @@ export const DesignQueueContent = {
         this.setupStore = getReactiveStore(Requests.getDesignQueueSetup, null, [DQ_DATABASE, DQ_TAB]);
     },
     methods: {
-        // Cell for an instant-write column: select (page options), checkbox (the data), else text
-        cellTypeFor(key) {
-            const k = columnText(key);
-            if (this.selectOptions[k]) return 'select';
-            return this.columnKinds?.[k] === 'checkbox' ? 'checkbox' : 'text';
-        },
         // Derived fields recomputed from the (local) row: the row turns gray when Setups is checked
         deriveRow(row) {
             return { ...row, _rowColor: isCheckedValue(row[DONE_COLUMN]) ? 'gray' : '' };
@@ -240,9 +229,9 @@ export const DesignQueueContent = {
                 return row.Note === null ? 'write disabled: loading the note' : 'write disabled: no show identifier';
             }
             if (!isInstantColumn({ columns: this.instantColumns }, key)) return '';
+            // Until setup loads, a column's type (and so its cell) isn't known: shown read-only
+            if (!this.setup) return 'write disabled: loading setup';
             if (!this.instantConfig) return 'write disabled: no row identity';
-            // Until the column kinds load, a column's cell type isn't known (shown read-only)
-            if (!this.columnKinds && !this.selectOptions[columnText(key)]) return 'write disabled: loading column types';
             if (this.duplicateIdentities.has(this.rowId(row))) return 'write disabled: duplicate row identity';
             return '';
         },

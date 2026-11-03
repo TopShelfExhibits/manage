@@ -108,15 +108,16 @@ export const ScheduleTableComponent = {
     data() {
         return {
             scheduleTableStore: null,
+            columnTypesStore: null,
             SCHEDULE_VIEWS,
             SCHEDULE_DECORATION_KEYS
         };
     },
 
     computed: {
-        // FieldDefs built from the sheet headers (shared with other Schedule pages)
+        // FieldDefs built from the sheet headers (shared with other Schedule pages), typed by ColumnTypes
         fields() {
-            return buildScheduleFields(this.scheduleTableStore ? this.scheduleTableStore.data : []);
+            return buildScheduleFields(this.scheduleTableStore ? this.scheduleTableStore.data : [], { types: this.columnTypesStore?.data });
         },
         tableData() {
             const rawData = this.scheduleTableStore ? this.scheduleTableStore.data : [];
@@ -212,6 +213,7 @@ export const ScheduleTableComponent = {
         }
     },
     async mounted() {
+        this.columnTypesStore = getReactiveStore(Requests.getColumnTypes, null, ['PROD_SCHED', 'Production Schedule']);
         this.recreateStore();
     },
     methods: {
