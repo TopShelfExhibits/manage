@@ -137,6 +137,10 @@ export const DesignQueueContent = {
         selectOptions() {
             return { assignee: this.assignees };
         },
+        // Colour word (a global colour class) per option, by column
+        selectColors() {
+            return { assignee: this.setup?.assigneeColors || {} };
+        },
         // DesignQueueFields preference → one view patch (affects only this page)
         patches() {
             const cols = this.setup?.fields;
@@ -162,7 +166,7 @@ export const DesignQueueContent = {
                 if (!isInstantColumn({ columns: this.instantColumns }, f.key)) return f;
                 const type = this.cellTypeFor(f.key);
                 const field = { ...f, cell: type, editable: true, sortable: f.sortable || type === 'select' };
-                if (type === 'select') field.cellOptions = { options: this.selectOptions[columnText(f.key)] || [] };
+                if (type === 'select') field.cellOptions = { options: this.selectOptions[columnText(f.key)] || [], colors: this.selectColors[columnText(f.key)] || {} };
                 return field;
             });
             for (const col of this.instantColumns) {

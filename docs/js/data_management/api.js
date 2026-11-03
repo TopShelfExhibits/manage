@@ -1,6 +1,6 @@
 import { wrapMethods, normalizeHeaderName, Database, InventoryUtils, PackListUtils, ProductionUtils, ApplicationUtils, EditHistoryUtils, InstantWriteUtils, todayISOString, offsetToISO, sanitizeTabName, mapWithConcurrency, ProgressBus, getRandomLoadingQuote } from './index.js';
 import { authState } from '../application/utils/auth.js';
-import { instantWriteEntry, columnText, identityText } from './utils/instant-write-config.js';
+import { instantWriteEntry, columnText, identityText, parseColoredName } from './utils/instant-write-config.js';
 import { columnKind } from './utils/checkbox-values.js';
 
 /**
@@ -1523,7 +1523,8 @@ class Requests_uncached {
      * and the tab's data). A one-item list, so it can back a reactive store:
      * [{ instant: { identity, columns } | null   InstantWriteTables entry for the tab
      *    fields: string[] | null                 DesignQueueFields (shown columns)
-     *    assignees: string[]                     DesignQueueAssignees
+     *    assignees: string[]                     DesignQueueAssignees names (["Alex", "red"]: name + colour word)
+     *    assigneeColors: { [name]: colour }      the colour words, for the names that have one
      *    kinds: { [columnText]: kind } }]        getColumnKinds, keyed by matched column name
      */
     static async getDesignQueueSetup(deps, database, tab) {
@@ -1533,10 +1534,12 @@ class Requests_uncached {
             deps.call(Requests.getJsonPreference, 'DesignQueueAssignees', []),
             deps.call(Requests.getColumnKinds, database, tab)
         ]);
+        const parsedAssignees = (Array.isArray(assignees) ? assignees : []).map(parseColoredName);
         return [{
             instant,
             fields: Array.isArray(fields) && fields.length ? fields.map(String) : null,
-            assignees: Array.isArray(assignees) ? assignees.map(String) : [],
+            assignees: parsedAssignees.map(a => a.name),
+            assigneeColors: Object.fromEntries(parsedAssignees.filter(a => a.color).map(a => [a.name, a.color])),
             kinds: Object.fromEntries((kinds || []).map(k => [columnText(k.column), k.kind]))
         }];
     }

@@ -1919,7 +1919,8 @@ test('INSTANT WRITE', 'design queue setup: instant config, shown fields, assigne
     const [setup] = await Requests.getDesignQueueSetup('PROD_SCHED', 'Production Schedule');
     assertEqual(setup.instant, { identity: ['Client', 'Year', 'Show'], columns: ['Elev', 'Panels', 'Setups', 'Assignee'] }, 'instant config');
     assertContains(setup.fields, 'Note', 'DesignQueueFields');
-    assertEqual(setup.assignees, ['Alex', 'Sam'], 'assignees');
+    assertEqual(setup.assignees, ['Alex', 'Sam Smith'], 'assignees');
+    assertEqual(setup.assigneeColors, { Alex: 'red', 'Sam Smith': 'blue' }, 'assignee colour words');
     assertEqual([setup.kinds.elev, setup.kinds.setups, setup.kinds['account manager']], ['checkbox', 'checkbox', 'text'], 'kinds by matched column name');
 });
 

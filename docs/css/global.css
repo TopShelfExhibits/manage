@@ -360,42 +360,42 @@ tr.clickable:not(.white, .gray, .purple, .red, .orange, .yellow, .blue, .green):
 }
 
 
-button.white, input[type="button"].white, input[type="submit"].white, .button.white, thead.white > tr > th, .white > .modal-header {
+button.white, input[type="button"].white, input[type="submit"].white, select.white, .button.white, thead.white > tr > th, .white > .modal-header {
     background-color: var(--background-color);
     color: var(--color-text-light);
     border: 1px solid var(--color-border);
 }
-button.gray, input[type="button"].gray, input[type="submit"].gray, .button.gray, thead.gray > tr > th, .gray > .modal-header {
+button.gray, input[type="button"].gray, input[type="submit"].gray, select.gray, .button.gray, thead.gray > tr > th, .gray > .modal-header {
     background-color: var(--color-gray);
     color: var(--color-text-inverted);
     border: 1px solid var(--color-border);
 }
-button.purple, input[type="button"].purple, input[type="submit"].purple, .button.purple, thead.purple > tr > th, .purple > .modal-header {
+button.purple, input[type="button"].purple, input[type="submit"].purple, select.purple, .button.purple, thead.purple > tr > th, .purple > .modal-header {
     background-color: var(--color-purple);
     color: var(--color-text-inverted);
     border: none;
 }
-button.red, input[type="button"].red, input[type="submit"].red, .button.red, thead.red > tr > th, .red > .modal-header {
+button.red, input[type="button"].red, input[type="submit"].red, select.red, .button.red, thead.red > tr > th, .red > .modal-header {
     background-color: var(--color-red);
     color: var(--color-text-inverted);
     border: none;
 }
-button.orange, input[type="button"].orange, input[type="submit"].orange, .button.orange, thead.orange > tr > th, .orange > .modal-header {
+button.orange, input[type="button"].orange, input[type="submit"].orange, select.orange, .button.orange, thead.orange > tr > th, .orange > .modal-header {
     background-color: var(--color-orange);
     color: var(--color-text-inverted);
     border: none;
 }
-button.yellow, input[type="button"].yellow, input[type="submit"].yellow, .button.yellow, thead.yellow > tr > th, .yellow > .modal-header {
+button.yellow, input[type="button"].yellow, input[type="submit"].yellow, select.yellow, .button.yellow, thead.yellow > tr > th, .yellow > .modal-header {
     background-color: var(--color-yellow);
     color: var(--color-text);
     border: 1px solid var(--color-border);
 }
-button.blue, input[type="button"].blue, input[type="submit"].blue, .button.blue, thead.blue > tr > th, .blue > .modal-header {
+button.blue, input[type="button"].blue, input[type="submit"].blue, select.blue, .button.blue, thead.blue > tr > th, .blue > .modal-header {
     background-color: var(--color-blue);
     color: var(--color-text-inverted);
     border: none;
 }
-button.green, input[type="button"].green, input[type="submit"].green, .button.green, thead.green > tr > th, .green > .modal-header {
+button.green, input[type="button"].green, input[type="submit"].green, select.green, .button.green, thead.green > tr > th, .green > .modal-header {
     background-color: var(--color-green);
     color: var(--color-text-inverted);
     border: none;

@@ -56,6 +56,18 @@ export function columnText(name) {
     return String(name ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
 }
 
+const COLOR_WORDS = Object.freeze(['gray', 'purple', 'red', 'orange', 'yellow', 'blue', 'green']);
+
+/**
+ * A preference entry as { name, color }: a [name, colour] pair (["Sam Smith", "red"]) or a bare
+ * name. The colour is one of the global colour classes; any other word is ignored.
+ */
+export function parseColoredName(entry) {
+    const [name, color] = Array.isArray(entry) ? entry : [entry];
+    const word = String(color ?? '').trim().toLowerCase();
+    return { name: String(name ?? '').trim(), color: COLOR_WORDS.includes(word) ? word : '' };
+}
+
 /**
  * A row's identity values, as they match.
  * @param {string[]} identity  the identity column names

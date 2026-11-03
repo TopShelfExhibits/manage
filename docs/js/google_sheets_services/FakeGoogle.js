@@ -1675,7 +1675,7 @@ export class FakeGoogleSheetsService {
             ['DesignQueueFields', 'Design queue fields', 'columns shown on the design queue', 'schedule/design-queue*', 'json',
                 '["Client", "Show", "Size", "Note", "Elev", "Panels", "Setups", "Assignee", "Account Manager", "Ship", "Booth#"]', ''],
             ['DesignQueueAssignees', 'Design queue assignees', 'people who can be assigned design work', 'schedule/design-queue*', 'json',
-                '["Alex", "Sam"]', '']
+                '[["Alex", "red"], ["Sam Smith", "blue"]]', '']
         );
     }
     if (data.CACHE && !data.CACHE.ShowNotes) {

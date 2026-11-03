@@ -130,7 +130,8 @@ const CheckboxCell = {
 };
 
 /**
- * Select. Options come from field.cellOptions.options (page-supplied list). A current value
+ * Select. Options come from field.cellOptions.options (page-supplied list); cellOptions.colors maps
+ * an option to a colour word, which styles the select with that colour class. A current value
  * that isn't in the list still shows as an extra option, so nothing is hidden or overwritten.
  */
 const SelectCell = {
@@ -143,6 +144,12 @@ const SelectCell = {
             const list = (this.field.cellOptions?.options || []).map(String);
             if (this.current && !list.some(o => o.trim().toLowerCase() === this.current.trim().toLowerCase())) list.push(this.current);
             return list;
+        },
+        // Colour class of the chosen option (field.cellOptions.colors: { option: colour word })
+        colorClass() {
+            const colors = this.field.cellOptions?.colors || {};
+            const key = Object.keys(colors).find(o => o.trim().toLowerCase() === this.current.trim().toLowerCase());
+            return key ? colors[key] : '';
         }
     },
     methods: {
@@ -155,7 +162,7 @@ const SelectCell = {
         <span v-if="!editable" class="cell-select-text" :title="disabled || ''">
             <span v-html="readOnly"></span>
         </span>
-        <select v-else class="cell-select" :value="current" @change="change" @click.stop>
+        <select v-else :class="['cell-select', colorClass]" :value="current" @change="change" @click.stop>
             <option value=""></option>
             <option v-for="o in options" :key="o" :value="o">{{ o }}</option>
         </select>
