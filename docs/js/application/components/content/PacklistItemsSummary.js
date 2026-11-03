@@ -1,14 +1,15 @@
 import { html, DataView, Requests, getReactiveStore, createAnalysisConfig, NavigationRegistry, ItemImageComponent, InventoryCategoryFilter, Priority, invalidateCache, todayISOString, OverlappingShowsModal } from '../../index.js';
+import { itemImageStyle } from '../../utils/views/viewStyles.js';
 
-// What each summary key is
+// What each summary key is. image holds no data: the thumbnail column (see itemImageStyle).
 const SUMMARY_FIELDS = [
-    { key: 'image', labelHtml: '<span class="material-symbols-outlined">imagesmode</span>', label: 'IMG', sortable: false, cell: 'image', cellOptions: { itemKey: 'itemId', size: 48 } },
-    { key: 'itemId', label: 'Item#', type: 'item', sortable: true, cell: 'slot' },
-    { key: 'quantity', label: 'Quantity', sortable: true },
-    { key: 'available', label: 'Inv. Qty.', sortable: true },
-    { key: 'tabName', label: 'Tab', sortable: true },
-    { key: 'remaining', label: 'Remaining', format: 'number', type: 'number', sortable: true },
-    { key: 'overlappingShows', label: 'Overlapping Shows', sortable: false, cell: 'slot' }
+    { key: 'image', label: 'IMG' },
+    { key: 'itemId', label: 'Item#', type: 'item' },
+    { key: 'quantity', label: 'Quantity' },
+    { key: 'available', label: 'Inv. Qty.' },
+    { key: 'tabName', label: 'Tab' },
+    { key: 'remaining', label: 'Remaining', format: 'number', type: 'number' },
+    { key: 'overlappingShows', label: 'Overlapping Shows' }
 ];
 
 // Packlist items summary view (views-and-renderers-plan §5, Phase 4)
@@ -22,7 +23,14 @@ const SUMMARY_VIEWS = {
         layout: 'table',
         columns: ['image', 'itemId', 'quantity', 'available', 'remaining', 'overlappingShows'],
         hidden: ['tabName'],
-        style: { image: { width: 1 }, remaining: { color: 'auto' }, overlappingShows: { columnColor: 'gray' } },
+        sortable: ['itemId', 'quantity', 'available', 'tabName', 'remaining'],
+        // The page draws Item# and Overlapping Shows (#cell)
+        style: {
+            image: itemImageStyle('itemId'),
+            itemId: { cell: 'slot' },
+            remaining: { color: 'auto' },
+            overlappingShows: { cell: 'slot', columnColor: 'gray' }
+        },
         table: { sticky: { start: ['image'] }, hideRowsOnSearch: false }
     }]
 };

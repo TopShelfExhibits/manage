@@ -1,5 +1,6 @@
 import { html, TableComponent, DataView, Requests, getReactiveStore, NavigationRegistry, createAnalysisConfig, invalidateCache, Priority, tableRowSelectionState, EditHistoryUtils, authState, undoRegistry, todayISOString, getAutoColorClass } from '../../index.js';
 import { resolveView } from '../../utils/views/resolveView.js';
+import { itemImageStyle } from '../../utils/views/viewStyles.js';
 import { ItemImageComponent } from './InventoryTable.js';
 import { sheetLockMixin } from '../../utils/sheetLockMixin.js';
 import { packlistIndexResolutionMixin } from '../interface/IndexResolutionModal.js';
@@ -157,9 +158,12 @@ const PACKLIST_ITEMS_VIEW = {
 const CRATE_EDITABLE = ['Type', 'L', 'W', 'H', 'Weight'];
 const ITEM_EDITABLE = ['Description', 'Packing/shop notes'];
 
+// The crates table's row number column (drawn by the page: the visible row count)
+const PIECE_NUMBER = 'Piece #';
+
 // Width/font by header for the crates table (structural class packlist-table, R3.6)
 function crateColumnStyle(label) {
-    if (label === 'Piece #') return { width: 10, font: 'narrow' };
+    if (label === PIECE_NUMBER) return { width: 10, font: 'narrow' };
     const width = ['Description', 'Packing/shop notes'].includes(label) ? 200 : ['L', 'W', 'H'].includes(label) ? 20 : 40;
     const font = ['Pack', 'Check', 'Weight'].includes(label) ? 'narrow' : undefined;
     return font ? { width, font } : { width };
@@ -180,6 +184,7 @@ export const PacklistTable = {
             isPrinting: false,
             databaseItemHeaders: null,
             NavigationRegistry,
+            PIECE_NUMBER,
             lockNamespace: 'PACK_LISTS',
             itemGroupVisibilityOverride: null,
             descriptionOnlyTabs: [],
@@ -202,18 +207,11 @@ export const PacklistTable = {
         // Crates view: the sheet's crate headers, in sheet order. Piece # and the nested item table
         // are page cells (#cell); the item table's cell spans the item headers after it.
         cratesResolved() {
-            const fields = this.mainHeaders.map(key => {
-                const isIndex = key === 'Piece #';
-                const isItems = key === this.itemHeadersStart;
-                return {
-                    key, label: key, isIndex,
-                    editable: CRATE_EDITABLE.includes(key),
-                    colspan: isItems ? this.itemHeaders.length : undefined,
-                    cell: (isIndex || isItems) ? 'slot' : undefined
-                };
-            });
+            const fields = this.mainHeaders.map(key => ({ key, label: key, editable: CRATE_EDITABLE.includes(key) }));
             const style = {};
             for (const key of this.mainHeaders) style[key] = crateColumnStyle(key);
+            if (style[PIECE_NUMBER]) style[PIECE_NUMBER].cell = 'slot';
+            if (style[this.itemHeadersStart]) Object.assign(style[this.itemHeadersStart], { cell: 'slot', colspan: this.itemHeaders.length });
             return resolveView(fields, {
                 id: 'packlist-crates',
                 layout: 'table',
@@ -759,12 +757,13 @@ export const PacklistTable = {
                     };
                 },
                 computed: {
+                    // image holds no data: the thumbnail column (see itemImageStyle)
                     fields() {
                         return [
-                            { key: 'image', labelHtml: '<span class="material-symbols-outlined">imagesmode</span>', label: 'IMG', sortable: false, cell: 'image', cellOptions: { itemKey: 'itemNumber', size: 48 } },
-                            { key: 'itemNumber', label: 'Item#', type: 'item', sortable: true },
-                            { key: 'description', label: 'Description', sortable: true },
-                            { key: 'quantity', label: 'Available', sortable: true }
+                            { key: 'image', label: 'IMG' },
+                            { key: 'itemNumber', label: 'Item#', type: 'item' },
+                            { key: 'description', label: 'Description' },
+                            { key: 'quantity', label: 'Available' }
                         ];
                     },
                     // Single-view registry in a modal (no URL); "+ Add Item" is the primary action
@@ -776,7 +775,8 @@ export const PacklistTable = {
                             views: [{
                                 id: 'table', name: 'Inventory', layout: 'table',
                                 columns: ['image', 'itemNumber', 'description', 'quantity'],
-                                style: { image: { width: 1 }, itemNumber: { width: 120 }, quantity: { width: 100 } },
+                                sortable: ['itemNumber', 'description', 'quantity'],
+                                style: { image: itemImageStyle('itemNumber'), itemNumber: { width: 120 }, quantity: { width: 100 } },
                                 table: { sticky: { start: ['image'] } },
                                 sort: { key: 'itemNumber', dir: 'asc' }
                             }]
@@ -858,7 +858,6 @@ export const PacklistTable = {
                         :showSearch="true"
                         :showRefresh="false"
                         :showFooter="true"
-                        :sortable="true"
                         :emptyMessage="'No inventory items found'"
                         :loadingMessage="inventoryStore && inventoryStore.isAnalyzing ? 'Loading images...' : 'Loading inventory...'"
                     >
@@ -1495,7 +1494,7 @@ export const PacklistTable = {
                         </div>
                     </template>
                     <template #cell="{ row, rowIndex, field: column, onInnerTableDirty }">
-                        <template v-if="column && column.isIndex">
+                        <template v-if="column && column.key === PIECE_NUMBER">
                             <!-- Only count visible (not marked-for-deletion) rows for Piece # -->
                             {{
                                 mainTableData

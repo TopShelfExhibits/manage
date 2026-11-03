@@ -406,14 +406,14 @@ const PacklistPinToggleComponent = {
     `
 };
 
-// What each packlist card key is. _shipLine, _status and _cardColor are derived on a computed copy.
+// What each packlist card key is. _shipLine, _status and _unattached are derived on a computed copy.
 const PACKLIST_FIELDS = [
-    { key: 'title', label: 'Title', type: 'string', sortable: true },
-    { key: 'shipDate', label: 'Ship Date', type: 'date', sortable: true },
+    { key: 'title', label: 'Title', type: 'string' },
+    { key: 'shipDate', label: 'Ship Date', type: 'date' },
     { key: '_shipLine', label: 'Ship' },
     { key: 'description', label: 'Description', format: 'multiline' },
     { key: '_status', label: 'Status' },
-    { key: '_cardColor', label: 'Card colour' }
+    { key: '_unattached', label: 'Not attached to a show' }
 ];
 
 // Packlists page view registry (views-and-renderers-plan §4.3, §5). Cards don't link /details (R4.1).
@@ -428,9 +428,11 @@ const PACKLIST_VIEWS = {
             icon: 'grid_view',
             layout: 'cards',
             cards: { card: [['title'], ['_shipLine'], ['description']], footer: [['_status']] },
-            hidden: ['shipDate', '_cardColor'],
-            rowColor: { field: '_cardColor', rule: 'value' },
+            hidden: ['shipDate', '_unattached'],
+            // An unattached packlist's card is red, every other card gray
+            rowColor: { field: '_unattached', rule: 'checked:red', fallback: 'gray' },
             sort: { key: 'title', dir: 'asc' },
+            sortable: ['title', 'shipDate'],
             action: 'row'
         }
     ]
@@ -794,7 +796,7 @@ export const PacklistContent = {
                 _shipLine: shipLine,
                 description,
                 _status: status,
-                _cardColor: this.isUnattached(tab) ? 'red' : 'gray',
+                _unattached: this.isUnattached(tab),
                 _unsaved: unsaved
             };
         },

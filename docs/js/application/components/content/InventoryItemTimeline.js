@@ -4,11 +4,11 @@ import { valueMatchesAny } from '../../utils/views/searchMatch.js';
 
 // What each timeline key is (calendarStart/End are derived on a computed copy of the rows)
 const TIMELINE_FIELDS = [
-    { key: 'date', label: 'Date', sortable: true, format: 'date', type: 'date' },
-    { key: 'quantity', label: 'Quantity', sortable: false, format: 'number', type: 'number' },
-    { key: 'event', label: 'Event', sortable: false },
-    { key: 'note', label: 'Note', sortable: false },
-    { key: 'change', label: 'Change', sortable: false },
+    { key: 'date', label: 'Date', format: 'date', type: 'date' },
+    { key: 'quantity', label: 'Quantity', format: 'number', type: 'number' },
+    { key: 'event', label: 'Event' },
+    { key: 'note', label: 'Note' },
+    { key: 'change', label: 'Change' },
     { key: 'calendarStart', label: 'Start', format: 'date', type: 'date' },
     { key: 'calendarEnd', label: 'End', format: 'date', type: 'date' }
 ];
@@ -18,6 +18,7 @@ const TIMELINE_VIEWS = {
     id: 'item-timeline',
     default: 'table',
     theme: 'purple',
+    sortable: ['date'],
     views: [
         {
             id: 'table',

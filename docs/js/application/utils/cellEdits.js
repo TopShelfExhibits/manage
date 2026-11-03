@@ -224,7 +224,7 @@ export function useInstantEdits(host) {
     const loadedRow = (id) => host.rows().find(r => host.rowId(r) === id) || null;
 
     function sameValue(key, a, b) {
-        if (host.field(key)?.cell === 'checkbox') return isCheckedValue(a) === isCheckedValue(b);
+        if (host.field(key)?.type === 'checkbox') return isCheckedValue(a) === isCheckedValue(b);
         return String(a ?? '').trim() === String(b ?? '').trim();
     }
 

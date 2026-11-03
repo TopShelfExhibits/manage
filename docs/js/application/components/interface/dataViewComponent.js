@@ -1,5 +1,5 @@
 import { html, NavigationRegistry, TableComponent, CalendarComponent, CardsComponent } from '../../index.js';
-import { resolveView, resolveAction, pickView, devWarn } from '../../utils/views/resolveView.js';
+import { resolveView, resolveAction, pickView, withRegistryDefaults, devWarn } from '../../utils/views/resolveView.js';
 import { searchWords, makeHighlighter } from '../../utils/views/searchMatch.js';
 import { formatText } from '../../utils/views/fieldFormat.js';
 import { useContainerSize } from '../../utils/useContainerSize.js';
@@ -119,11 +119,11 @@ export const DataView = {
         },
         resolved() {
             const opts = { size: this.size, print: this.printing, patches: this.patches, editMode: this.editMode, theme: this.registry?.theme || '' };
-            const r = resolveView(this.fields, this.activeView, opts);
+            const r = resolveView(this.fields, withRegistryDefaults(this.registry, this.activeView), opts);
             if (r.invalid) {
                 // A view whose calendar fields are missing falls back to the default view
                 const fallback = pickView(this.registry, {});
-                if (fallback && fallback !== this.activeView) return resolveView(this.fields, fallback, opts);
+                if (fallback && fallback !== this.activeView) return resolveView(this.fields, withRegistryDefaults(this.registry, fallback), opts);
             }
             return r;
         },

@@ -1,16 +1,18 @@
 import { html, DataView, Requests, getReactiveStore, createAnalysisConfig, NavigationRegistry, ItemImageComponent, ScheduleFilterSelect, InventoryCategoryFilter, Priority, invalidateCache, toISODateString, todayISOString, offsetToISO, OverlappingShowsModal } from '../../index.js';
 import { textFiltersToSearchParams } from '../../../data_management/utils/helpers.js';
+import { itemImageStyle } from '../../utils/views/viewStyles.js';
 
-// What each report key is (calendarStart/End are derived ranges on a computed copy of the rows)
+// What each report key is (calendarStart/End are derived ranges on a computed copy of the rows).
+// image holds no data: the thumbnail column (see itemImageStyle).
 const ITEM_REPORT_FIELDS = [
-    { key: 'image', labelHtml: '<span class="material-symbols-outlined">imagesmode</span>', label: 'IMG', sortable: false, cell: 'image', cellOptions: { itemKey: 'itemId', size: 48 } },
-    { key: 'itemId', label: 'Item#', type: 'item', sortable: true, cell: 'itemId' },
-    { key: 'description', label: 'Description', sortable: true },
-    { key: 'startDate', label: 'Start', format: 'date', type: 'date', sortable: true },
-    { key: 'endDate', label: 'End', format: 'date', type: 'date', sortable: true },
-    { key: 'inventoryQty', label: 'Inv Qty', format: 'number', type: 'number', sortable: true },
-    { key: 'minQty', label: 'Min Qty', format: 'number', type: 'number', sortable: true },
-    { key: 'overlappingShows', label: 'Overlapping Shows', sortable: false, cell: 'slot' },
+    { key: 'image', label: 'IMG' },
+    { key: 'itemId', label: 'Item#', type: 'item' },
+    { key: 'description', label: 'Description' },
+    { key: 'startDate', label: 'Start', format: 'date', type: 'date' },
+    { key: 'endDate', label: 'End', format: 'date', type: 'date' },
+    { key: 'inventoryQty', label: 'Inv Qty', format: 'number', type: 'number' },
+    { key: 'minQty', label: 'Min Qty', format: 'number', type: 'number' },
+    { key: 'overlappingShows', label: 'Overlapping Shows' },
     { key: 'tabName', label: 'Category' },
     { key: 'calendarStart', label: 'Start', format: 'date', type: 'date' },
     { key: 'calendarEnd', label: 'End', format: 'date', type: 'date' }
@@ -21,6 +23,9 @@ const ITEM_REPORT_VIEWS = {
     id: 'item-shortages',
     default: 'table',
     theme: 'blue',
+    // Shared by both views: the thumbnail, item numbers as item text, and the page's Overlapping Shows (#cell)
+    sortable: ['itemId', 'description', 'startDate', 'endDate', 'inventoryQty', 'minQty'],
+    style: { image: itemImageStyle('itemId'), itemId: { cell: 'itemId' }, overlappingShows: { cell: 'slot' } },
     views: [
         {
             id: 'table',
@@ -30,7 +35,6 @@ const ITEM_REPORT_VIEWS = {
             columns: ['image', 'itemId', 'startDate', 'endDate', 'inventoryQty', 'minQty', 'overlappingShows'],
             hidden: ['tabName', 'calendarStart', 'calendarEnd'],
             style: {
-                image: { width: 1 },
                 minQty: { color: 'auto' },
                 overlappingShows: { columnColor: 'gray' }
             },

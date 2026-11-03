@@ -69,7 +69,8 @@ export function fieldTypeProps({ type, options } = {}) {
         case 'number': return { type: 'number', format: 'number' };
         case 'currency': return { format: 'currency' };
         case 'checkbox': return { type: 'checkbox' };
-        case 'select': return { type: 'select', ...(options ? { options } : {}) };
+        // The field names its list (optionList); the page that shows it supplies field.options
+        case 'select': return { type: 'select', ...(options ? { optionList: options } : {}) };
         default: return {};
     }
 }

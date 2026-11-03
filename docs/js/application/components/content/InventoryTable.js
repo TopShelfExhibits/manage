@@ -1,5 +1,6 @@
 import { html, Requests, TableComponent, DataView, getReactiveStore, createAnalysisConfig, NavigationRegistry, Priority, invalidateCache, authState, undoRegistry, EditHistoryUtils, todayISOString } from '../../index.js';
 import { sheetLockMixin } from '../../utils/sheetLockMixin.js';
+import { itemImageStyle } from '../../utils/views/viewStyles.js';
 
 /**
  * Modal displayed before any inventory save.
@@ -823,9 +824,14 @@ const INVENTORY_TABLE_VIEWS = {
         id: 'table',
         name: 'Items',
         layout: 'table',
-        columns: ['image', 'itemNumber', 'quantity', 'description', 'notes', '_navigate'],
-        style: { image: { width: 1 }, itemNumber: { width: 120 }, quantity: { width: 120 }, _navigate: { width: 36 } },
-        table: { sticky: { start: ['image'], end: ['_navigate'] } },
+        columns: ['image', 'itemNumber', 'quantity', 'description', 'notes'],
+        sortable: ['itemNumber', 'quantity', 'description'],
+        style: {
+            image: itemImageStyle('itemNumber', { size: 64, editable: true }),
+            itemNumber: { width: 120 },
+            quantity: { width: 120 }
+        },
+        table: { sticky: { start: ['image'] } },
         sort: { key: 'itemNumber', dir: 'asc' }
     }]
 };
@@ -866,24 +872,26 @@ export const InventoryTableComponent = {
         };
     },
     computed: {
-        // What each inventory key is; edits apply only while the page's edit mode is 'batch' (§4.16)
+        // What each inventory key is; edits apply only while the page's edit mode is 'batch' (§4.16).
+        // image holds no data: the thumbnail column (see itemImageStyle).
         fields() {
             return [
-                { key: 'image', labelHtml: '<span class="material-symbols-outlined">imagesmode</span>', label: 'IMG', sortable: false, cell: 'image', cellOptions: { itemKey: 'itemNumber', editable: true } },
-                { key: 'itemNumber', label: 'Item#', type: 'item', sortable: true },
-                { key: 'quantity', label: 'Qty', format: 'number', type: 'number', editable: true, sortable: true },
-                { key: 'description', label: 'Description (visible in pack lists)', editable: true, sortable: true },
-                { key: 'notes', label: 'Notes (internal only)', editable: true, sortable: false },
-                {
-                    key: '_navigate', labelHtml: '<span class="material-symbols-outlined">calendar_month</span>', label: '', sortable: false,
-                    cell: 'navigate',
-                    cellOptions: {
-                        to: (row) => (row.itemNumber && this.tabTitle) ? `inventory/${this.tabTitle.toLowerCase()}/${row.itemNumber}` : null,
-                        title: 'View item timeline',
-                        class: 'purple'
-                    }
-                }
+                { key: 'image', label: 'IMG' },
+                { key: 'itemNumber', label: 'Item#', type: 'item' },
+                { key: 'quantity', label: 'Qty', format: 'number', type: 'number', editable: true },
+                { key: 'description', label: 'Description (visible in pack lists)', editable: true },
+                { key: 'notes', label: 'Notes (internal only)', editable: true }
             ];
+        },
+        // Row action: the item's timeline (the table's action column, with a calendar header icon)
+        timelineAction() {
+            return {
+                to: (row) => (row.itemNumber && this.tabTitle) ? `inventory/${this.tabTitle.toLowerCase()}/${row.itemNumber}` : null,
+                disabled: (row) => !row.itemNumber,
+                icon: 'calendar_month',
+                headerIcon: 'calendar_month',
+                title: 'View item timeline'
+            };
         },
         // Tab metadata flags hide columns for this tab (data configuration → a view patch)
         viewPatches() {
@@ -1272,6 +1280,7 @@ export const InventoryTableComponent = {
                 :fields="fields"
                 :rows="tableData"
                 :registry="INVENTORY_TABLE_VIEWS"
+                :action="timelineAction"
                 :patches="viewPatches"
                 :edit-mode="editModeName"
                 :title="inventoryName || tabTitle"

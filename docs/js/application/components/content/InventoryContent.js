@@ -3,15 +3,17 @@ import { createVisibilityManager } from './InventoryTable.js';
 import { ShowInventoryReport } from './ShowInventoryReport.js';
 import { InventoryItemReport } from './InventoryItemReport.js';
 import { InventoryItemTimeline } from './InventoryItemTimeline.js';
+import { itemImageStyle } from '../../utils/views/viewStyles.js';
 
-// What each inventory overview key is (rows from Requests.getAllInventoryData)
+// What each inventory overview key is (rows from Requests.getAllInventoryData).
+// image holds no data: the thumbnail column (see itemImageStyle).
 const INVENTORY_FIELDS = [
-    { key: 'tab', label: 'Category', sortable: true, cell: 'slot' },
-    { key: 'image', labelHtml: '<span class="material-symbols-outlined">imagesmode</span>', label: 'I', sortable: false, cell: 'image', cellOptions: { itemKey: 'itemNumber', size: 32 } },
-    { key: 'itemNumber', label: 'Item#', type: 'item', sortable: true },
-    { key: 'quantity', label: 'Qty', format: 'number', type: 'number', sortable: true },
-    { key: 'description', label: 'Description', sortable: true },
-    { key: 'notes', label: 'Notes', sortable: false }
+    { key: 'tab', label: 'Category' },
+    { key: 'image', label: 'I' },
+    { key: 'itemNumber', label: 'Item#', type: 'item' },
+    { key: 'quantity', label: 'Qty', format: 'number', type: 'number' },
+    { key: 'description', label: 'Description' },
+    { key: 'notes', label: 'Notes' }
 ];
 
 /**
@@ -23,6 +25,9 @@ const INVENTORY_VIEWS = {
     id: 'inventory',
     default: 'items',
     theme: 'purple',
+    // Shared by both views: the page draws Category (#cell); the item thumbnail
+    sortable: ['tab', 'itemNumber', 'quantity', 'description'],
+    style: { tab: { cell: 'slot' }, image: itemImageStyle('itemNumber', { size: 32 }) },
     views: [
         {
             id: 'items',
@@ -31,7 +36,7 @@ const INVENTORY_VIEWS = {
             layout: 'table',
             columns: ['tab', 'image', 'itemNumber', 'quantity'],
             details: ['description', 'notes'],
-            style: { tab: { width: 120 }, image: { width: 1 } },
+            style: { tab: { width: 120 } },
             table: { sticky: { start: ['image'] } },
             sort: [{ key: 'tab', dir: 'asc' }, { key: 'itemNumber', dir: 'asc' }],
             action: 'button'

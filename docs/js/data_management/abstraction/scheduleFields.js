@@ -1,9 +1,10 @@
 /**
  * Production Schedule field definitions (views-and-renderers-plan §3, §4.1).
  *
- * Fields describe what each Schedule column IS: label, data type, format, sortability.
+ * Fields describe what each Schedule column IS: its name (label), data type and format.
  * They are shared by every page that shows Schedule rows (the Schedule page and the design
- * queue). Presentation (which columns show, widths, colours) belongs to each page's views.
+ * queue). Presentation (which columns show and sort, widths, colours, cells) belongs to each
+ * page's views.
  *
  * The sheet's headers are dynamic, so fields are built from the loaded headers. The known
  * columns are always present, so views can reference them before data loads. Each field's type
@@ -29,9 +30,6 @@ const LABELS = {
     'Ship': 'Ship Date'
 };
 
-const SORTABLE = new Set(['Show', 'Client', 'Ship', 'City', 'Size', 'S. Start',
-    'Start Date', 'End Date', 'Load In', 'Load Out', 'Event Start', 'Event End']);
-
 /** Human label for a sheet header (moved from ScheduleTable.formatColumnLabel). */
 export function scheduleLabel(header) {
     if (LABELS[header]) return LABELS[header];
@@ -47,7 +45,7 @@ export function scheduleLabel(header) {
 
 /** FieldDef for one Schedule header; typeMap from columnTypeMap(declared types). */
 export function scheduleField(header, typeMap = null) {
-    return { key: header, label: scheduleLabel(header), sortable: SORTABLE.has(header), ...fieldTypeProps(columnTypeOf(typeMap, header)) };
+    return { key: header, label: scheduleLabel(header), ...fieldTypeProps(columnTypeOf(typeMap, header)) };
 }
 
 /**
@@ -67,6 +65,7 @@ export function buildScheduleFields(rows, opts = {}) {
     if (first) Object.keys(first).forEach(add);
     SCHEDULE_KNOWN_COLUMNS.forEach(add);
     const fields = headers.map(h => scheduleField(h, typeMap));
-    if (packlist) fields.push({ key: PACKLIST_FIELD_KEY, label: 'Packlist', sortable: false });
+    // Synthetic: holds no data; the Schedule page draws it (custom, views-and-renderers-plan §4.14)
+    if (packlist) fields.push({ key: PACKLIST_FIELD_KEY, label: 'Packlist' });
     return fields;
 }

@@ -13,6 +13,8 @@ const SCHEDULE_VIEWS = {
     id: 'schedule',
     default: 'table',
     theme: '',
+    // Sortable in every view (names that aren't sheet headers are ignored)
+    sortable: ['Show', 'Client', 'Ship', 'City', 'Size', 'S. Start', 'Start Date', 'End Date', 'Load In', 'Load Out', 'Event Start', 'Event End'],
     views: [
         {
             id: 'table',

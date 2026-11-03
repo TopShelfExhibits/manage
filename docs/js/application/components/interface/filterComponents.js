@@ -768,9 +768,9 @@ export const ScheduleAdvancedFilter = {
                     },
                     fields() {
                         return [
-                            { key: 'show', label: 'Show', sortable: true },
-                            { key: 'shipDate', label: 'Ship Date', sortable: true, format: 'date', type: 'date' },
-                            { key: 'returnDate', label: 'Return', sortable: true, format: 'date', type: 'date' }
+                            { key: 'show', label: 'Show' },
+                            { key: 'shipDate', label: 'Ship Date', format: 'date', type: 'date' },
+                            { key: 'returnDate', label: 'Return', format: 'date', type: 'date' }
                         ];
                     },
                     // Single-view registry, no URL; Select is the primary action (button in the action cell)
@@ -779,7 +779,7 @@ export const ScheduleAdvancedFilter = {
                             id: 'show-overlap-picker',
                             default: 'table',
                             theme: 'gray',
-                            views: [{ id: 'table', name: 'Shows', layout: 'table', columns: ['show', 'shipDate', 'returnDate'], sort: { key: 'show', dir: 'asc' } }]
+                            views: [{ id: 'table', name: 'Shows', layout: 'table', columns: ['show', 'shipDate', 'returnDate'], sortable: ['show', 'shipDate', 'returnDate'], sort: { key: 'show', dir: 'asc' } }]
                         };
                     },
                     selectAction() {

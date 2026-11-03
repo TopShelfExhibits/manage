@@ -1540,11 +1540,6 @@ export const TableComponent = {
             type: String,
             default: null
         },
-        // Table-wide default for fields that don't set `sortable` themselves
-        sortable: {
-            type: Boolean,
-            default: false
-        },
         hideGroupMembers: {
             type: Boolean,
             default: false
@@ -2097,8 +2092,8 @@ export const TableComponent = {
          * Column model from the resolved view: one entry per slot (a parent-owned stack of lines,
          * each line a list of inline keys) plus the details fields. Hidden fields never appear.
          * A column is editable when the edit mode isn't 'none' and its field is editable. An
-         * editable field without a cell edits through the text cell; number and external-edit
-         * fields keep their own editors.
+         * editable field without a cell edits through the text cell; number fields keep their own
+         * editor. (A checkbox or select field already has its type's cell: resolveView.)
          */
         columnModel() {
             const r = this.resolved;
@@ -2116,10 +2111,7 @@ export const TableComponent = {
                     editable: this.editMode !== 'none' && !!f.editable,
                     ...extra
                 };
-                // An editable field's default cell follows its data type (checkbox, select), else text
-                if (column.editable && !column.cell && column.format !== 'number' && column.format !== 'external-edit') {
-                    column.cell = column.type === 'checkbox' || column.type === 'select' ? column.type : 'text';
-                }
+                if (column.editable && !column.cell && column.format !== 'number') column.cell = 'text';
                 return column;
             };
             const slots = r.slots.map(slot => {
@@ -2168,14 +2160,24 @@ export const TableComponent = {
         effectiveAction() {
             return this.action || { kind: 'none', trigger: 'button', icon: '', label: '' };
         },
+        // The action column header: the action's headerIcon, else ⓘ for details
+        actionHeader() {
+            const a = this.effectiveAction;
+            return a.headerIcon || (a.kind === 'details' ? 'ⓘ' : '');
+        },
         // Inline details expand is available (rows render the details container)
         detailsEnabled() {
             return this.effectiveAction.kind === 'details';
         },
-        // Trailing sticky action cell (generalizes today's details button)
+        // Trailing sticky action cell (generalizes today's details button). Details that are
+        // always shown (forceDetails) need no toggle; any other action still gets its button.
         hasActionCell() {
             const a = this.effectiveAction;
-            return !this.forceDetails && a.kind !== 'none' && a.trigger === 'button';
+            return a.kind !== 'none' && a.trigger === 'button' && !(this.forceDetails && a.kind === 'details');
+        },
+        // Detail rows render for the details action, or always when details are forced open
+        detailRowsEnabled() {
+            return this.detailsEnabled || this.forceDetails;
         },
         hasRowTrigger() {
             const a = this.effectiveAction;
@@ -2901,9 +2903,13 @@ export const TableComponent = {
             this.isUsingDefaultSort = true;
         },
         
+        // Sortability comes from the view (resolved field.sortable)
         isColumnSortable(column) {
-            // Check if column has explicit sortable property, otherwise fall back to table-wide sortable
-            return column.sortable !== undefined ? column.sortable : this.sortable;
+            return !!column.sortable;
+        },
+        // A material symbol name ('calendar_month') rather than a glyph ('☷')
+        isSymbolName(text) {
+            return typeof text === 'string' && /^[a-z][a-z0-9_]*$/.test(text);
         },
 
         getSortIcon(columnKey) {
@@ -3017,7 +3023,7 @@ export const TableComponent = {
         },
         // A batch cell changed from its loaded value shows the original and a revert control
         showRevert(row, rowIndex, column) {
-            return this.isBatchEditing && column.editable && column.format !== 'external-edit'
+            return this.isBatchEditing && column.editable && column.cell !== 'external-edit'
                 && this.batchEdits.isChanged(rowIndex, column.key)
                 && this.batchEdits.originalRow(row, rowIndex) !== undefined
                 && this.batchEdits.originalValue(row, rowIndex, column.key) !== row[column.key];
@@ -4361,7 +4367,7 @@ export const TableComponent = {
                                     </template>
                                 </div>
                             </th>
-                            <th v-if="hasActionCell" class="details-header col-sticky-end" style="font-size: 20px; line-height: 1em;" :style="[stickyColumnWidths[stickyColumnWidths.length - 1] ? { width: stickyColumnWidths[stickyColumnWidths.length - 1] + 'px' } : {}, cloneDetailsStickyTransform ? { transform: cloneDetailsStickyTransform } : {}]"><template v-if="effectiveAction.kind === 'details'">&#9432;</template></th>
+                            <th v-if="hasActionCell" class="details-header col-sticky-end" style="font-size: 20px; line-height: 1em;" :style="[stickyColumnWidths[stickyColumnWidths.length - 1] ? { width: stickyColumnWidths[stickyColumnWidths.length - 1] + 'px' } : {}, cloneDetailsStickyTransform ? { transform: cloneDetailsStickyTransform } : {}]"><span v-if="isSymbolName(actionHeader)" class="material-symbols-outlined">{{ actionHeader }}</span><template v-else>{{ actionHeader }}</template></th>
                         </tr>
                     </thead>
                 </table>
@@ -4405,7 +4411,7 @@ export const TableComponent = {
                                     </template>
                                 </div>
                             </th>
-                            <th v-if="hasActionCell" class="details-header col-sticky-end" style="font-size: 20px; line-height: 1em; right: 0;" :title="effectiveAction.kind === 'details' ? 'Details' : (effectiveAction.label || '')"><template v-if="effectiveAction.kind === 'details'">&#9432;</template></th>
+                            <th v-if="hasActionCell" class="details-header col-sticky-end" style="font-size: 20px; line-height: 1em; right: 0;" :title="effectiveAction.kind === 'details' ? 'Details' : (effectiveAction.title || effectiveAction.label || '')"><span v-if="isSymbolName(actionHeader)" class="material-symbols-outlined">{{ actionHeader }}</span><template v-else>{{ actionHeader }}</template></th>
                         </tr>
                     </thead>
                     <tbody>
@@ -4487,16 +4493,6 @@ export const TableComponent = {
                                             :disabled="cellDisabledReason(row, column)"
                                             :cell-scope="{ rowIndex: idx, onInnerTableDirty: (isDirty) => batchEdits.setNested(idx, column.key, isDirty) }"
                                         />
-                                        <!-- Edited outside the cell (e.g. a modal) and tracked for dirty state: the page's default slot -->
-                                        <slot
-                                            v-else-if="column.editable && column.format === 'external-edit'"
-                                            :row="row"
-                                            :column="column"
-                                            :rowIndex="idx"
-                                            :cellRowIndex="idx"
-                                            :cellColIndex="colIndex">
-                                            <span v-html="highlightSearchText(row[column.key], column)"></span>
-                                        </slot>
                                         <span v-else v-html="highlightSearchText(row[column.key], column)"></span>
                                         <!-- Changed batch cell (not number): revert button; its hint shows the original over the editor -->
                                         <template v-if="column.format !== 'number' && showRevert(row, idx, column)">
@@ -4559,15 +4555,16 @@ export const TableComponent = {
                                             :class="[theme, 'button-symbol', 'details-toggle', isRowExpanded(idx) ? 'expanded' : 'collapsed', hasDetailsSearchMatch(row) ? 'search-match' : '']"
                                         >
                                             <span v-if="isRowExpanded(idx)" class="material-symbols-outlined">close</span>
+                                            <span v-else-if="isSymbolName(effectiveAction.icon)" class="material-symbols-outlined">{{ effectiveAction.icon }}</span>
                                             <template v-else>{{ effectiveAction.icon || '☷' }}</template>
                                         </button>
                                         <button
                                             v-else
                                             @click.stop="performAction(row, idx)"
                                             :disabled="isActionDisabled(row)"
-                                            :title="effectiveAction.label || 'Open'"
+                                            :title="effectiveAction.title || effectiveAction.label || 'Open'"
                                             :class="[theme, effectiveAction.label ? 'action-button' : 'button-symbol', 'row-action-button', isDetailsOnlyMatch(row) ? 'search-match' : '']"
-                                        >{{ effectiveAction.label || effectiveAction.icon || '☷' }}</button>
+                                        ><template v-if="effectiveAction.label">{{ effectiveAction.label }}</template><span v-else-if="isSymbolName(effectiveAction.icon)" class="material-symbols-outlined">{{ effectiveAction.icon }}</span><template v-else>{{ effectiveAction.icon || '☷' }}</template></button>
                                 </td>
                             </tr>
                             
@@ -4583,12 +4580,12 @@ export const TableComponent = {
                             </button>
                             
                             <!-- Column-aligned detail rows (row-detail-rows slot) -->
-                            <template v-if="detailsEnabled && $slots['row-detail-rows'] && shouldShowDetailsContent(row, idx)">
+                            <template v-if="detailRowsEnabled && $slots['row-detail-rows'] && shouldShowDetailsContent(row, idx)">
                                 <slot name="row-detail-rows" :row="row" :rowIndex="idx" :visibleColumns="visibleColumns" />
                             </template>
 
                             <!-- Expandable single-cell details row (details grid + row-details slot) -->
-                            <tr v-if="detailsEnabled && !$slots['row-detail-rows']" class="details-row-container">
+                            <tr v-if="detailRowsEnabled && !$slots['row-detail-rows']" class="details-row-container">
                                 <td v-if="draggable"></td>
                                 <td :colspan="headerColumns.length + (hasActionCell ? 1 : 0)" class="details-container">
 

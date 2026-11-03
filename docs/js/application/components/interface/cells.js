@@ -1,11 +1,12 @@
 import { html } from '../../utils/template-helpers.js';
-import { NavigationRegistry } from '../../index.js';
 import { isCheckedValue, checkboxWriteValue } from '../../../data_management/utils/checkbox-values.js';
 import { escapeHtml, formatText } from '../../utils/views/fieldFormat.js';
 
 /**
- * Cell registry (views-and-renderers-plan §4.14). A field with `cell: '<name>'` renders through
- * the registry in every renderer: table cells, calendar chip lines, card lines and the details grid.
+ * Cell registry (views-and-renderers-plan §4.14). A resolved field with `cell: '<name>'` renders
+ * through the registry in every renderer: table cells, calendar chip lines, card lines and the
+ * details grid. The cell comes from the field's type (checkbox, select) or the view's
+ * style[key].cell; pages never put it on fields.
  *
  * Every cell receives the same props:
  *   row, field, value, renderer ('table'|'calendar'|'cards'|'details'), density ('full'|'compact'),
@@ -76,36 +77,6 @@ const TextCell = {
     template: html`<span :class="field.cellOptions?.class || ''" v-html="html"></span>`
 };
 
-const NavigateCell = {
-    name: 'NavigateCell',
-    props: cellProps,
-    inject: { appContext: { from: 'appContext', default: null } },
-    computed: {
-        opts() { return this.field.cellOptions || {}; },
-        target() {
-            try { return typeof this.opts.to === 'function' ? this.opts.to(this.row) : null; }
-            catch { return null; }
-        }
-    },
-    methods: {
-        go() {
-            if (!this.target) return;
-            const path = this.searchTerm
-                ? NavigationRegistry.buildPath(this.target, { searchTerm: this.searchTerm })
-                : this.target;
-            this.appContext?.navigateToPath?.(path);
-        }
-    },
-    template: html`
-        <button
-            v-if="target"
-            :class="['button-symbol', opts.class || theme || 'purple']"
-            :title="opts.title || 'Open'"
-            @click.stop="go"
-        >{{ opts.icon || '☷' }}</button>
-    `
-};
-
 /**
  * Checkbox. Reads `X`/TRUE as checked and anything else as unchecked; checking commits `X`,
  * unchecking commits blank.
@@ -130,9 +101,10 @@ const CheckboxCell = {
 };
 
 /**
- * Select. Options come from field.cellOptions.options (page-supplied list); cellOptions.colors maps
- * an option to a colour word, which styles the select with that colour class. A current value
- * that isn't in the list still shows as an extra option, so nothing is hidden or overwritten.
+ * Select. The allowed values are data: field.options (the page supplies the list ColumnTypes
+ * names). cellOptions.colors (view presentation) maps an option to a colour word, which styles
+ * the select with that colour class. A current value that isn't in the list still shows as an
+ * extra option, so nothing is hidden or overwritten.
  */
 const SelectCell = {
     name: 'SelectCell',
@@ -141,7 +113,7 @@ const SelectCell = {
         current() { return this.value == null ? '' : String(this.value); },
         readOnly() { return readOnlyHtml(this); },
         options() {
-            const list = (this.field.cellOptions?.options || []).map(String);
+            const list = (Array.isArray(this.field.options) ? this.field.options : []).map(String);
             if (this.current && !list.some(o => o.trim().toLowerCase() === this.current.trim().toLowerCase())) list.push(this.current);
             return list;
         },
@@ -243,7 +215,6 @@ const EditTextCell = {
 const CELL_REGISTRY = {
     image: { full: ImageCell, compact: null },
     itemId: { full: TextCell, compact: TextCell },
-    navigate: { full: NavigateCell, compact: null },
     checkbox: { full: CheckboxCell, compact: CheckboxCell },
     select: { full: SelectCell, compact: null },
     text: { full: EditTextCell, compact: null }
@@ -257,7 +228,7 @@ const CELL_REGISTRY = {
  * @returns {Object|null}
  */
 function cellComponentFor(field, density = 'full') {
-    if (!field || !field.cell || field.cell === 'slot') return null;
+    if (!field || !field.cell || field.cell === 'slot' || field.cell === 'external-edit') return null;
     const entry = CELL_REGISTRY[field.cell];
     if (!entry) return null;
     return density === 'compact' ? (entry.compact || null) : (entry.full || null);
@@ -267,7 +238,8 @@ function cellComponentFor(field, density = 'full') {
 
 /**
  * Renders one field value through the cell pipeline:
- *   registry cell → page #cell slot (field.cell === 'slot') → formatted, highlighted text.
+ *   registry cell → page #cell slot (field.cell 'slot', or 'external-edit': the page draws a value
+ *   edited outside the cell, e.g. in a modal) → formatted, highlighted text.
  * Props: row, field, renderer, density, searchTerm, highlight(value, field) → HTML (else the value
  *        is formatted and escaped), theme, cellSlot (the page's #cell slot function, if any),
  *        editable, editMode, commit, disabled (a cell is editable only with a commit and no reason blocking it)
@@ -299,7 +271,7 @@ export const CellRenderer = {
             const editable = this.editable && !!commit && !disabled;
             return h(comp, { row, field, value, renderer, density, searchTerm, highlight, theme, editable, editMode, commit, disabled });
         }
-        if (field.cell === 'slot' && this.cellSlot) {
+        if ((field.cell === 'slot' || field.cell === 'external-edit') && this.cellSlot) {
             return this.cellSlot({ ...(this.cellScope || {}), row, field, value, renderer, density });
         }
         const text = highlight ? highlight(value, field) : escapeHtml(formatText(value, field));

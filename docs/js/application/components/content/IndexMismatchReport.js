@@ -7,12 +7,12 @@ import { IndexResolutionComponent } from '../interface/IndexResolutionModal.js';
  */
 const IGNORE_KEYWORD = '__IGNORE__';
 
-// What each mismatch key is. Resolution is edited outside the cell (resolution modal), saved in batch.
+// What each mismatch key is. Resolution is edited (in the resolution modal) and saved in batch.
 const MISMATCH_FIELDS = [
-    { key: 'rawValue', label: 'Name', sortable: true },
-    { key: 'typeLabel', label: 'Type', sortable: true },
-    { key: 'sourcesSummary', label: 'Sources', sortable: false, cell: 'slot' },
-    { key: 'resolution', label: 'Resolution', sortable: false, editable: true, format: 'external-edit', cell: 'slot' }
+    { key: 'rawValue', label: 'Name' },
+    { key: 'typeLabel', label: 'Type' },
+    { key: 'sourcesSummary', label: 'Sources' },
+    { key: 'resolution', label: 'Resolution', editable: true }
 ];
 
 // Index mismatch report view (views-and-renderers-plan §5, Phase 4)
@@ -25,7 +25,9 @@ const MISMATCH_VIEWS = {
         name: 'Index Mismatches',
         layout: 'table',
         columns: ['rawValue', 'typeLabel', 'sourcesSummary', 'resolution'],
-        style: { typeLabel: { width: 80 } }
+        sortable: ['rawValue', 'typeLabel'],
+        // The page draws Sources and Resolution (#cell); Resolution is edited outside the cell
+        style: { typeLabel: { width: 80 }, sourcesSummary: { cell: 'slot' }, resolution: { cell: 'external-edit' } }
     }]
 };
 

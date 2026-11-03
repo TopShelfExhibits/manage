@@ -54,12 +54,14 @@ const DESIGN_QUEUE_VIEWS = {
             columns: [...DESIGN_QUEUE_DEFAULT_FIELDS],
             hidden: ['_identifier'],
             sort: { key: 'Ship', dir: 'asc' },
+            sortable: ['Client', 'Show', 'Size', 'Ship', 'Assignee'],
             // A row whose Setups is checked turns gray (and stays in place)
             rowColor: { field: 'Setups', rule: 'checked:gray' },
             fullWidth: true,
             table: { hideRowsOnSearch: false },
             // Every column but Note has a width, so Note takes the rest of the row (and wraps)
             style: {
+                Note: { cellOptions: { placeholder: 'Add a note' } },
                 Client: { width: 110 },
                 Show: { width: 140 },
                 Size: { width: 70, font: 'narrow' },
@@ -132,29 +134,41 @@ export const DesignQueueContent = {
             return this.instantConfig?.identity || DEFAULT_IDENTITY;
         },
         // Option lists for select columns, by the name ColumnTypes gives them ({ "options": "<list name>" }).
-        // colors: option → colour word (a global colour class)
+        // options are the allowed values (data); colors (option → colour word) are presentation.
         optionLists() {
             return {
                 DesignQueueAssignees: { options: this.setup?.assignees || [], colors: this.setup?.assigneeColors || {} }
             };
         },
-        // DesignQueueFields chooses the shown columns (one view patch, this page only). The view
-        // orders them; chosen columns the view doesn't list follow, in the preference's order.
+        // View patches from preferences (this page only):
+        //  - DesignQueueFields chooses the shown columns. The view orders them; chosen columns the
+        //    view doesn't list follow, in the preference's order.
+        //  - Each select column's option colours (from its option list) style its cell.
         patches() {
+            const patches = [];
             const chosen = this.setup?.fields;
-            if (!chosen) return [];
-            const wanted = new Set(chosen.map(columnText));
-            const inView = new Set(DESIGN_QUEUE_DEFAULT_FIELDS.map(columnText));
-            const columns = [
-                ...DESIGN_QUEUE_DEFAULT_FIELDS.filter(k => wanted.has(columnText(k))),
-                ...chosen.filter(k => !inView.has(columnText(k)))
-            ];
-            return [{ patch: { columns } }];
+            if (chosen) {
+                const wanted = new Set(chosen.map(columnText));
+                const inView = new Set(DESIGN_QUEUE_DEFAULT_FIELDS.map(columnText));
+                const columns = [
+                    ...DESIGN_QUEUE_DEFAULT_FIELDS.filter(k => wanted.has(columnText(k))),
+                    ...chosen.filter(k => !inView.has(columnText(k)))
+                ];
+                patches.push({ patch: { columns } });
+            }
+            const style = {};
+            for (const f of this.fields) {
+                const colors = f.type === 'select' ? this.optionLists[f.optionList]?.colors : null;
+                if (colors && Object.keys(colors).length) style[f.key] = { cellOptions: { colors } };
+            }
+            if (Object.keys(style).length) patches.push({ patch: { style } });
+            return patches;
         },
         rawRows() {
             return this.scheduleStore?.data || [];
         },
-        // FieldDefs: Schedule fields typed by ColumnTypes, instant columns editable, the Note, derived fields
+        // FieldDefs: Schedule fields typed by ColumnTypes (a select gets its list's values),
+        // instant columns editable, the Note, derived fields
         fields() {
             const base = buildScheduleFields(this.rawRows, { packlist: false, types: this.setup?.types });
             if (!this.rawRows.length) {
@@ -164,18 +178,16 @@ export const DesignQueueContent = {
             }
             const keys = new Set(base.map(f => columnText(f.key)));
             const fields = base.map(f => {
-                if (!isInstantColumn({ columns: this.instantColumns }, f.key)) return f;
-                const field = { ...f, editable: true, sortable: f.sortable || f.type === 'select' };
-                if (f.type === 'select') {
-                    field.cellOptions = this.optionLists[f.options] || { options: [] };
-                    if (!this.optionLists[f.options]) console.warn(`[DesignQueue] no option list "${f.options}" for select column "${f.key}"`);
-                }
-                return field;
+                const field = isInstantColumn({ columns: this.instantColumns }, f.key) ? { ...f, editable: true } : f;
+                if (f.type !== 'select') return field;
+                const list = this.optionLists[f.optionList];
+                if (!list) console.warn(`[DesignQueue] no option list "${f.optionList}" for select column "${f.key}"`);
+                return { ...field, options: list?.options || [] };
             });
             for (const col of this.instantColumns) {
                 if (!keys.has(columnText(col)) && this.rawRows.length) console.warn(`[DesignQueue] instant-write column "${col}" is not in the sheet; skipped`);
             }
-            if (!keys.has('note')) fields.push({ key: 'Note', label: 'Note', cell: 'text', editable: true, cellOptions: { placeholder: 'Add a note' } });
+            if (!keys.has('note')) fields.push({ key: 'Note', label: 'Note', editable: true });
             fields.push({ key: '_identifier', label: 'Identifier' });
             return fields;
         },

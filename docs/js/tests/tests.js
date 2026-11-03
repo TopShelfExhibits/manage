@@ -32,7 +32,7 @@ import { FakeGoogleSheetsAuth, FakeGoogleSheetsService, setFakeDelaysEnabled } f
 import { isCheckedValue } from '../data_management/utils/checkbox-values.js';
 import { useBatchEdits, useInstantEdits } from '../application/utils/cellEdits.js';
 import { CacheInvalidationBus, ApplicationUtils, ProductionUtils, triggerCachePoll } from '../data_management/index.js';
-import { resolveView, resolveAction, pickView, mergeView, matchesKeyPattern, setViewWarningHandler } from '../application/utils/views/resolveView.js';
+import { resolveView, resolveAction, pickView, mergeView, matchesKeyPattern, setViewWarningHandler, withRegistryDefaults } from '../application/utils/views/resolveView.js';
 import { SEARCH_LIMITS, searchWords, matchRow, matchRows, makeHighlighter } from '../application/utils/views/searchMatch.js';
 import { formatValue, formatText } from '../application/utils/views/fieldFormat.js';
 import { rowsToCards, bucketRowsToCards } from '../application/utils/views/cardsAdapter.js';
@@ -1578,6 +1578,35 @@ test('VIEWS ENGINE', 'narrow variant replaces columns; medium/wide keep them', a
     assertEqual(narrow.details.map(f => f.key).includes('City'), true, 'City moves to details when narrow');
 });
 
+test('VIEWS ENGINE', 'presentation comes from the view: style props, sortable list, type cells; fields keep data only', async () => {
+    const fields = [
+        { key: 'item', label: 'Item#', type: 'item' },
+        { key: 'done', label: 'Done', type: 'checkbox' },
+        { key: 'who', label: 'Who', type: 'select', options: ['A', 'B'] },
+        { key: 'pic', label: 'IMG', cell: 'image', sortable: true }
+    ];
+    const view = {
+        id: 'v', layout: 'table', columns: ['pic', 'item', 'done', 'who'],
+        sortable: ['item', 'w*'],
+        style: { pic: { width: 1, cell: 'image', labelHtml: '<i>img</i>', cellOptions: { itemKey: 'item' } }, item: { label: 'No.', title: 'Item number' } }
+    };
+    const { result: r, warnings } = withViewWarnings(() => resolveView(fields, view));
+    const f = (k) => r.fieldMap.get(k);
+    assertEqual([f('item').label, f('item').title, f('item').sortable, f('who').sortable, f('done').sortable], ['No.', 'Item number', true, true, false], 'label, title, sortable (patterns)');
+    assertEqual([f('pic').cell, f('pic').labelHtml, f('pic').cellOptions, f('done').cell, f('who').cell, f('who').options], ['image', '<i>img</i>', { itemKey: 'item' }, 'checkbox', 'select', ['A', 'B']], 'view cells, type cells, data options');
+    assertEqual(warnings.filter(w => /presentation props \(sortable, cell\)/.test(w)).length, 1, 'presentation on a field warns');
+    const bare = resolveView([{ key: 'pic', cell: 'image' }], { id: 'b', layout: 'table', columns: ['pic'] });
+    assertEqual(bare.fieldMap.get('pic').cell, undefined, 'and is ignored');
+});
+
+test('VIEWS ENGINE', 'registry style and sortable apply to every view; a view overrides them', async () => {
+    const registry = { style: { a: { width: 10, cell: 'slot' } }, sortable: ['a'], views: [] };
+    const merged = withRegistryDefaults(registry, { id: 'v', style: { a: { width: 20 } }, sortable: ['b'] });
+    assertEqual([merged.style.a, merged.sortable], [{ width: 20, cell: 'slot' }, ['b']], 'style merges, lists replace');
+    const plain = { id: 'p' };
+    assertEqual(withRegistryDefaults({ views: [] }, plain) === plain, true, 'no registry defaults: the view itself');
+});
+
 test('VIEWS ENGINE', 'patches apply after variants and respect sizes', async () => {
     const patches = [{ patch: { columns: ['Client', 'Show'] }, sizes: ['narrow'] }, { patch: { hidden: ['Booth#'] } }];
     const { result: wide } = withViewWarnings(() => resolveView(V_FIELDS, V_TABLE, { size: 'wide', patches }));
@@ -1925,7 +1954,7 @@ test('COLUMN TYPES', 'getColumnTypes reads the ColumnTypes preference; schedule 
     const byName = Object.fromEntries(types.map(t => [t.column, t]));
     assertEqual([byName.Elev?.type, byName.Assignee], ['checkbox', { column: 'Assignee', type: 'select', options: 'DesignQueueAssignees' }], 'declared');
     const fields = Object.fromEntries(buildScheduleFields([{ Elev: '', 'Ship BKD': '', Ship: '', Client: '', Assignee: '' }], { packlist: false, types }).map(f => [f.key, f]));
-    assertEqual([fields.Elev.type, fields['Ship BKD'].type, fields.Ship.type, fields.Client.type, fields.Assignee.options], ['checkbox', 'checkbox', 'date', undefined, 'DesignQueueAssignees'], 'field types');
+    assertEqual([fields.Elev.type, fields['Ship BKD'].type, fields.Ship.type, fields.Client.type, fields.Assignee.optionList], ['checkbox', 'checkbox', 'date', undefined, 'DesignQueueAssignees'], 'field types');
 });
 
 test('INSTANT WRITE', 'design queue setup: instant config, shown fields, assignees and column types in one call', async () => {
@@ -2154,7 +2183,7 @@ function instantHarness(commit) {
             return commit(entries);
         },
         derive: (r) => ({ ...r, done: r.Elev === 'X' }),
-        field: (key) => (key === 'Elev' ? { key, label: 'Elev', cell: 'checkbox' } : { key, label: key }),
+        field: (key) => (key === 'Elev' ? { key, label: 'Elev', type: 'checkbox' } : { key, label: key }),
         delay: () => 20,
         modal: () => ({ error: (m) => calls.errors.push(m), alert: () => {} }),
         refresh: () => { calls.refreshes++; }

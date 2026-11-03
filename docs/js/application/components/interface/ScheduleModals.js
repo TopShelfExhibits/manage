@@ -60,13 +60,13 @@ export const TransshipmentModal = {
         // The per-row buttons stay as cell content (two actions per row; no primary action).
         stage1Fields() {
             return [
-                { key: 'Show', label: 'Show', sortable: true },
-                { key: 'Client', label: 'Client', sortable: true },
+                { key: 'Show', label: 'Show' },
+                { key: 'Client', label: 'Client' },
                 { key: 'Year', label: 'Year' },
-                { key: 'Size', label: 'Size', sortable: true },
-                { key: 'Ship', label: 'Ship', sortable: true },
-                { key: '_actionFrom', label: 'Ships From', sortable: false },
-                { key: '_actionTo', label: 'Ships To', sortable: false }
+                { key: 'Size', label: 'Size' },
+                { key: 'Ship', label: 'Ship' },
+                { key: '_actionFrom', label: 'Ships From' },
+                { key: '_actionTo', label: 'Ships To' }
             ];
         },
         stage1Registry() {
@@ -78,6 +78,7 @@ export const TransshipmentModal = {
                     id: 'table', name: 'Shows', layout: 'table',
                     columns: ['Show', 'Client', 'Size', 'Ship', '_actionFrom', '_actionTo'],
                     hidden: ['Year'],
+                    sortable: ['Show', 'Client', 'Size', 'Ship'],
                     style: { _actionFrom: { width: 105 }, _actionTo: { width: 95 } },
                     sort: { key: 'Ship', dir: 'asc' }
                 }]
@@ -85,12 +86,12 @@ export const TransshipmentModal = {
         },
         stage2Fields() {
             return [
-                { key: 'Show', label: 'Show', sortable: true },
-                { key: 'Client', label: 'Client', sortable: true },
+                { key: 'Show', label: 'Show' },
+                { key: 'Client', label: 'Client' },
                 { key: 'Year', label: 'Year' },
-                { key: 'Size', label: 'Size', sortable: true },
-                { key: 'Ship', label: 'Ship', sortable: true },
-                { key: '_action', label: '', sortable: false }
+                { key: 'Size', label: 'Size' },
+                { key: 'Ship', label: 'Ship' },
+                { key: '_action', label: '' }
             ];
         },
         stage2Registry() {
@@ -102,6 +103,7 @@ export const TransshipmentModal = {
                     id: 'table', name: 'Partner shows', layout: 'table',
                     columns: ['Show', 'Client', 'Size', 'Ship', '_action'],
                     hidden: ['Year'],
+                    sortable: ['Show', 'Client', 'Size', 'Ship'],
                     style: { _action: { width: 90 } },
                     table: { sticky: { end: ['_action'] } },
                     sort: { key: 'Ship', dir: 'asc' }
