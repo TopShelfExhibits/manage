@@ -1,6 +1,6 @@
 import { html, Requests, DataView, getReactiveStore, invalidateCache, ScheduleFilterSelect } from '../../index.js';
 import { buildScheduleFields } from '../../../data_management/abstraction/scheduleFields.js';
-import { columnKindsOfRows, isCheckedValue } from '../../../data_management/utils/checkbox-values.js';
+import { isCheckedValue } from '../../../data_management/utils/checkbox-values.js';
 import { instantWriteEntry, isInstantColumn, identityKey, identityText, columnText } from '../../../data_management/utils/instant-write-config.js';
 import { textFiltersToSearchParams } from '../../../data_management/utils/helpers.js';
 import { shipReturnAnalysis, withShipDate, shipReturnCards, SHIP_RETURN_DECORATION_KEYS } from '../../utils/scheduleShipping.js';
@@ -138,13 +138,11 @@ export const DesignQueueContent = {
         rawRows() {
             return this.scheduleStore?.data || [];
         },
-        // What each column holds, from the whole sheet (cached); the loaded rows until that arrives
+        // What each column holds, from the whole sheet (cached); null until it loads
         columnKinds() {
             const sheet = this.kindsStore?.data;
-            if (Array.isArray(sheet) && sheet.length) {
-                return Object.fromEntries(sheet.map(k => [columnText(k.column), k.kind]));
-            }
-            return Object.fromEntries(Object.entries(columnKindsOfRows(this.rawRows)).map(([k, v]) => [columnText(k), v]));
+            if (!Array.isArray(sheet) || !sheet.length) return null;
+            return Object.fromEntries(sheet.map(k => [columnText(k.column), k.kind]));
         },
         // FieldDefs: Schedule fields, instant cells typed by their data, the joined Note, derived fields
         fields() {
@@ -233,7 +231,7 @@ export const DesignQueueContent = {
         cellTypeFor(key) {
             const k = columnText(key);
             if (this.selectOptions[k]) return 'select';
-            return this.columnKinds[k] === 'checkbox' ? 'checkbox' : 'text';
+            return this.columnKinds?.[k] === 'checkbox' ? 'checkbox' : 'text';
         },
         // Derived fields recomputed from the (local) row: the row turns gray when Setups is checked
         deriveRow(row) {
@@ -247,6 +245,8 @@ export const DesignQueueContent = {
             if (key === 'Note') return row._identifier ? '' : 'write disabled: no show identifier yet';
             if (!isInstantColumn({ columns: this.instantColumns }, key)) return '';
             if (!this.instantConfig) return 'write disabled: no row identity';
+            // Until the column kinds load, a column's cell type isn't known (shown read-only)
+            if (!this.columnKinds && !this.selectOptions[columnText(key)]) return 'write disabled: loading column types';
             if (this.duplicateIdentities.has(this.rowId(row))) return 'write disabled: duplicate row identity';
             return '';
         },
