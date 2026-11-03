@@ -883,12 +883,11 @@ export const InventoryTableComponent = {
                 { key: 'notes', label: 'Notes (internal only)', editable: true }
             ];
         },
-        // Row action: the item's timeline (the table's action column, with a calendar header icon)
+        // Row action: the item's timeline (the standard action button under a calendar header icon)
         timelineAction() {
             return {
                 to: (row) => (row.itemNumber && this.tabTitle) ? `inventory/${this.tabTitle.toLowerCase()}/${row.itemNumber}` : null,
                 disabled: (row) => !row.itemNumber,
-                icon: 'calendar_month',
                 headerIcon: 'calendar_month',
                 title: 'View item timeline'
             };

@@ -157,13 +157,16 @@ export const InventoryContent = {
             visibilityManager: Vue.markRaw(createVisibilityManager()),
             INVENTORY_FIELDS,
             INVENTORY_VIEWS,
-            // Primary action: category cards → the category; overview rows → the item timeline (R3.8)
+            // Primary action: category cards → the category; overview rows → the item timeline (R3.8),
+            // the standard action button under a calendar header icon
             inventoryAction: {
                 to: (row) => {
                     if (!row?.tab) return null;
                     if (row._bucket !== undefined) return 'inventory/' + String(row.tab).toLowerCase();
                     return row.itemNumber ? `inventory/${String(row.tab).toLowerCase()}/${row.itemNumber}` : null;
-                }
+                },
+                headerIcon: 'calendar_month',
+                title: 'View item timeline'
             }
         };
     },
