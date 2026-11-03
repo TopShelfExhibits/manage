@@ -1,6 +1,5 @@
 import { html, Requests, DataView, getReactiveStore, invalidateCache, ScheduleFilterSelect, createAnalysisConfig, Priority } from '../../index.js';
 import { buildScheduleFields } from '../../../data_management/abstraction/scheduleFields.js';
-import { isCheckedValue } from '../../../data_management/utils/checkbox-values.js';
 import { isInstantColumn, identityKey, columnText } from '../../../data_management/utils/instant-write-config.js';
 import { textFiltersToSearchParams } from '../../../data_management/utils/helpers.js';
 import { shipReturnAnalysis, withShipDate, shipReturnCards, SHIP_RETURN_DECORATION_KEYS } from '../../utils/scheduleShipping.js';
@@ -24,8 +23,8 @@ import { shipReturnAnalysis, withShipDate, shipReturnCards, SHIP_RETURN_DECORATI
  *  - Note is not a Schedule column: a per-row analysis on the schedule store reads it from
  *    CACHE/ShowNotes by computeIdentifier (Requests.getShowNoteForRow). It keeps the last note
  *    while refreshing, and re-runs when the notes tab changes.
- *  - Rows whose Setups is checked (X) stay in place and turn gray via a derived colour field
- *    (_rowColor) recomputed from the local row, so the row grays as soon as the box is clicked.
+ *  - Rows whose Setups is checked (X) stay in place and turn gray: a view colour rule
+ *    (rowColor 'checked:gray') on the shown row, so the row grays as soon as the box is clicked.
  *  - Ship shows the estimated ship date (sorted ascending); the initial filter is the
  *    "Upcoming" schedule search.
  * The Schedule page itself stays read-only.
@@ -41,8 +40,6 @@ export const DESIGN_QUEUE_DEFAULT_FIELDS = Object.freeze(['Client', 'Show', 'Siz
 const DEFAULT_INSTANT_COLUMNS = Object.freeze(['Elev', 'Panels', 'Setups', 'Assignee']);
 // Row identity when the preference is missing (the Schedule's show identity)
 const DEFAULT_IDENTITY = Object.freeze(['Client', 'Year', 'Show']);
-// The row turns gray when this column is checked
-const DONE_COLUMN = 'Setups';
 
 const DESIGN_QUEUE_VIEWS = {
     id: 'design-queue',
@@ -55,9 +52,10 @@ const DESIGN_QUEUE_VIEWS = {
             icon: 'table',
             layout: 'table',
             columns: [...DESIGN_QUEUE_DEFAULT_FIELDS],
-            hidden: ['_rowColor', '_identifier'],
+            hidden: ['_identifier'],
             sort: { key: 'Ship', dir: 'asc' },
-            rowColor: { field: '_rowColor', rule: 'value' },
+            // A row whose Setups is checked turns gray (and stays in place)
+            rowColor: { field: 'Setups', rule: 'checked:gray' },
             fullWidth: true,
             table: { hideRowsOnSearch: false },
             // Every column but Note has a width, so Note takes the rest of the row (and wraps)
@@ -178,7 +176,7 @@ export const DesignQueueContent = {
                 if (!keys.has(columnText(col)) && this.rawRows.length) console.warn(`[DesignQueue] instant-write column "${col}" is not in the sheet; skipped`);
             }
             if (!keys.has('note')) fields.push({ key: 'Note', label: 'Note', cell: 'text', editable: true, cellOptions: { placeholder: 'Add a note' } });
-            fields.push({ key: '_rowColor', label: 'Row colour' }, { key: '_identifier', label: 'Identifier' });
+            fields.push({ key: '_identifier', label: 'Identifier' });
             return fields;
         },
         // Identities shared by more than one loaded row (writes to those rows are refused)
@@ -199,7 +197,7 @@ export const DesignQueueContent = {
                 // Ship shows (and sorts by) the estimated ship date; transship rows the source show's end
                 const out = { ...withShipDate(row), _identifier: showNote?.identifier || '' };
                 if (!sheetHasNote) out.Note = showNote ? showNote.note : null;
-                return this.deriveRow(out);
+                return out;
             });
         },
         // Decorations: the shared transship cards on Ship (and Recieved, when shown)
@@ -225,10 +223,6 @@ export const DesignQueueContent = {
         this.setupStore = getReactiveStore(Requests.getDesignQueueSetup, null, [DQ_DATABASE, DQ_TAB]);
     },
     methods: {
-        // Derived fields recomputed from the (local) row: the row turns gray when Setups is checked
-        deriveRow(row) {
-            return { ...row, _rowColor: isCheckedValue(row[DONE_COLUMN]) ? 'gray' : '' };
-        },
         // Row identity: the preference's identity columns (Client + Year + Show by default)
         rowId(row) {
             return identityKey(this.identity, k => row?.[k]);
@@ -320,7 +314,6 @@ export const DesignQueueContent = {
                 :decoration-keys="SHIP_RETURN_DECORATION_KEYS"
                 :row-id="rowId"
                 :cell-disabled="cellDisabled"
-                :derive="deriveRow"
                 :is-loading="isLoading"
                 :is-analyzing="isAnalyzing"
                 :loading-progress="scheduleStore ? scheduleStore.analysisProgress : -1"

@@ -829,7 +829,7 @@ Depends only on Phases 0–1.
    - **Fields** use the production sheet's header names. The `DesignQueueFields` preference (§4.15) chooses the shown columns; the view's list (below) sets their order:
      `Client`, `Show`, `Size`, `Elev`, `Panels`, `Setups`, `Assignee`, `Account Manager`, `Ship`, `Note`, `Booth#`.
    - **`Elev`, `Panels`, `Setups`** are shown directly as checkboxes. There is no Task aggregation for now (R7.1).
-   - **Completed rows** (Setups checked) stay in the list, unchanged in order. They are styled gray through a derived colour field: `_rowColor = 'gray'`, with `rowColor: { field: '_rowColor', rule: 'value' }` (R3.5). The field recomputes from the local row, so the row greys as soon as Setups is checked.
+   - **Completed rows** (Setups checked) stay in the list, unchanged in order. The view styles them gray with a colour rule on the checkbox itself: `rowColor: { field: 'Setups', rule: 'checked:gray' }` (R3.5). The rule reads the shown row, which carries the local edit, so the row greys as soon as Setups is checked.
      A row is complete when each of the three columns is `X`, `-` or `N/a` (R8.2). `-` and `N/a` count as done for this rule only; the cell itself still shows unchecked, and checking it writes `X`.
    - **Assignee** is a `select` whose options come from `DesignQueueAssignees`.
    - **Note** is an editable text field saved to `CACHE/ShowNotes` (§4.16).

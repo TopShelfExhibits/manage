@@ -1723,6 +1723,7 @@ test('VIEWS COLOR', 'colour rules: auto numbers/dates, value, literal; rowColor 
     assertEqual(applyColorRule('auto', 0, { format: 'number' }), 'orange', 'zero');
     assertEqual(applyColorRule('auto', 5, { format: 'number' }), '', 'positive');
     assertEqual(applyColorRule('auto', '', { format: 'number' }), '', 'blank');
+    assertEqual(['X', 'true', '', '-', '8/1'].map(v => applyColorRule('checked:gray', v)), ['gray', 'gray', '', '', ''], 'checked:<class>');
     assertEqual(applyColorRule('value', 'gray', {}), 'gray', 'value');
     assertEqual(applyColorRule('purple', 'x', {}), 'purple', 'literal');
     const today = todayISOString();

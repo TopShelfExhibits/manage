@@ -1,13 +1,15 @@
 /**
  * Colour rules for views (§4.9). Colour is data only:
- *   'auto'  → getAutoColorClass(number) for numeric values; date proximity for date fields
- *   'value' → the value itself is the class (for page-computed derived colour fields)
- *   other   → a literal class name
+ *   'auto'            → getAutoColorClass(number) for numeric values; date proximity for date fields
+ *   'value'           → the value itself is the class (for page-computed derived colour fields)
+ *   'checked:<class>' → <class> when the value is a checked checkbox value (X / TRUE)
+ *   other             → a literal class name
  *
  * Pure: no Vue, no DOM. Safe to import from tests.
  */
 import { getAutoColorClass } from '../autoColor.js';
 import { parseDate } from '../../../data_management/utils/helpers.js';
+import { isCheckedValue } from '../../../data_management/utils/checkbox-values.js';
 
 /**
  * Colour class for a date based on proximity to today (moved from TableComponent).
@@ -57,6 +59,7 @@ export function applyColorRule(rule, value, field) {
         if (value === null || value === undefined || value === '' || typeof value === 'object') return '';
         return String(value);
     }
+    if (rule.startsWith('checked:')) return isCheckedValue(value) ? rule.slice('checked:'.length) : '';
     return String(rule);
 }
 
