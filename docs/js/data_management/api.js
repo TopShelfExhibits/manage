@@ -1,7 +1,6 @@
 import { wrapMethods, normalizeHeaderName, Database, InventoryUtils, PackListUtils, ProductionUtils, ApplicationUtils, EditHistoryUtils, InstantWriteUtils, todayISOString, offsetToISO, sanitizeTabName, mapWithConcurrency, ProgressBus, getRandomLoadingQuote } from './index.js';
 import { authState } from '../application/utils/auth.js';
 import { instantWriteEntry, identityText, parseColoredName } from './utils/instant-write-config.js';
-import { columnKind } from './utils/checkbox-values.js';
 import { columnTypesEntry } from './utils/column-types.js';
 
 /**
@@ -1502,21 +1501,6 @@ class Requests_uncached {
     static async getInstantWriteConfig(deps, database, tab) {
         const all = await deps.call(Requests.getJsonPreference, 'InstantWriteTables', {});
         return instantWriteEntry(all, database, tab);
-    }
-
-    /**
-     * What each column of a tab holds, judged from all its values (the data decides cell types):
-     * [{ column, kind: 'checkbox'|'empty'|'text' }], column = normalized header name.
-     * Cached with the tab's data, so it follows writes and refreshes.
-     */
-    static async getColumnKinds(deps, database, tab) {
-        const raw = await deps.call(Database.getData, database, tab);
-        const header = Array.isArray(raw?.[0]) ? raw[0] : [];
-        const body = raw.slice(1);
-        return header
-            .map((h, c) => ({ column: normalizeHeaderName(h), c }))
-            .filter(({ column }) => column)
-            .map(({ column, c }) => ({ column, kind: columnKind(body.map(line => line?.[c])) }));
     }
 
     /**

@@ -1,5 +1,5 @@
 import { html, getReactiveStore, Requests, authState, NavigationRegistry, buildTextFilterParameters, parseTextFilterParameters, LoadingBarComponent, createAnalysisConfig, parseDateFilterParameters, buildDateFilterParameters, toISODateString, parseDate, toUSDateString, offsetToISO, Priority, DataView } from '../../index.js';
-import { columnKindsOfRows } from '../../../data_management/utils/checkbox-values.js';
+import { columnTypeMap, columnTypeOf } from '../../../data_management/utils/column-types.js';
 
 // Filter types that take no values: "is empty" (text filters), "checked" / "unchecked" (checkbox filters)
 const VALUELESS_TYPES = ['empty', 'checked', 'unchecked'];
@@ -154,6 +154,8 @@ export const ScheduleAdvancedFilter = {
             
             // Reactive store for production schedule data (for column loading)
             scheduleStore: null,
+            // Declared column types of the Production Schedule (ColumnTypes preference)
+            columnTypesStore: null,
             
             // Selected saved search for update/delete
             selectedSavedSearchIndex: null // null = "New Search"
@@ -187,37 +189,19 @@ export const ScheduleAdvancedFilter = {
                 .filter(key => key !== 'AppData')
                 .sort();
         },
-        // Date-formatted columns only
+        // Each column's type: declared in ColumnTypes, else the shared name guess (utils/column-types.js)
+        columnTypes() {
+            return columnTypeMap(this.columnTypesStore?.data);
+        },
+        // Date columns ('Date' is always offered: the default date filter column)
         dateColumns() {
-            if (!this.scheduleData || this.scheduleData.length === 0) {
-                return ['Date']; // Default
-            }
-            
-            // Find columns that are date-related based on column name keywords
-            // Uses same logic as ScheduleTable.js isDateColumn method
-            const dateKeywords = ['date', 'start', 'end', 'ship', 'due', 'deadline', 'created', 'updated', 'modified', 'time', 'return'];
-            const firstRow = this.scheduleData[0];
-            
-            const dateColumns = Object.keys(firstRow)
-                .filter(key => {
-                    if (key === 'AppData') return false;
-                    // Check if column name contains date-related keywords (case-insensitive)
-                    const keyLower = key.toLowerCase();
-                    return dateKeywords.some(keyword => keyLower.includes(keyword));
-                })
-                .sort();
-            
-            // Always ensure 'Date' is included
-            if (!dateColumns.includes('Date')) {
-                dateColumns.unshift('Date');
-            }
-            
+            const dateColumns = this.availableColumns.filter(col => columnTypeOf(this.columnTypes, col).type === 'date');
+            if (!dateColumns.includes('Date')) dateColumns.unshift('Date');
             return dateColumns;
         },
-        // Columns holding checkbox values, judged from all loaded rows (the data decides)
+        // Checkbox columns (declared only: an undeclared column is never a checkbox)
         checkboxColumns() {
-            const kinds = columnKindsOfRows(this.scheduleData);
-            return this.availableColumns.filter(col => kinds[col] === 'checkbox');
+            return this.availableColumns.filter(col => columnTypeOf(this.columnTypes, col).type === 'checkbox');
         },
         // Text filter columns (all columns except date and checkbox columns)
         textFilterColumns() {
@@ -291,6 +275,7 @@ export const ScheduleAdvancedFilter = {
     },
     methods: {
         async initializeScheduleStore() {
+            this.columnTypesStore = getReactiveStore(Requests.getColumnTypes, null, ['PROD_SCHED', 'Production Schedule']);
             // Initialize reactive store for production schedule (for column loading only)
             this.scheduleStore = getReactiveStore(
                 Requests.getProductionScheduleData,

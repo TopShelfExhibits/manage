@@ -39,7 +39,6 @@ import { rowsToCards, bucketRowsToCards } from '../application/utils/views/cards
 import { applyColorRule, colorFor, rowColorFor } from '../application/utils/views/viewColor.js';
 import { containerTier, viewportTier, BREAKPOINTS } from '../application/utils/useContainerSize.js';
 import { todayISOString, searchFilter, textFiltersToSearchParams, parseSearchParameters } from '../data_management/utils/helpers.js';
-import { columnKind, columnKindsOfRows } from '../data_management/utils/checkbox-values.js';
 import { instantWriteEntry, identityKey, cellKey, joinKey } from '../data_management/utils/instant-write-config.js';
 import { estimateShipDate } from '../data_management/utils/ship-date.js';
 import { getReactiveStore, createAnalysisConfig } from '../application/index.js';
@@ -1926,15 +1925,6 @@ test('COLUMN TYPES', 'getColumnTypes reads the ColumnTypes preference; schedule 
     assertEqual([byName.Elev?.type, byName.Assignee], ['checkbox', { column: 'Assignee', type: 'select', options: 'DesignQueueAssignees' }], 'declared');
     const fields = Object.fromEntries(buildScheduleFields([{ Elev: '', 'Ship BKD': '', Ship: '', Client: '', Assignee: '' }], { packlist: false, types }).map(f => [f.key, f]));
     assertEqual([fields.Elev.type, fields['Ship BKD'].type, fields.Ship.type, fields.Client.type, fields.Assignee.options], ['checkbox', 'checkbox', 'date', undefined, 'DesignQueueAssignees'], 'field types');
-});
-
-test('INSTANT WRITE', 'column kinds come from the data', async () => {
-    assertEqual(['X', '', '-', 'N/a'].map(v => columnKind([v, 'X'])), ['checkbox', 'checkbox', 'checkbox', 'checkbox'], 'checkbox values');
-    assertEqual([columnKind(['', ' ']), columnKind(['-', 'N/A']), columnKind(['X', 'Alex'])], ['empty', 'text', 'text'], 'empty, never checked, mixed');
-    assertEqual([columnKind(['X', 'X', '-', '8/1']), columnKind(['X', '1/10', '3/1', 'Done'])], ['checkbox', 'text'], 'a stray date, mostly dates');
-    assertEqual(columnKindsOfRows([{ A: 'X', B: 'Bo', AppData: {} }, { A: '', B: '' }]), { A: 'checkbox', B: 'text' }, 'rows');
-    const kinds = Object.fromEntries((await Requests.getColumnKinds('PROD_SCHED', 'Production Schedule')).map(k => [k.column, k.kind]));
-    assertEqual([kinds.Elev, kinds.Panels, kinds.Setups, kinds.Client, kinds.Assignee], ['checkbox', 'checkbox', 'checkbox', 'text', 'text'], 'schedule kinds');
 });
 
 test('INSTANT WRITE', 'design queue setup: instant config, shown fields, assignees and column types in one call', async () => {
