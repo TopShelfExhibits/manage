@@ -1,6 +1,6 @@
 # TopShelf Live Inventory: conventions for agents
 
-Top Shelf Exhibits' live inventory web app. It is plain ES modules and Vue 3 (Options API, global `Vue`) under `docs/`, served as static files, with no build step. GitHub Copilot reads [.github/copilot-instructions.md](.github/copilot-instructions.md). Keep rules that apply to both tools in both files.
+Top Shelf Exhibits' live inventory web app. It is plain ES modules and Vue 3 (Options API, global `Vue`) under `docs/`, served as static files, with no build step.
 
 ## Ground rules
 
