@@ -90,6 +90,22 @@ Related notes: [notes.md](notes.md) (TODO items L80–82, L131–135), [calendar
 - **New page:** content that is different in purpose (its own analysis, endpoints, or actions). Example: the design queue gets its own page under Schedule.
 - **New view:** a different visualization of the same data for the same purpose. Example: Schedule table and calendar, or a ship/return calendar.
 
+### Principle: data or view?
+
+Every property has one home. When adding one, put it where its question is answered:
+
+| Question | Home | Examples |
+| --- | --- | --- |
+| What is this value, and may it be written? | **Field** (page code, the data layer, preferences such as `ColumnTypes` and `InstantWriteTables`) | `key`, `label` (the field's name), `type`, `format`, `editable`, a select's `options` (allowed values) and `optionList` (list name) |
+| Which columns show, in what order, and how do they look and behave? | **View** (`columns`, `sortable`, `style`, …; a registry may share `style` and `sortable` with all its views) | header text and icons (`style.label`, `labelHtml`, `title`), widths, fonts, colours, sortability, which cell draws a value (`style.cell`, `cellOptions`), column span |
+| What does a row's data say? | **Derived field** computed by the page, holding a data state | `_unattached: true`, `_status` |
+| What colour or style does that state get? | **View colour rule** | `rowColor: { field: '_unattached', rule: 'checked:red', fallback: 'gray' }` |
+
+- A field never carries presentation. `resolveView` ignores presentation properties on fields, with a dev warning, so drift shows up on localhost.
+- A view never decides data: types, write permission and allowed values come from fields.
+- Cells that follow the data need no view setting: a `checkbox` or `select` field gets its type's cell (read-only ones render disabled), and an editable field without a cell gets the text editor. A view names a cell only for a display choice (`image`, `itemId`, the page's `slot`, `external-edit`).
+- Presentation that comes from data at runtime (the assignee colours in a preference, a dynamic column's header) enters through the page as a view patch (§4.15) or the page's computed registry, never as field properties.
+
 ### Non-goals
 
 - **Customization UI and per-user override storage.** The system accepts patches (§4.15). The only source built here is the `DesignQueueFields` preference for the design queue; other sources are decided per page later.
@@ -210,9 +226,9 @@ There are 20 renderer instances in 14 components.
 ```
  Page component — data, domain logic, actions, edit mode
  ├─ rows     ← store data + derived fields (computed copy; never written to store.data)
- ├─ fields   ← FieldDef[]: what each key IS (label, type, format, sortable, editable, cell)
+ ├─ fields   ← FieldDef[]: what each key IS (label, type, format, editable, options)
  ├─ editMode ← 'none' | 'batch' | 'instant'  (page data, never view data; §4.16)
- ├─ registry ← page view registry: views (data), default, theme
+ ├─ registry ← page view registry: views (presentation), shared style and sortable, default, theme
  └─ hooks    ← action · decorations · bucketDecorations · commitCells (instant mode)
         │
         ▼
@@ -259,21 +275,26 @@ There are 20 renderer instances in 14 components.
 
 ```js
 /**
- * @typedef {Object} FieldDef
- * @property {string}  key
- * @property {string}  [label]
- * @property {string}  [labelHtml]   header label as HTML (icon)
- * @property {string}  [title]       header tooltip
- * @property {string}  [type]        data type / compare semantics: 'item', 'date', 'number', 'checkbox' (Phase 2), …
- * @property {'date'|'currency'|'number'|'external-edit'|string} [format]
- * @property {boolean} [sortable]
- * @property {boolean} [editable]    configured with the page's data, not by views (§4.16)
- * @property {string}  [cell]        'slot' → page #cell; '<name>' → registry; absent → formatted text
- * @property {number}  [colspan]     table-structural; PacklistTable nested item header only
+ * @typedef {Object} FieldDef           what the data is (see "Principle: data or view?")
+ * @property {string}   key
+ * @property {string}   [label]         the field's human name (headers, cards, details, sort menus)
+ * @property {string}   [type]          data type / compare semantics: 'item', 'date', 'number', 'checkbox', 'select', …
+ * @property {'date'|'currency'|'number'|'multiline'|string} [format]   display format implied by the type
+ * @property {boolean}  [editable]      configured with the page's data, not by views (§4.16)
+ * @property {string[]} [options]       select: the allowed values (the page supplies them)
+ * @property {string}   [optionList]    select: the option list ColumnTypes names
  */
 ```
 
-Presentation properties (`width`, `font`, `autoColor`, `cellClass`, `columnClass`, `allowHide`, `details`, `stackUnder`, `sticky`, `firstRow`, `secondRow`, `whenSmall`) are **not** field properties. They move into views. During migration `resolveView` tolerates them on fields with a dev warning. Phase 5 removes that tolerance.
+Presentation properties are **not** field properties: `labelHtml`, `title`, `sortable`, `cell`, `cellOptions`, `colspan`, `isIndex`, and the older `width`, `font`, `autoColor`, `cellClass`, `columnClass`, `allowHide`, `details`, `stackUnder`, `sticky`, `firstRow`, `secondRow`, `whenSmall`. `resolveView` ignores them on fields, with a dev warning; they belong in the view (§4.2).
+
+**Resolved fields.** Renderers read `resolved.fields` / `resolved.fieldMap`: each data field with the view's presentation merged in (`style` props, `sortable`, and the type's cell). Pages never build presented fields themselves.
+
+**Columns without data (custom, kept).** The ideal is that every column holds data and anything else is an action. These stay as bare fields (`key` + `label`) with their presentation in the view; no new mechanism is added for them:
+- the item thumbnail (`image`): ideally the inventory data stores an image URL and a view styles that column as a thumbnail, with editing following its data controls (see Later);
+- the Schedule `packlist` column: ideally tables allow several row actions with their own styling (see Later).
+
+The inventory calendar button is no longer a column: it is the inventory table's row action, with a calendar header icon (`action: { to, icon, headerIcon, title }`).
 
 ### 4.2 View definition: presentation as data
 
@@ -297,13 +318,18 @@ Presentation properties (`width`, `font`, `autoColor`, `cellClass`, `columnClass
  * @property {string[]|'rest'} [details='rest']  'rest' = every field not listed elsewhere
  * @property {string[]|'rest'} [hidden]          never shown, never searched
  * @property {{key:string, dir:'asc'|'desc'}} [sort]
+ * @property {string[]} [sortable]        keys (or patterns) the user can sort by; unlisted keys don't
+ *                                        sort; names a sheet lacks are ignored
  *
  * // Interaction
  * @property {'button'|'row'} [action='button']   how the primary action is triggered (§4.8)
  *
- * // Style and colour
- * @property {Object<string,{ width?:number, font?:string, color?:ColorRule, columnColor?:string }>} [style]
- *           keyed by field key or pattern; columnColor = column background class (table)
+ * // Style and colour (keyed by field key or pattern; exact keys override patterns)
+ * @property {Object<string,{ width?:number, font?:string, color?:ColorRule, columnColor?:string,
+ *           label?:string, labelHtml?:string, title?:string, cell?:string, cellOptions?:Object, colspan?:number }>} [style]
+ *           columnColor = column background class (table); label/labelHtml/title = header text, header
+ *           HTML (icon) and tooltip; cell = the cell that draws the value when it isn't the type's
+ *           (§4.14); colspan = table-structural (PacklistTable's nested item header only)
  * @property {{ field:string, rule:ColorRule, fallback?:string }} [rowColor]
  *
  * // Layout sections
@@ -320,7 +346,8 @@ Presentation properties (`width`, `font`, `autoColor`, `cellClass`, `columnClass
 
 - **Key patterns:** a trailing `*` (`'show_*'`) works in every key list and in `style` keys, using the same rule as `matchesPagePattern` in [preferencesComponent.js](../js/application/components/interface/preferencesComponent.js).
 - **Variant cascade:** `medium` applies at medium and narrow sizes; `narrow` applies on top of it at narrow size; `print` applies last. Objects merge deeply, arrays replace.
-- **Colour rules are data only** (R3.5). Any rule that needs logic (packlist red when unattached, a fallback colour) becomes a **derived field** computed by the page (for example `_cardColor: 'red'`), and the view references it: `rowColor: { field: '_cardColor', rule: 'value' }`.
+- **Colour rules are data only** (R3.5). Rules: `'auto'`, `'value'` (the value is the class), `'checked:<class>'` (the class when the value is a checked checkbox value or `true`), or a literal class. Logic (packlist unattached) becomes a **derived field holding a data state**, computed by the page (`_unattached: true`), and the view maps it to a colour: `rowColor: { field: '_unattached', rule: 'checked:red', fallback: 'gray' }`. A derived field holds a state, not a class name.
+- **Registry-level presentation:** a registry's `style` and `sortable` apply to all its views (`withRegistryDefaults`); a view's own entries win (objects merge, lists replace).
 - **Validation:** dev warnings, never throws.
   - Unknown keys are ignored.
   - The first tier wins on duplicates. At most one of `details` and `hidden` may be `'rest'`.
@@ -631,12 +658,12 @@ This replaces the `hiddenColumns` mutation and the 100 ms restore.
 
 ### 4.14 Modularity: cells, decorations, slots
 
-1. **Cell registry** (`field.cell = '<name>'`).
-   - Props: `{ row, field, value, renderer, density, search }`, where `density` is `'full'` or `'compact'`.
-   - Initial registry: `image`, `itemId`, `navigate`; Phase 2 adds `checkbox` and `select`.
-   - A missing compact form falls back to text.
-   - The table, chips, cards **and the details grid** all use this pipeline, so a future data type (checkbox) is added once.
-2. **Page slot** (`field.cell = 'slot'`). `#cell="{ row, field, renderer, density }"` is called only for those fields, and other fields keep the fallback (fixes D6). Clickable content inside chips and cards is allowed.
+1. **Cell registry.** A cell is the component that draws a value. Renderers read it from the resolved field (`resolvedField.cell`), which comes from the data or the view:
+   - **From the data** (no view setting): a `checkbox` field gets `checkbox`, a `select` field gets `select` (both render disabled when read-only), and an editable field without a cell gets `text`, the one text editor.
+   - **From the view** (`style[key].cell`, a display choice): `image` (item thumbnail, custom: see §4.1), `itemId`, `slot`, `external-edit`. Its options are `style[key].cellOptions`.
+   - Props: `{ row, field, value, renderer, density, search }`, where `density` is `'full'` or `'compact'`. A missing compact form falls back to text.
+   - The table, chips, cards **and the details grid** all use this pipeline, so a new data type is added once.
+2. **Page slot** (`style[key].cell = 'slot'`). `#cell="{ row, field, renderer, density }"` is called only for those fields, and other fields keep the fallback (fixes D6). Clickable content inside chips and cards is allowed. `'external-edit'` also draws through the page slot, for a value edited outside the cell (a modal): the table shows no editor and no revert control for it.
 3. **Decorations** `decorations(row, key) → Card[]`, where `key = null` is row-level.
    - Table: rendered after the cell content. `#cell-extra` stays for markup that isn't a card.
    - Calendar: inline on the chip line, or at the chip end (hidden when narrow).
@@ -769,7 +796,7 @@ The real committed widths are 360, about 800 and about 1000, plus content-sized.
 | InventoryItemReport                                            | 1     | `table`, `calendar`                                      | `calendarColumns` → `chip`. `hide-columns` → `hidden`. `cellClass` → `style.minQty.color='auto'`. `columnClass` → `style.overlappingShows.columnColor='gray'`. `#default` → slot plus registry. Action `to` item page, `action: 'row'` in both views. Show-all reader → `dateFilter` (Phase 0).                                                                                       | Medium |
 | Design queue (new page)                                        | 2     | `table` (one view)                                       | New content component and registry (`design-queue`) under Schedule, sharing `scheduleFields.js` and the Schedule data. Columns from `DesignQueueFields`; `Elev`/`Panels`/`Setups` checkboxes; `Assignee` select; `Note` from `ShowNotes`; completed rows gray; `view.sort` on Ship; default filter upcoming shows; `editMode: 'instant'`. Schedule page stays read-only. See Phase 2. | Medium |
 | Inventory categories + overview                                | 3     | `items` (table), `categories` (cards, `bucketBy: 'tab'`) | `bucketKeys` and `bucketDecorations` from `categoriesStore`. Remove `_hiddenSearchData`. Widened search (§4.5). Categories: action `to` category, `row`. Overview: action `to` timeline, `button` (replaces `#details-cell`; details fields stay searchable, R3.8). Sticky `image` → `table.sticky`.                                                                                  | High   |
-| PacklistContent                                                | 3     | `cards`                                                  | `formatPacklistCard` → derived fields (`_shipDate`, `_status`, `_cardColor`) plus decorations. Action `to` packlist, `row`. Pins and subpage filters stay page logic. `view.sort` sets the default sort. Cards don't link `/details` (R4.1).                                                                                                                                          | Medium |
+| PacklistContent                                                | 3     | `cards`                                                  | `formatPacklistCard` → derived fields (`_shipDate`, `_status`, `_unattached`) plus decorations. Action `to` packlist, `row`. Pins and subpage filters stay page logic. `view.sort` sets the default sort. Cards don't link `/details` (R4.1).                                                                                                                                          | Medium |
 | ReportsContent                                                 | 3     | none                                                     | Builds its three-card menu inline with the card CSS; no longer uses `CardsComponent` (R3.7).                                                                                                                                                                                                                                                                                          | Low    |
 | PacklistItemsSummary, ShowInventoryReport, IndexMismatchReport | 4     | one each                                                 | `hide-columns` → `hidden`. `cellClass`/`columnClass` → `style` (with `show_*` patterns). `#default` → slot plus registry. **Remove `allowHide`** with the ShowInventoryReport migration.                                                                                                                                                                                              | Low    |
 | TransshipmentModal ×2, overlapping-show picker                 | 4     | one each, no URL                                         | `hide-columns` → `hidden`. The picker's action is `run` selectShow with label "Select". Modal size `page` (Phase 6).                                                                                                                                                                                                                                                                  | Low    |
@@ -870,6 +897,8 @@ Depends only on Phases 0–1.
 ### Later (not scheduled, built on this system)
 
 - Other patch sources (beyond the `DesignQueueFields` preference) and customization UI (per page).
+- Item images as data: the inventory stores each item's image URL, and the thumbnail is how a view styles a URL column (`style.cell`); editing follows that column's data controls. Replaces the custom `image` column (`itemImageStyle`) and the image cell's own lookup and `editable` option.
+- Several row actions per table, each with its own styling, so the Schedule `packlist` column becomes an action.
 - Instant-write checkboxes on the Schedule page itself, and a Task column that aggregates design progress (R7.1).
 - Editable details cells.
 - Ship/return calendar view.
