@@ -1599,6 +1599,22 @@ test('VIEWS ENGINE', 'presentation comes from the view: style props, sortable li
     assertEqual(bare.fieldMap.get('pic').cell, undefined, 'and is ignored');
 });
 
+test('VIEWS ENGINE', 'calendar.actions: keys drawn in the chip end bar are shown; print variants can change cell options', async () => {
+    const fields = ['s', 'e', 'a', 'b', 'c'].map(key => ({ key, label: key }));
+    const view = {
+        id: 'cal', layout: 'calendar',
+        calendar: { start: 's', end: 'e', chip: [['a']], actions: ['b', 'nope'] },
+        hidden: ['s', 'e', 'c'],
+        style: { b: { cell: 'showList', cellOptions: { max: 2 } } },
+        variants: { print: { style: { b: { cellOptions: { max: null } } } } }
+    };
+    const { result: r, warnings } = withViewWarnings(() => resolveView(fields, view));
+    assertEqual([r.calendar.actions, r.shown], [['b'], ['a', 'b']], 'actions shown after the chip lines');
+    assertEqual(warnings.some(w => /unknown key "nope" in calendar.actions/.test(w)), true, 'unknown key warns');
+    const printed = resolveView(fields, view, { print: true });
+    assertEqual([r.fieldMap.get('b').cellOptions.max, printed.fieldMap.get('b').cellOptions.max], [2, null], 'print variant');
+});
+
 test('VIEWS ENGINE', 'registry style and sortable apply to every view; a view overrides them', async () => {
     const registry = { style: { a: { width: 10, cell: 'slot' } }, sortable: ['a'], views: [] };
     const merged = withRegistryDefaults(registry, { id: 'v', style: { a: { width: 20 } }, sortable: ['b'] });

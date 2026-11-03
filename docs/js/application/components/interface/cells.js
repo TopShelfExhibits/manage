@@ -14,9 +14,10 @@ import { escapeHtml, formatText } from '../../utils/views/fieldFormat.js';
  *   editable (the cell may be edited now: edit mode on, a commit wired, nothing blocking it),
  *   editMode ('batch'|'instant'; when a text cell reports: batch on every change, instant when
  *   editing ends), commit(value) (report an edit: batch → cell-edit and dirty tracking;
- *   instant → the delayed write queue), disabled (why editing is blocked; shown as the tooltip)
- * Field-specific options come from `field.cellOptions` (what the data is, e.g. which key holds
- * the item number). An entry without a compact form falls back to formatted text when compact.
+ *   instant → the delayed write queue), disabled (why editing is blocked; shown as the tooltip),
+ *   rowAction ({ run(), disabled, title }: the row's primary action, for the action cell)
+ * Cell options come from `field.cellOptions`, which the view sets (style[key].cellOptions; e.g. which
+ * key holds the item number). An entry without a compact form falls back to formatted text when compact.
  *
  * `field.cell = 'slot'` is not a registry entry: the renderer calls the page's #cell slot instead.
  */
@@ -33,7 +34,8 @@ const cellProps = {
     editable: { type: Boolean, default: false },
     editMode: { type: String, default: '' },
     commit: { type: Function, default: null },
-    disabled: { type: String, default: '' }
+    disabled: { type: String, default: '' },
+    rowAction: { type: Object, default: null }
 };
 
 // ItemImageComponent lives in InventoryTable.js; load it lazily so this module never forms an
@@ -75,6 +77,70 @@ const TextCell = {
         html() { return readOnlyHtml(this); }
     },
     template: html`<span :class="field.cellOptions?.class || ''" v-html="html"></span>`
+};
+
+/**
+ * The row's primary action as the value's button (style[key].cell = 'action'). The renderer draws
+ * no separate action button while a shown column uses this cell. cellOptions.class: the button's
+ * colour class (default: the theme). Without an action (rowAction) the value shows as text.
+ */
+const ActionCell = {
+    name: 'ActionCell',
+    props: cellProps,
+    computed: {
+        html() { return readOnlyHtml(this); },
+        colorClass() { return this.field.cellOptions?.class || this.theme || 'white'; }
+    },
+    template: html`
+        <button
+            v-if="rowAction"
+            :class="['card', colorClass]"
+            :disabled="rowAction.disabled"
+            :title="rowAction.title || null"
+            @click.stop="rowAction.run()"
+            v-html="html"
+        ></button>
+        <span v-else v-html="html"></span>
+    `
+};
+
+/**
+ * A list of show identifiers (the value is an array) as full-width buttons that open each show
+ * (style[key].cell = 'showList'). Past cellOptions.max shows, one "N shows" button opens the list
+ * in a modal instead; a view sets max per layout (0: always the button; null or absent: never).
+ * cellOptions.to: the path for one show, '{value}' replaced by its identifier (default
+ * 'packlist/{value}/details').
+ */
+const ShowListCell = {
+    name: 'ShowListCell',
+    props: cellProps,
+    inject: {
+        appContext: { from: 'appContext', default: null },
+        modal: { from: '$modal', default: null }
+    },
+    computed: {
+        opts() { return this.field.cellOptions || {}; },
+        shows() { return Array.isArray(this.value) ? this.value.filter(v => v != null && v !== '').map(String) : []; },
+        inline() { return this.opts.max == null || this.shows.length <= this.opts.max; },
+        summary() { return `${this.shows.length} ${this.shows.length === 1 ? 'show' : 'shows'}`; },
+        anyMatch() { return !!this.highlight && this.shows.some(id => String(this.highlight(id, this.field)).includes('search-match')); }
+    },
+    methods: {
+        label(id) { return this.highlight ? this.highlight(id, this.field) : escapeHtml(id); },
+        path(id) { return String(this.opts.to || 'packlist/{value}/details').replace('{value}', id); },
+        open(id) { this.appContext?.navigateToPath?.(this.path(id)); },
+        async openAll() {
+            const { OverlappingShowsModal } = await import('./OverlappingShowsModal.js');
+            this.modal?.custom?.(OverlappingShowsModal, { shows: this.shows, to: this.opts.to, modalClass: 'hamburger-menu', size: 'card' }, `${this.shows.length} Overlapping Shows`);
+        }
+    },
+    template: html`
+        <span v-if="!shows.length">—</span>
+        <div v-else-if="inline" class="cell-button-list">
+            <button v-for="id in shows" :key="id" class="card white" @click.stop="open(id)" v-html="label(id)"></button>
+        </div>
+        <button v-else :class="['card', 'white', 'font-black', { 'search-highlight': anyMatch }]" @click.stop="openAll">{{ summary }}</button>
+    `
 };
 
 /**
@@ -215,6 +281,8 @@ const EditTextCell = {
 const CELL_REGISTRY = {
     image: { full: ImageCell, compact: null },
     itemId: { full: TextCell, compact: TextCell },
+    action: { full: ActionCell, compact: ActionCell },
+    showList: { full: ShowListCell, compact: ShowListCell },
     checkbox: { full: CheckboxCell, compact: CheckboxCell },
     select: { full: SelectCell, compact: null },
     text: { full: EditTextCell, compact: null }
@@ -242,7 +310,8 @@ function cellComponentFor(field, density = 'full') {
  *   edited outside the cell, e.g. in a modal) → formatted, highlighted text.
  * Props: row, field, renderer, density, searchTerm, highlight(value, field) → HTML (else the value
  *        is formatted and escaped), theme, cellSlot (the page's #cell slot function, if any),
- *        editable, editMode, commit, disabled (a cell is editable only with a commit and no reason blocking it)
+ *        editable, editMode, commit, disabled (a cell is editable only with a commit and no reason blocking it),
+ *        rowAction (the row's primary action { run(), disabled, title }, for the action cell)
  */
 export const CellRenderer = {
     name: 'CellRenderer',
@@ -259,17 +328,18 @@ export const CellRenderer = {
         editMode: { type: String, default: '' },
         commit: { type: Function, default: null },
         disabled: { type: String, default: '' },
+        rowAction: { type: Object, default: null },
         // Extra scope for the page's #cell slot (e.g. rowIndex, onInnerTableDirty in PacklistTable)
         cellScope: { type: Object, default: null }
     },
     render() {
         const h = Vue.h;
-        const { row, field, renderer, density, searchTerm, highlight, theme, editMode, commit, disabled } = this;
+        const { row, field, renderer, density, searchTerm, highlight, theme, editMode, commit, disabled, rowAction } = this;
         const value = row ? row[field.key] : undefined;
         const comp = cellComponentFor(field, density);
         if (comp) {
             const editable = this.editable && !!commit && !disabled;
-            return h(comp, { row, field, value, renderer, density, searchTerm, highlight, theme, editable, editMode, commit, disabled });
+            return h(comp, { row, field, value, renderer, density, searchTerm, highlight, theme, editable, editMode, commit, disabled, rowAction });
         }
         if ((field.cell === 'slot' || field.cell === 'external-edit') && this.cellSlot) {
             return this.cellSlot({ ...(this.cellScope || {}), row, field, value, renderer, density });

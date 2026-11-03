@@ -219,6 +219,7 @@ export function resolveView(fields, view, opts = {}) {
     // 3a. Shown tier: the layout's primary section
     let slotKeyLines = [];          // table: string[][][]
     let chip = [];                  // calendar: string[][]
+    let chipActions = [];           // calendar: string[] (cells in the chip's end button bar)
     let card = [], footer = [];     // cards: string[][]
     const claimShown = (key, where) => {
         if (!known(key)) { warnUnknown(where, key); return false; }
@@ -242,6 +243,7 @@ export function resolveView(fields, view, opts = {}) {
         }
     } else if (layout === 'calendar') {
         chip = claimLines(normalizeLines(v.calendar?.chip, fieldKeys), 'calendar.chip');
+        chipActions = claimLines([normalizeLine(v.calendar?.actions || [], fieldKeys)], 'calendar.actions')[0] || [];
     } else if (layout === 'cards') {
         card = claimLines(normalizeLines(v.cards?.card, fieldKeys), 'cards.card');
         footer = claimLines(normalizeLines(v.cards?.footer, fieldKeys), 'cards.footer');
@@ -336,7 +338,7 @@ export function resolveView(fields, view, opts = {}) {
     let invalid = null;
     if (layout === 'calendar') {
         const c = v.calendar || {};
-        calendar = { start: c.start, end: c.end, weekStart: c.weekStart || 'sunday', yearColumn: c.yearColumn || null, chip };
+        calendar = { start: c.start, end: c.end, weekStart: c.weekStart || 'sunday', yearColumn: c.yearColumn || null, chip, actions: chipActions };
         if (!c.start || !c.end || !known(c.start) || !known(c.end)) {
             invalid = 'calendar-fields';
             devWarn(`view "${viewId}": calendar start/end field missing (${c.start}, ${c.end})`);
@@ -361,7 +363,7 @@ export function resolveView(fields, view, opts = {}) {
     // 6. Output
     const shown = layout === 'table'
         ? slots.flatMap(s => s.lines.flat())
-        : layout === 'calendar' ? chip.flat() : [...card.flat(), ...footer.flat()];
+        : layout === 'calendar' ? [...chip.flat(), ...chipActions] : [...card.flat(), ...footer.flat()];
     const details = detailsOrder.map(k => fieldMap.get(k));
     const hidden = new Set(fieldKeys.filter(k => tier.get(k) === 'hidden'));
     for (const k of ALWAYS_HIDDEN) hidden.add(k);

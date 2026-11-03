@@ -2173,7 +2173,11 @@ export const TableComponent = {
         // always shown (forceDetails) need no toggle; any other action still gets its button.
         hasActionCell() {
             const a = this.effectiveAction;
-            return a.kind !== 'none' && a.trigger === 'button' && !(this.forceDetails && a.kind === 'details');
+            return a.kind !== 'none' && a.trigger === 'button' && !(this.forceDetails && a.kind === 'details') && !this.actionInColumn;
+        },
+        // A shown column with the action cell (style cell 'action') is the primary action's button
+        actionInColumn() {
+            return this.columnModel.all.some(c => c.cell === 'action');
         },
         // Detail rows render for the details action, or always when details are forced open
         detailRowsEnabled() {
@@ -2910,6 +2914,15 @@ export const TableComponent = {
         // A material symbol name ('calendar_month') rather than a glyph ('☷')
         isSymbolName(text) {
             return typeof text === 'string' && /^[a-z][a-z0-9_]*$/.test(text);
+        },
+        // The row's primary action for an action cell
+        rowActionFor(row, idx) {
+            if (this.effectiveAction.kind === 'none') return null;
+            return {
+                run: () => this.performAction(row, idx),
+                disabled: this.isActionDisabled(row),
+                title: this.effectiveAction.title || this.effectiveAction.label || ''
+            };
         },
 
         getSortIcon(columnKey) {
@@ -4491,6 +4504,7 @@ export const TableComponent = {
                                             :edit-mode="editMode"
                                             :commit="(value) => commitCellValue(idx, column, value)"
                                             :disabled="cellDisabledReason(row, column)"
+                                            :row-action="column.cell === 'action' ? rowActionFor(row, idx) : null"
                                             :cell-scope="{ rowIndex: idx, onInnerTableDirty: (isDirty) => batchEdits.setNested(idx, column.key, isDirty) }"
                                         />
                                         <span v-else v-html="highlightSearchText(row[column.key], column)"></span>
