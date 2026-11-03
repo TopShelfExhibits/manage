@@ -42,6 +42,7 @@ import { todayISOString, searchFilter, textFiltersToSearchParams, parseSearchPar
 import { columnKind, columnKindsOfRows } from '../data_management/utils/checkbox-values.js';
 import { instantWriteEntry, identityKey, cellKey, joinKey } from '../data_management/utils/instant-write-config.js';
 import { estimateShipDate } from '../data_management/utils/ship-date.js';
+import { getReactiveStore } from '../application/index.js';
 import { withShipDate } from '../application/utils/scheduleShipping.js';
 
 // ── Runner ────────────────────────────────────────────────────────────────────
@@ -2162,6 +2163,29 @@ test('CELL EDITS', 'instant: an edit made while its cell is being written is wri
     edits.edit(rows[0], 'Note', 'two');
     await editWait(250);
     assertEqual(calls.commits, [['a.Note=one'], ['a.Note=two']], 'two writes in order');
+});
+
+// ── Reactive stores: eviction ────────────────────────────────────────────────
+
+test('REACTIVE STORES', 'an evicted store that is read loads again; an unread one stays evicted', async () => {
+    const calls = { shown: 0, unread: 0 };
+    const tag = Date.now();
+    const shown = getReactiveStore(async () => { calls.shown++; return [{ a: 1 }]; }, null, [`evict-shown-${tag}`], null, false);
+    const unread = getReactiveStore(async () => { calls.unread++; return [{ a: 1 }]; }, null, [`evict-unread-${tag}`], null, false);
+    await shown.load();
+    await unread.load();
+    const el = document.createElement('div');
+    const app = Vue.createApp({ render: () => Vue.h('span', String(shown.data.length)) });
+    app.mount(el);
+    try {
+        shown.evict();
+        unread.evict();
+        await editWait(300);
+        assertEqual([calls.shown, shown.data.length, el.textContent], [2, 1, '1'], 'rendered store reloaded');
+        assertEqual([calls.unread, unread.needsReload], [1, true], 'unread store stays evicted');
+    } finally {
+        app.unmount();
+    }
 });
 
 // ── Batched verified writes, fault injection, sheet health ───────────────────
