@@ -36,24 +36,22 @@ export const RowDetailsComponent = {
         }
     },
     template: html`
-        <div v-if="gridFields.length > 0" class="auto-details">
-            <div class="details-grid">
-                <div v-for="field in gridFields" :key="field.key" class="detail-item">
-                    <label>{{ field.label ?? field.key }}{{ withColon ? ':' : '' }}</label>
-                    <span>
-                        <CellRenderer
-                            :row="row"
-                            :field="field"
-                            renderer="details"
-                            density="full"
-                            :search-term="searchTerm"
-                            :highlight="highlight"
-                            :theme="theme"
-                            :cell-slot="cellSlot"
-                        />
-                        <DecorationCards :cards="cardsFor(field.key)" :inline="true" />
-                    </span>
-                </div>
+        <div v-if="gridFields.length > 0" class="details-grid">
+            <div v-for="field in gridFields" :key="field.key" class="detail-item">
+                <label>{{ field.label ?? field.key }}{{ withColon ? ':' : '' }}</label>
+                <span>
+                    <CellRenderer
+                        :row="row"
+                        :field="field"
+                        renderer="details"
+                        density="full"
+                        :search-term="searchTerm"
+                        :highlight="highlight"
+                        :theme="theme"
+                        :cell-slot="cellSlot"
+                    />
+                    <DecorationCards :cards="cardsFor(field.key)" :inline="true" />
+                </span>
             </div>
         </div>
         <slot></slot>
@@ -73,13 +71,16 @@ const SlotOutlet = {
  * RowDetailsModal — the details action outside tables (calendar chips, cards).
  * Contents: the details grid (details fields plus the view's shown fields), then the page's
  * #row-details (passed as a function prop so slot scope and injections survive), then the
- * row-level decorations in a button bar.
+ * row-level decorations in a button bar. No wrapper: the parts render straight into the modal's
+ * .content, which lays them out (column, gap).
  *
  * Open with: $modal.custom(RowDetailsModal, { row, fields, ..., modalClass }, title)
  */
 export const RowDetailsModal = {
     name: 'RowDetailsModal',
     components: { RowDetailsComponent, DecorationCards, SlotOutlet },
+    // Several root nodes (no wrapper): the modal's listeners and props aren't passed to a root
+    inheritAttrs: false,
     props: {
         row: { type: Object, required: true },
         fields: { type: Array, default: () => [] },
@@ -102,23 +103,21 @@ export const RowDetailsModal = {
         }
     },
     template: html`
-        <div class="row-details-modal">
-            <RowDetailsComponent
-                :row="row"
-                :fields="fields"
-                :skip-empty="true"
-                :decorations-by-key="placed.byKey"
-                :cell-slot="cellSlot"
-                :search-term="searchTerm"
-                :highlight="highlight"
-                :theme="theme"
-                :with-colon="false"
-            >
-                <SlotOutlet v-if="rowDetails" :render="rowDetails" :scope="{ row, rowIndex: null, isExpanded: true, detailsColumns: fields }" />
-            </RowDetailsComponent>
-            <div v-if="placed.rowLevel.length > 0" class="button-bar">
-                <DecorationCards :cards="placed.rowLevel" />
-            </div>
+        <RowDetailsComponent
+            :row="row"
+            :fields="fields"
+            :skip-empty="true"
+            :decorations-by-key="placed.byKey"
+            :cell-slot="cellSlot"
+            :search-term="searchTerm"
+            :highlight="highlight"
+            :theme="theme"
+            :with-colon="false"
+        >
+            <SlotOutlet v-if="rowDetails" :render="rowDetails" :scope="{ row, rowIndex: null, isExpanded: true, detailsColumns: fields }" />
+        </RowDetailsComponent>
+        <div v-if="placed.rowLevel.length > 0" class="button-bar">
+            <DecorationCards :cards="placed.rowLevel" />
         </div>
     `
 };

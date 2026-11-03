@@ -1260,11 +1260,10 @@ td.col-sticky-start, td.col-sticky-end {
     border-top: none;
 }
 
-.details-content {
+/* A table row's details: the shared .content (padding, column, gap) as a panel under the row */
+.details-container > .content {
     position: sticky;
     left: 0;
-    box-sizing: border-box;
-    padding: var(--padding-md);
     background-color: var(--background-color);
     margin: 0 1px var(--padding-md) 1px;
     border-radius: 0 0 var(--radius-lg) var(--radius-lg);
@@ -1272,10 +1271,6 @@ td.col-sticky-start, td.col-sticky-end {
     border-top: none;
     overflow: hidden;
     box-shadow: 0 4px 8px var(--color-shadow);
-
-    display: flex;
-    flex-direction: column;
-    gap: var(--padding-md);
 }
 
 .details-grid {
@@ -1296,7 +1291,8 @@ td.col-sticky-start, td.col-sticky-end {
     gap: var(--padding-sm);
 }
 
-.detail-item span {
+/* The value under a detail's label (not spans inside its cards) */
+.detail-item > span {
     color: var(--color-text);
     overflow: hidden;
     text-overflow: ellipsis;

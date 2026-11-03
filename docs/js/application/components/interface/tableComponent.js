@@ -1677,7 +1677,7 @@ export const TableComponent = {
             stickySpacerHeight: 0, // Measured height of wrapper before clone is added
             stickyColumnWidths: [], // Store actual column widths from original table
             colWidths: [], // Measured th widths for sticky column offset computation
-            tableWrapperWidth: 0, // Visible width of .table-wrapper for details-content sizing
+            tableWrapperWidth: 0, // Visible width of .table-wrapper for the details panel's width
             // Runtime toggle for hiding non-matching rows; starts from the view (table.hideRowsOnSearch)
             hideRowsOnSearchLocal: this.resolved?.table?.hideRowsOnSearch !== false,
             theadActive: false // Mobile: tap-to-show column buttons toggle
@@ -2428,7 +2428,7 @@ export const TableComponent = {
                     this.showStickyHeader = true;
                     this.stickyLeft = rect ? rect.left : 0;
                     this.stickyWidth = rect ? rect.width : 0;
-                    // clientWidth excludes scrollbar; rect.width does not — details-content must fit inside.
+                    // clientWidth excludes scrollbar; rect.width does not — the details panel must fit inside.
                     this.tableWrapperWidth = tableWrapper ? tableWrapper.clientWidth : (rect ? rect.width : 0);
                     this.stickyScrollLeft = tableWrapper?.scrollLeft ?? 0;
                     this.colWidths = this.stickyColumnWidths.slice();
@@ -4603,7 +4603,7 @@ export const TableComponent = {
                                 <td v-if="draggable"></td>
                                 <td :colspan="headerColumns.length + (hasActionCell ? 1 : 0)" class="details-container">
 
-                                    <div v-if="shouldShowDetailsContent(row, idx)" class="details-content" :style="tableWrapperWidth ? { width: (tableWrapperWidth - 2) + 'px' } : {}">
+                                    <div v-if="shouldShowDetailsContent(row, idx)" class="content" :style="tableWrapperWidth ? { width: (tableWrapperWidth - 2) + 'px' } : {}">
                                         <RowDetailsComponent
                                             :row="row"
                                             :fields="detailsColumns"
