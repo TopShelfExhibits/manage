@@ -422,15 +422,16 @@ div#app-content > div.empty-message {
     padding: var(--padding-md);
 }
 
-td .card, .button-bar .card, .content-footer .card, .content-header .card, .calendar-chip .card {
+/* Cards beside a value (table cells and detail items) and in bars: one compact card */
+td .card, .detail-item > span .card, .button-bar .card, .content-footer .card, .content-header .card {
     font-size: .875em;
     padding: var(--padding-sm);
     border-radius: var(--radius-md);
 }
-td .card, .calendar-chip .card {
+td .card, .detail-item > span .card {
     display: inline-block;
 }
-td span:not(:empty):has(+ .card) {
+td span:not(:empty):has(+ .card), .detail-item > span span:not(:empty):has(+ .card) {
     margin-right:var(--padding-sm);
 }
 
@@ -1731,7 +1732,11 @@ html.row-dragging * {
     border-right: 1px solid var(--color-border);
 }
 
+/* Calendar chips: one compact scale for everything inside a chip (cards in the text lines and
+   every control in the end bar share --chip-control-height and --chip-font) */
 .calendar-chip {
+    --chip-control-height: 20px;
+    --chip-font: 0.7rem;
     border: 1px solid;
     border-radius: var(--radius-md);
     padding: var(--padding-sm);
@@ -1801,31 +1806,46 @@ html.row-dragging * {
     justify-content: center;
 }
 
-.calendar-chip .chip-text .card {
-    font-size: 0.65rem;
+.calendar-chip .card {
+    font-size: var(--chip-font);
     padding: 1px 4px;
     line-height: 1.3;
     white-space: nowrap;
     display: inline-block;
+    border-radius: var(--radius-md);
 }
 .chip-first-row .card,
 .chip-second-row .card {
     margin-left: 3px;
     vertical-align: middle;
 }
-/* Chip end: one button bar (action cells, decoration cards, the primary action button last) */
-.chip-actions {
+/* Chip end: one button bar (action cells, decoration cards, the primary action button last).
+   Every control is the same height and font; the generic .button-bar sizing (28px symbol
+   buttons, growing buttons) doesn't apply inside a chip. */
+.calendar-chip .chip-actions.button-bar {
     flex-shrink: 0;
     display: flex;
-    flex-direction: row;
-    align-items: center;
+    align-items: stretch;
+    gap: 0;
     margin-left: auto;
 }
-.chip-actions.button-bar {
-    gap: 0;
-}
-.chip-actions > button {
+.calendar-chip .chip-actions.button-bar > * {
+    box-sizing: border-box;
+    height: var(--chip-control-height);
+    min-height: 0;
+    margin: 0;
+    padding: 0 4px;
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: var(--chip-font);
+    line-height: 1;
     white-space: nowrap;
+}
+.calendar-chip .chip-actions.button-bar > .button-symbol {
+    width: var(--chip-control-height);
+    padding: 0;
 }
 
 /* A list of buttons in one cell (the showList cell, the overlapping shows modal): stacked, full width */
@@ -2393,14 +2413,7 @@ td.details-cell button.action-button {
     padding: 0 var(--padding-sm);
 }
 
-/* Calendar: action button at the chip start; chips without a row trigger aren't clickable */
-.calendar-chip .chip-action-button {
-    width: 20px;
-    height: 20px;
-    flex-basis: 20px;
-    font-size: 0.75rem;
-    line-height: 1;
-}
+/* Calendar: chips without a row trigger aren't clickable */
 .calendar-chip.chip-no-trigger {
     cursor: default;
 }

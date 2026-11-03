@@ -570,8 +570,8 @@ export const CalendarComponent = {
                                 </template>
                                 <template v-if="hasEndCards">
                                     <button
-                                        v-for="card in endCards(seg.row)"
-                                        :key="card.message"
+                                        v-for="(card, ci) in endCards(seg.row)"
+                                        :key="ci + '-' + card.message"
                                         :class="['card', 'hide-when-narrow', card.color || card.class, { 'clickable': card.action && !card.disabled }]"
                                         :title="card.title || card.hoverMessage || null"
                                         :disabled="card.disabled"
