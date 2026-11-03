@@ -334,7 +334,9 @@ The inventory calendar button is no longer a column: it is the inventory table's
  *
  * // Layout sections
  * @property {{ sticky?: {start?:string[], end?:string[]}, hideRowsOnSearch?: boolean }} [table]
- * @property {{ start:string, end:string, weekStart?:'sunday'|'saturday', yearColumn?:string, chip:Line[] }} [calendar]
+ * @property {{ start:string, end:string, weekStart?:'sunday'|'saturday', yearColumn?:string, chip:Line[], actions?:string[] }} [calendar]
+ *           actions = keys whose cells draw in the chip's end button bar (before the decoration cards
+ *           and the action button), like a card footer
  * @property {{ bucketBy?:string, card:Line[], footer?:Line[], hideOnSearch?:boolean }} [cards]
  *
  * // Variants: partial ViewDefs by condition
@@ -511,7 +513,9 @@ Row click and the details button are **one mechanism**. Every row has at most on
  *  @property {(row) => string} [to]     navigation path; DataView adds the current searchTerm
  *  @property {(row) => void}   [run]    in-place action (select, add)
  *  @property {string} [label]           button text, e.g. 'Select', '+ Add Item'
- *  @property {string} [icon]            button icon; default is the details icon (☷)
+ *  @property {string} [icon]            button icon: a glyph or a material symbol name; default is the details icon (☷)
+ *  @property {string} [headerIcon]      the table's action column header (glyph or symbol name; details default ⓘ)
+ *  @property {string} [title]           the button's tooltip
  *  @property {(row) => boolean} [disabled]  e.g. the picker disables Select for shows without dates
  */
 ```
@@ -528,8 +532,10 @@ An `ActionDef` has exactly one of `to` and `run` (R6.5). If both are given, `res
 
 | Trigger              | Table                                                                                  | Calendar                 | Cards                     |
 | -------------------- | -------------------------------------------------------------------------------------- | ------------------------ | ------------------------- |
-| `'button'` (default) | one action button in the trailing sticky cell (today's details cell, `col-sticky-end`) | button at the chip start | button in the card footer |
+| `'button'` (default) | one action button in the trailing sticky cell (today's details cell, `col-sticky-end`) | button at the chip end, last in its button bar | button in the card footer |
 | `'row'`              | whole row, with hover highlight, `tabindex="0"` and Enter/Space; no button             | chip body; no button     | whole card; no button     |
+
+- **The action in a column:** a view can draw the primary action as a column's value instead of a separate button: `style[key].cell = 'action'` (for example the item shortage report's purple Item# buttons). While a shown column (or a calendar chip line or `calendar.actions` key) uses that cell, the renderer draws no action button. Use it when the action belongs to one value; other per-row buttons are decorations or cells such as `showList`.
 
 - **Glow:** with `'button'`, the button glows on a details-only match. With `'row'`, the row, chip or card gets a `details-match` class instead; cards also keep their matched-fields list.
 - **Row-trigger guards:** a click is ignored when it lands inside an interactive element (`button, a, input, select, textarea, [contenteditable], .column-button`), when text is selected (`!getSelection().isCollapsed`, so cell contents can still be copied), and during clipboard or drag mode. Use `click`, not `touchend`.
@@ -660,7 +666,8 @@ This replaces the `hiddenColumns` mutation and the 100 ms restore.
 
 1. **Cell registry.** A cell is the component that draws a value. Renderers read it from the resolved field (`resolvedField.cell`), which comes from the data or the view:
    - **From the data** (no view setting): a `checkbox` field gets `checkbox`, a `select` field gets `select` (both render disabled when read-only), and an editable field without a cell gets `text`, the one text editor.
-   - **From the view** (`style[key].cell`, a display choice): `image` (item thumbnail, custom: see §4.1), `itemId`, `slot`, `external-edit`. Its options are `style[key].cellOptions`.
+   - **From the view** (`style[key].cell`, a display choice): `image` (item thumbnail, custom: see §4.1), `itemId`, `action` (the row's primary action as this value's button; `cellOptions.class` colours it), `showList` (a list of show identifiers as full-width buttons; past `cellOptions.max` one "N shows" button opens them in a modal; `cellOptions.to` is the show path with `{value}`), `slot`, `external-edit`. Its options are `style[key].cellOptions`, so each view sets them for its layout: the item shortage report lists two shows in the table, always uses the "N shows" button on calendar chips (`max: 0`), and lists every show when printing (`variants.print`, `max: null`).
+   - Button lists in a cell use the shared `.cell-button-list` style (stacked, full width; left-aligned lines in print).
    - Props: `{ row, field, value, renderer, density, search }`, where `density` is `'full'` or `'compact'`. A missing compact form falls back to text.
    - The table, chips, cards **and the details grid** all use this pipeline, so a new data type is added once.
 2. **Page slot** (`style[key].cell = 'slot'`). `#cell="{ row, field, renderer, density }"` is called only for those fields, and other fields keep the fallback (fixes D6). Clickable content inside chips and cards is allowed. `'external-edit'` also draws through the page slot, for a value edited outside the cell (a modal): the table shows no editor and no revert control for it.
