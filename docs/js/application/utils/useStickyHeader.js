@@ -167,15 +167,9 @@ export function useStickyHeader({
         // Initial update in current tick
         _update();
         
-        // On mobile/touch devices or when elements might not be fully laid out yet,
-        // schedule a secondary update after a brief delay to ensure accurate measurements.
-        // This helps catch cases where getBoundingClientRect() returns incorrect values
-        // before the browser has completed layout calculations.
-        if (window.matchMedia('(max-width: 768px)').matches || 
-            (window.innerHeight < 600 && window.innerWidth < 600)) {
-            // Small delay for mobile to allow layout to settle
-            setTimeout(() => _update(), 100);
-        }
+        // Always schedule a second update after layout settles: getBoundingClientRect() can be
+        // stale before the browser finishes layout (replaces the old 768px heuristic, size model §4.10).
+        setTimeout(() => _update(), 100);
     }
 
     function teardown() {

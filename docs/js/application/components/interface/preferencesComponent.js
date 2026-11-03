@@ -182,7 +182,7 @@ export const PreferencesMenuComponent = {
                 PreferencesEditModal,
                 {
                     preferences: this.matchingPreferences,
-                    modalClass: 'small-menu',
+                    size: 'card',
                     onSaved: (editValues) => this.savePreferences(editValues)
                 },
                 'Edit Global Parameters'
@@ -204,7 +204,7 @@ export const PreferencesMenuComponent = {
             <div class="card details-grid" style="--details-grid-min-column-width: 140px;">
                 <div v-for="pref in matchingPreferences" :key="pref.id" class="detail-item">
                     <label class="pref-label">{{ pref.name }}:</label>
-                    <span class="pref-value">{{ pref.value }}</span>
+                    <span class="pref-value" :title="pref.value">{{ pref.value }}</span>
                 </div>
             </div>
         </div>

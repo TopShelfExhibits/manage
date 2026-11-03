@@ -43,6 +43,17 @@ const ErrorIconComponent = {
     `
 };
 
+/**
+ * Modal size tiers (views-and-renderers-plan §4.17). Every modal has exactly one size; layout and
+ * colour classes (reading-menu, hamburger-menu, red) stay separate in modalClass.
+ *   card (default)  360px content   → narrow container tier
+ *   wide            750px content   → medium tier (two dashboard cards plus gap)
+ *   page            min(viewport, 1000px) → wide tier on desktop (DataView, RowDetailsModal, pickers)
+ *   auto            content-sized   → images only
+ * `tall` keeps a fixed viewport height (like the dashboard .tall). All sizes cap at the viewport.
+ */
+export const MODAL_SIZES = Object.freeze(['card', 'wide', 'page', 'auto']);
+
 export const ModalComponent = {
     props: {
         modalId: { type: String, required: true },
@@ -50,6 +61,8 @@ export const ModalComponent = {
         isVisible: { type: Boolean, default: false },
         components: { type: Array, default: () => [] },
         modalClass: { type: String, default: '' },
+        size: { type: String, default: 'card' },
+        tall: { type: Boolean, default: false },
         message: { type: String, default: '' },
         contentClass: { type: String, default: '' },
         componentProps: { type: Object, default: () => ({}) },
@@ -114,7 +127,7 @@ export const ModalComponent = {
     },
     template: html`
         <div v-if="isVisible" class="modal-overlay" @click.self="closeModal">
-            <div :class="['modal', modalClass]">
+            <div :class="['modal', 'size-' + size, { tall }, modalClass]">
                 <div class="modal-header">
                     <h3>{{ title }}</h3>
                     <button class="column-button" @click="closeModal"><span class="material-symbols-outlined">close</span></button>
@@ -142,14 +155,16 @@ export class ModalManager {
 
     _create(title, components, props) {
         // Extract modal-level props from component props
-        const { modalClass, message, contentClass, submitAction, ...componentProps } = props || {};
-        
+        const { modalClass, size, tall, message, contentClass, submitAction, ...componentProps } = props || {};
+
         const modal = {
             id: `modal-${this.nextId++}`,
             title,
             isVisible: true,
             components: Array.isArray(components) ? components : (components ? [components] : []),
             modalClass: modalClass || '',
+            size: MODAL_SIZES.includes(size) ? size : 'card',
+            tall: !!tall,
             message: message || '',
             contentClass: contentClass || '',
             submitAction: submitAction || null,
@@ -166,32 +181,35 @@ export class ModalManager {
 
     // Core methods that are actually used
     alert(message, title = 'Alert', autoClose = true) {
-        return this._create(title, autoClose ? AutoCloseComponent : null, { 
-            message, 
-            autoClose, 
-            modalClass: 'reading-menu small-menu' 
+        return this._create(title, autoClose ? AutoCloseComponent : null, {
+            message,
+            autoClose,
+            modalClass: 'reading-menu',
+            size: 'card'
         });
     }
 
-    confirm(message, onConfirm, onCancel = null, title = 'Confirm', confirmText = null, cancelText = null, modalClass = 'reading-menu small-menu') {
-        return this._create(title, ConfirmButtonsComponent, { 
-            message, 
-            onConfirm, 
-            onCancel, 
-            confirmText, 
-            cancelText, 
-            modalClass 
+    confirm(message, onConfirm, onCancel = null, title = 'Confirm', confirmText = null, cancelText = null, modalClass = 'reading-menu') {
+        return this._create(title, ConfirmButtonsComponent, {
+            message,
+            onConfirm,
+            onCancel,
+            confirmText,
+            cancelText,
+            modalClass,
+            size: 'card'
         });
     }
 
     image(imageUrl, title = 'Image') {
-        return this._create(title, ImageContentComponent, { imageUrl, modalClass: 'reading-menu' });
+        return this._create(title, ImageContentComponent, { imageUrl, modalClass: 'reading-menu', size: 'auto' });
     }
 
     error(message, title = 'Error') {
-        return this._create(title, ErrorIconComponent, { 
-            message, 
-            modalClass: 'reading-menu red' 
+        return this._create(title, ErrorIconComponent, {
+            message,
+            modalClass: 'reading-menu red',
+            size: 'card'
         });
     }
 

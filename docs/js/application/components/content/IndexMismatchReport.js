@@ -1,4 +1,4 @@
-import { html, TableComponent, Requests, getReactiveStore, NavigationRegistry } from '../../index.js';
+import { html, DataView, Requests, getReactiveStore, NavigationRegistry } from '../../index.js';
 import { IndexResolutionComponent } from '../interface/IndexResolutionModal.js';
 
 /**
@@ -7,8 +7,32 @@ import { IndexResolutionComponent } from '../interface/IndexResolutionModal.js';
  */
 const IGNORE_KEYWORD = '__IGNORE__';
 
+// What each mismatch key is. Resolution is edited (in the resolution modal) and saved in batch.
+const MISMATCH_FIELDS = [
+    { key: 'rawValue', label: 'Name' },
+    { key: 'typeLabel', label: 'Type' },
+    { key: 'sourcesSummary', label: 'Sources' },
+    { key: 'resolution', label: 'Resolution', editable: true }
+];
+
+// Index mismatch report view (views-and-renderers-plan §5, Phase 4)
+const MISMATCH_VIEWS = {
+    id: 'index-mismatches',
+    default: 'table',
+    theme: 'blue',
+    views: [{
+        id: 'table',
+        name: 'Index Mismatches',
+        layout: 'table',
+        columns: ['rawValue', 'typeLabel', 'sourcesSummary', 'resolution'],
+        sortable: ['rawValue', 'typeLabel'],
+        // The page draws Sources and Resolution (#cell); Resolution is edited outside the cell
+        style: { typeLabel: { width: 80 }, sourcesSummary: { cell: 'slot' }, resolution: { cell: 'external-edit' } }
+    }]
+};
+
 export const IndexMismatchReport = {
-    components: { TableComponent },
+    components: { DataView },
     inject: ['$modal', 'appContext'],
     props: {
         containerPath: { type: String, default: 'reports/index-mismatches' },
@@ -16,7 +40,9 @@ export const IndexMismatchReport = {
     },
     data() {
         return {
-            reportStore: null
+            reportStore: null,
+            MISMATCH_FIELDS,
+            MISMATCH_VIEWS
         };
     },
     computed: {
@@ -29,14 +55,9 @@ export const IndexMismatchReport = {
         loadingMessage() {
             return this.reportStore?.loadingMessage || 'Scanning index references...';
         },
-        tableColumns() {
-            return [
-                { key: 'rawValue', label: 'Name', sortable: true },
-                { key: 'typeLabel', label: 'Type', sortable: true, width: 80 },
-                { key: 'sourcesSummary', label: 'Sources', sortable: false },
-                { key: 'resolution', label: 'Resolution', sortable: false, editable: true, format: 'external-edit' },
-                { key: '_resolve', label: '', sortable: false, width: 90, sticky: 'end' }
-            ];
+        // Primary action: Resolve (in-place, labelled; the trailing action cell)
+        resolveAction() {
+            return { run: (row) => this.openResolutionModal(row), label: 'Resolve' };
         },
         tableData() {
             if (!this.reportStore?.data) return [];
@@ -72,7 +93,7 @@ export const IndexMismatchReport = {
         async saveResolutions() {
             const rowsWithResolutions = this.reportStore.data.filter(row => row.AppData?.pendingResolutions?.length > 0);
             if (!rowsWithResolutions.length) return true;
-            
+
             for (const row of rowsWithResolutions) {
                 const options = row.AppData.pendingResolutions || [];
                 for (const option of options) {
@@ -105,10 +126,10 @@ export const IndexMismatchReport = {
                     }
                 }
             }
-            
+
             // Immediately reload the report to clear resolved rows
             await this.reportStore.load();
-            
+
             return true;
         },
         initializeStore() {
@@ -159,14 +180,14 @@ export const IndexMismatchReport = {
 
                         if (!originalRow.AppData) originalRow.AppData = {};
                         if (!originalRow.AppData.pendingResolutions) originalRow.AppData.pendingResolutions = [];
-                        
+
                         originalRow.AppData.pendingResolutions.push({
                             actionType: isIgnore ? 'add-override-ignore' : 'add-override-link',
                             scheduleId: scheduleId || '',
                             packlistId: packlistId || '',
                             label
                         });
-                        
+
                         // Update resolution display as joined string
                         originalRow.resolution = originalRow.AppData.pendingResolutions.map(r => r.label).join('\n');
                         return { applied: true };
@@ -183,12 +204,12 @@ export const IndexMismatchReport = {
                         if (originalRow) {
                             if (!originalRow.AppData) originalRow.AppData = {};
                             if (!originalRow.AppData.pendingResolutions) originalRow.AppData.pendingResolutions = [];
-                            
+
                             originalRow.AppData.pendingResolutions.push({
                                 ...option,
                                 label: option.label
                             });
-                            
+
                             // Update resolution display as joined string
                             originalRow.resolution = originalRow.AppData.pendingResolutions.map(r => r.label).join('\n');
                         }
@@ -206,10 +227,12 @@ export const IndexMismatchReport = {
         this.initializeStore();
     },
     template: html`
-        <TableComponent
-            theme="blue"
-            :data="tableData"
-            :columns="tableColumns"
+        <DataView
+            :fields="MISMATCH_FIELDS"
+            :rows="tableData"
+            :registry="MISMATCH_VIEWS"
+            edit-mode="batch"
+            :action="resolveAction"
             :original-data="reportStore?.originalData || []"
             :is-loading="isLoading"
             :is-analyzing="isAnalyzing"
@@ -221,17 +244,12 @@ export const IndexMismatchReport = {
             :sync-search-with-url="true"
             :container-path="containerPath || 'reports/index-mismatches'"
             :navigate-to-path="navigateToPath"
-            :readonly="false"
-            :allowDetails="false"
             @refresh="handleRefresh"
             @on-save="() => reportStore.save()"
         >
-            <template #default="{ row, column }">
-                <button
-                    v-if="column.key === '_resolve'"
-                    @click="openResolutionModal(row)"
-                >Resolve</button>
-                <div v-else-if="column.key === 'resolution'" style="line-height: 1.6;">
+            <!-- Page cells (field.cell = 'slot') -->
+            <template #cell="{ row, field: column }">
+                <div v-if="column.key === 'resolution'" style="line-height: 1.6;">
                     <template v-if="row.resolution">
                         <div v-for="(line, idx) in row.resolution.split('\n')" :key="idx">
                             {{ line }}
@@ -251,8 +269,7 @@ export const IndexMismatchReport = {
                         [{{ source.sourceType }}] {{ source.identifier }}
                     </div>
                 </div>
-                <span v-else>{{ row[column.key] !== null && row[column.key] !== undefined ? row[column.key] : '—' }}</span>
             </template>
-        </TableComponent>
+        </DataView>
     `
 };

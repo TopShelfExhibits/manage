@@ -146,7 +146,7 @@ export class HamburgerMenuRegistry {
         const standardProps = {
             containerPath,
             containerType,
-            currentView: this.getCurrentView(containerPath),
+            currentSegment: this.getCurrentSegment(containerPath),
             title: NavigationRegistry.getDisplayName(containerPath, true), // Use centralized display logic
             modalClass: 'hamburger-menu',
             // Merge with menu-specific props
@@ -245,7 +245,7 @@ export class HamburgerMenuRegistry {
         return this.defaultMenu;
     }
 
-    getCurrentView(containerPath) {
+    getCurrentSegment(containerPath) {
         if (!containerPath) return '';
         // Strip query parameters before splitting
         const cleanPath = containerPath.split('?')[0];

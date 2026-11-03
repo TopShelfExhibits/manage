@@ -119,7 +119,9 @@ class database_uncached {
      * @param {File} file - The image file to upload
      * @param {string} itemNumber - The item number used to name the file
      * @param {string} folderId - Google Drive folder ID for thumbnails
-     * @returns {Promise<string|null>} The new image URL, or null on failure
+     * @returns {Promise<{fileId: string, file: File}|null>} The new Drive file ID and the image
+     *   that was uploaded (already resized — lets the caller show it without downloading it back),
+     *   or null on failure
      */
     static async uploadItemImage(file, itemNumber, folderId = window.ENDPOINT_IDS.THUMBNAILS) {
         const itemNumberStr = String(itemNumber).trim();
@@ -134,7 +136,7 @@ class database_uncached {
 
         // Check if this item currently has a thumbnail record that points to a prefix file
         // If so, we need to preserve that file when uploading the item's own image
-        const currentRecord = await ApplicationUtils.getThumbnailRecord(null, itemNumberStr);
+        const currentRecord = await ApplicationUtils.getThumbnailRecord(itemNumberStr);
         const prefixFileIdsToPreserve = new Set();
         if (currentRecord && currentRecord.file) {
             // Extract prefix from item number
@@ -143,7 +145,7 @@ class database_uncached {
             if (parts.length >= 2 && parts[0]) {
                 const prefix = parts[0];
                 // Check if the current file belongs to the prefix (not the item itself)
-                const prefixRecord = await ApplicationUtils.getThumbnailRecord(null, prefix);
+                const prefixRecord = await ApplicationUtils.getThumbnailRecord(prefix);
                 if (prefixRecord && prefixRecord.file === currentRecord.file) {
                     // This item is using a prefix file - preserve it
                     prefixFileIdsToPreserve.add(prefixRecord.file);
@@ -180,64 +182,22 @@ class database_uncached {
             if (oldId === uploaded.id) continue;
             await GoogleSheetsService.deleteDriveFile(oldId);
         }
-        
-        invalidateCache([
-            { namespace: 'database', methodName: 'getItemImageBlobUrl', args: [itemNumberStr] }
-        ], true);
 
-        // Fetch blob and store file reference to CACHE sheet (without blob URL generation)
-        const blobUrl = await GoogleSheetsService.getAuthenticatedImageUrl(uploaded.id);
-        if (blobUrl) {
-            ApplicationUtils.storeThumbnailRecord(itemNumberStr, uploaded.id, null)
-                .catch(err => console.warn('[icons] Failed to store thumbnail record on upload:', err));
-            return blobUrl;
-        }
-        return null;
+        ApplicationUtils.storeThumbnailRecord(itemNumberStr, uploaded.id, null)
+            .catch(err => console.warn('[icons] Failed to store thumbnail record on upload:', err));
+        return { fileId: uploaded.id, file: resizedFile };
     }
 
     /**
-     * Fetch the full-resolution image for an item as a blob URL.
-     * Only called when the full-size image modal is opened.
-     * @param {Object} deps - Dependency decorator
-     * @param {string} itemNumber - Item number to search for
-     * @param {string} folderId - Google Drive folder ID
-     * @returns {Promise<string>} Blob URL or empty string
-     */
-    static async getItemImageBlobUrl(deps, itemNumber, folderId = window.ENDPOINT_IDS.THUMBNAILS) {
-        if (!itemNumber) return '';
-        const itemNumberStr = String(itemNumber).trim();
-        if (!itemNumberStr) return '';
-
-        const extensions = ['jpg', 'jpeg', 'png'];
-        for (const ext of extensions) {
-            const fileName = `${itemNumberStr}.${ext}`;
-            const file = await GoogleSheetsService.searchDriveFileInFolder(fileName, folderId);
-            if (file && file.id) {
-                const blobUrl = await GoogleSheetsService.getAuthenticatedImageUrl(file.id);
-                if (blobUrl) return blobUrl;
-            }
-        }
-
-        const separators = /[\s\-_]+/;
-        const parts = itemNumberStr.split(separators);
-        // Prefix fallback commented out — only search for exact match for now.
-        // if (parts.length > 1 && parts[0]) {
-        //     return await deps.call(Database.getItemImageBlobUrl, parts[0], folderId);
-        // }
-
-        return '';
-    }
-
-    /**
-     * Fetch an authenticated blob URL directly from a Drive file ID.
-     * Used by the thumbnail store analysis step to convert stored file IDs to displayable URLs.
-     * @param {Object} deps - Dependency decorator
+     * Fetch a Drive file's raw content as a Blob.
+     * NOT CACHED — callers own the result: the thumbnail cache (application/utils/thumbnailCache.js)
+     * downscales and persists it per device; the full-size image modal frees it on close.
      * @param {string} fileId - Google Drive file ID
-     * @returns {Promise<string|null>} Blob URL or null
+     * @returns {Promise<Blob|null>} The file content, or null on failure
      */
-    static async getDriveBlobUrl(deps, fileId) {
+    static async getDriveFileBlob(fileId) {
         if (!fileId) return null;
-        return await GoogleSheetsService.getAuthenticatedImageUrl(fileId);
+        return await GoogleSheetsService.getDriveFileBlob(fileId);
     }
 
     /* MUTATION FUNCTIONS */
@@ -393,6 +353,62 @@ class database_uncached {
     }
 
     /**
+     * Read a tab or an A1 range straight from the sheet, bypassing the cache.
+     * Used by verified writes (read → write → re-read), which must see the live sheet.
+     * NOT cached (listed with the mutation methods in wrapMethods below).
+     * @param {string} tableId
+     * @param {string} rangeOrTab - Tab name, or "Tab!A1:B2"
+     * @returns {Promise<Array<Array<string>>>} raw 2D array
+     */
+    static async readFresh(tableId, rangeOrTab) {
+        return await GoogleSheetsService.getSheetData(tableId, rangeOrTab);
+    }
+
+    /** 1-based column number → A1 column letters (1 → A, 27 → AA). */
+    static columnLetter(columnNumber) {
+        return _numberToColumnLetter(columnNumber);
+    }
+
+    /** A1 range on a tab, quoting the sheet name when needed: a1Range('Production Schedule', 'A5:Z5'). */
+    static a1Range(tabName, ref) {
+        return `${_quoteSheetName(tabName)}!${ref}`;
+    }
+
+    /**
+     * Read several ranges of one table in a single uncached request (values.batchGet).
+     * @param {string} tableId
+     * @param {string[]} ranges - full A1 ranges (see a1Range)
+     * @returns {Promise<Array<Array<Array<string>>>>} one 2D array per range
+     */
+    static async readFreshRanges(tableId, ranges) {
+        return await GoogleSheetsService.batchGetValues(tableId, ranges);
+    }
+
+    /**
+     * Write several single cells of one tab in a single request (values.batchUpdate), then
+     * invalidate the tab's cached data once.
+     * @param {string} tableId
+     * @param {string} tabName
+     * @param {Array<{ rowNumber: number, columnNumber: number, value: string }>} cells - 1-based
+     * @returns {Promise<boolean>}
+     */
+    static async setCellValues(tableId, tabName, cells) {
+        if (!cells || !cells.length) return true;
+        const data = cells.map(c => {
+            const col = _numberToColumnLetter(c.columnNumber);
+            return { range: Database.a1Range(tabName, `${col}${c.rowNumber}:${col}${c.rowNumber}`), values: [[c.value ?? '']] };
+        });
+        await GoogleSheetsService.batchSetValues(tableId, data);
+
+        stampDataChange(`database:getData:"${tableId}","${tabName}"`);
+        invalidateCache([
+            { namespace: 'database', methodName: 'getData', args: [tableId, tabName] }
+        ], true);
+
+        return true;
+    }
+
+    /**
      * Write a single cell value using A1 notation range.
      * This avoids full-table writes for high-concurrency updates.
      * @param {string} tableId - Identifier for the table
@@ -404,9 +420,29 @@ class database_uncached {
      */
     static async setCellValue(tableId, tabName, rowNumber, columnNumber, value) {
         const colLetter = _numberToColumnLetter(columnNumber);
-        const range = `${tabName}!${colLetter}${rowNumber}:${colLetter}${rowNumber}`;
+        const range = Database.a1Range(tabName, `${colLetter}${rowNumber}:${colLetter}${rowNumber}`);
 
         await GoogleSheetsService.setSheetData(tableId, range, [[value ?? '']], null);
+
+        stampDataChange(`database:getData:"${tableId}","${tabName}"`);
+        invalidateCache([
+            { namespace: 'database', methodName: 'getData', args: [tableId, tabName] }
+        ], true);
+
+        return true;
+    }
+
+    /**
+     * Delete whole rows of one tab in a single request, then invalidate the tab's cached data.
+     * Positional: callers check the rows just before and verify after (rows move under it).
+     * @param {string} tableId
+     * @param {string} tabName
+     * @param {number[]} rowNumbers - 1-based sheet rows (the header row is never deleted)
+     * @returns {Promise<boolean>}
+     */
+    static async deleteSheetRows(tableId, tabName, rowNumbers) {
+        if (!rowNumbers || !rowNumbers.length) return true;
+        await GoogleSheetsService.deleteSheetRows(tableId, tabName, rowNumbers);
 
         stampDataChange(`database:getData:"${tableId}","${tabName}"`);
         invalidateCache([
@@ -484,12 +520,11 @@ class database_uncached {
 }
 
 // Wrap and export the class with caching, excluding mutation methods
-// Image URLs get infinite cache since they rarely change and are expensive Google Drive API calls
 export const Database = wrapMethods(
     database_uncached, 
     'database', 
-    ['createTab', 'hideTabs', 'showTabs', 'setData', 'updateRow', 'setCellValue', 'appendSheetRow', 'uploadItemImage'],
-    ['getItemImageBlobUrl', 'getDriveBlobUrl', 'getTabs'], // Infinite cache: image URLs (expensive Google Drive API calls)
+    ['createTab', 'hideTabs', 'showTabs', 'setData', 'updateRow', 'setCellValue', 'setCellValues', 'deleteSheetRows', 'appendSheetRow', 'uploadItemImage', 'getDriveFileBlob', 'readFresh', 'readFreshRanges', 'columnLetter', 'a1Range'], // getDriveFileBlob: uncached read (callers own the Blob)
+    ['getTabs'], // Infinite cache
     {
         // Sheet data: infinite for INVENTORY and PACK_LISTS (cross-session poller handles freshness);
         // 20-minute default for everything else (PROD_SCHED, CACHE, etc.)
@@ -611,4 +646,14 @@ function _numberToColumnLetter(num) {
         n = Math.floor((n - 1) / 26);
     }
     return letter;
+}
+
+/**
+ * Quote a sheet name for an A1 range when it holds anything but letters, digits and underscores
+ * ("Production Schedule" → "'Production Schedule'"); quotes inside are doubled.
+ * @private
+ */
+function _quoteSheetName(name) {
+    const s = String(name);
+    return /^[A-Za-z0-9_]+$/.test(s) ? s : `'${s.replace(/'/g, "''")}'`;
 }

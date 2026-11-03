@@ -202,6 +202,75 @@ export class GoogleSheetsService {
     }
 
     /**
+     * values.batchGet: read several ranges in one request.
+     * @param {string} tableId
+     * @param {string[]} ranges - A1 ranges including the sheet name
+     * @returns {Promise<Array<Array<Array<string>>>>} one 2D array per range, in order ([[]] when empty)
+     */
+    static async batchGetValues(tableId, ranges) {
+        await GoogleSheetsAuth.checkAuth();
+        const spreadsheetId = window.ENDPOINT_IDS[tableId];
+        if (!spreadsheetId) throw new Error(`[GoogleSheetsData.batchGetValues] SPREADSHEET_NOT_FOUND: Spreadsheet ID not found for table: ${tableId}`);
+        if (!ranges || !ranges.length) return [];
+        const response = await GoogleSheetsService.withExponentialBackoff(() =>
+            gapi.client.sheets.spreadsheets.values.batchGet({ spreadsheetId, ranges })
+        );
+        const valueRanges = response.result?.valueRanges || [];
+        return ranges.map((_, i) => {
+            const values = valueRanges[i]?.values;
+            return Array.isArray(values) && values.length ? values : [[]];
+        });
+    }
+
+    /**
+     * values.batchUpdate: write several ranges in one request (same value input as setSheetData).
+     * Only the given ranges change; nothing is truncated.
+     * @param {string} tableId
+     * @param {Array<{ range: string, values: Array<Array<string>> }>} data
+     * @returns {Promise<boolean>}
+     */
+    static async batchSetValues(tableId, data) {
+        if (!(await GoogleSheetsAuth.checkAuth())) GoogleSheetsService._throwAuthError();
+        const spreadsheetId = window.ENDPOINT_IDS[tableId];
+        if (!spreadsheetId) throw new Error(`[GoogleSheetsData.batchSetValues] SPREADSHEET_NOT_FOUND: Spreadsheet ID not found for table: ${tableId}`);
+        if (!data || !data.length) return true;
+        await GoogleSheetsService.withExponentialBackoff(() =>
+            gapi.client.sheets.spreadsheets.values.batchUpdate({
+                spreadsheetId,
+                resource: { valueInputOption: 'USER_ENTERED', data }
+            })
+        );
+        return true;
+    }
+
+    /**
+     * Delete whole rows of one tab in a single request (bottom up, so the numbers stay valid).
+     * @param {string} tableId
+     * @param {string} tabName
+     * @param {number[]} rowNumbers - 1-based sheet rows
+     * @returns {Promise<boolean>}
+     */
+    static async deleteSheetRows(tableId, tabName, rowNumbers) {
+        if (!(await GoogleSheetsAuth.checkAuth())) GoogleSheetsService._throwAuthError();
+        const spreadsheetId = window.ENDPOINT_IDS[tableId];
+        if (!spreadsheetId) throw new Error(`[GoogleSheetsData.deleteSheetRows] SPREADSHEET_NOT_FOUND: Spreadsheet ID not found for table: ${tableId}`);
+        const rows = [...new Set((rowNumbers || []).map(Number).filter(n => Number.isInteger(n) && n > 1))].sort((a, b) => b - a);
+        if (!rows.length) return true;
+        const info = await GoogleSheetsService.withExponentialBackoff(() =>
+            gapi.client.sheets.spreadsheets.get({ spreadsheetId, includeGridData: false })
+        );
+        const sheet = (info.result?.sheets || []).find(s => s.properties.title === tabName);
+        if (!sheet) throw new Error(`[GoogleSheetsData.deleteSheetRows] SHEET_NOT_FOUND: ${tabName}`);
+        const requests = rows.map(n => ({
+            deleteDimension: { range: { sheetId: sheet.properties.sheetId, dimension: 'ROWS', startIndex: n - 1, endIndex: n } }
+        }));
+        await GoogleSheetsService.withExponentialBackoff(() =>
+            gapi.client.sheets.spreadsheets.batchUpdate({ spreadsheetId, resource: { requests } })
+        );
+        return true;
+    }
+
+    /**
      * Set sheet data from array of JS objects
      * @param {string} tableId
      * @param {string} tabName
@@ -371,8 +440,11 @@ export class GoogleSheetsService {
         if (typeof gapi === 'undefined' || !gapi.client?.sheets?.spreadsheets?.get) return;
         
         // Extract sheet name from range if provided (e.g., "Locks!D1:D1" -> "Locks")
-        const sheetName = tabName.includes('!') ? tabName.split('!')[0] : tabName;
-        const rangeSpec = tabName.includes('!') ? tabName.split('!')[1] : null;
+        // (the sheet name may be quoted: "'Production Schedule'!A5:A5")
+        const bang = tabName.lastIndexOf('!');
+        const quoted = bang >= 0 ? tabName.slice(0, bang) : tabName;
+        const sheetName = /^'.*'$/.test(quoted) ? quoted.slice(1, -1).replace(/''/g, "'") : quoted;
+        const rangeSpec = bang >= 0 ? tabName.slice(bang + 1) : null;
         
         // Parse range to determine required rows/cols if not explicitly provided
         if (rangeSpec && (requiredRows === null || requiredCols === null)) {
@@ -746,17 +818,16 @@ export class GoogleSheetsService {
     }
 
     /**
-     * Fetch a Drive file's content as an authenticated blob URL.
-     * Use this for any file that is not publicly shared — the blob URL
-     * works in <img> tags without needing auth headers.
+     * Fetch a Drive file's raw content as a Blob (authenticated — works for files that are not
+     * publicly shared). Wrap it with URL.createObjectURL to show it in an <img>.
      * @param {string} fileId - Google Drive file ID
-     * @returns {Promise<string|null>} A blob object URL, or null on failure
+     * @returns {Promise<Blob|null>} The file content, or null on failure
      */
-    static async getAuthenticatedImageUrl(fileId) {
+    static async getDriveFileBlob(fileId) {
         try {
             const token = gapi.client.getToken();
             if (!token || !token.access_token) {
-                console.warn('[icons] getAuthenticatedImageUrl: no token available');
+                console.warn('[icons] getDriveFileBlob: no token available');
                 return null;
             }
             const response = await fetch(
@@ -764,13 +835,12 @@ export class GoogleSheetsService {
                 { headers: { Authorization: `Bearer ${token.access_token}` } }
             );
             if (!response.ok) {
-                console.warn(`[icons] getAuthenticatedImageUrl failed for ${fileId}: HTTP ${response.status}`);
+                console.warn(`[icons] getDriveFileBlob failed for ${fileId}: HTTP ${response.status}`);
                 return null;
             }
-            const blob = await response.blob();
-            return URL.createObjectURL(blob);
+            return await response.blob();
         } catch (error) {
-            console.error('[icons] getAuthenticatedImageUrl error:', error);
+            console.error('[icons] getDriveFileBlob error:', error);
             return null;
         }
     }

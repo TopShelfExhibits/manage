@@ -1,5 +1,7 @@
-import { html, Requests, TableComponent, getReactiveStore, createAnalysisConfig, NavigationRegistry, Priority, invalidateCache, authState, undoRegistry, EditHistoryUtils, todayISOString, ProposalUtils, getInventoryNoteMaxLength } from '../../index.js';
+import { html, Requests, TableComponent, DataView, getReactiveStore, createAnalysisConfig, NavigationRegistry, Priority, invalidateCache, authState, undoRegistry, EditHistoryUtils, todayISOString, appSettings, ProposalUtils, getInventoryNoteMaxLength } from '../../index.js';
 import { sheetLockMixin } from '../../utils/sheetLockMixin.js';
+import { ThumbnailCache } from '../../utils/thumbnailCache.js';
+import { itemImageStyle, iconLabel } from '../../utils/views/viewStyles.js';
 import { getProposalsStore, reloadProposals, proposalPath } from '../../utils/inventoryProposals.js';
 
 /**
@@ -399,10 +401,12 @@ const NewItemNumberPrompt = {
 
 
 // Modal component for viewing a full-size thumbnail with a replace option
+// Shows the thumbnail right away and swaps in the full-size file once it downloads. The full-size
+// image is held only while the modal is open — it is freed on close, never cached.
 const ImageViewWithReplaceComponent = {
     props: {
         thumbnailUrl: { type: String, required: true },
-        itemNumber: { type: String, default: '' },
+        fileId: { type: String, required: true },
         onReplace: { type: Function, default: null }
     },
     data() {
@@ -414,9 +418,12 @@ const ImageViewWithReplaceComponent = {
         }
     },
     async mounted() {
-        if (this.itemNumber) {
-            this.fullImageUrl = await Requests.getItemImageBlobUrl(this.itemNumber) || null;
-        }
+        const blob = await Requests.getDriveFileBlob(this.fileId);
+        if (blob && !this._closed) this.fullImageUrl = URL.createObjectURL(blob);
+    },
+    beforeUnmount() {
+        this._closed = true;
+        if (this.fullImageUrl) URL.revokeObjectURL(this.fullImageUrl);
     },
     template: html`
         <img :src="displayUrl" alt="Image" style="max-width: 90vw; max-height: 70vh; object-fit: contain;" />
@@ -436,12 +443,12 @@ const ImageUploadComponent = {
             selectedFile: null,
             previewUrl: null,
             uploading: false,
-            uploadError: null
+            uploadError: null,
+            canReadClipboard: !!navigator.clipboard?.read
         };
     },
     methods: {
-        handleFileSelect(event) {
-            const file = event.target.files[0];
+        setSelectedFile(file) {
             if (!file) return;
             if (!file.type.startsWith('image/')) {
                 this.uploadError = 'Please select an image file.';
@@ -452,14 +459,70 @@ const ImageUploadComponent = {
             if (this.previewUrl) URL.revokeObjectURL(this.previewUrl);
             this.previewUrl = URL.createObjectURL(file);
         },
+        handleFileSelect(event) {
+            this.setSelectedFile(event.target.files[0]);
+        },
+        // Wrap a clipboard blob in a named File — _resizeImageFile and the Drive upload both expect one.
+        // The name is irrelevant: uploadItemImage renames the file to <itemNumber>.<ext>.
+        _fileFromClipboardBlob(blob, type) {
+            const ext = type === 'image/png' ? 'png' : 'jpg';
+            return new File([blob], `pasted.${ext}`, { type });
+        },
+        // Clear the file input so it doesn't keep showing a previously chosen file name
+        _clearFileInput() {
+            if (this.$refs.fileInput) this.$refs.fileInput.value = '';
+        },
+        async pasteFromClipboard() {
+            if (this.uploading) return;
+            try {
+                const items = await navigator.clipboard.read();
+                for (const item of items) {
+                    const type = item.types.find(t => t.startsWith('image/'));
+                    if (!type) continue;
+                    const blob = await item.getType(type);
+                    this.setSelectedFile(this._fileFromClipboardBlob(blob, type));
+                    this._clearFileInput();
+                    return;
+                }
+                this.uploadError = 'No image found on the clipboard.';
+            } catch (e) {
+                console.warn('[ImageUploadComponent] Clipboard read failed:', e);
+                this.uploadError = e.name === 'NotAllowedError'
+                    ? 'Clipboard access was blocked. Allow clipboard access in your browser\'s site settings, or press Ctrl+V.'
+                    : 'Could not read the clipboard.';
+            }
+        },
+        // Ctrl+V while the modal is open. Registered on window in the capture phase so it runs before
+        // tableComponent's document-level paste listener, and stops propagation so a paste made here
+        // never inserts spreadsheet rows into a table behind the modal.
+        handleWindowPaste(event) {
+            event.preventDefault();
+            event.stopPropagation();
+            if (this.uploading) return;
+            const data = event.clipboardData;
+            if (!data) return;
+            // clipboardData.files covers image data and, in some browsers, files copied in the OS file manager
+            let file = Array.from(data.files || []).find(f => f.type.startsWith('image/'));
+            if (!file) {
+                const item = Array.from(data.items || []).find(i => i.kind === 'file' && i.type.startsWith('image/'));
+                file = item?.getAsFile() || null;
+            }
+            if (!file) {
+                this.uploadError = 'No image found on the clipboard.';
+                return;
+            }
+            if (!file.name) file = this._fileFromClipboardBlob(file, file.type);
+            this.setSelectedFile(file);
+            this._clearFileInput();
+        },
         async handleUpload() {
             if (!this.selectedFile || this.uploading) return;
             this.uploading = true;
             this.uploadError = null;
             try {
-                const newUrl = await Requests.uploadItemImage(this.selectedFile, this.itemNumber);
-                if (newUrl) {
-                    this.onUploadSuccess?.(newUrl);
+                const uploaded = await Requests.uploadItemImage(this.selectedFile, this.itemNumber);
+                if (uploaded?.fileId) {
+                    this.onUploadSuccess?.(uploaded);
                     this.$emit('close-modal');
                 } else {
                     this.uploadError = 'Upload failed. Please try again.';
@@ -472,14 +535,21 @@ const ImageUploadComponent = {
             }
         }
     },
+    mounted() {
+        window.addEventListener('paste', this.handleWindowPaste, true);
+    },
     beforeUnmount() {
+        window.removeEventListener('paste', this.handleWindowPaste, true);
         if (this.previewUrl) URL.revokeObjectURL(this.previewUrl);
     },
     template: html`
         <div v-if="previewUrl" style="text-align: center;">
             <img :src="previewUrl" alt="Preview" style="max-width: 100%; max-height: 200px; object-fit: contain; border-radius: 4px;" />
         </div>
-        <input class="card" style="width:100%" type="file" accept="image/*" @change="handleFileSelect" :disabled="uploading" />
+        <div v-if="canReadClipboard" class="card clickable white" @click="pasteFromClipboard" :disabled="uploading" title="Or press Ctrl+V">
+            Paste from clipboard (ctrl + V)
+        </div>
+        <input ref="fileInput" class="card" style="width:100%" type="file" accept="image/*" @change="handleFileSelect" :disabled="uploading" />
         <div v-if="uploadError" class="red card">{{ uploadError }}</div>
         <div class="button-bar">
             <button @click="handleUpload" :disabled="!selectedFile || uploading">
@@ -490,113 +560,8 @@ const ImageUploadComponent = {
     `
 };
 
-// Mini global queue that throttles how many images can be decoding/rendering at once.
-// Chrome and Edge block the main thread when decoding multiple image blobs simultaneously.
-// IntersectionObserver can fire many callbacks at once during a scroll — this queue
-// ensures only MAX_CONCURRENT images actually become visible (and start decoding) at a time.
-// Items are sorted by Y position so top-of-viewport images decode first.
-const ImageRenderQueue = {
-    pending: [],
-    active: 0,
-    MAX_CONCURRENT: 3,
-
-    enqueue(fn, yPosition = 0) {
-        // Store both the function and its Y position for sorting
-        this.pending.push({ fn, y: yPosition });
-        // Sort by Y position (ascending — top of page first)
-        this.pending.sort((a, b) => a.y - b.y);
-        this._flush();
-    },
-
-    release() {
-        this.active = Math.max(0, this.active - 1);
-        this._flush();
-    },
-
-    cancel(targetFn) {
-        const i = this.pending.findIndex(item => item.fn === targetFn);
-        if (i !== -1) this.pending.splice(i, 1);
-    },
-
-    _flush() {
-        while (this.active < this.MAX_CONCURRENT && this.pending.length > 0) {
-            this.active++;
-            const item = this.pending.shift();
-            item.fn();
-        }
-    }
-};
-
-// Factory that creates a shared IntersectionObserver for an entire table component.
-// Each large table creates one of these and provides it to all descendant ItemImageComponents,
-// replacing hundreds of individual observers with a single one.
-// Components without a parent manager fall back to creating their own observer.
-export function createVisibilityManager() {
-    const callbacks = new Map(); // element → callback(y)
-    const observer = new IntersectionObserver(
-        (entries) => {
-            entries.forEach(entry => {
-                if (!entry.isIntersecting) return;
-                const cb = callbacks.get(entry.target);
-                if (cb) {
-                    callbacks.delete(entry.target);
-                    observer.unobserve(entry.target);
-                    // Pass the pre-calculated y from the IO entry — avoids a
-                    // forced synchronous layout recalculation (getBoundingClientRect).
-                    cb(entry.boundingClientRect.top);
-                }
-            });
-        },
-        { rootMargin: '100px', threshold: 0 }
-    );
-    return {
-        register(el, callback) {
-            callbacks.set(el, callback);
-            observer.observe(el);
-        },
-        unregister(el) {
-            if (callbacks.has(el)) {
-                callbacks.delete(el);
-                observer.unobserve(el);
-            }
-        },
-        destroy() {
-            observer.disconnect();
-            callbacks.clear();
-        }
-    };
-}
-
-// Shared singleton thumbnail store — loads the full Thumbnails table once and resolves
-// blob URLs via analysis. All ItemImageComponent instances share the same store instance.
-// Marked as exempt from eviction to prevent auto-clearing, similar to the dashboard store.
-// Lazy loading ensures images are only fetched when they scroll into view.
-function getThumbnailStore() {
-    return getReactiveStore(
-        Requests.getAllThumbnailRecords,
-        null,
-        [],
-        [
-            // Single analysis step: Convert file IDs to full blob URLs
-            createAnalysisConfig(
-                Requests.getDriveBlobUrl,
-                'blobUrl',
-                'Loading images...',
-                ['file'],
-                [],
-                null,
-                false,
-                Priority.BACKGROUND,
-                false,
-                false
-            )
-        ],
-        true,   // autoLoad
-        null,   // priorityConfig
-        true    // exemptFromEviction - prevent auto-clearing
-    );
-}
-
+// Item thumbnail. Resolves its Drive file through the shared ThumbnailCache (own record, else the
+// category prefix record) and only fetches once it is on or near the screen. See thumbnailCache.js.
 export const ItemImageComponent = {
     props: {
         itemNumber: {
@@ -613,183 +578,147 @@ export const ItemImageComponent = {
         }
     },
     inject: {
-        $modal: '$modal',
-        // Optionally injected by large table parents — replaces per-component IntersectionObserver
-        _tableVisibility: { from: '_tableVisibility', default: null }
+        $modal: '$modal'
     },
     data() {
         return {
-            thumbnailStore: null,
-            localImageUrl: null,    // Set immediately after upload for instant feedback
-            cachedImageUrl: null,   // Last known good image URL to prevent flashing during reload
-            cachedPrefixUrl: null,  // Last known good prefix URL to prevent flashing during reload
-            isVisible: false,       // Lazy loading: true once image is allowed to render
-            observer: null,         // Per-component IntersectionObserver (used when no parent manager)
-            _queueFn: null,         // Pending queue callback reference (for cancellation)
-            _holdsSlot: false       // Whether this component holds an active queue slot
+            imageUrl: null,         // Thumbnail URL currently shown (owned by ThumbnailCache — never revoke)
+            displayedFileId: null,  // File that imageUrl belongs to
+            pendingFileId: null,    // File currently requested from ThumbnailCache
+            uploadedFileId: null,   // File just uploaded here — shown until the records table catches up
+            fadeIn: false,          // True when the image arrived after mount, so it fades in
+            isVisible: false,
+            observing: false,
+            retriedFileId: null     // File already re-downloaded once after a decode error
         };
     },
     computed: {
-        record() {
-            return this.thumbnailStore?.data?.find(r => r.itemNumber === this.itemNumber) || null;
+        source() {
+            return ThumbnailCache.resolve(this.itemNumber);
         },
-        prefixRecord() {
-            if (!this.itemNumber) return null;
-            const prefix = this.itemNumber.split(/[\s\-_]+/)[0];
-            if (!prefix || prefix === this.itemNumber) return null;
-            return this.thumbnailStore?.data?.find(r => r.itemNumber === prefix) || null;
+        recordFileId() {
+            return this.source?.fileId || null;
         },
-        imageUrl() {
-            if (this.localImageUrl) return this.localImageUrl;
-            
-            // Lazy loading: don't fetch images until visible
-            if (!this.isVisible) return null;
-            
-            // During loading/analyzing, preserve the cached URL to avoid flashing
-            const isReloading = this.thumbnailStore?.isLoading || this.thumbnailStore?.isAnalyzing;
-            if (isReloading && this.cachedImageUrl) {
-                return this.cachedImageUrl;
-            }
-            
-            // Use full image URL
-            let newUrl = this.record?.AppData?.blobUrl || null;
-            
-            // Update cache if URL changed
-            if (newUrl && newUrl !== this.cachedImageUrl) {
-                this.cachedImageUrl = newUrl;
-            }
-            
-            return newUrl;
-        },
-        prefixImageUrl() {
-            if (this.imageUrl) return null;
-
-            // If this item has its own thumbnail record, never show the prefix fallback.
-            // Showing the prefix while waiting for the item's own analysis would cause a
-            // prefix→own transition (and a second blob URL load) once analysis resolves.
-            if (this.record?.file) return null;
-            
-            // Lazy loading: don't fetch images until visible
-            if (!this.isVisible) return null;
-            
-            // During loading/analyzing, preserve the cached prefix URL to avoid flashing
-            const isReloading = this.thumbnailStore?.isLoading || this.thumbnailStore?.isAnalyzing;
-            if (isReloading && this.cachedPrefixUrl) {
-                return this.cachedPrefixUrl;
-            }
-            
-            // Use full image URL
-            let newUrl = this.prefixRecord?.AppData?.blobUrl || null;
-            
-            // Update cache if URL changed
-            if (newUrl && newUrl !== this.cachedPrefixUrl) {
-                this.cachedPrefixUrl = newUrl;
-            }
-            
-            return newUrl;
+        fileId() {
+            return this.uploadedFileId || this.recordFileId;
         },
         isResolved() {
-            return !this.thumbnailStore?.isLoading && !this.thumbnailStore?.isAnalyzing;
+            return ThumbnailCache.isReady() && !this.pendingFileId;
         },
         realImageFound() {
-            return !!this.imageUrl;
+            return !!this.imageUrl && (!!this.uploadedFileId || !!this.source?.isOwn);
         },
         imageFound() {
-            return !!(this.imageUrl || this.prefixImageUrl);
+            return !!this.imageUrl;
+        },
+        downloadsEnabled() {
+            return !appSettings.onlyRunEssentialAnalysis;
         }
     },
+    created() {
+        ThumbnailCache.connect();
+    },
     mounted() {
-        this.thumbnailStore = getThumbnailStore();
-        this._setupVisibility();
+        this.refresh();
     },
     watch: {
         itemNumber() {
-            // Cancel any pending queue entry and release any held slot
-            if (this._queueFn) {
-                ImageRenderQueue.cancel(this._queueFn);
-                this._queueFn = null;
-            }
-            this._releaseSlot();
-
-            // Unregister from visibility system
-            if (this._tableVisibility) {
-                this._tableVisibility.unregister(this.$el);
-            } else if (this.observer) {
-                this.observer.disconnect();
-            }
-            
-            this.cachedImageUrl = null;
-            this.cachedPrefixUrl = null;
-            this.isVisible = false;
-            
-            // Re-register for the new item number
-            this._setupVisibility();
+            // Row reused for a different item — never show the previous item's image
+            this.cancelPending();
+            this.imageUrl = null;
+            this.displayedFileId = null;
+            this.uploadedFileId = null;
+            this.retriedFileId = null;
+            this.refresh();
         },
-        record(newRecord, oldRecord) {
-            // If the record changes (e.g., item deleted/recreated), clear cache
-            if (newRecord?.file !== oldRecord?.file) {
-                this.cachedImageUrl = null;
-                this.cachedPrefixUrl = null;
-            }
+        recordFileId(id) {
+            // The records table now has the upload; follow it again from here on
+            if (this.uploadedFileId && id === this.uploadedFileId) this.uploadedFileId = null;
+        },
+        fileId() {
+            // Records reloaded (new upload, prefix record added/removed). The current image stays
+            // up until the new one is ready, so reloads never flash the placeholder.
+            this.refresh();
+        },
+        downloadsEnabled(enabled) {
+            if (enabled) this.refresh();
         }
     },
     methods: {
-        _setupVisibility() {
-            const onVisible = (yPosition = 0) => {
-                const fn = () => {
-                    this._queueFn = null;
-                    this._holdsSlot = true;
-                    this.isVisible = true;
-                    this.$nextTick(() => {
-                        if (!this.imageUrl && !this.prefixImageUrl) {
-                            this._releaseSlot();
-                        }
-                    });
-                };
-                this._queueFn = fn;
-                ImageRenderQueue.enqueue(fn, yPosition);
-            };
+        refresh() {
+            const fileId = this.fileId;
+            if (!fileId) {
+                this.cancelPending();
+                this.stopObserving();
+                // Only clear once records have loaded — an unresolved table is not "no image"
+                if (ThumbnailCache.isReady()) {
+                    this.imageUrl = null;
+                    this.displayedFileId = null;
+                }
+                return;
+            }
+            if (fileId === this.displayedFileId) return;
 
-            if (this._tableVisibility) {
-                // Delegate to the parent table's shared observer
-                // The manager passes entry.boundingClientRect.top to avoid forced reflow.
-                this._tableVisibility.register(this.$el, onVisible);
+            const cached = ThumbnailCache.peek(fileId);
+            if (cached) {
+                this.cancelPending();
+                this.showImage(fileId, cached, false);
+                return;
+            }
+            if (!this.isVisible) {
+                // observe() reports the current state right away, which calls back into refresh()
+                this.startObserving();
+                return;
+            }
+            if (this.pendingFileId === fileId) return;
+
+            this.cancelPending();
+            this.pendingFileId = fileId;
+            ThumbnailCache.load(fileId).then(url => {
+                if (this.pendingFileId !== fileId) return; // superseded, cancelled, or unmounted
+                this.pendingFileId = null;
+                if (url) this.showImage(fileId, url, true);
+            });
+        },
+        showImage(fileId, url, fadeIn) {
+            this.imageUrl = url;
+            this.displayedFileId = fileId;
+            this.fadeIn = fadeIn;
+            this.stopObserving();
+        },
+        cancelPending() {
+            if (this.pendingFileId) {
+                ThumbnailCache.cancel(this.pendingFileId);
+                this.pendingFileId = null;
+            }
+        },
+        startObserving() {
+            if (this.observing || !this.$el) return;
+            this.observing = true;
+            ThumbnailCache.observeVisibility(this.$el, this.onVisibilityChange);
+        },
+        stopObserving() {
+            if (!this.observing) return;
+            this.observing = false;
+            this.isVisible = false;
+            ThumbnailCache.unobserveVisibility(this.$el);
+        },
+        onVisibilityChange(visible) {
+            this.isVisible = visible;
+            if (visible) {
+                this.refresh();
             } else {
-                // Fallback: per-component observer for components outside large tables
-                this.observer = new IntersectionObserver(
-                    (entries) => {
-                        entries.forEach(entry => {
-                            if (entry.isIntersecting) {
-                                this.observer.disconnect();
-                                onVisible(entry.boundingClientRect.top);
-                            }
-                        });
-                    },
-                    { rootMargin: '100px', threshold: 0 }
-                );
-                this.observer.observe(this.$el);
+                // Scrolled away before the download started — free the slot for images still on screen
+                this.cancelPending();
             }
-        },
-        _releaseSlot() {
-            if (this._holdsSlot) {
-                this._holdsSlot = false;
-                ImageRenderQueue.release();
-            }
-        },
-        onImageSettled() {
-            // Called on @load or @error — signal the queue that this slot is free
-            this._releaseSlot();
-        },
-        clearLocalImageUrl() {
-            if (this.localImageUrl?.startsWith('blob:')) URL.revokeObjectURL(this.localImageUrl);
-            this.localImageUrl = null;
         },
         showImageModal() {
             if (this.realImageFound) {
                 this.$modal.custom(ImageViewWithReplaceComponent, {
                     thumbnailUrl: this.imageUrl,
-                    itemNumber: this.itemNumber,
-                    modalClass: 'page-menu',
+                    fileId: this.displayedFileId,
+                    size: 'page',
+                    tall: true,
                     onReplace: (this.editable && this.itemNumber) ? () => this.showUploadModal() : null
                 }, `Image: ${this.itemNumber}`);
             }
@@ -801,52 +730,30 @@ export const ItemImageComponent = {
             this.$modal.custom(ImageUploadComponent, {
                 itemNumber: this.itemNumber,
                 mode,
-                onUploadSuccess: (url) => {
-                    this.clearLocalImageUrl();
-                    this.localImageUrl = url;
-                    this.cachedImageUrl = url;      // Update cache so new URL shows immediately
-                    this.cachedPrefixUrl = null;    // No longer need prefix
-                    this.isVisible = true;          // Ensure uploaded image shows immediately
+                onUploadSuccess: async ({ fileId, file }) => {
+                    // Show the uploaded image straight from the file that was sent to Drive
+                    const url = await ThumbnailCache.seed(fileId, file);
+                    this.cancelPending();
+                    this.retriedFileId = null;
+                    this.uploadedFileId = fileId;
+                    if (url) this.showImage(fileId, url, true);
                 }
             }, title);
         },
-        async handleError(isMainImage) {
-            // Release the queue slot immediately — refetch is async and shouldn't block others
-            this._releaseSlot();
-            
-            // Blob URL became stale — re-fetch from the stored Drive file ID
-            const fileId = this.record?.file;
-            if (!fileId) return;
-            
-            // Clear cache since we're intentionally refetching
-            this.cachedImageUrl = null;
-            this.cachedPrefixUrl = null;
-            
-            // Invalidate and refetch full image
-            invalidateCache([{ namespace: 'database', methodName: 'getDriveBlobUrl', args: [fileId] }]);
-            const fresh = await Requests.getDriveBlobUrl(fileId);
-            if (fresh) {
-                this.clearLocalImageUrl();
-                this.localImageUrl = fresh;
-                this.cachedImageUrl = fresh;
-            }
+        handleError() {
+            // The stored thumbnail didn't decode. Drop it and download once more; give up after that.
+            const fileId = this.displayedFileId;
+            this.imageUrl = null;
+            this.displayedFileId = null;
+            if (!fileId || this.retriedFileId === fileId) return;
+            this.retriedFileId = fileId;
+            ThumbnailCache.discard(fileId);
+            this.refresh();
         }
     },
     beforeUnmount() {
-        if (this._queueFn) {
-            ImageRenderQueue.cancel(this._queueFn);
-            this._queueFn = null;
-        }
-        this._releaseSlot();
-
-        if (this._tableVisibility) {
-            this._tableVisibility.unregister(this.$el);
-        } else if (this.observer) {
-            this.observer.disconnect();
-            this.observer = null;
-        }
-        
-        this.clearLocalImageUrl();
+        this.cancelPending();
+        this.stopObserving();
     },
     template: html`
         <div
@@ -855,39 +762,22 @@ export const ItemImageComponent = {
             @click="realImageFound ? showImageModal() : (editable && isResolved ? showUploadModal() : null)"
             :title="realImageFound ? 'Expand image' : (editable && isResolved ? 'Upload thumbnail' : '')"
         >
-            <!-- Transition group handles all fade-in/fade-out automatically -->
-            <transition-group name="longfade">
-                <img
-                    v-if="prefixImageUrl"
-                    :key="prefixImageUrl"
-                    class="image-layer"
-                    :src="prefixImageUrl"
-                    alt="Category Image"
-                    decoding="async"
-                    @load="onImageSettled"
-                    @error="handleError(false)"
-                />
-
-                <img
-                    v-else-if="imageUrl"
-                    :key="imageUrl"
-                    class="image-layer"
-                    :src="imageUrl"
-                    alt="Item Image"
-                    decoding="async"
-                    @load="onImageSettled"
-                    @error="handleError(true)"
-                />
-
-                <img
-                    v-else
-                    :key="'placeholder'"
-                    class="image-layer"
-                    src="assets/placeholder.png"
-                    alt="Placeholder"
-                    decoding="async"
-                />
-            </transition-group>
+            <img
+                v-if="imageUrl"
+                :key="imageUrl"
+                :class="['image-layer', { 'image-fade-in': fadeIn }]"
+                :src="imageUrl"
+                :alt="realImageFound ? 'Item Image' : 'Category Image'"
+                decoding="async"
+                @error="handleError"
+            />
+            <img
+                v-else
+                class="image-layer"
+                src="assets/placeholder.png"
+                alt="Placeholder"
+                decoding="async"
+            />
         </div>
     `
 };
@@ -908,18 +798,74 @@ function formatHistoryTime(deciseconds) {
     });
 }
 
+// Inventory category table view (views-and-renderers-plan §5, Phase 4). Batch edit mode.
+const INVENTORY_TABLE_VIEWS = {
+    id: 'inventory-category',
+    default: 'table',
+    theme: 'purple',
+    views: [{
+        id: 'table',
+        name: 'Items',
+        layout: 'table',
+        columns: ['image', 'itemNumber', 'quantity', 'description', 'notes'],
+        sortable: ['itemNumber', 'quantity', 'description'],
+        style: {
+            image: itemImageStyle('itemNumber', { size: 64, editable: true }),
+            itemNumber: { width: 120 },
+            quantity: { width: 120 }
+        },
+        table: { sticky: { start: ['image'] } },
+        sort: { key: 'itemNumber', dir: 'asc' }
+    }]
+};
+
+// Edit History page (historyMode): the category table's columns, then revert and the change that
+// produced each row's values. The page draws the history columns (#cell).
+const historyMeta = (width) => ({ width, cell: 'slot', columnColor: 'history-meta' });
+const INVENTORY_HISTORY_VIEWS = {
+    id: 'inventory-edit-history',
+    default: 'table',
+    theme: 'purple',
+    views: [{
+        ...INVENTORY_TABLE_VIEWS.views[0],
+        name: 'Edit History',
+        columns: [...INVENTORY_TABLE_VIEWS.views[0].columns, '_revert', '_historyDate', '_historyUser', '_historyNote'],
+        style: {
+            ...INVENTORY_TABLE_VIEWS.views[0].style,
+            _revert: { width: 36, labelHtml: iconLabel('history'), cell: 'slot' },
+            _historyDate: historyMeta(160),
+            _historyUser: historyMeta(90),
+            _historyNote: historyMeta(160)
+        }
+    }]
+};
+
+// Edit History page: rows deleted from the category (the _EditHistory archive), read only
+const INVENTORY_DELETED_VIEWS = {
+    id: 'inventory-deleted',
+    default: 'table',
+    theme: 'purple',
+    views: [{
+        id: 'table',
+        name: 'Deleted items',
+        layout: 'table',
+        columns: ['itemNumber', 'quantity', 'description', 'notes', 'deletedAt', 'deletedBy'],
+        style: {
+            itemNumber: { width: 120 },
+            quantity: { width: 80 },
+            deletedAt: historyMeta(160),
+            deletedBy: historyMeta(90)
+        }
+    }]
+};
+
 export const InventoryTableComponent = {
     mixins: [sheetLockMixin],
     components: {
-        TableComponent,
+        DataView,
         ItemImageComponent
     },
     inject: ['appContext', '$modal', '$notify'],
-    provide() {
-        return {
-            _tableVisibility: this._visibilityManager
-        };
-    },
     props: {
         containerPath: {
             type: String,
@@ -933,10 +879,6 @@ export const InventoryTableComponent = {
             type: String,
             default: undefined
         },
-        editMode: {
-            type: Boolean,
-            default: true
-        },
         // Edit History page: read-only past states under each item, with revert
         historyMode: {
             type: Boolean,
@@ -949,91 +891,67 @@ export const InventoryTableComponent = {
             proposalsStore: null,
             archivedRows: [],
             revertNote: '',
+            INVENTORY_DELETED_VIEWS,
             lockNamespace: 'INVENTORY',
-            tabMetaFlags: { hideQuantity: false, hideItemNumber: false },
-            _visibilityManager: createVisibilityManager()
+            tabMetaFlags: { hideQuantity: false, hideItemNumber: false }
         };
     },
     computed: {
-        columns() {
-            // Dynamically set columns' editable property based on allowEdit
-            let cols = [
-                { 
-                    key: 'image', 
-                    labelHtml: '<span class="material-symbols-outlined">imagesmode</span>',
-                    label: 'IMG',
-                    width: 1,
-                    sortable: false,
-                    sticky: 'start'
-                },
-                { 
-                    key: 'itemNumber', 
-                    label: 'Item#',
-                    type: 'item',
-                    width: 120,
-                    sortable: true
-                },
-                {
-                    key: 'quantity',
-                    label: 'Qty',
-                    format: 'number',
-                    historyField: true,
-                    editable: this.allowEdit,
-                    autoColor: false,
-                    width: 120,
-                    sortable: true
-                },
-                { 
-                    key: 'description',
-                    label: 'Description (visible in pack lists)',
-                    historyField: true,
-                    editable: this.allowEdit,
-                    sortable: true
-                },
-                { 
-                    key: 'notes',
-                    label: 'Notes (internal only)',
-                    historyField: true,
-                    editable: this.allowEdit,
-                    sortable: false
-                },
-                {
-                    key: '_navigate',
-                    labelHtml: '<span class="material-symbols-outlined">calendar_month</span>',
-                    label: '',
-                    width: 36,
-                    sortable: false,
-                    sticky: 'end'
-                }
+        // What each inventory key is; edits apply only while the page's edit mode is 'batch' (§4.16).
+        // image holds no data: the thumbnail column (see itemImageStyle). The Edit History page adds
+        // its revert and history columns, which hold no data either.
+        fields() {
+            const fields = [
+                { key: 'image', label: 'IMG' },
+                { key: 'itemNumber', label: 'Item#', type: 'item' },
+                { key: 'quantity', label: 'Qty', format: 'number', type: 'number', editable: true },
+                { key: 'description', label: 'Description (visible in pack lists)', editable: true },
+                { key: 'notes', label: 'Notes (internal only)', editable: true }
             ];
             if (this.historyMode) {
-                // No item timeline button; history metadata and revert columns at the end
-                cols = cols.filter(c => c.key !== '_navigate');
-                // Main row: mark values that differ from the saved row (unsaved revert)
-                cols = cols.map(c => c.historyField ? {
-                    ...c,
-                    cellClass: (value, row) => row && this.unsavedFields(row).has(c.key) ? 'history-unsaved' : ''
-                } : c);
-                const meta = () => 'history-meta';
-                cols.push(
-                    {
-                        key: '_revert',
-                        labelHtml: '<span class="material-symbols-outlined">history</span>',
-                        label: '',
-                        width: 36,
-                        sortable: false
-                    },
-                    { key: '_historyDate', label: 'Date', width: 160, sortable: false, cellClass: meta },
-                    { key: '_historyUser', label: 'User', width: 90, sortable: false, cellClass: meta },
-                    { key: '_historyNote', label: 'Note', width: 160, sortable: false, cellClass: meta }
+                fields.push(
+                    { key: '_revert', label: '' },
+                    { key: '_historyDate', label: 'Date' },
+                    { key: '_historyUser', label: 'User' },
+                    { key: '_historyNote', label: 'Note' }
                 );
             }
-            // Apply column filters based on metadata flags
-            return cols.filter(c => {
-                if (this.tabMetaFlags.hideQuantity && c.key === 'quantity') return false;
-                if (this.tabMetaFlags.hideItemNumber && c.key === 'itemNumber') return false;
-                return true;
-            });
+            return fields;
+        },
+        registry() {
+            return this.historyMode ? INVENTORY_HISTORY_VIEWS : INVENTORY_TABLE_VIEWS;
+        },
+        // Row action: the item's timeline (the standard action button under a calendar header icon).
+        // The Edit History page has none.
+        timelineAction() {
+            if (this.historyMode) return null;
+            return {
+                to: (row) => (row.itemNumber && this.tabTitle) ? `inventory/${this.tabTitle.toLowerCase()}/${row.itemNumber}` : null,
+                disabled: (row) => !row.itemNumber,
+                headerIcon: 'calendar_month',
+                title: 'View item timeline'
+            };
+        },
+        // Tab metadata flags hide columns for this tab (data configuration → a view patch)
+        viewPatches() {
+            const hide = [];
+            if (this.tabMetaFlags.hideQuantity) hide.push('quantity');
+            if (this.tabMetaFlags.hideItemNumber) hide.push('itemNumber');
+            if (!hide.length) return [];
+            return [{ patch: { columns: this.registry.views[0].columns.filter(k => !hide.includes(k)), hidden: hide } }];
+        },
+        editModeName() {
+            return this.allowEdit ? 'batch' : 'none';
+        },
+        deletedFields() {
+            return [
+                { key: 'itemNumber', label: 'Item#', type: 'item' },
+                { key: 'quantity', label: 'Qty', format: 'number' },
+                { key: 'description', label: 'Description' },
+                { key: 'notes', label: 'Notes' },
+                { key: 'deletedAt', label: 'Deleted' },
+                { key: 'deletedBy', label: 'By' }
+            ];
         },
         tableData() {
             return this.inventoryTableStore ? this.inventoryTableStore.data : [];
@@ -1057,16 +975,6 @@ export const InventoryTableComponent = {
                 map.get(entry.itemNumber).push(entry);
             }
             return map;
-        },
-        deletedColumns() {
-            return [
-                { key: 'itemNumber', label: 'Item#', width: 120 },
-                { key: 'quantity', label: 'Qty', width: 80 },
-                { key: 'description', label: 'Description' },
-                { key: 'notes', label: 'Notes' },
-                { key: 'deletedAt', label: 'Deleted', width: 160, cellClass: () => 'history-meta' },
-                { key: 'deletedBy', label: 'By', width: 90, cellClass: () => 'history-meta' }
-            ];
         },
         deletedRows() {
             return this.archivedRows.map(entry => ({
@@ -1143,8 +1051,8 @@ export const InventoryTableComponent = {
             ];
         },
         allowEdit() {
-            // Allow editing only if editMode is true AND not locked by another user AND lock check is complete
-            return this.editMode && !this.lockedByOther && this.lockCheckComplete;
+            // Inventory is always in edit mode, unless another user or device holds the lock
+            return !this.lockedByOther && this.lockCheckComplete;
         },
         allowSave() {
             const result = this.isDirty && !this.lockedByOther && this.lockCheckComplete;
@@ -1203,31 +1111,11 @@ export const InventoryTableComponent = {
     },
     beforeUnmount() {
         this.$notify.clearBanners(this.containerPath);
-        this._visibilityManager.destroy();
     },
     methods: {
-        onForeignLockWhileClean() {
-            if (!this.appContext?.navigateToPath) return;
-
-            const viewPath = NavigationRegistry.buildPathWithCurrentParams(
-                this.containerPath,
-                this.appContext?.currentPath,
-                { edit: undefined }
-            );
-            this.appContext.navigateToPath(viewPath);
-        },
-
-        onLockAcquireFailed(lockInfo) {
+        onLockAcquireFailed() {
             if (this.inventoryTableStore) {
                 this.inventoryTableStore.setData(this.inventoryTableStore.originalData);
-            }
-            if (this.appContext?.navigateToPath) {
-                const viewPath = NavigationRegistry.buildPathWithCurrentParams(
-                    this.containerPath,
-                    this.appContext?.currentPath,
-                    { edit: undefined }
-                );
-                this.appContext.navigateToPath(viewPath);
             }
         },
 
@@ -1253,11 +1141,11 @@ export const InventoryTableComponent = {
             );
         },
         
-        async handleCellEdit(rowIdx, colIdx, value) {
+        // cell-edit contract: (rowIndex, columnKey, value) — keyed by column, not position (fixes D4)
+        async handleCellEdit(rowIdx, colKey, value) {
             const user = authState.user?.email;
             if (!user || !this.tabTitle) return;
 
-            const colKey = this.columns[colIdx]?.key;
             const originalValue = colKey && this.inventoryTableStore ? this.inventoryTableStore.data[rowIdx]?.[colKey] : undefined;
 
             // Apply the value immediately to prevent flicker during async lock operations.
@@ -1286,7 +1174,7 @@ export const InventoryTableComponent = {
                 onConfirm: (itemNumber) => {
                     this.addNewRow(itemNumber, positionData);
                 },
-                modalClass: ''
+                size: 'card'
             }, 'New Item');
         },
         
@@ -1602,9 +1490,13 @@ export const InventoryTableComponent = {
             return this.historyMeta(this.historyByItem.get(row.itemNumber)?.[0]?.entry);
         },
 
+        isHistoryField(key) {
+            return HISTORY_FIELDS.includes(key);
+        },
+
         // Leading visible columns without history fields (image, item#) share one label cell
         leadingSpan(visibleColumns) {
-            const index = visibleColumns.findIndex(col => col.historyField);
+            const index = visibleColumns.findIndex(col => this.isHistoryField(col.key));
             return index === -1 ? visibleColumns.length : index;
         },
 
@@ -1659,14 +1551,16 @@ export const InventoryTableComponent = {
     },
     template: html `
         <slot>
-            <TableComponent
+            <DataView
                 ref="tableComponent"
-                theme="purple"
-                :data="tableData"
+                :fields="fields"
+                :rows="tableData"
+                :registry="registry"
+                :action="timelineAction"
+                :patches="viewPatches"
+                :edit-mode="editModeName"
                 :title="inventoryName || tabTitle"
-                :originalData="originalData"
-                :columns="columns"
-                default-sort-column="itemNumber"
+                :original-data="originalData"
                 :isLoading="isLoading"
                 :error="error"
                 :showRefresh="true"
@@ -1677,12 +1571,11 @@ export const InventoryTableComponent = {
                 :navigate-to-path="appContext.navigateToPath"
                 :newRow="allowEdit"
                 :external-dirty-state="isDirty"
-                :allowDetails="true"
-                :forceDetails="editMode || historyMode"
+                :forceDetails="true"
                 :rowDetailsVisible="hasDetailRows"
                 emptyMessage="No inventory items found"
                 :loading-message="loadingMessage"
-                class="inventory-table-component mark-dirty"
+                class="inventory-table-component"
                 @refresh="handleRefresh"
                 @cell-edit="handleCellEdit"
                 @new-row="handleNewRow"
@@ -1691,24 +1584,12 @@ export const InventoryTableComponent = {
                 <template #header-area>
                     <div class="button-bar" style="display: none;"></div>
                 </template>
-                <template #default="{ row, column, rowIndex, cellRowIndex, cellColIndex }">
-                    <ItemImageComponent 
-                        v-if="column.key === 'image'"
-                        :itemNumber="row.itemNumber"
-                        :editable="true"
-                    />
-                    <button
-                        v-else-if="column.key === '_navigate'"
-                        class="button-symbol purple"
-                        @click.stop="navigateToItemPage(row)"
-                        title="View item timeline"
-                    >☷</button>
-                    <span v-else-if="column.key === '_historyDate'" :class="{ 'history-unsaved-label': currentHistoryMeta(row).unsaved }">{{ currentHistoryMeta(row).date }}</span>
-                    <span v-else-if="column.key === '_historyUser'">{{ currentHistoryMeta(row).user }}</span>
-                    <span v-else-if="column.key === '_historyNote'">{{ currentHistoryMeta(row).note }}</span>
-                    <span v-else-if="column.key === '_revert'"></span>
+                <template #cell="{ row, field }">
+                    <span v-if="field.key === '_historyDate'" :class="['history-meta', { 'history-unsaved-label': currentHistoryMeta(row).unsaved }]">{{ currentHistoryMeta(row).date }}</span>
+                    <span v-else-if="field.key === '_historyUser'" class="history-meta">{{ currentHistoryMeta(row).user }}</span>
+                    <span v-else-if="field.key === '_historyNote'" class="history-meta">{{ currentHistoryMeta(row).note }}</span>
                 </template>
-                <template #row-detail-rows="{ row, visibleColumns }">
+                <template #row-detail-rows="{ row, visibleColumns, hasActionCell }">
                     <tr
                         v-for="(detail, i) in getDetailRows(row)"
                         :key="i"
@@ -1725,7 +1606,7 @@ export const InventoryTableComponent = {
                                 'history-meta': column.key.startsWith('_history')
                             }"
                         >
-                            <template v-if="column.historyField">
+                            <template v-if="isHistoryField(column.key)">
                                 <span
                                     v-if="detail.changed.has(column.key) && String(detail.fields[column.key] ?? '').trim() === ''"
                                     class="history-empty"
@@ -1741,8 +1622,11 @@ export const InventoryTableComponent = {
                                 @click.stop="revertToState(row, detail)"
                                 title="Revert to this state (undoes every newer change)"
                             >↶</button>
+                        </td>
+                        <!-- Under the row action (item timeline): a proposal row opens its proposal -->
+                        <td v-if="hasActionCell">
                             <button
-                                v-else-if="column.key === '_navigate' && detail.proposal"
+                                v-if="detail.proposal"
                                 class="button-symbol purple"
                                 @click.stop="openProposal(detail.proposal)"
                                 :title="'Open the ' + detail.proposal.proposal + ' proposal'"
@@ -1750,18 +1634,22 @@ export const InventoryTableComponent = {
                         </td>
                     </tr>
                 </template>
-            </TableComponent>
-            <TableComponent
+            </DataView>
+            <DataView
                 v-if="historyMode && deletedRows.length > 0"
-                theme="purple"
+                :fields="deletedFields"
+                :rows="deletedRows"
+                :registry="INVENTORY_DELETED_VIEWS"
                 title="Deleted items"
-                :data="deletedRows"
-                :columns="deletedColumns"
                 :showSearch="false"
                 :showRefresh="false"
                 emptyMessage="No deleted items"
                 class="inventory-deleted-rows"
-            />
+            >
+                <template #cell="{ row, field }">
+                    <span class="history-meta">{{ row[field.key] }}</span>
+                </template>
+            </DataView>
         </slot>
     `
 };

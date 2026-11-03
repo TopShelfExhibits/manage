@@ -42,7 +42,7 @@ export const NotificationBubbleOverlay = {
                 'Notification',
                 banner.action ? banner.action.label : 'OK',
                 cancelText,
-                `reading-menu small-menu alert-modal ${banner.color}`
+                `reading-menu alert-modal ${banner.color}`
             );
         },
 

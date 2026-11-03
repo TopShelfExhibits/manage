@@ -1,7 +1,7 @@
-import { html, Requests, TableComponent, CardsComponent, ItemImageComponent, getReactiveStore, ProposalUtils, PROPOSAL_LOCK_NAMESPACE, parseDate, todayISOString, getInventoryNoteMaxLength } from '../../index.js';
+import { html, Requests, DataView, getReactiveStore, ProposalUtils, PROPOSAL_LOCK_NAMESPACE, parseDate, todayISOString, getInventoryNoteMaxLength } from '../../index.js';
 import { sheetLockMixin } from '../../utils/sheetLockMixin.js';
 import { getProposalsStore, reloadProposals, proposalPath, commitInventoryProposal } from '../../utils/inventoryProposals.js';
-import { escapeHtml } from '../../utils/useSearch.js';
+import { itemImageStyle } from '../../utils/views/viewStyles.js';
 import { InventorySaveModal } from './InventoryTable.js';
 
 /**
@@ -14,38 +14,66 @@ const formatDay = (deciseconds) => (deciseconds
     : '');
 const titleCase = (tab) => tab.charAt(0).toUpperCase() + tab.slice(1).toLowerCase();
 
-/** reports/inventory-proposals — one card per proposal, active first, committed (gray) last */
+// What each proposal card key is. _summary, _status and _committed are derived on a computed copy.
+const PROPOSAL_FIELDS = [
+    { key: 'name', label: 'Proposal' },
+    { key: '_summary', label: 'Items' },
+    { key: '_status', label: 'Status' },
+    { key: '_committed', label: 'Committed' }
+];
+
+// One card per proposal, active first (purple), committed last (gray)
+const PROPOSAL_GRID_VIEWS = {
+    id: 'inventory-proposals',
+    default: 'cards',
+    theme: 'purple',
+    views: [{
+        id: 'cards',
+        name: 'Inventory Proposals',
+        layout: 'cards',
+        cards: { card: [['name'], ['_summary']], footer: [['_status']] },
+        hidden: ['_committed'],
+        rowColor: { field: '_committed', rule: 'checked:gray', fallback: 'purple' },
+        action: 'row'
+    }]
+};
+
+/** reports/inventory-proposals — one card per proposal */
 export const InventoryProposalsGrid = {
-    components: { 'cards-grid': CardsComponent },
+    components: { DataView },
     props: {
         containerPath: { type: String, default: 'reports/inventory-proposals' },
         navigateToPath: Function
     },
     data() {
-        return { proposalsStore: getProposalsStore() };
+        return {
+            proposalsStore: getProposalsStore(),
+            PROPOSAL_FIELDS,
+            PROPOSAL_GRID_VIEWS,
+            proposalAction: { to: (row) => proposalPath(row.name) }
+        };
     },
     computed: {
-        proposals() {
-            return ProposalUtils.groupProposals(this.proposalsStore.data || []);
-        },
-        cards() {
-            return this.proposals.map(proposal => ({
-                id: proposal.slug,
-                title: proposal.name,
-                content: escapeHtml(`${proposal.itemCount} item${proposal.itemCount === 1 ? '' : 's'} in ${proposal.categories.map(titleCase).join(', ')}`),
-                contentFooter: escapeHtml(proposal.committed
+        // groupProposals orders them: active first, then committed
+        proposalRows() {
+            return ProposalUtils.groupProposals(this.proposalsStore.data || []).map(proposal => ({
+                name: proposal.name,
+                _summary: `${proposal.itemCount} item${proposal.itemCount === 1 ? '' : 's'} in ${proposal.categories.map(titleCase).join(', ')}`,
+                _status: proposal.committed
                     ? `Committed by ${proposal.committedBy} on ${formatDay(proposal.committed)}`
-                    : `Updated by ${proposal.updatedBy} on ${formatDay(proposal.updated)}`),
-                cardClass: proposal.committed ? 'gray' : 'button purple',
-                onClick: () => this.navigateToPath?.(proposalPath(proposal.name))
+                    : `Updated by ${proposal.updatedBy} on ${formatDay(proposal.updated)}`,
+                _committed: !!proposal.committed
             }));
         }
     },
     template: html`
-        <cards-grid
-            :items="cards"
-            :on-item-click="() => {}"
+        <DataView
+            :fields="PROPOSAL_FIELDS"
+            :rows="proposalRows"
+            :registry="PROPOSAL_GRID_VIEWS"
+            :action="proposalAction"
             :is-loading="proposalsStore.isLoading"
+            :show-header="false"
             empty-message="No proposals yet. Save inventory edits as a proposal from a category's Save dialog."
             :container-path="containerPath"
             :navigate-to-path="navigateToPath"
@@ -53,13 +81,59 @@ export const InventoryProposalsGrid = {
     `
 };
 
+// What each proposal row key is (ProposalUtils.toTableRow). image, _projected and _remove hold no
+// data: the thumbnail, the projected quantity and the remove button (the page draws the last two).
+const PROPOSAL_TABLE_FIELDS = [
+    { key: 'image', label: 'I' },
+    { key: 'category', label: 'Category' },
+    { key: 'itemNumber', label: 'Item#', type: 'item' },
+    { key: 'currentQuantity', label: 'Current Qty' },
+    { key: 'quantityChange', label: 'Change', format: 'number', type: 'number', editable: true },
+    { key: '_projected', label: 'Projected Qty' },
+    { key: 'description', label: 'Description', editable: true },
+    { key: 'notes', label: 'Notes', editable: true },
+    { key: '_remove', label: '' }
+];
+
+// The proposal's item changes. Batch edit mode while active; committed proposals drop the
+// projection and remove columns (a view patch).
+const PROPOSAL_TABLE_VIEWS = {
+    id: 'inventory-proposal',
+    default: 'table',
+    theme: 'purple',
+    views: [{
+        id: 'table',
+        name: 'Proposal',
+        layout: 'table',
+        columns: ['image', 'category', 'itemNumber', 'currentQuantity', 'quantityChange', '_projected', 'description', 'notes', '_remove'],
+        details: [],
+        hidden: 'rest',
+        sortable: ['category', 'itemNumber', 'currentQuantity', 'quantityChange', 'description'],
+        style: {
+            image: itemImageStyle('itemNumber', { size: 32 }),
+            category: { width: 130 },
+            itemNumber: { width: 120 },
+            currentQuantity: { width: 90, cell: 'slot' },
+            quantityChange: { width: 100, color: 'sign:proposal-increase:proposal-decrease' },
+            _projected: { width: 110, cell: 'slot' },
+            // Proposed text that differs from the item's current text
+            description: { color: 'differs:currentDescription:proposal-changed' },
+            notes: { color: 'differs:currentNotes:proposal-changed' },
+            _remove: { width: 36, cell: 'slot' }
+        },
+        table: { sticky: { start: ['image'], end: ['_remove'] } },
+        sort: { key: 'category', dir: 'asc' }
+    }]
+};
+const COMMITTED_COLUMNS = PROPOSAL_TABLE_VIEWS.views[0].columns.filter(key => key !== '_projected' && key !== '_remove');
+
 /**
  * reports/inventory-proposals/<slug> — one table of the proposal's item changes.
  * Editable with the standard lock and Save/Discard; Commit applies it to inventory.
  */
 export const InventoryProposalTable = {
     mixins: [sheetLockMixin],
-    components: { TableComponent, ItemImageComponent },
+    components: { DataView },
     inject: ['appContext', '$modal', '$notify'],
     props: {
         proposalSlug: { type: String, required: true },
@@ -73,7 +147,9 @@ export const InventoryProposalTable = {
             lockNamespace: PROPOSAL_LOCK_NAMESPACE,
             projectionDate: todayISOString(),
             todayISO: todayISOString(),
-            committing: false
+            committing: false,
+            PROPOSAL_TABLE_FIELDS,
+            PROPOSAL_TABLE_VIEWS
         };
     },
     computed: {
@@ -109,6 +185,13 @@ export const InventoryProposalTable = {
         allowEdit() {
             return !this.isCommitted && !this.lockedByOther && this.lockCheckComplete;
         },
+        editModeName() {
+            return this.allowEdit ? 'batch' : 'none';
+        },
+        // Committed changes are already in Current Qty, so only active proposals project
+        viewPatches() {
+            return this.isCommitted ? [{ patch: { columns: COMMITTED_COLUMNS } }] : [];
+        },
         tableData() {
             return this.tableStore ? this.tableStore.data : [];
         },
@@ -118,43 +201,6 @@ export const InventoryProposalTable = {
         projectionDeciseconds() {
             const date = parseDate(this.projectionDate) || new Date();
             return Math.floor(date.getTime() / 100);
-        },
-        columns() {
-            const changedFrom = (currentKey) => (value, row) => (
-                row && String(value ?? '') !== String(row[currentKey] ?? '') ? 'proposal-changed' : ''
-            );
-            return [
-                // Read-only thumbnail, as on the inventory overview table
-                {
-                    key: 'image',
-                    labelHtml: '<span class="material-symbols-outlined">imagesmode</span>',
-                    label: 'I',
-                    width: 1,
-                    sortable: false,
-                    sticky: 'start'
-                },
-                { key: 'category', label: 'Category', width: 130, sortable: true },
-                { key: 'itemNumber', label: 'Item#', type: 'item', width: 120, sortable: true },
-                { key: 'currentQuantity', label: 'Current Qty', width: 90, sortable: true },
-                {
-                    key: 'quantityChange',
-                    label: 'Change',
-                    format: 'number',
-                    editable: this.allowEdit,
-                    autoColor: false,
-                    width: 100,
-                    sortable: true,
-                    cellClass: (value) => {
-                        const delta = parseFloat(value) || 0;
-                        return delta > 0 ? 'proposal-increase' : delta < 0 ? 'proposal-decrease' : '';
-                    }
-                },
-                // Committed changes are already in Current Qty, so only active proposals project
-                ...(this.isCommitted ? [] : [{ key: '_projected', label: 'Projected Qty', width: 110, sortable: false }]),
-                { key: 'description', label: 'Description', editable: this.allowEdit, sortable: true, cellClass: changedFrom('currentDescription') },
-                { key: 'notes', label: 'Notes', editable: this.allowEdit, sortable: false, cellClass: changedFrom('currentNotes') },
-                ...(this.isCommitted ? [] : [{ key: '_remove', label: '', width: 36, sortable: false, sticky: 'end' }])
-            ];
         },
         banners() {
             return [
@@ -215,8 +261,8 @@ export const InventoryProposalTable = {
         projected(row) {
             return ProposalUtils.projectQuantity(row, this.projectionDeciseconds);
         },
-        async handleCellEdit(rowIdx, colIdx, value) {
-            const key = this.columns[colIdx]?.key;
+        // cell-edit contract: (rowIndex, columnKey, value)
+        async handleCellEdit(rowIdx, key, value) {
             const row = this.tableStore?.data[rowIdx];
             if (!key || !row) return;
             const previous = row[key];
@@ -274,14 +320,15 @@ export const InventoryProposalTable = {
             <h3>Proposal Not Found</h3>
             <p>There is no proposal named "{{ proposalSlug }}".</p>
         </div>
-        <TableComponent
+        <DataView
             v-else
-            theme="purple"
+            :fields="PROPOSAL_TABLE_FIELDS"
+            :rows="tableData"
+            :registry="PROPOSAL_TABLE_VIEWS"
+            :patches="viewPatches"
+            :edit-mode="editModeName"
+            :original-data="originalData"
             :title="proposalName ? proposalName + (isCommitted ? ' (committed)' : ' proposal') : 'Proposal'"
-            :data="tableData"
-            :originalData="originalData"
-            :columns="columns"
-            default-sort-column="category"
             :isLoading="!tableStore || tableStore.isLoading || committing"
             :loading-message="committing ? 'Committing proposal...' : (tableStore?.loadingMessage || 'Loading proposal...')"
             :showRefresh="true"
@@ -291,7 +338,6 @@ export const InventoryProposalTable = {
             :navigate-to-path="navigateToPath"
             :external-dirty-state="isDirty"
             emptyMessage="This proposal has no items."
-            class="mark-dirty"
             @cell-edit="handleCellEdit"
             @on-save="handleSave"
             @refresh="handleRefresh"
@@ -310,21 +356,19 @@ export const InventoryProposalTable = {
                     >Commit</button>
                 </div>
             </template>
-            <template #default="{ row, column }">
-                <ItemImageComponent
-                    v-if="column.key === 'image'"
-                    :imageSize="32"
-                    :itemNumber="row.itemNumber"
-                />
-                <span v-else-if="column.key === '_projected'">{{ projected(row) }}</span>
-                <span v-else-if="column.key === 'currentQuantity' && row.missing" class="red" title="This item no longer exists in inventory">missing</span>
+            <template #cell="{ row, field }">
+                <span v-if="field.key === '_projected'">{{ projected(row) }}</span>
+                <template v-else-if="field.key === 'currentQuantity'">
+                    <span v-if="row.missing" class="red" title="This item no longer exists in inventory">missing</span>
+                    <template v-else>{{ row.currentQuantity }}</template>
+                </template>
                 <button
-                    v-else-if="column.key === '_remove' && allowEdit"
+                    v-else-if="field.key === '_remove' && allowEdit"
                     class="button-symbol white"
                     @click.stop="removeRow(row)"
                     title="Remove this item from the proposal"
                 >×</button>
             </template>
-        </TableComponent>
+        </DataView>
     `
 };

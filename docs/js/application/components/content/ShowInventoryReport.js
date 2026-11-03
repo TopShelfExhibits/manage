@@ -1,12 +1,13 @@
-import { html, TableComponent, Requests, getReactiveStore, createAnalysisConfig, NavigationRegistry, ItemImageComponent, ScheduleFilterSelect, InventoryCategoryFilter, Priority, invalidateCache, toISODateString, todayISOString, offsetToISO, getAutoColorClass } from '../../index.js';
-import { normalizeFilterValues } from '../../../data_management/utils/helpers.js';
+import { html, DataView, Requests, getReactiveStore, createAnalysisConfig, NavigationRegistry, ItemImageComponent, ScheduleFilterSelect, InventoryCategoryFilter, Priority, invalidateCache, toISODateString, todayISOString, offsetToISO, getAutoColorClass } from '../../index.js';
+import { textFiltersToSearchParams } from '../../../data_management/utils/helpers.js';
+import { itemImageStyle } from '../../utils/views/viewStyles.js';
 
 /**
  * Component for displaying inventory report across multiple shows
  * Shows: Item ID, Inventory Qty, quantities for each show, Remaining
  */
 export const ShowInventoryReport = {
-    components: { TableComponent, ItemImageComponent, ScheduleFilterSelect, InventoryCategoryFilter },
+    components: { DataView, ItemImageComponent, ScheduleFilterSelect, InventoryCategoryFilter },
     inject: ['$modal', 'appContext'],
     props: {
         containerPath: { type: String, default: 'reports/show-usage' },
@@ -40,78 +41,72 @@ export const ShowInventoryReport = {
             }
             return Array.from(showSet).sort();
         },
-        
-        // Dynamic table columns based on loaded shows
-        tableColumns() {
-            const baseColumns = [
-                { 
-                    key: 'image', 
-                    labelHtml: '<span class="material-symbols-outlined">imagesmode</span>',
-                    label: 'IMG',
-                    width: 1,
-                    sortable: false,
-                    sticky: 'start'
-                },
-                { key: 'itemId', label: 'Item#', type: 'item', sortable: true },
-                { key: 'description', label: 'Item Description', type: 'item', details: true, sortable: true },
-                { key: 'available', label: 'Inv Qty.', sortable: true },
+
+        // What each report key is; show columns are dynamic (show_<identifier>), named by the
+        // show identifier. image holds no data: the thumbnail column (see itemImageStyle).
+        reportFields() {
+            const fields = [
+                { key: 'image', label: 'IMG' },
+                { key: 'itemId', label: 'Item#', type: 'item' },
+                { key: 'description', label: 'Item Description', type: 'item' },
+                { key: 'available', label: 'Inv Qty.' },
+                { key: 'minQty', label: 'Min Qty', format: 'number', type: 'number' },
+                { key: 'tabName', label: 'Category' }
             ];
-            
-            // Add minQty column with unified autoColor
-            const minQtyColumn = {
-                key: 'minQty',
-                label: 'Min Qty',
-                format: 'number',
-                sortable: true,
-                cellClass: (value) => getAutoColorClass(value)
-            };
-            
-            // Add dynamic show columns (narrow width and narrow font)
-            const showColumns = this.showIdentifiers.map((showId, index) => {
-                // Remove year from display label and abbreviate
-                // Format is typically "CLIENT YEAR SHOW", we want abbreviated "CLI... SHO..."
-                let displayLabel = showId;
-                
-                // Match pattern: word(s) followed by 4-digit year followed by word(s)
-                // Example: "ALLEN ARMS 2025 SHOT" -> "ALL... SHO..."
-                const yearPattern = /^(.+?)\s+(\d{4})\s+(.+)$/;
-                const match = showId.match(yearPattern);
-                if (match) {
-                    const clientPart = match[1];
-                    const showPart = match[3];
-                    
-                    // Abbreviate if longer than 4 characters
-                    const abbreviate = (text) => {
-                        return text.length > 5 ? text.substring(0, 3) + '...' : text;
-                    };
-                    
-                    displayLabel = `${abbreviate(clientPart)} ${abbreviate(showPart)}`;
-                }
-                
-                return {
-                    key: `show_${showId}`,
-                    label: displayLabel,
-                    title: showId, // Full identifier as tooltip
-                    width: 1,
-                    format: 'number',
-                    font: 'narrow',
-                    columnClass: 'striped gray', // Every other column gets gray background
-                    allowHide: true, // Enable hide button for show columns
-                    sortable: true
-                };
-            });
-            
-            return [...baseColumns, minQtyColumn, ...showColumns];
+            for (const showId of this.showIdentifiers) {
+                fields.push({ key: `show_${showId}`, label: showId, format: 'number', type: 'number' });
+            }
+            return fields;
         },
-        
+        // Show column headers: abbreviated "CLI... SHO...", the full identifier as the tooltip
+        showHeaderStyles() {
+            const abbreviate = (text) => text.length > 5 ? text.substring(0, 3) + '...' : text;
+            return Object.fromEntries(this.showIdentifiers.map(showId => {
+                const match = showId.match(/^(.+?)\s+(\d{4})\s+(.+)$/);
+                const label = match ? `${abbreviate(match[1])} ${abbreviate(match[3])}` : showId;
+                return [`show_${showId}`, { label, title: showId }];
+            }));
+        },
+        // Show usage report view (views-and-renderers-plan §5, Phase 4). The per-column hide
+        // button (allowHide) is removed: show columns can't be hidden per run until customization exists.
+        reportRegistry() {
+            return {
+                id: 'show-usage',
+                default: 'table',
+                theme: 'blue',
+                views: [{
+                    id: 'table',
+                    name: 'Show Usage',
+                    layout: 'table',
+                    columns: ['image', 'itemId', 'available', 'minQty', 'show_*'],
+                    details: ['description'],
+                    hidden: ['tabName'],
+                    sortable: ['itemId', 'description', 'available', 'minQty', 'show_*'],
+                    // The page draws Item# and each show's quantity (#cell)
+                    style: {
+                        image: itemImageStyle('itemId'),
+                        itemId: { cell: 'slot' },
+                        minQty: { color: 'auto' },
+                        'show_*': { width: 1, font: 'narrow', columnColor: 'striped gray', cell: 'slot' },
+                        ...this.showHeaderStyles
+                    },
+                    table: { sticky: { start: ['image'] }, hideRowsOnSearch: false }
+                }]
+            };
+        },
+        // Kept for the wide-table layout class
+        tableColumns() {
+            return this.reportFields;
+        },
+
         isLoading() {
             return this.reportStore?.isLoading || false;
         },
-        
+
         isAnalyzing() {
             return this.reportStore?.isAnalyzing || false;
         },
-        
+
         tableData() {
             const data = this.reportStore?.data || [];
             // Enhance each row with computed remaining value and flattened show data for sorting
@@ -120,7 +115,7 @@ export const ShowInventoryReport = {
                     ...row,
                     minQty: row.minQty ?? null
                 };
-                
+
                 // Flatten show data for sorting - add show quantities as direct properties
                 if (row.shows) {
                     this.showIdentifiers.forEach(showId => {
@@ -130,43 +125,43 @@ export const ShowInventoryReport = {
                         enhancedRow[`show_${showId}`] = (showValue !== null && showValue !== undefined) ? showValue : null;
                     });
                 }
-                
+
                 return enhancedRow;
             });
         },
-        
+
         loadingMessage() {
             return this.reportStore?.loadingMessage || 'Loading...';
         },
-        
+
         emptyMessage() {
             // Check if a search has been performed by looking at URL parameters
             const params = NavigationRegistry.getParametersForContainer(
                 this.containerPath || 'reports/show-usage',
                 this.appContext?.currentPath
             );
-            const hasSearchParams = params && (params.dateFilters || params.textFilters || params.view);
-            
+            const hasSearchParams = params && (params.dateFilters || params.textFilters || params.dateFilter);
+
             // If we have search params but no report store yet, it means no shows were found
             if (hasSearchParams && !this.reportStore && !this.isLoading) {
                 return 'No packlists found for the selected search criteria';
             }
-            
+
             // If the store loaded but found no data and no category filter is active, the schedule filter yielded no results
             if (this.reportStore && !this.isLoading && !this.isAnalyzing && this.showIdentifiers.length === 0 && !this.ctgFilter) {
                 return 'No packlists found for the selected search criteria';
             }
-            
+
             // If the store loaded but found no items and a category filter is active, the category has no items
             if (this.reportStore && !this.isLoading && !this.isAnalyzing && this.tableData.length === 0 && this.ctgFilter) {
                 return 'No items were found in this category.';
             }
-            
+
             // If we have shows selected but no items in the data, it means the category has no items
             if (this.showIdentifiers.length > 0 && this.tableData.length === 0 && !this.isLoading && !this.isAnalyzing) {
                 return 'No items were found in this category.';
             }
-            
+
             return 'Select a schedule filter to load shows and generate report';
         }
     },
@@ -182,11 +177,11 @@ export const ShowInventoryReport = {
                 this.error = null;
                 return;
             }
-            
+
             // Build filter and search params from search data (let API handle show finding)
             const filter = {};
             const searchParams = {};
-            
+
             if (searchData.dateFilters && searchData.dateFilters.length > 0) {
                 filter.dateFilters = searchData.dateFilters;
             }
@@ -207,22 +202,13 @@ export const ShowInventoryReport = {
             this.referenceDate = resolvedStart ?? todayISOString();
             this.endDate = resolvedEnd ?? null;
 
-            // Apply text filters
-            if (searchData.textFilters && searchData.textFilters.length > 0) {
-                searchData.textFilters.forEach(textFilter => {
-                    if (textFilter.column && (textFilter.values || textFilter.value)) {
-                        searchParams[textFilter.column] = {
-                            values: normalizeFilterValues(textFilter),
-                            type: textFilter.type || 'contains'
-                        };
-                    }
-                });
-            }
-            
+            // Apply text filters (filters on the same column are kept together and OR'd)
+            Object.assign(searchParams, textFiltersToSearchParams(searchData.textFilters));
+
             // Store search params and initialize report store
             this.searchFilter = filter;
             this.searchParams = searchParams;
-            
+
             try {
                 this.initializeReportStore();
             } catch (err) {
@@ -238,12 +224,12 @@ export const ShowInventoryReport = {
             //    searchParams: this.searchParams,
             //    ctgFilter: this.ctgFilter
             //});
-            
+
             if (!this.searchFilter && !this.searchParams) {
                 //console.log('[ShowInventoryReport] Skipping store initialization - no search parameters');
                 return;
             }
-            
+
             // Build analysis config
             const analysisConfig = [
                 // Get inventory tab name for each item
@@ -278,7 +264,7 @@ export const ShowInventoryReport = {
                     Priority.BACKGROUND // Descriptions are visual enhancements, lowest priority
                 )
             ];
-            
+
             this.reportStore = getReactiveStore(
                 Requests.getMultipleShowsItemsSummary,
                 null,
@@ -286,7 +272,7 @@ export const ShowInventoryReport = {
                 analysisConfig,
                 true // Auto-load
             );
-            
+
             this.error = null;
         },
 
@@ -328,7 +314,7 @@ export const ShowInventoryReport = {
             //     ctgFilter: this.ctgFilter,
             //     hasReportStore: !!this.reportStore
             // });
-            
+
             // Update filter and reinitialize store
             this.ctgFilter = categoryName;
             //console.log('[ShowInventoryReport] Calling initializeReportStore()');
@@ -340,13 +326,13 @@ export const ShowInventoryReport = {
         //    containerPath: this.containerPath,
         //    currentPath: this.appContext?.currentPath
         //});
-        
+
         // Get URL parameters to check what should be initialized
         const params = NavigationRegistry.getParametersForContainer(
             this.containerPath || 'reports/show-usage',
             this.appContext?.currentPath
         );
-        
+
         //console.log('[ShowInventoryReport] Initial URL parameters:', params);
         //console.log('[ShowInventoryReport] Waiting for child components (ScheduleFilterSelect and InventoryCategoryFilter) to sync with URL and emit events...');
     },
@@ -356,18 +342,14 @@ export const ShowInventoryReport = {
                 <p>{{ error }}</p>
             </div>
 
-            <TableComponent
-                theme="blue"
-                :data="tableData"
-                :columns="tableColumns"
-                :hide-columns="['tabName']"
+            <DataView
+                :fields="reportFields"
+                :rows="tableData"
+                :registry="reportRegistry"
                 :show-search="true"
                 :sync-search-with-url="true"
                 :container-path="containerPath || 'reports/show-usage'"
                 :navigate-to-path="navigateToPath"
-                :hide-rows-on-search="false"
-                :readonly="true"
-                :allowDetails="true"
                 :is-loading="isLoading"
                 :is-analyzing="isAnalyzing"
                 :loading-message="loadingMessage"
@@ -392,15 +374,10 @@ export const ShowInventoryReport = {
                     </div>
                 </template>
 
-                <template #default="{ row, column }">
-                    <slot v-if="column.key === 'image'">
-                        <ItemImageComponent 
-                            :imageSize="48"
-                            :itemNumber="row.itemId"
-                        />
-                    </slot>
-                    <slot v-else-if="column.key === 'itemId'">
-                        <button v-if="row.tabName" 
+                <!-- Page cells (field.cell = 'slot'); every other field uses the formatted fallback -->
+                <template #cell="{ row, field: column }">
+                    <slot v-if="column.key === 'itemId'">
+                        <button v-if="row.tabName"
                                 @click="navigateToItemPage(row)"
                                 class="purple card"
                                 :title="'View timeline for ' + row.itemId">
@@ -408,20 +385,14 @@ export const ShowInventoryReport = {
                         </button>
                         <span v-else>{{ row.itemId }}</span>
                     </slot>
-                    <slot v-else-if="column.key === 'remaining'">
-                        {{ row.remaining !== null ? row.remaining : '—' }}
-                    </slot>
                     <slot v-else-if="column.key.startsWith('show_')">
                         <span v-if="row[column.key] !== undefined && row[column.key] !== null && row[column.key] !== 0">
                             {{ row[column.key] }}
                         </span>
                         <span v-else>—</span>
                     </slot>
-                    <div v-else>
-                        {{ row[column.key] !== null && row[column.key] !== undefined ? row[column.key] : '—' }}
-                    </div>
                 </template>
-            </TableComponent>
+            </DataView>
         </div>
     `
 };

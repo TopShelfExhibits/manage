@@ -7,6 +7,13 @@ import { SheetSql } from './sheetSql.js';
 import { BaseTokenManager } from './GoogleSheetsAuth.js';
 import { normalizeHeaderName, isLocalhost } from '../data_management/utils/helpers.js';
 
+// A1 column letters → 0-based index ("A" → 0, "Z" → 25, "AA" → 26)
+function _colToIndex(letters) {
+    let n = 0;
+    for (const ch of String(letters)) n = n * 26 + (ch.charCodeAt(0) - 64);
+    return n - 1;
+}
+
 let _delaysEnabled = true;
 
 // Serialize an EditHistory/MetaData fixture (contract: docs/notes/metadata-implementation.md)
@@ -39,6 +46,12 @@ function _configuredEmail() {
     return _storageGet('sessionStorage', USER_STORAGE_KEY) || DEFAULT_FAKE_USER;
 }
 export function setFakeDelaysEnabled(enabled) { _delaysEnabled = enabled; }
+
+// A1 sheet names may be quoted ('Production Schedule'!A5:Z5); quotes inside are doubled
+function _unquoteSheetName(name) {
+    const m = /^'(.*)'$/.exec(name || '');
+    return m ? m[1].replace(/''/g, "'") : name;
+}
 
 export class FakeGoogleSheetsAuth {
     static userEmail = _configuredEmail();
@@ -1144,18 +1157,114 @@ export class FakeGoogleSheetsService {
         }
     }
 
+    /**
+     * Fault injection for tests (null in normal use). Hooks run inside the fake service calls, at
+     * the points where a concurrent editor could change the live sheet:
+     *   beforeRead(tableId, range)              before each range read (getSheetData, batchGetValues)
+     *   beforeWrite(tableId, range, values)     before a single setSheetData; return 'drop' to lose it
+     *   beforeBatchWrite(tableId, data)         before a batchSetValues; return 'drop' to lose all of
+     *                                           it, or a Set of data indices to lose just those
+     *   beforeDelete(tableId, tabName, rows)    before a deleteSheetRows; return 'drop' to lose it
+     */
+    static faults = null;
+
+    static async _fault(name, ...args) {
+        const hook = this.faults && this.faults[name];
+        return typeof hook === 'function' ? await hook(...args) : undefined;
+    }
+
+    /** Delete whole rows (1-based; the header row is never deleted), bottom up, as one step. */
+    static async deleteSheetRows(tableId, tabName, rowNumbers) {
+        await this.delay(500 + Math.random() * 500);
+        await FakeGoogleSheetsAuth.checkAuth();
+        if (!this.ENDPOINT_IDS[tableId]) throw new Error(`[deleteSheetRows] Spreadsheet ID not found for table: ${tableId}`);
+        const sheet = this.mockData[tableId]?.[tabName];
+        if (!sheet) throw new Error(`[deleteSheetRows] Sheet not found: ${tabName}`);
+        const rows = [...new Set((rowNumbers || []).map(Number).filter(n => Number.isInteger(n) && n > 1))].sort((a, b) => b - a);
+        if (await this._fault('beforeDelete', tableId, tabName, rows) === 'drop') return true;
+        rows.forEach(n => { if (n - 1 < sheet.length) sheet.splice(n - 1, 1); });
+        return true;
+    }
+
+    /** values.batchGet: one 2D array per range, in order (each range read as getSheetData would). */
+    static async batchGetValues(tableId, ranges) {
+        return await Promise.all((ranges || []).map(range => this.getSheetData(tableId, range)));
+    }
+
+    /**
+     * values.batchUpdate: write every { range, values } in one step. Like the API, the batch lands
+     * as a unit; a fault hook can only act before it (or drop parts of it).
+     */
+    static async batchSetValues(tableId, data) {
+        await this.delay(500 + Math.random() * 500);
+        await FakeGoogleSheetsAuth.checkAuth();
+        if (!this.ENDPOINT_IDS[tableId]) throw new Error(`[batchSetValues] Spreadsheet ID not found for table: ${tableId}`);
+        const fault = await this._fault('beforeBatchWrite', tableId, data);
+        if (fault === 'drop') return true;
+        (data || []).forEach((d, i) => {
+            if (fault instanceof Set && fault.has(i)) return;
+            if (!this._writeRange(tableId, d.range, d.values)) throw new Error(`[batchSetValues] Unsupported range: ${d.range}`);
+        });
+        return true;
+    }
+
+    /**
+     * Synchronous write of a values block to an A1 range ("Tab!B2:D3", sheet name optionally quoted).
+     * @returns {boolean} false when the range isn't an A1 block range
+     */
+    static _writeRange(tableId, range, updates) {
+        const rangeMatch = String(range).match(/^(.+)!([A-Z]+)(\d+):([A-Z]+)(\d+)$/);
+        if (!rangeMatch) return false;
+        const [, rawSheetName, startCol, startRow, endCol, endRow] = rangeMatch;
+        const sheetName = _unquoteSheetName(rawSheetName);
+        const startColIndex = _colToIndex(startCol);
+        const endColIndex = _colToIndex(endCol);
+        const startRowIndex = parseInt(startRow) - 1;
+        const endRowIndex = parseInt(endRow) - 1;
+
+        // Initialize sheet if it doesn't exist
+        if (!this.mockData[tableId]) this.mockData[tableId] = {};
+        if (!this.mockData[tableId][sheetName]) {
+            // Initialize with empty structure (will be populated dynamically)
+            this.mockData[tableId][sheetName] = [
+                ['Users'] // Row 0: Headers row (lock keys added dynamically)
+            ];
+        }
+        const sheet = this.mockData[tableId][sheetName];
+        if (!Array.isArray(updates) || !updates.length || !Array.isArray(updates[0])) return true;
+
+        for (let r = 0; r < updates.length && startRowIndex + r <= endRowIndex; r++) {
+            const rowIndex = startRowIndex + r;
+            // Ensure row exists, and columns up to endColIndex
+            while (sheet.length <= rowIndex) sheet.push([]);
+            while (sheet[rowIndex].length <= endColIndex) sheet[rowIndex].push('');
+            for (let colOffset = 0; colOffset < updates[r].length; colOffset++) {
+                const targetColIndex = startColIndex + colOffset;
+                if (targetColIndex <= endColIndex) sheet[rowIndex][targetColIndex] = updates[r][colOffset];
+            }
+        }
+        // Debug log for Caching tab writes
+        if (tableId === 'CACHE' && sheetName === 'Caching') {
+            console.log(`[FakeGoogle] Caching tab updated at row ${startRowIndex + 1}:`, updates[0]);
+        }
+        return true;
+    }
+
     static async getSheetData(tableId, range) {
         await this.delay(500 + Math.random() * 500); // Add random delay > 1s
         await FakeGoogleSheetsAuth.checkAuth();
-        
+
         const spreadsheetId = this.ENDPOINT_IDS[tableId];
         if (!spreadsheetId) throw new Error(`[getSheetData] Spreadsheet ID not found for table: ${tableId}`);
 
         //console.log(`FakeGoogleSheetsService: Getting data for ${tableId}, range: ${range}`);
         await this.delay(100);
+        await this._fault('beforeRead', tableId, range);
 
-        // Parse range to extract sheet name and cell range
-        const [sheetName, cellRange] = range.split('!');
+        // Parse range to extract sheet name and cell range (the sheet name may be quoted)
+        const bang = range.lastIndexOf('!');
+        const sheetName = _unquoteSheetName(bang >= 0 ? range.slice(0, bang) : range);
+        const cellRange = bang >= 0 ? range.slice(bang + 1) : undefined;
 
         // Initialize Caching tab in mockData if it doesn't exist yet
         // CRITICAL: Caching tab MUST have both columns (Key, Timestamp) populated for poller to function.
@@ -1187,14 +1296,21 @@ export class FakeGoogleSheetsService {
             const cellMatch = cellRange.match(/^([A-Z]+)(\d+):([A-Z]+)(\d+)$/);
             if (cellMatch) {
                 const [, startCol, startRow, endCol, endRow] = cellMatch;
-                const colIndex = startCol.charCodeAt(0) - 'A'.charCodeAt(0);
-                const rowIndex = parseInt(startRow) - 1;
-                
-                // Return specific cell data
-                if (sheetData[rowIndex] && sheetData[rowIndex][colIndex] !== undefined) {
-                    return [[sheetData[rowIndex][colIndex]]];
+                const c0 = _colToIndex(startCol);
+                const c1 = _colToIndex(endCol);
+                const r0 = parseInt(startRow) - 1;
+                const r1 = parseInt(endRow) - 1;
+                // Return the requested block (multi-letter columns and multi-cell ranges supported)
+                const block = [];
+                for (let r = r0; r <= r1; r++) {
+                    const line = [];
+                    for (let c = c0; c <= c1; c++) {
+                        const v = sheetData[r] ? sheetData[r][c] : undefined;
+                        line.push(v === undefined ? '' : v);
+                    }
+                    block.push(line);
                 }
-                return [['']]; // Empty cell
+                return block;
             }
         }
 
@@ -1211,52 +1327,13 @@ export class FakeGoogleSheetsService {
 
         //console.log(`FakeGoogleSheetsService: Setting data for ${tableId}/${tabName}`);
         await this.delay(150);
+        if (await this._fault('beforeWrite', tableId, tabName, updates) === 'drop') return true;
 
         try {
             // Handle range-specific updates (e.g., "Locks!B2" for single cell, "Caching!A2:B2" for row updates)
             // CRITICAL: Must support multi-column writes. writeCacheTimestamp uses A#:B# ranges to write
             // both Key and Timestamp columns simultaneously. Single-column writes would break cache invalidation.
-            const rangeMatch = tabName.match(/^([^!]+)!([A-Z]+)(\d+):([A-Z]+)(\d+)$/);
-            if (rangeMatch) {
-                const [, sheetName, startCol, startRow, endCol, endRow] = rangeMatch;
-                const startColIndex = startCol.charCodeAt(0) - 'A'.charCodeAt(0);
-                const endColIndex = endCol.charCodeAt(0) - 'A'.charCodeAt(0);
-                const rowIndex = parseInt(startRow) - 1;
-                
-                // Initialize sheet if it doesn't exist
-                if (!this.mockData[tableId]) this.mockData[tableId] = {};
-                if (!this.mockData[tableId][sheetName]) {
-                    // Initialize with empty structure (will be populated dynamically)
-                    this.mockData[tableId][sheetName] = [
-                        ['Users'] // Row 0: Headers row (lock keys added dynamically)
-                    ];
-                }
-                
-                // Ensure row exists
-                while (this.mockData[tableId][sheetName].length <= rowIndex) {
-                    this.mockData[tableId][sheetName].push([]);
-                }
-                
-                // Ensure columns exist in row (expand to endColIndex)
-                while (this.mockData[tableId][sheetName][rowIndex].length <= endColIndex) {
-                    this.mockData[tableId][sheetName][rowIndex].push('');
-                }
-                
-                // Update the cell(s) - handle both single cell and multi-column ranges
-                if (Array.isArray(updates) && updates.length > 0 && Array.isArray(updates[0])) {
-                    for (let colOffset = 0; colOffset < updates[0].length; colOffset++) {
-                        const targetColIndex = startColIndex + colOffset;
-                        if (targetColIndex <= endColIndex) {
-                            this.mockData[tableId][sheetName][rowIndex][targetColIndex] = updates[0][colOffset];
-                        }
-                    }
-                    // Debug log for Caching tab writes
-                    if (tableId === 'CACHE' && sheetName === 'Caching') {
-                        console.log(`[FakeGoogle] Caching tab updated at row ${rowIndex + 1}:`, updates[0]);
-                    }
-                }
-                return true;
-            }
+            if (this._writeRange(tableId, tabName, updates)) return true;
             
             // If removeRowsBelow is specified, delete all rows below that row before saving
             if (typeof removeRowsBelow === 'number') {
@@ -1593,12 +1670,9 @@ export class FakeGoogleSheetsService {
     }
 
     /**
-     * Fake implementation of fetching an authenticated image blob URL from a file ID.
-     * Maps fake file IDs to test images. For dynamically uploaded files, returns a test image.
+     * Maps fake file IDs to test image paths. Dynamically uploaded files get a default test image.
      */
-    static async getAuthenticatedImageUrl(fileId) {
-        await this.delay(50);
-        
+    static _fakeImagePath(fileId) {
         // Map predefined file IDs to test image paths
         const fileMap = {
             'file_id_bx_prefix': 'assets/logobkp.png',
@@ -1619,6 +1693,18 @@ export class FakeGoogleSheetsService {
         }
         
         return null;
+    }
+
+    /**
+     * Fake implementation of fetching a Drive file's raw content as a Blob.
+     * Loads the test image that _fakeImagePath maps the file ID to.
+     */
+    static async getDriveFileBlob(fileId) {
+        await this.delay(50);
+        const url = this._fakeImagePath(fileId);
+        if (!url) return null;
+        const response = await fetch(url);
+        return response.ok ? await response.blob() : null;
     }
 
     /**
@@ -1649,6 +1735,61 @@ export class FakeGoogleSheetsService {
     }
 }
 
+// ── Design queue fixtures (views-and-renderers-plan §4.16, Phase 2) ──────────
+// The live database gets the same: the json preferences below, a CACHE/ShowNotes tab, and
+// Account Manager / Assignee columns on the Production Schedule.
+// ColumnTypes declares what each column holds (utils/column-types.js); undeclared columns are text
+// (or a date / number / currency guessed from the name).
+const FAKE_COLUMN_TYPES = {
+    'PROD_SCHED/Production Schedule': {
+        'Ship BKD': 'checkbox', 'O/B BKD': 'checkbox', 'MHA Done': 'checkbox', 'Sup Badge Req.': 'checkbox',
+        'Pack List': 'checkbox', 'PL to OPS': 'checkbox', 'SOW Sent': 'checkbox', 'SOW Ret': 'checkbox',
+        'Elev': 'checkbox', 'Panels': 'checkbox', 'Setups': 'checkbox', '3rd Party Auth': 'checkbox',
+        'I&D': 'checkbox', 'S/U to Elite': 'checkbox', 'MH': 'checkbox', 'Elec': 'checkbox',
+        'Elec and Net dwg sent': 'checkbox', 'H/S': 'checkbox', 'H/S dwg sent': 'checkbox', 'Net': 'checkbox',
+        'Oth': 'checkbox', 'EAC': 'checkbox', 'COI': 'checkbox', 'S/U IN SHOP': 'checkbox',
+        'Assignee': { type: 'select', options: 'DesignQueueAssignees' }
+    }
+};
+(function addDesignQueueFixtures() {
+    const data = FakeGoogleSheetsService.mockData;
+    const prefs = data.CACHE && data.CACHE.Preferences;
+    if (prefs) {
+        prefs.push(
+            ['InstantWriteTables', 'Instant-write tables', 'row identity and writable columns for tables that save each edit immediately', 'schedule*', 'json',
+                '{"PROD_SCHED/Production Schedule": {"identity": ["Client", "Year", "Show"], "columns": ["Elev", "Panels", "Setups", "Assignee"]}}', ''],
+            ['DesignQueueFields', 'Design queue fields', 'columns shown on the design queue', 'schedule/design-queue*', 'json',
+                '["Client", "Show", "Size", "Note", "Elev", "Panels", "Setups", "Assignee", "Account Manager", "Ship", "Booth#"]', ''],
+            ['DesignQueueAssignees', 'Design queue assignees', 'people who can be assigned design work', 'schedule/design-queue*', 'json',
+                '[["Alex", "red"], ["Sam Smith", "blue"]]', ''],
+            ['ColumnTypes', 'Column types', 'what each sheet column holds (checkbox, select, date, number, currency); undeclared columns are text', 'schedule*', 'json',
+                JSON.stringify(FAKE_COLUMN_TYPES), '']
+        );
+    }
+    if (data.CACHE && !data.CACHE.ShowNotes) {
+        data.CACHE.ShowNotes = [
+            ['Identifier', 'Note', 'EditHistory'],
+            ['GEARFIRE 2025 SHOT', 'Waiting on client logo files', '']
+        ];
+    }
+    const tabs = FakeGoogleSheetsService.mockTabs && FakeGoogleSheetsService.mockTabs.CACHE;
+    if (tabs && !tabs.some(t => t.title === 'ShowNotes')) tabs.push({ title: 'ShowNotes', sheetId: 11 });
+
+    const sched = data.PROD_SCHED && data.PROD_SCHED['Production Schedule'];
+    if (sched && sched.length && !sched[0].includes('Assignee')) {
+        const width = sched[0].length;
+        sched[0][width] = 'Account Manager';
+        sched[0][width + 1] = 'Assignee';
+        const managers = ['Dana', 'Lee', 'Morgan'];
+        const assignees = ['Alex', 'Sam', 'Jordan', ''];
+        for (let i = 1; i < sched.length; i++) {
+            const row = sched[i];
+            while (row.length < width) row.push('');
+            row[width] = managers[i % managers.length];
+            row[width + 1] = assignees[i % assignees.length];
+        }
+    }
+})();
 // ── Local persistence, cross-tab sync, and test sandbox ─────────────────────
 // Mock data lives in memory, so by default every reload starts from the fixtures above.
 // On localhost the current state is also saved to localStorage after every write and
@@ -1772,7 +1913,7 @@ export const FakeGoogleState = {
 };
 
 // Persist after every mutating call
-['setSheetData', 'copySheetTab', 'createBlankTab', 'hideTabs', 'showTabs', 'setMockData'].forEach(name => {
+['setSheetData', 'batchSetValues', 'deleteSheetRows', 'copySheetTab', 'createBlankTab', 'hideTabs', 'showTabs', 'setMockData'].forEach(name => {
     const original = FakeGoogleSheetsService[name];
     FakeGoogleSheetsService[name] = function (...args) {
         const result = original.apply(this, args);

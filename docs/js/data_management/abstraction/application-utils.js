@@ -842,7 +842,8 @@ class applicationUtils_uncached {
     /**
      * Read one thumbnail record from the shared Thumbnails tab in the CACHE sheet.
      * Returns { itemNumber, file, blob } or null if not found.
-     * Cached infinitely — invalidated by storeThumbnailRecord.
+     * Cached infinitely — derived from getAllThumbnailRecords, so any write to the
+     * Thumbnails tab (local or from another session) invalidates it through the dependency chain.
      */
     static async getThumbnailRecord(deps, itemNumber) {
         // Serve from pending write buffer first (avoids a sheet read before the debounced flush fires)
@@ -850,25 +851,20 @@ class applicationUtils_uncached {
             const pending = _pendingThumbnailWrites.get(itemNumber);
             return { itemNumber, ...pending };
         }
-        // Call Database.getData directly (not via deps.call) so no dependency link is registered
-        // between this cache entry and the getData entry. This prevents Database.setData on the
-        // Thumbnails tab from cascading to invalidate every other item's thumbnail at once.
-        // Selective invalidation is done explicitly in _flushThumbnailWrites instead.
-        const tab = await Database.findTabByName('CACHE', 'Thumbnails');
-        if (!tab) return null;
-        const rows = await Database.getData('CACHE', 'Thumbnails', _THUMBNAILS_MAPPING);
+        const rows = await deps.call(ApplicationUtils.getAllThumbnailRecords);
         return rows.find(r => r.itemNumber === itemNumber) || null;
     }
 
     /**
      * Load the entire Thumbnails table from the CACHE sheet.
-     * Used by the shared thumbnail reactive store to load all records at once.
-     * Invalidated whenever a thumbnail write flushes.
+     * Used by the shared thumbnail records store (application/utils/thumbnailCache.js).
+     * Registered as a dependent of getData('CACHE', 'Thumbnails') so that Database.setData on the
+     * tab — and the cross-session timestamp it stamps — invalidates this and reloads the store.
      */
     static async getAllThumbnailRecords(deps) {
-        const allTabs = await Database.getTabs('CACHE');
-        if (!allTabs.some(t => t.title === 'Thumbnails')) return [];
-        return await Database.getData('CACHE', 'Thumbnails', _THUMBNAILS_MAPPING);
+        const tab = await deps.call(Database.findTabByName, 'CACHE', 'Thumbnails');
+        if (!tab) return [];
+        return await deps.call(Database.getData, 'CACHE', 'Thumbnails', _THUMBNAILS_MAPPING);
     }
 
     /**
@@ -1004,16 +1000,10 @@ async function _flushThumbnailWrites() {
                 existing.push({ itemNumber, file, blob });
             }
         }
+        // setData stamps and invalidates getData('CACHE', 'Thumbnails'). getAllThumbnailRecords and
+        // getThumbnailRecord depend on it, so this session's records store reloads and other sessions
+        // pick up the change on their next timestamp poll — no separate invalidation needed here.
         await Database.setData('CACHE', 'Thumbnails', existing, _THUMBNAILS_MAPPING, { skipMetadata: true });
-        // Selectively invalidate only the written items in this session.
-        for (const itemNumber of pending.keys()) {
-            invalidateCache([{ namespace: 'app_utils', methodName: 'getThumbnailRecord', args: [itemNumber] }]);
-        }
-        // Invalidate the full-table cache so the thumbnail store reloads with the new records.
-        invalidateCache([{ namespace: 'app_utils', methodName: 'getAllThumbnailRecords', args: [] }]);
-        // Broadcast to other sessions via the cross-session timestamp poller so they
-        // invalidate their own getThumbnailRecord entries and re-read the updated sheet.
-        stampDataChange('app_utils:getThumbnailRecord');
         console.log(`[Thumbnails] Stored ${pending.size} thumbnail record(s) to CACHE sheet`);
     } catch (err) {
         console.warn('[Thumbnails] Failed to flush thumbnail writes:', err);

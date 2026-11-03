@@ -1,3 +1,5 @@
+import { isCheckedValue } from './checkbox-values.js';
+
 export function parseDate(val, forceLocal = true, defaultYear = null) {
     if (!val) return null;
     
@@ -166,8 +168,12 @@ export function offsetToISO(value) {
 /**
  * Filters data based on search parameters.
  * @param {Array} data - The array of objects to search within.
- * @param {Object} searchParams - An object where keys are field names and values are search terms.
- *        If the key is "$any", the value will be searched in all fields.
+ * @param {Object} searchParams - Keys are field names; each value is a search config
+ *        ({ values, type } or a plain string), or a list of configs for the same field.
+ *        If the key is "$any", the value is searched in all fields.
+ *        Types: 'contains' (default), 'excludes', 'empty', 'checked', 'unchecked'.
+ *        Within one field, the include types (contains, empty, checked, unchecked) are OR'd and
+ *        every excludes applies (AND); different fields are AND'd.
  * @returns {Array} - The filtered array of objects.
  */
 export function searchFilter(data, searchParams) {
@@ -188,6 +194,10 @@ export function searchFilter(data, searchParams) {
         return searchConfig.value;
     }
 
+    function typeOf(searchConfig) {
+        return (typeof searchConfig === 'object' && searchConfig && searchConfig.type) || 'contains';
+    }
+
     /**
      * Helper function to apply match type to a value comparison
      * @param {string} itemValue - The value from the data item
@@ -196,12 +206,17 @@ export function searchFilter(data, searchParams) {
      * @returns {boolean} Whether the match succeeds
      */
     function applyMatchType(itemValue, searchValue, type) {
+        // Value-less types
+        if (type === 'empty') return !String(itemValue ?? '').trim();
+        if (type === 'checked') return isCheckedValue(itemValue);
+        if (type === 'unchecked') return !isCheckedValue(itemValue);
+
         const itemStr = String(itemValue).toLowerCase();
-        
+
         // Handle array of values (list search)
         if (Array.isArray(searchValue)) {
             const searchStrings = searchValue.map(v => String(v).toLowerCase());
-            
+
             if (type === 'excludes') {
                 // Item passes filter if it doesn't contain ANY of the excluded values
                 // Each exclude value independently triggers exclusion (AND logic)
@@ -210,10 +225,10 @@ export function searchFilter(data, searchParams) {
             // Default to contains: Item matches if it contains ANY of the search values (OR logic)
             return searchStrings.some(searchStr => itemStr.includes(searchStr));
         }
-        
+
         // Handle single value (backward compatibility)
         const searchStr = String(searchValue).toLowerCase();
-        
+
         if (type === 'excludes') {
             return !itemStr.includes(searchStr);
         }
@@ -221,51 +236,54 @@ export function searchFilter(data, searchParams) {
         return itemStr.includes(searchStr);
     }
 
+    // One field's configs: (any include config matches, if there are any) and (every excludes passes)
+    function passesField(itemValue, configs) {
+        const includes = configs.filter(c => typeOf(c) !== 'excludes');
+        const excludes = configs.filter(c => typeOf(c) === 'excludes');
+        if (!excludes.every(c => applyMatchType(itemValue, extractSearchValue(c), 'excludes'))) return false;
+        return includes.length === 0 || includes.some(c => applyMatchType(itemValue, extractSearchValue(c), typeOf(c)));
+    }
+
+    const asList = (config) => (Array.isArray(config) ? config : [config]).filter(c => c !== null && c !== undefined);
+
     return data.filter(item => {
         // If $any is present, search all keys for the value
         if (searchParams.hasOwnProperty('$any')) {
-            const searchConfig = searchParams['$any'];
-            const searchValue = extractSearchValue(searchConfig);
-            const type = typeof searchConfig === 'object' ? searchConfig.type : 'contains';
-            
-            return Object.values(item).some(val => 
-                applyMatchType(val, searchValue, type)
-            );
+            const configs = asList(searchParams['$any']);
+            return Object.values(item).some(val => passesField(val, configs));
         }
-        
-        // Separate filters by type for different combining logic
-        const excludeFilters = [];
-        const otherFilters = [];
-        
-        Object.keys(searchParams).forEach(key => {
-            if (!item.hasOwnProperty(key)) return;
-            
-            const searchConfig = searchParams[key];
-            const searchValue = extractSearchValue(searchConfig);
-            const type = typeof searchConfig === 'object' ? searchConfig.type : 'contains';
-            
-            const filterInfo = { key, searchValue, type };
-            
-            if (type === 'excludes') {
-                excludeFilters.push(filterInfo);
-            } else {
-                otherFilters.push(filterInfo);
-            }
+
+        // Every field's filter must pass (AND across fields); a field the item lacks is skipped
+        return Object.keys(searchParams).every(key => {
+            if (!item.hasOwnProperty(key)) return true;
+            return passesField(item[key], asList(searchParams[key]));
         });
-        
-        // For exclude filters: each filter independently excludes items
-        // Item passes if it passes ALL exclude filters (doesn't match any excluded term)
-        const passesExcludeFilters = excludeFilters.length === 0 || 
-            excludeFilters.every(f => applyMatchType(item[f.key], f.searchValue, f.type));
-        
-        // For other filters: item must match ALL filters (AND logic across columns;
-        // OR logic across multiple values within a single filter is handled in applyMatchType)
-        const passesOtherFilters = otherFilters.length === 0 || 
-            otherFilters.every(f => applyMatchType(item[f.key], f.searchValue, f.type));
-        
-        // Item must pass both filter groups
-        return passesExcludeFilters && passesOtherFilters;
     });
+}
+
+/** Filter types that take no values (the operation is the whole filter). */
+export const VALUELESS_FILTER_TYPES = Object.freeze(['empty', 'checked', 'unchecked']);
+
+/**
+ * Text filters from the filter UI / URL ([{ column, values, type }]) → searchFilter params.
+ * Filters on the same column are kept together as a list, so "contains Bob" and "is empty" on
+ * one column both apply (rows matching either), instead of the second replacing the first.
+ * @param {Array} textFilters
+ * @returns {Object} searchParams (empty when there are no usable filters)
+ */
+export function textFiltersToSearchParams(textFilters) {
+    const params = {};
+    (Array.isArray(textFilters) ? textFilters : []).forEach(filter => {
+        if (!filter || !filter.column) return;
+        const type = filter.type || 'contains';
+        const values = normalizeFilterValues(filter).map(v => String(v)).filter(v => v.trim());
+        if (!values.length && !VALUELESS_FILTER_TYPES.includes(type)) return;
+        const config = VALUELESS_FILTER_TYPES.includes(type) ? { values: [], type } : { values, type };
+        const existing = params[filter.column];
+        if (!existing) params[filter.column] = config;
+        else params[filter.column] = [...(Array.isArray(existing) ? existing : [existing]), config];
+    });
+    return params;
 }
 
 /**
@@ -679,17 +697,8 @@ export function parseSearchParameters(params) {
     // Parse date filters
     result.dateFilters = parseDateFilterParameters(params);
     
-    // Parse text filters into searchParams
-    const textFilters = parseTextFilterParameters(params);
-    textFilters.forEach(filter => {
-        if (filter.column && filter.values && filter.values.length > 0) {
-            // Store as object with values and type for advanced matching
-            result.searchParams[filter.column] = {
-                values: filter.values,
-                type: filter.type || 'contains'
-            };
-        }
-    });
+    // Parse text filters into searchParams (same-column filters kept together)
+    result.searchParams = textFiltersToSearchParams(parseTextFilterParameters(params));
     
     return result;
 }

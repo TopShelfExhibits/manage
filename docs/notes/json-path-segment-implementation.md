@@ -48,7 +48,7 @@ http://domain.com/docs/#schedule?scheduleFilter=%7B%22dateFilter%22%3A%220%2C30%
 ### Schedule Page - Show All
 
 ```
-#schedule?{"view":"all"}
+#schedule?{"dateFilter":"all"}
 ```
 
 ### Inventory Page - Search by Item ID
