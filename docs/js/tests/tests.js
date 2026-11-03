@@ -44,6 +44,8 @@ import { instantWriteEntry, identityKey, cellKey, joinKey } from '../data_manage
 import { estimateShipDate } from '../data_management/utils/ship-date.js';
 import { getReactiveStore, createAnalysisConfig } from '../application/index.js';
 import { checkSheetHealth } from './sheetHealth.js';
+import { guessColumnType, columnTypesEntry, columnTypeMap, columnTypeOf } from '../data_management/utils/column-types.js';
+import { buildScheduleFields } from '../data_management/abstraction/scheduleFields.js';
 import { withShipDate } from '../application/utils/scheduleShipping.js';
 
 // ── Runner ────────────────────────────────────────────────────────────────────
@@ -1482,9 +1484,9 @@ test('PREFERENCES', 'getPreferences returns an array', async () => {
     if (!Array.isArray(result)) throw new Error(`expected array, got ${typeof result}`);
 });
 
-test('PREFERENCES', 'getPreferences returns 7 rows', async () => {
+test('PREFERENCES', 'getPreferences returns every fixture row', async () => {
     const result = await Requests.getPreferences();
-    assertEqual(result.length, 10, 'getPreferences row count');
+    assertEqual(result.length, 11, 'getPreferences row count');
 });
 
 test('PREFERENCES', 'all rows have required fields', async () => {
@@ -1905,6 +1907,25 @@ test('INSTANT WRITE', 'keys: identities match trimmed and case-insensitively; ce
     assertEqual(key({ Client: 'A|B', Year: '', Show: 'C' }) === key({ Client: 'A', Year: 'B', Show: 'C' }), false, 'a value with | is not split');
     assertEqual(cellKey('r', 'Account  Manager'), cellKey('r', 'account manager'), 'column names normalized');
     assertEqual(joinKey('a', null, 1).split(''), ['a', '', '1'], 'parts');
+});
+
+test('COLUMN TYPES', 'declared types win; undeclared columns are text unless the name reads as a date, number or currency', async () => {
+    const all = { 'DB/Tab': { 'Ship BKD': 'checkbox', Owner: { type: 'select', options: 'People' }, Odd: 'colour', ' ': 'text' } };
+    const list = columnTypesEntry(all, 'DB', 'Tab');
+    assertEqual(list, [{ column: 'Ship BKD', type: 'checkbox' }, { column: 'Owner', type: 'select', options: 'People' }], 'unknown types and blank names skipped');
+    assertEqual(columnTypesEntry(all, 'DB', 'Other'), [], 'other tab');
+    const map = columnTypeMap(list);
+    assertEqual([columnTypeOf(map, 'ship  bkd'), columnTypeOf(map, 'Owner'), columnTypeOf(map, 'Ship'), columnTypeOf(map, 'Notes')],
+        [{ type: 'checkbox' }, { type: 'select', options: 'People' }, { type: 'date' }, { type: 'text' }], 'declared, then guessed');
+    assertEqual(['S. Start', 'Qty', 'Total Cost', 'Booth#'].map(guessColumnType), ['date', 'number', 'currency', 'text'], 'name guesses');
+});
+
+test('COLUMN TYPES', 'getColumnTypes reads the ColumnTypes preference; schedule fields carry the types', async () => {
+    const types = await Requests.getColumnTypes('PROD_SCHED', 'Production Schedule');
+    const byName = Object.fromEntries(types.map(t => [t.column, t]));
+    assertEqual([byName.Elev?.type, byName.Assignee], ['checkbox', { column: 'Assignee', type: 'select', options: 'DesignQueueAssignees' }], 'declared');
+    const fields = Object.fromEntries(buildScheduleFields([{ Elev: '', 'Ship BKD': '', Ship: '', Client: '', Assignee: '' }], { packlist: false, types }).map(f => [f.key, f]));
+    assertEqual([fields.Elev.type, fields['Ship BKD'].type, fields.Ship.type, fields.Client.type, fields.Assignee.options], ['checkbox', 'checkbox', 'date', undefined, 'DesignQueueAssignees'], 'field types');
 });
 
 test('INSTANT WRITE', 'column kinds come from the data', async () => {

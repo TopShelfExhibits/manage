@@ -1663,8 +1663,21 @@ export class FakeGoogleSheetsService {
 }
 
 // ── Design queue fixtures (views-and-renderers-plan §4.16, Phase 2) ──────────
-// The live database gets the same: three json preferences, a CACHE/ShowNotes tab, and
+// The live database gets the same: the json preferences below, a CACHE/ShowNotes tab, and
 // Account Manager / Assignee columns on the Production Schedule.
+// ColumnTypes declares what each column holds (utils/column-types.js); undeclared columns are text
+// (or a date / number / currency guessed from the name).
+const FAKE_COLUMN_TYPES = {
+    'PROD_SCHED/Production Schedule': {
+        'Ship BKD': 'checkbox', 'O/B BKD': 'checkbox', 'MHA Done': 'checkbox', 'Sup Badge Req.': 'checkbox',
+        'Pack List': 'checkbox', 'PL to OPS': 'checkbox', 'SOW Sent': 'checkbox', 'SOW Ret': 'checkbox',
+        'Elev': 'checkbox', 'Panels': 'checkbox', 'Setups': 'checkbox', '3rd Party Auth': 'checkbox',
+        'I&D': 'checkbox', 'S/U to Elite': 'checkbox', 'MH': 'checkbox', 'Elec': 'checkbox',
+        'Elec and Net dwg sent': 'checkbox', 'H/S': 'checkbox', 'H/S dwg sent': 'checkbox', 'Net': 'checkbox',
+        'Oth': 'checkbox', 'EAC': 'checkbox', 'COI': 'checkbox', 'S/U IN SHOP': 'checkbox',
+        'Assignee': { type: 'select', options: 'DesignQueueAssignees' }
+    }
+};
 (function addDesignQueueFixtures() {
     const data = FakeGoogleSheetsService.mockData;
     const prefs = data.CACHE && data.CACHE.Preferences;
@@ -1675,7 +1688,9 @@ export class FakeGoogleSheetsService {
             ['DesignQueueFields', 'Design queue fields', 'columns shown on the design queue', 'schedule/design-queue*', 'json',
                 '["Client", "Show", "Size", "Note", "Elev", "Panels", "Setups", "Assignee", "Account Manager", "Ship", "Booth#"]', ''],
             ['DesignQueueAssignees', 'Design queue assignees', 'people who can be assigned design work', 'schedule/design-queue*', 'json',
-                '[["Alex", "red"], ["Sam Smith", "blue"]]', '']
+                '[["Alex", "red"], ["Sam Smith", "blue"]]', ''],
+            ['ColumnTypes', 'Column types', 'what each sheet column holds (checkbox, select, date, number, currency); undeclared columns are text', 'schedule*', 'json',
+                JSON.stringify(FAKE_COLUMN_TYPES), '']
         );
     }
     if (data.CACHE && !data.CACHE.ShowNotes) {

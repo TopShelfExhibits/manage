@@ -2,6 +2,7 @@ import { wrapMethods, normalizeHeaderName, Database, InventoryUtils, PackListUti
 import { authState } from '../application/utils/auth.js';
 import { instantWriteEntry, columnText, identityText, parseColoredName } from './utils/instant-write-config.js';
 import { columnKind } from './utils/checkbox-values.js';
+import { columnTypesEntry } from './utils/column-types.js';
 
 /**
  * CACHING ARCHITECTURE NOTES:
@@ -1516,6 +1517,16 @@ class Requests_uncached {
             .map((h, c) => ({ column: normalizeHeaderName(h), c }))
             .filter(({ column }) => column)
             .map(({ column, c }) => ({ column, kind: columnKind(body.map(line => line?.[c])) }));
+    }
+
+    /**
+     * The declared column types of a tab, from the ColumnTypes preference (see
+     * utils/column-types.js): [{ column, type, options? }]. Undeclared columns are not listed;
+     * columnTypeOf gives them the name guess. The one cached read of column types for every page.
+     */
+    static async getColumnTypes(deps, database, tab) {
+        const all = await deps.call(Requests.getJsonPreference, 'ColumnTypes', {});
+        return columnTypesEntry(all, database, tab);
     }
 
     /**
