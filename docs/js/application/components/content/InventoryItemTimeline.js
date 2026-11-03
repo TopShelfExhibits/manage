@@ -1,13 +1,14 @@
 import { html, Requests, NavigationRegistry, DataView, ScheduleFilterSelect, getReactiveStore, toISODateString, todayISOString, offsetToISO, ItemImageComponent } from '../../index.js';
 import { useSearch } from '../../utils/useSearch.js';
+import { valueMatchesAny } from '../../utils/views/searchMatch.js';
 
 // What each timeline key is (calendarStart/End are derived on a computed copy of the rows)
 const TIMELINE_FIELDS = [
-    { key: 'date', label: 'Date', sortable: true, format: 'date', type: 'date' },
-    { key: 'quantity', label: 'Quantity', sortable: false, format: 'number', type: 'number' },
-    { key: 'event', label: 'Event', sortable: false },
-    { key: 'note', label: 'Note', sortable: false },
-    { key: 'change', label: 'Change', sortable: false },
+    { key: 'date', label: 'Date', format: 'date', type: 'date' },
+    { key: 'quantity', label: 'Quantity', format: 'number', type: 'number' },
+    { key: 'event', label: 'Event' },
+    { key: 'note', label: 'Note' },
+    { key: 'change', label: 'Change' },
     { key: 'calendarStart', label: 'Start', format: 'date', type: 'date' },
     { key: 'calendarEnd', label: 'End', format: 'date', type: 'date' }
 ];
@@ -17,6 +18,7 @@ const TIMELINE_VIEWS = {
     id: 'item-timeline',
     default: 'table',
     theme: 'purple',
+    sortable: ['date'],
     views: [
         {
             id: 'table',
@@ -25,6 +27,7 @@ const TIMELINE_VIEWS = {
             layout: 'table',
             columns: ['date', 'quantity', 'event', 'note', 'change'],
             hidden: ['calendarStart', 'calendarEnd'],
+            table: { hideRowsOnSearch: false },
             style: {
                 date: { width: 120 },
                 quantity: { width: 90, color: 'auto' },
@@ -72,7 +75,6 @@ export const InventoryItemTimeline = {
     setup(props) {
         // Initialize search composable
         const search = useSearch({
-            formatValue: null,
             syncWithUrl: true,
             navigationRegistry: NavigationRegistry,
             containerPath: props.containerPath,
@@ -194,11 +196,7 @@ export const InventoryItemTimeline = {
             // timelineStore computed reacts automatically to the filter change
         },
         hasSearchMatch(value) {
-            if (!this.search.hasActiveSearch.value || !value) return false;
-            const stringValue = String(value).toLowerCase();
-            return this.search.searchWords.value.some(word => 
-                stringValue.includes(word.toLowerCase())
-            );
+            return valueMatchesAny(value, this.search.searchWords.value);
         }
     },
     mounted() {
@@ -253,7 +251,6 @@ export const InventoryItemTimeline = {
                 :navigate-to-path="navigateToPath"
                 :details-title="row => [row.event, row.note].filter(Boolean).join(' — ') || 'Event Details'"
                 :show-search="false"
-                :hide-rows-on-search="false"
                 :show-refresh="false"
                 :is-loading="timelineStore?.isLoading ?? false"
                 :loading-message="timelineStore?.loadingMessage || 'Loading timeline...'"

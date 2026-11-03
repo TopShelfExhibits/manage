@@ -1,4 +1,12 @@
 import { html, getReactiveStore, Requests, authState, NavigationRegistry, buildTextFilterParameters, parseTextFilterParameters, LoadingBarComponent, createAnalysisConfig, parseDateFilterParameters, buildDateFilterParameters, toISODateString, parseDate, toUSDateString, offsetToISO, Priority, DataView } from '../../index.js';
+import { columnTypeMap, columnTypeOf } from '../../../data_management/utils/column-types.js';
+
+// Filter types that take no values: "is empty" (text filters), "checked" / "unchecked" (checkbox filters)
+const VALUELESS_TYPES = ['empty', 'checked', 'unchecked'];
+const CHECKBOX_TYPES = ['checked', 'unchecked'];
+function isCheckboxFilter(filter) {
+    return CHECKBOX_TYPES.includes(filter?.type);
+}
 
 // Shared utility: Match URL search data to a saved search
 function matchUrlToSavedSearch(savedSearches, urlSearchData) {
@@ -57,15 +65,27 @@ function normalizeValues(filter) {
     return filter.values || (filter.value ? [filter.value] : []);
 }
 
-// Shared utility: Validate and clean text filters
+// Values for the editor: at least one input, so switching a value-less filter back to
+// "Contains" shows a box to type in
+function editableValues(filter) {
+    const values = normalizeValues(filter);
+    return values.length ? values : [''];
+}
+
+// Shared utility: Validate and clean text filters (value-less types need only a column)
 function getValidTextFilters(textFilters) {
     return textFilters
-        .filter(f => f.column && f.values && f.values.some(v => v.trim()))
-        .map(f => ({ 
-            column: f.column, 
-            values: f.values.filter(v => v.trim()),
-            type: f.type || 'contains' 
+        .filter(f => f.column && (VALUELESS_TYPES.includes(f.type) || (f.values && f.values.some(v => v.trim()))))
+        .map(f => ({
+            column: f.column,
+            values: VALUELESS_TYPES.includes(f.type) ? [] : f.values.filter(v => v.trim()),
+            type: f.type || 'contains'
         }));
+}
+
+// A filter card is complete (green) when it has a column and, for value types, a value
+function isFilterComplete(filter) {
+    return !!filter.column && (VALUELESS_TYPES.includes(filter.type) || (filter.values || []).some(v => String(v).trim()));
 }
 
 // Shared utility: Clean filter objects by removing AppData and other metadata
@@ -134,6 +154,8 @@ export const ScheduleAdvancedFilter = {
             
             // Reactive store for production schedule data (for column loading)
             scheduleStore: null,
+            // Declared column types of the Production Schedule (ColumnTypes preference)
+            columnTypesStore: null,
             
             // Selected saved search for update/delete
             selectedSavedSearchIndex: null // null = "New Search"
@@ -167,36 +189,30 @@ export const ScheduleAdvancedFilter = {
                 .filter(key => key !== 'AppData')
                 .sort();
         },
-        // Date-formatted columns only
+        // Each column's type: declared in ColumnTypes, else the shared name guess (utils/column-types.js)
+        columnTypes() {
+            return columnTypeMap(this.columnTypesStore?.data);
+        },
+        // Date columns ('Date' is always offered: the default date filter column)
         dateColumns() {
-            if (!this.scheduleData || this.scheduleData.length === 0) {
-                return ['Date']; // Default
-            }
-            
-            // Find columns that are date-related based on column name keywords
-            // Uses same logic as ScheduleTable.js isDateColumn method
-            const dateKeywords = ['date', 'start', 'end', 'ship', 'due', 'deadline', 'created', 'updated', 'modified', 'time', 'return'];
-            const firstRow = this.scheduleData[0];
-            
-            const dateColumns = Object.keys(firstRow)
-                .filter(key => {
-                    if (key === 'AppData') return false;
-                    // Check if column name contains date-related keywords (case-insensitive)
-                    const keyLower = key.toLowerCase();
-                    return dateKeywords.some(keyword => keyLower.includes(keyword));
-                })
-                .sort();
-            
-            // Always ensure 'Date' is included
-            if (!dateColumns.includes('Date')) {
-                dateColumns.unshift('Date');
-            }
-            
+            const dateColumns = this.availableColumns.filter(col => columnTypeOf(this.columnTypes, col).type === 'date');
+            if (!dateColumns.includes('Date')) dateColumns.unshift('Date');
             return dateColumns;
         },
-        // Text filter columns (all columns except date columns)
+        // Checkbox columns (declared only: an undeclared column is never a checkbox)
+        checkboxColumns() {
+            return this.availableColumns.filter(col => columnTypeOf(this.columnTypes, col).type === 'checkbox');
+        },
+        // Text filter columns (all columns except date and checkbox columns)
         textFilterColumns() {
-            return this.availableColumns.filter(col => !this.dateColumns.includes(col));
+            return this.availableColumns.filter(col => !this.dateColumns.includes(col) && !this.checkboxColumns.includes(col));
+        },
+        // The filter list holds both kinds; checkbox filters are the checked / unchecked types
+        textOnlyFilters() {
+            return this.textFilters.filter(f => !isCheckboxFilter(f));
+        },
+        checkboxFilters() {
+            return this.textFilters.filter(f => isCheckboxFilter(f));
         },
         // Loading states from store
         isLoadingColumns() {
@@ -259,6 +275,7 @@ export const ScheduleAdvancedFilter = {
     },
     methods: {
         async initializeScheduleStore() {
+            this.columnTypesStore = getReactiveStore(Requests.getColumnTypes, null, ['PROD_SCHED', 'Production Schedule']);
             // Initialize reactive store for production schedule (for column loading only)
             this.scheduleStore = getReactiveStore(
                 Requests.getProductionScheduleData,
@@ -303,7 +320,7 @@ export const ScheduleAdvancedFilter = {
                 this.textFilters = filter.textFilters.map((filter, index) => ({
                     id: index + 1,
                     column: filter.column,
-                    values: normalizeValues(filter),
+                    values: editableValues(filter),
                     type: filter.type || 'contains'
                 }));
                 this.nextFilterId = filter.textFilters.length + 1;
@@ -357,6 +374,17 @@ export const ScheduleAdvancedFilter = {
                 values: [''],
                 type: 'contains'
             });
+        },
+        addCheckboxFilter() {
+            this.textFilters.push({
+                id: this.nextFilterId++,
+                column: '',
+                values: [],
+                type: 'checked'
+            });
+        },
+        isFilterComplete(filter) {
+            return isFilterComplete(filter);
         },
         handleValueInput(filter, valueIndex, event) {
             const value = event.target.value;
@@ -485,7 +513,7 @@ export const ScheduleAdvancedFilter = {
                 this.textFilters = search.textFilters.map((filter, index) => ({
                     id: index + 1,
                     column: filter.column,
-                    values: normalizeValues(filter),
+                    values: editableValues(filter),
                     type: filter.type || 'contains'
                 }));
                 this.nextFilterId = search.textFilters.length + 1;
@@ -686,7 +714,7 @@ export const ScheduleAdvancedFilter = {
                     this.textFilters = upcomingSearch.textFilters.map((f, i) => ({
                         id: i + 1,
                         column: f.column,
-                        values: normalizeValues(f),
+                        values: editableValues(f),
                         type: f.type || 'contains'
                     }));
                     this.nextFilterId = upcomingSearch.textFilters.length + 1;
@@ -740,18 +768,18 @@ export const ScheduleAdvancedFilter = {
                     },
                     fields() {
                         return [
-                            { key: 'show', label: 'Show', sortable: true },
-                            { key: 'shipDate', label: 'Ship Date', sortable: true, format: 'date', type: 'date' },
-                            { key: 'returnDate', label: 'Return', sortable: true, format: 'date', type: 'date' }
+                            { key: 'show', label: 'Show' },
+                            { key: 'shipDate', label: 'Ship Date', format: 'date', type: 'date' },
+                            { key: 'returnDate', label: 'Return', format: 'date', type: 'date' }
                         ];
                     },
-                    // Single-view registry, no URL; Select is the primary action (button in the action cell)
+                    // Single-view registry, no URL; Select is the primary action (a row click)
                     registry() {
                         return {
                             id: 'show-overlap-picker',
                             default: 'table',
                             theme: 'gray',
-                            views: [{ id: 'table', name: 'Shows', layout: 'table', columns: ['show', 'shipDate', 'returnDate'], sort: { key: 'show', dir: 'asc' } }]
+                            views: [{ id: 'table', name: 'Shows', layout: 'table', columns: ['show', 'shipDate', 'returnDate'], sortable: ['show', 'shipDate', 'returnDate'], sort: { key: 'show', dir: 'asc' }, action: 'row' }]
                         };
                     },
                     selectAction() {
@@ -911,11 +939,11 @@ export const ScheduleAdvancedFilter = {
                     </button>
                 </div>
 
-                <!-- Text Filters -->
-                <div 
-                    v-for="filter in textFilters" 
+                <!-- Text Filters (filters on the same column match rows meeting either) -->
+                <div
+                    v-for="filter in textOnlyFilters"
                     :key="filter.id"
-                    :class="'card' + (filter.values.some(v => v.trim()) ? ' green' : ' gray')"
+                    :class="'card' + (isFilterComplete(filter) ? ' green' : ' gray')"
                     style="display: flex; flex-wrap: wrap; gap: var(--padding-md); align-items: center;"
                 >
                     <h5 style="width: 80px; align-self: flex-start;">Text Filter:</h5>
@@ -944,11 +972,12 @@ export const ScheduleAdvancedFilter = {
                         >
                             <option value="contains">Contains</option>
                             <option value="excludes">Excludes</option>
+                            <option value="empty">Is empty</option>
                         </select>
                     </div>
-                    <!-- Multiple value inputs -->
-                    
-                    <div :class="['form-group', { 'hide-when-narrow': !filter.column }]">
+                    <!-- Multiple value inputs (none for "Is empty") -->
+
+                    <div v-if="filter.type !== 'empty'" :class="['form-group', { 'hide-when-narrow': !filter.column }]">
                         <label>Value{{ filter.values.length > 1 ? (filter.type === 'contains' ? ' or additional values' : ' and additional values') : '' }}</label>
                         <div class="button-bar">
                             <div 
@@ -985,7 +1014,42 @@ export const ScheduleAdvancedFilter = {
                     </div>
 
                     <div class="spacer"></div>
-                    <button 
+                    <button
+                        @click="removeTextFilter(filter.id)"
+                        class="button-symbol white"
+                        title="Remove this filter"
+                    >
+                        <span class="material-symbols-outlined">close</span>
+                    </button>
+                </div>
+
+                <!-- Checkbox Filters -->
+                <div
+                    v-for="filter in checkboxFilters"
+                    :key="filter.id"
+                    :class="'card' + (isFilterComplete(filter) ? ' green' : ' gray')"
+                    style="display: flex; flex-wrap: wrap; gap: var(--padding-md); align-items: center;"
+                >
+                    <h5 style="width: 80px; align-self: flex-start;">Checkbox Filter:</h5>
+
+                    <div class="form-group">
+                        <label>Column</label>
+                        <select v-model="filter.column">
+                            <option value="">Select...</option>
+                            <option v-for="col in checkboxColumns" :key="col" :value="col">{{ col }}</option>
+                        </select>
+                    </div>
+
+                    <div :class="['form-group', { 'hide-when-narrow': !filter.column }]">
+                        <label>Is</label>
+                        <select v-model="filter.type" :disabled="!filter.column">
+                            <option value="checked">Checked</option>
+                            <option value="unchecked">Unchecked</option>
+                        </select>
+                    </div>
+
+                    <div class="spacer"></div>
+                    <button
                         @click="removeTextFilter(filter.id)"
                         class="button-symbol white"
                         title="Remove this filter"
@@ -1008,6 +1072,9 @@ export const ScheduleAdvancedFilter = {
                 </button>
                 <button @click="addTextFilter" class="white" :disabled="isLoadingColumns">
                     + Text Filter
+                </button>
+                <button @click="addCheckboxFilter" class="white" :disabled="isLoadingColumns || !checkboxColumns.length">
+                    + Checkbox Filter
                 </button>
                 <!-- <button @click="" class="button-symbol white" :disabled="isLoadingColumns">
                     +

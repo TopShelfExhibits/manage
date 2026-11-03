@@ -1,6 +1,6 @@
 # Views System & Unified Renderers: Refactor Plan
 
-**Status:** revision 9, decisions applied; Phases 0–6 implemented on `views-system` (uncommitted, awaiting manual testing) · **Branch:** `views-system` · **Date:** 2026-10-30
+**Status:** revision 9, decisions applied; Phases 0–6 implemented and committed on `views-system`, awaiting manual testing · **Branch:** `views-system` · **Date:** 2026-11-02
 
 ## Implementation status (2026-10-30)
 
@@ -15,7 +15,7 @@ All six phases are implemented in the working tree. The in-browser suite passes 
 
 - Engine: `js/application/utils/views/` (`resolveView.js`, `cardsAdapter.js`, `fieldFormat.js`, `viewColor.js`, `searchMatch.js`), `js/application/utils/useContainerSize.js`.
 - Components: `dataViewComponent.js`, `viewSelectComponent.js`, `contentHeaderComponent.js`, `rowDetailsComponent.js`, `cells.js` (registry: image, itemId, navigate, checkbox, select, text).
-- Data layer: `data_management/abstraction/scheduleFields.js`, `instant-write-utils.js` (`writeCellVerified`, `saveShowNote`), `utils/checkbox-values.js`; `Requests.writeCellVerified / saveShowNote / getShowNotes / getJsonPreference / getInstantWriteConfig`.
+- Data layer: `data_management/abstraction/scheduleFields.js`, `instant-write-utils.js` (`writeCellsVerified`, `saveShowNote`), `utils/checkbox-values.js`, `utils/instant-write-config.js` (the preference and the failure messages); `Requests.writeCellsVerified / saveShowNote / getShowNotes / getJsonPreference / getInstantWriteConfig`.
 - New page: `content/DesignQueueContent.js` (route `schedule/design-queue`, Schedule hamburger menu → Design Queue).
 
 **Choices made during implementation (all reversible)**
@@ -25,7 +25,10 @@ All six phases are implemented in the working tree. The in-browser suite passes 
 - Fields may carry `cellOptions` (e.g. which key holds the item number for the image cell) and `format: 'multiline'`.
 - The calendar skips table group-master rows, so ItemReport uses one row set for both views.
 - PacklistTable resolves its views directly (no DataView), per C3.
-- The renderer contract keeps individual state props (`isLoading`, `error`, …) instead of one `state` object; cards keep `theme` and default-sort props, set only by DataView.
+- The renderer contract keeps individual state props (`isLoading`, `error`, …) instead of one `state` object. Every renderer (table, calendar, cards) takes `resolved`, `data`, `action` and decorations; cards build their cards with the adapter themselves.
+- `resolved.sort` is always a list of `{ key, direction }`. Whether search hides rows is view data only (`table.hideRowsOnSearch`); a page that needs a different default passes a patch.
+- Search highlighting and HTML escaping each have one implementation: `searchMatch.makeHighlighter` and `fieldFormat.escapeHtml`. Decoration placement lives in `views/decorations.js`.
+- Batch edits match rows to loaded rows by `rowKey` everywhere; rows added, removed or moved mark the table changed without marking cells.
 - `Requests.getInventoryHiddenSearchData` was removed (D7); category cards search the item rows.
 
 ## Purpose
@@ -86,6 +89,22 @@ Related notes: [notes.md](notes.md) (TODO items L80–82, L131–135), [calendar
 
 - **New page:** content that is different in purpose (its own analysis, endpoints, or actions). Example: the design queue gets its own page under Schedule.
 - **New view:** a different visualization of the same data for the same purpose. Example: Schedule table and calendar, or a ship/return calendar.
+
+### Principle: data or view?
+
+Every property has one home. When adding one, put it where its question is answered:
+
+| Question | Home | Examples |
+| --- | --- | --- |
+| What is this value, and may it be written? | **Field** (page code, the data layer, preferences such as `ColumnTypes` and `InstantWriteTables`) | `key`, `label` (the field's name), `type`, `format`, `editable`, a select's `options` (allowed values) and `optionList` (list name) |
+| Which columns show, in what order, and how do they look and behave? | **View** (`columns`, `sortable`, `style`, …; a registry may share `style` and `sortable` with all its views) | header text and icons (`style.label`, `labelHtml`, `title`), widths, fonts, colours, sortability, which cell draws a value (`style.cell`, `cellOptions`), column span |
+| What does a row's data say? | **Derived field** computed by the page, holding a data state | `_unattached: true`, `_status` |
+| What colour or style does that state get? | **View colour rule** | `rowColor: { field: '_unattached', rule: 'checked:red', fallback: 'gray' }` |
+
+- A field never carries presentation. `resolveView` ignores presentation properties on fields, with a dev warning, so drift shows up on localhost.
+- A view never decides data: types, write permission and allowed values come from fields.
+- Cells that follow the data need no view setting: a `checkbox` or `select` field gets its type's cell (read-only ones render disabled), and an editable field without a cell gets the text editor. A view names a cell only for a display choice (`image`, `itemId`, the page's `slot`, `external-edit`).
+- Presentation that comes from data at runtime (the assignee colours in a preference, a dynamic column's header) enters through the page as a view patch (§4.15) or the page's computed registry, never as field properties.
 
 ### Non-goals
 
@@ -207,10 +226,10 @@ There are 20 renderer instances in 14 components.
 ```
  Page component — data, domain logic, actions, edit mode
  ├─ rows     ← store data + derived fields (computed copy; never written to store.data)
- ├─ fields   ← FieldDef[]: what each key IS (label, type, format, sortable, editable, cell)
+ ├─ fields   ← FieldDef[]: what each key IS (label, type, format, editable, options)
  ├─ editMode ← 'none' | 'batch' | 'instant'  (page data, never view data; §4.16)
- ├─ registry ← page view registry: views (data), default, theme
- └─ hooks    ← action · decorations · bucketDecorations · commitCell (instant mode)
+ ├─ registry ← page view registry: views (presentation), shared style and sortable, default, theme
+ └─ hooks    ← action · decorations · bucketDecorations · commitCells (instant mode)
         │
         ▼
  <DataView>  — the only producer of renderer presentation input
@@ -256,21 +275,26 @@ There are 20 renderer instances in 14 components.
 
 ```js
 /**
- * @typedef {Object} FieldDef
- * @property {string}  key
- * @property {string}  [label]
- * @property {string}  [labelHtml]   header label as HTML (icon)
- * @property {string}  [title]       header tooltip
- * @property {string}  [type]        data type / compare semantics: 'item', 'date', 'number', 'checkbox' (Phase 2), …
- * @property {'date'|'currency'|'number'|'external-edit'|string} [format]
- * @property {boolean} [sortable]
- * @property {boolean} [editable]    configured with the page's data, not by views (§4.16)
- * @property {string}  [cell]        'slot' → page #cell; '<name>' → registry; absent → formatted text
- * @property {number}  [colspan]     table-structural; PacklistTable nested item header only
+ * @typedef {Object} FieldDef           what the data is (see "Principle: data or view?")
+ * @property {string}   key
+ * @property {string}   [label]         the field's human name (headers, cards, details, sort menus)
+ * @property {string}   [type]          data type / compare semantics: 'item', 'date', 'number', 'checkbox', 'select', …
+ * @property {'date'|'currency'|'number'|'multiline'|string} [format]   display format implied by the type
+ * @property {boolean}  [editable]      configured with the page's data, not by views (§4.16)
+ * @property {string[]} [options]       select: the allowed values (the page supplies them)
+ * @property {string}   [optionList]    select: the option list ColumnTypes names
  */
 ```
 
-Presentation properties (`width`, `font`, `autoColor`, `cellClass`, `columnClass`, `allowHide`, `details`, `stackUnder`, `sticky`, `firstRow`, `secondRow`, `whenSmall`) are **not** field properties. They move into views. During migration `resolveView` tolerates them on fields with a dev warning. Phase 5 removes that tolerance.
+Presentation properties are **not** field properties: `labelHtml`, `title`, `sortable`, `cell`, `cellOptions`, `colspan`, `isIndex`, and the older `width`, `font`, `autoColor`, `cellClass`, `columnClass`, `allowHide`, `details`, `stackUnder`, `sticky`, `firstRow`, `secondRow`, `whenSmall`. `resolveView` ignores them on fields, with a dev warning; they belong in the view (§4.2).
+
+**Resolved fields.** Renderers read `resolved.fields` / `resolved.fieldMap`: each data field with the view's presentation merged in (`style` props, `sortable`, and the type's cell). Pages never build presented fields themselves.
+
+**Columns without data (custom, kept).** The ideal is that every column holds data and anything else is an action. These stay as bare fields (`key` + `label`) with their presentation in the view; no new mechanism is added for them:
+- the item thumbnail (`image`): ideally the inventory data stores an image URL and a view styles that column as a thumbnail, with editing following its data controls (see Later);
+- the Schedule `packlist` column: ideally tables allow several row actions with their own styling (see Later).
+
+The inventory calendar button is no longer a column: it is the inventory table's row action, with a calendar header icon (`action: { to, icon, headerIcon, title }`).
 
 ### 4.2 View definition: presentation as data
 
@@ -294,18 +318,25 @@ Presentation properties (`width`, `font`, `autoColor`, `cellClass`, `columnClass
  * @property {string[]|'rest'} [details='rest']  'rest' = every field not listed elsewhere
  * @property {string[]|'rest'} [hidden]          never shown, never searched
  * @property {{key:string, dir:'asc'|'desc'}} [sort]
+ * @property {string[]} [sortable]        keys (or patterns) the user can sort by; unlisted keys don't
+ *                                        sort; names a sheet lacks are ignored
  *
  * // Interaction
  * @property {'button'|'row'} [action='button']   how the primary action is triggered (§4.8)
  *
- * // Style and colour
- * @property {Object<string,{ width?:number, font?:string, color?:ColorRule, columnColor?:string }>} [style]
- *           keyed by field key or pattern; columnColor = column background class (table)
+ * // Style and colour (keyed by field key or pattern; exact keys override patterns)
+ * @property {Object<string,{ width?:number, font?:string, color?:ColorRule, columnColor?:string,
+ *           label?:string, labelHtml?:string, title?:string, cell?:string, cellOptions?:Object, colspan?:number }>} [style]
+ *           columnColor = column background class (table); label/labelHtml/title = header text, header
+ *           HTML (icon) and tooltip; cell = the cell that draws the value when it isn't the type's
+ *           (§4.14); colspan = table-structural (PacklistTable's nested item header only)
  * @property {{ field:string, rule:ColorRule, fallback?:string }} [rowColor]
  *
  * // Layout sections
  * @property {{ sticky?: {start?:string[], end?:string[]}, hideRowsOnSearch?: boolean }} [table]
- * @property {{ start:string, end:string, weekStart?:'sunday'|'saturday', yearColumn?:string, chip:Line[] }} [calendar]
+ * @property {{ start:string, end:string, weekStart?:'sunday'|'saturday', yearColumn?:string, chip:Line[], actions?:string[] }} [calendar]
+ *           actions = keys whose cells draw in the chip's end button bar (before the decoration cards
+ *           and the action button), like a card footer
  * @property {{ bucketBy?:string, card:Line[], footer?:Line[], hideOnSearch?:boolean }} [cards]
  *
  * // Variants: partial ViewDefs by condition
@@ -317,7 +348,8 @@ Presentation properties (`width`, `font`, `autoColor`, `cellClass`, `columnClass
 
 - **Key patterns:** a trailing `*` (`'show_*'`) works in every key list and in `style` keys, using the same rule as `matchesPagePattern` in [preferencesComponent.js](../js/application/components/interface/preferencesComponent.js).
 - **Variant cascade:** `medium` applies at medium and narrow sizes; `narrow` applies on top of it at narrow size; `print` applies last. Objects merge deeply, arrays replace.
-- **Colour rules are data only** (R3.5). Any rule that needs logic (packlist red when unattached, a fallback colour) becomes a **derived field** computed by the page (for example `_cardColor: 'red'`), and the view references it: `rowColor: { field: '_cardColor', rule: 'value' }`.
+- **Colour rules are data only** (R3.5). Rules: `'auto'`, `'value'` (the value is the class), `'checked:<class>'` (the class when the value is a checked checkbox value or `true`), `'sign:<pos>:<neg>'` (by the sign of a number), `'differs:<key>:<class>'` (the class when the value differs from the row's `<key>`, e.g. a proposed description against the current one), or a literal class. Logic (packlist unattached) becomes a **derived field holding a data state**, computed by the page (`_unattached: true`), and the view maps it to a colour: `rowColor: { field: '_unattached', rule: 'checked:red', fallback: 'gray' }`. A derived field holds a state, not a class name.
+- **Registry-level presentation:** a registry's `style` and `sortable` apply to all its views (`withRegistryDefaults`); a view's own entries win (objects merge, lists replace).
 - **Validation:** dev warnings, never throws.
   - Unknown keys are ignored.
   - The first tier wins on duplicates. At most one of `details` and `hidden` may be `'rest'`.
@@ -419,7 +451,7 @@ resolveView(fields, view, { size = 'wide', print = false, patches = [], editMode
 - `resolved: ResolvedView`
 - `action: ResolvedAction` (§4.8)
 - `state: { isLoading, isAnalyzing, loadingProgress, loadingMessage, error, emptyMessage }`
-- `hooks: { decorations, bucketDecorations, commitCell }`
+- `hooks: { decorations, bucketDecorations, commitCells }`
 - slots: `#cell`, `#row-details`, `#header-area`, plus table-only `#cell-extra`, `#row-detail-rows`, `#selection-actions`
 - renderer-only behaviour props: table editing/drag/selection/grouping and `editMode`; cards pins
 
@@ -481,7 +513,9 @@ Row click and the details button are **one mechanism**. Every row has at most on
  *  @property {(row) => string} [to]     navigation path; DataView adds the current searchTerm
  *  @property {(row) => void}   [run]    in-place action (select, add)
  *  @property {string} [label]           button text, e.g. 'Select', '+ Add Item'
- *  @property {string} [icon]            button icon; default is the details icon (☷)
+ *  @property {string} [icon]            button icon: a glyph or a material symbol name; default is the details icon (☷)
+ *  @property {string} [headerIcon]      the table's action column header (glyph or symbol name; details default ⓘ)
+ *  @property {string} [title]           the button's tooltip
  *  @property {(row) => boolean} [disabled]  e.g. the picker disables Select for shows without dates
  */
 ```
@@ -498,8 +532,10 @@ An `ActionDef` has exactly one of `to` and `run` (R6.5). If both are given, `res
 
 | Trigger              | Table                                                                                  | Calendar                 | Cards                     |
 | -------------------- | -------------------------------------------------------------------------------------- | ------------------------ | ------------------------- |
-| `'button'` (default) | one action button in the trailing sticky cell (today's details cell, `col-sticky-end`) | button at the chip start | button in the card footer |
+| `'button'` (default) | one action button in the trailing sticky cell (today's details cell, `col-sticky-end`) | button at the chip end, last in its button bar | button in the card footer |
 | `'row'`              | whole row, with hover highlight, `tabindex="0"` and Enter/Space; no button             | chip body; no button     | whole card; no button     |
+
+- **The action in a column:** a view can draw the primary action as a column's value instead of a separate button: `style[key].cell = 'action'` (for example the item shortage report's purple Item# buttons). While a shown column (or a calendar chip line or `calendar.actions` key) uses that cell, the renderer draws no action button. Use it when the action belongs to one value; other per-row buttons are decorations or cells such as `showList`.
 
 - **Glow:** with `'button'`, the button glows on a details-only match. With `'row'`, the row, chip or card gets a `details-match` class instead; cards also keep their matched-fields list.
 - **Row-trigger guards:** a click is ignored when it lands inside an interactive element (`button, a, input, select, textarea, [contenteditable], .column-button`), when text is selected (`!getSelection().isCollapsed`, so cell contents can still be copied), and during clipboard or drag mode. Use `click`, not `touchend`.
@@ -628,12 +664,13 @@ This replaces the `hiddenColumns` mutation and the 100 ms restore.
 
 ### 4.14 Modularity: cells, decorations, slots
 
-1. **Cell registry** (`field.cell = '<name>'`).
-   - Props: `{ row, field, value, renderer, density, search }`, where `density` is `'full'` or `'compact'`.
-   - Initial registry: `image`, `itemId`, `navigate`; Phase 2 adds `checkbox` and `select`.
-   - A missing compact form falls back to text.
-   - The table, chips, cards **and the details grid** all use this pipeline, so a future data type (checkbox) is added once.
-2. **Page slot** (`field.cell = 'slot'`). `#cell="{ row, field, renderer, density }"` is called only for those fields, and other fields keep the fallback (fixes D6). Clickable content inside chips and cards is allowed.
+1. **Cell registry.** A cell is the component that draws a value. Renderers read it from the resolved field (`resolvedField.cell`), which comes from the data or the view:
+   - **From the data** (no view setting): a `checkbox` field gets `checkbox`, a `select` field gets `select` (both render disabled when read-only), and an editable field without a cell gets `text`, the one text editor.
+   - **From the view** (`style[key].cell`, a display choice): `image` (item thumbnail, custom: see §4.1), `itemId`, `action` (the row's primary action as this value's button; `cellOptions.class` colours it), `showList` (a list of show identifiers as full-width buttons; past `cellOptions.max` one "N shows" button opens them in a modal; `cellOptions.to` is the show path with `{value}`), `slot`, `external-edit`. Its options are `style[key].cellOptions`, so each view sets them for its layout: the item shortage report lists two shows in the table, always uses the "N shows" button on calendar chips (`max: 0`), and lists every show when printing (`variants.print`, `max: null`).
+   - Button lists in a cell use the shared `.cell-button-list` style (stacked, full width; left-aligned lines in print).
+   - Props: `{ row, field, value, renderer, density, search }`, where `density` is `'full'` or `'compact'`. A missing compact form falls back to text.
+   - The table, chips, cards **and the details grid** all use this pipeline, so a new data type is added once.
+2. **Page slot** (`style[key].cell = 'slot'`). `#cell="{ row, field, renderer, density }"` is called only for those fields, and other fields keep the fallback (fixes D6). Clickable content inside chips and cards is allowed. `'external-edit'` also draws through the page slot, for a value edited outside the cell (a modal): the table shows no editor and no revert control for it.
 3. **Decorations** `decorations(row, key) → Card[]`, where `key = null` is row-level.
    - Table: rendered after the cell content. `#cell-extra` stays for markup that isn't a card.
    - Calendar: inline on the chip line, or at the chip end (hidden when narrow).
@@ -652,7 +689,7 @@ The system's only extension input is a list of view patches supplied by the comp
 - **Application:** patches apply after variants, in order, with the same merge rules. An omitted `sizes` means all sizes.
 - **Narrow toggle (R2.4):** an override created at narrow size defaults to `sizes: ['narrow']`, and a UI can toggle each override per size later.
 - **Scope:** per page type (registry `id`), not per path (R2.11).
-- **First source: the design queue fields preference (R6.1, R7.2).** The `DesignQueueFields` preference (§4.16) is a plain array of column names. The design queue page passes it as one patch, `{ patch: { columns } }`. It affects only the design queue, never the Schedule page. Unknown names are ignored as usual, so the list can name a sheet column before it exists.
+- **First source: the design queue fields preference (R6.1, R7.2).** The `DesignQueueFields` preference (§4.16) is a plain array of column names that chooses which columns show. The view orders them: the page passes one patch, `{ patch: { columns } }`, with the view's columns that the preference names, in the view's order, then any other named columns in the preference's order. It affects only the design queue, never the Schedule page. Unknown names are ignored as usual, so the list can name a sheet column before it exists.
 - **Still not decided** (R2.5): other sources (session, local, per-user), which other pages allow patches, and any UI. Code-defined default views _are_ the app defaults; a preference only patches them.
 
 ### 4.16 Edit modes and other data concerns (R2.1, R2.2, R3.9)
@@ -674,9 +711,9 @@ These are set by the content component with its data, never by views.
 1. The renderer emits `cell-commit(row, columnKey, value)`. The cell shows the new value **immediately** (R7.3), on the local computed row.
    - `DataView` holds the commit in a small queue keyed by row identity and column for `INSTANT_WRITE_DELAY_MS` (1200 ms).
    - Another commit to the same cell within the delay replaces the queued value and restarts the timer. If the final value equals the loaded value, nothing is written, so a quick check-then-uncheck costs no write.
-   - When the timer fires, `DataView` calls the page's `commitCell` hook, which returns a promise. The cell shows a pending state until it settles.
+   - When the timer fires, `DataView` calls the page's `commitCells` hook with every queued cell, which returns a promise of one result per cell. The cells show a pending state until it settles.
    - Queued commits flush immediately when the page unmounts (in-app navigation). A browser cannot be relied on to finish a write while a tab is closing, so while commits are queued or in flight, `beforeunload` shows the browser's leave-confirmation prompt and starts the flush.
-2. `commitCell` calls one data-layer function, `Requests.writeCellVerified(database, tab, row, column, value)`. Steps 3–6 live there, in the abstraction layer, not in the page (per the [notes.md](notes.md) TODO on moving API logic into abstractions).
+2. `commitCells` calls one data-layer function, `Requests.writeCellsVerified(database, tab, [{ row, column, value }])`. Steps 3–6 live there, in the abstraction layer, not in the page (per the [notes.md](notes.md) TODO on moving API logic into abstractions).
 3. It locates the target by **identity, not position**: the row by its identity fields, the column by header name. It resolves both to live sheet indices just before writing.
 4. It reads the exact cell and aborts if the read fails or the row no longer matches.
 5. It writes only the desired state, in the sheet's existing convention (see checkbox values below), optionally with date metadata. A formula cell is replaced by the written value.
@@ -684,19 +721,25 @@ These are set by the content component with its data, never by views.
 
 Phase 0's key-based `cell-edit` contract serves `batch`. `instant` adds `cell-commit` beside it and leaves `cell-edit` unchanged.
 
+**One edit mechanism** ([cellEdits.js](../js/application/utils/cellEdits.js)). `useBatchEdits` (one per table: changed cells, revert, nested tables, undo while typing) and `useInstantEdits` (one per `DataView`: the delayed queue, overlay, write results) keep the same per-cell states, shown as the classes `cell-unsaved` and `cell-failed`. Every batch table colours unsaved cells except pack lists, whose edits change most cells.
+
+**One editor per cell type, in both modes.** A column is `editable` when the edit mode isn't `none` and its field is editable; the table has no second flag. Every edit goes through one table method that routes by `editMode`: `batch` → `cell-edit` (dirty tracking, undo, Save), `instant` → `cell-commit`. An editable field without a `cell` edits through the `text` cell (number and `external-edit` fields keep their own editors). The text cell is the only text editor: in `batch` it reports every change, in `instant` it reports the finished edit on blur; pasting inserts plain text, and in `batch` pasted text with tabs or line breaks is left to the table's row paste.
+
 **Preferences (R4.5, R5.2, R7.1, R7.2).** Everything an instant-write page needs from the sheet lives in the live database, so a renamed header or a new assignee needs no code change. For Schedule data the identity is Client + Year + Show, the same three inputs as `ProductionUtils.computeIdentifier` ([production-utils.js:332](../js/data_management/abstraction/production-utils.js#L332)).
 
 _Before Phase 2 starts_, add these rows to the live `CACHE/Preferences` sheet. All use the existing `json` type, which the preferences editor already validates:
 
 | ID                     | Name                   | Page                     | Type   | Value                                                                                                                                                                             |
 | ---------------------- | ---------------------- | ------------------------ | ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `InstantWriteTables`   | Instant-write tables   | `schedule*`              | `json` | `{"PROD_SCHED/Production Schedule": {"identity": ["Client", "Year", "Show"], "columns": {"Elev": "checkbox", "Panels": "checkbox", "Setups": "checkbox", "Assignee": "select"}}}` |
-| `DesignQueueFields`    | Design queue fields    | `schedule/design-queue*` | `json` | `["Client", "Show", "Size", "Elev", "Panels", "Setups", "Assignee", "Account Manager", "Ship", "Note", "Booth#"]`                                                                 |
-| `DesignQueueAssignees` | Design queue assignees | `schedule/design-queue*` | `json` | `["<name>", "<name>"]`                                                                                                                                                            |
+| `InstantWriteTables`   | Instant-write tables   | `schedule*`              | `json` | `{"PROD_SCHED/Production Schedule": {"identity": ["Client", "Year", "Show"], "columns": ["Elev", "Panels", "Setups", "Assignee"]}}` |
+| `DesignQueueFields`    | Design queue fields    | `schedule/design-queue*` | `json` | `["Client", "Show", "Size", "Note", "Elev", "Panels", "Setups", "Assignee", "Account Manager", "Ship", "Booth#"]`                                                                 |
+| `DesignQueueAssignees` | Design queue assignees | `schedule/design-queue*` | `json` | `["<name>", ["<name>", "<colour word>"]]`                                                                                                                                         |
+| `ColumnTypes`          | Column types           | `schedule*`              | `json` | `{"PROD_SCHED/Production Schedule": {"Elev": "checkbox", "Panels": "checkbox", "Setups": "checkbox", "Assignee": {"type": "select", "options": "DesignQueueAssignees"}}}`         |
 
 - **Keys:** `InstantWriteTables` is keyed by `<database>/<tab>`, the same pair passed to `Database.getData`.
-- **Writable columns:** `columns` lists every column an instant write may touch, with its cell type. The page builds those field definitions as `{ type, cell: type, editable: true }`. `writeCellVerified` refuses any column not listed. A listed column missing from the sheet is skipped with a dev warning.
-- **Select options:** the `Assignee` select takes its options from `DesignQueueAssignees`. A current value that isn't in the list still shows, as an extra option, so nothing is hidden or overwritten.
+- **Writable columns:** `columns` lists every column an instant write may touch; `identity` lists the columns that together identify a row. Both are read through `utils/instant-write-config.js` everywhere (writes, the design queue's row identity and duplicate check, and the test-only sheet health check in `tests/sheetHealth.js`). `writeCellsVerified` refuses any column not listed. A listed column missing from the sheet is skipped with a dev warning. The older form, `"columns": {"Elev": "checkbox", ...}`, is still read: its keys are the columns and the types are ignored (types live in `ColumnTypes`).
+- **Column types are declared.** `ColumnTypes` (keyed like `InstantWriteTables`) says what each column holds: `checkbox`, `select`, `date`, `number`, `currency` or `text` ([column-types.js](../js/data_management/utils/column-types.js)). Declared types win. An undeclared column is text, unless its name reads as a date, number or currency (`guessColumnType`, the only guess). `Requests.getColumnTypes` is the one cached read; the Schedule fields, the schedule filters and the design queue all use it. The table draws an editable column's cell from its type (checkbox, select, else text).
+- **Select options:** a select names its option list (`"options": "DesignQueueAssignees"`), and the page that shows the column supplies its lists by name. The design queue takes `DesignQueueAssignees` (names, optionally with a colour word) from preferences. A current value that isn't in the list still shows, as an extra option, so nothing is hidden or overwritten.
 - **Checkbox values (R7.3).** The sheet marks done with `X`. Unchecked cells may hold blank, `-`, `FALSE` or a date ([FakeGoogle.js:575](../js/google_sheets_services/FakeGoogle.js#L575)). In a column configured as a checkbox:
   - `X` (or `TRUE`) reads as checked, and **any other value reads as unchecked**;
   - checking writes `X`; unchecking writes blank;
@@ -706,7 +749,7 @@ _Before Phase 2 starts_, add these rows to the live `CACHE/Preferences` sheet. A
 - **Guards:**
   - If a table in `instant` mode has no entry, or names a column that doesn't exist, its instant cells render read-only with a visible "write disabled: no row identity" hint.
   - If two loaded rows share an identity, instant cells on those rows are disabled. The write never guesses.
-- **Read path:** the page (for `columns` and the design queue preferences) and `writeCellVerified` (for `identity` and `columns`) read the preferences through `Requests.getPreferences`, the way `InventorySuppressCategoryAnalysis` is read today ([api.js:1407](../js/data_management/api.js#L1407)).
+- **Read path:** the page (for `columns` and the design queue preferences) and `writeCellsVerified` (for `identity` and `columns`) read the preferences through `Requests.getPreferences`, the way `InventorySuppressCategoryAnalysis` is read today ([api.js:1407](../js/data_management/api.js#L1407)).
 
 **Field data types and editability** belong to field definitions. In future, details cells get data types and editing through the same cell pipeline (§4.14).
 
@@ -714,7 +757,7 @@ _Before Phase 2 starts_, add these rows to the live `CACHE/Preferences` sheet. A
 
 - **Columns:** `Identifier`, `Note`, `EditHistory`. `Identifier` is the value `ProductionUtils.computeIdentifier(show, client, year)` returns, so the same note follows the show on any page.
 - **Reading:** the page joins notes into its rows as the field `Note`, so the `DesignQueueFields` preference can use the plain name. If the Schedule sheet ever gets its own `Note` column, the join logs a dev warning and the sheet value wins.
-- **Writing:** an edit commits on blur, through the same delayed `cell-commit` queue, and `commitCell` routes it to `Requests.saveShowNote(identifier, text)`. This is an upsert: it updates the note row if it exists, appends one otherwise, and verifies by re-reading. It is not `writeCellVerified`, because the note's row may not exist yet.
+- **Writing:** an edit commits on blur, through the same delayed `cell-commit` queue, and `commitCells` routes it to `Requests.saveShowNote(identifier, text)`. This is an upsert: it updates the note row if it exists, appends one otherwise, and verifies by re-reading. It is not `writeCellsVerified`, because the note's row may not exist yet.
 - **Setup:** add the `ShowNotes` tab to the live CACHE spreadsheet and to FakeGoogle before Phase 2.
 
 ### 4.17 Modal size tiers (R3.2)
@@ -760,7 +803,7 @@ The real committed widths are 360, about 800 and about 1000, plus content-sized.
 | InventoryItemReport                                            | 1     | `table`, `calendar`                                      | `calendarColumns` → `chip`. `hide-columns` → `hidden`. `cellClass` → `style.minQty.color='auto'`. `columnClass` → `style.overlappingShows.columnColor='gray'`. `#default` → slot plus registry. Action `to` item page, `action: 'row'` in both views. Show-all reader → `dateFilter` (Phase 0).                                                                                       | Medium |
 | Design queue (new page)                                        | 2     | `table` (one view)                                       | New content component and registry (`design-queue`) under Schedule, sharing `scheduleFields.js` and the Schedule data. Columns from `DesignQueueFields`; `Elev`/`Panels`/`Setups` checkboxes; `Assignee` select; `Note` from `ShowNotes`; completed rows gray; `view.sort` on Ship; default filter upcoming shows; `editMode: 'instant'`. Schedule page stays read-only. See Phase 2. | Medium |
 | Inventory categories + overview                                | 3     | `items` (table), `categories` (cards, `bucketBy: 'tab'`) | `bucketKeys` and `bucketDecorations` from `categoriesStore`. Remove `_hiddenSearchData`. Widened search (§4.5). Categories: action `to` category, `row`. Overview: action `to` timeline, `button` (replaces `#details-cell`; details fields stay searchable, R3.8). Sticky `image` → `table.sticky`.                                                                                  | High   |
-| PacklistContent                                                | 3     | `cards`                                                  | `formatPacklistCard` → derived fields (`_shipDate`, `_status`, `_cardColor`) plus decorations. Action `to` packlist, `row`. Pins and subpage filters stay page logic. `view.sort` sets the default sort. Cards don't link `/details` (R4.1).                                                                                                                                          | Medium |
+| PacklistContent                                                | 3     | `cards`                                                  | `formatPacklistCard` → derived fields (`_shipDate`, `_status`, `_unattached`) plus decorations. Action `to` packlist, `row`. Pins and subpage filters stay page logic. `view.sort` sets the default sort. Cards don't link `/details` (R4.1).                                                                                                                                          | Medium |
 | ReportsContent                                                 | 3     | none                                                     | Builds its three-card menu inline with the card CSS; no longer uses `CardsComponent` (R3.7).                                                                                                                                                                                                                                                                                          | Low    |
 | PacklistItemsSummary, ShowInventoryReport, IndexMismatchReport | 4     | one each                                                 | `hide-columns` → `hidden`. `cellClass`/`columnClass` → `style` (with `show_*` patterns). `#default` → slot plus registry. **Remove `allowHide`** with the ShowInventoryReport migration.                                                                                                                                                                                              | Low    |
 | TransshipmentModal ×2, overlapping-show picker                 | 4     | one each, no URL                                         | `hide-columns` → `hidden`. The picker's action is `run` selectShow with label "Select". Modal size `page` (Phase 6).                                                                                                                                                                                                                                                                  | Low    |
@@ -809,7 +852,7 @@ Depends only on Phases 0–1.
 1. **`checkbox` and `select` cells** in the cell registry.
    - Checkbox works in both edit modes: in `batch` a toggle marks the cell dirty and prompts Save; in `instant` it emits `cell-commit`.
    - Select takes its options from a page-supplied list.
-2. **`Requests.writeCellVerified`** in the data layer: identity lookup, writable-column check, read, verify, write, re-read, one retry by identity, revert on failure (§4.16). Tested against FakeGoogle in [tests.js](../js/tests/tests.js), including a row moved mid-write and a duplicate identity.
+2. **`Requests.writeCellsVerified`** in the data layer: identity lookup, writable-column check, read, verify, write, re-read, one retry by identity, revert on failure (§4.16). Tested against FakeGoogle in [tests.js](../js/tests/tests.js), including a row moved mid-write and a duplicate identity.
 3. **`instant` edit mode** in `DataView` and `TableComponent` (still through the legacy adapter):
    - the delayed `cell-commit` queue with immediate local display (§4.16);
    - pending and failed state classes;
@@ -817,14 +860,14 @@ Depends only on Phases 0–1.
    - the `row` trigger is refused, as for any editable table.
 4. **Design queue page** under Schedule (R6.1, R7.1): its own content component and registry (`design-queue`), sharing `scheduleFields.js` and the Schedule data, with `editMode: 'instant'`. The Schedule page itself stays read-only (`none`).
    - **Route:** `schedule/design-queue`, one view (`table`). It gets its own dashboard card, as a separate page (R2.9).
-   - **Fields** use the production sheet's header names. Shown columns come from the `DesignQueueFields` preference (§4.15), and the code default is the same list:
+   - **Fields** use the production sheet's header names. The `DesignQueueFields` preference (§4.15) chooses the shown columns; the view's list (below) sets their order:
      `Client`, `Show`, `Size`, `Elev`, `Panels`, `Setups`, `Assignee`, `Account Manager`, `Ship`, `Note`, `Booth#`.
    - **`Elev`, `Panels`, `Setups`** are shown directly as checkboxes. There is no Task aggregation for now (R7.1).
-   - **Completed rows** stay in the list, unchanged in order. They are styled gray through a derived colour field: `_rowColor = 'gray'`, with `rowColor: { field: '_rowColor', rule: 'value' }` (R3.5). The field recomputes from the local row, so the row greys as soon as the last box is checked.
+   - **Completed rows** (Setups checked) stay in the list, unchanged in order. The view styles them gray with a colour rule on the checkbox itself: `rowColor: { field: 'Setups', rule: 'checked:gray' }` (R3.5). The rule reads the shown row, which carries the local edit, so the row greys as soon as Setups is checked.
      A row is complete when each of the three columns is `X`, `-` or `N/a` (R8.2). `-` and `N/a` count as done for this rule only; the cell itself still shows unchecked, and checking it writes `X`.
    - **Assignee** is a `select` whose options come from `DesignQueueAssignees`.
    - **Note** is an editable text field saved to `CACHE/ShowNotes` (§4.16).
-   - **Routing writes:** `commitCell` routes by field: `Note` → `saveShowNote`; every other column → `writeCellVerified`.
+   - **Routing writes:** `commitCells` routes by field: `Note` → `saveShowNote`; every other column → `writeCellsVerified`.
    - **Order and filter:** `view.sort = { key: 'Ship', dir: 'asc' }`, so the most urgent work is first. The initial filter is upcoming shows (Ship on or after today), set through the existing Schedule filter parameters. Filters stay a page concern (R1.16).
 5. Verify the instant-write and design queue items in §9.
 
@@ -861,6 +904,8 @@ Depends only on Phases 0–1.
 ### Later (not scheduled, built on this system)
 
 - Other patch sources (beyond the `DesignQueueFields` preference) and customization UI (per page).
+- Item images as data: the inventory stores each item's image URL, and the thumbnail is how a view styles a URL column (`style.cell`); editing follows that column's data controls. Replaces the custom `image` column (`itemImageStyle`) and the image cell's own lookup and `editable` option.
+- Several row actions per table, each with its own styling, so the Schedule `packlist` column becomes an action.
 - Instant-write checkboxes on the Schedule page itself, and a Task column that aggregates design progress (R7.1).
 - Editable details cells.
 - Ship/return calendar view.
@@ -1052,7 +1097,7 @@ Run per migrated page at desktop width, in a 360px dashboard card, in a double-w
 - [ ] Failed write: cell reverts, error shown, data refreshed; no Save prompt or dirty marker
 - [ ] Assignee pick list shows `DesignQueueAssignees`; an existing value outside the list still shows
 - [ ] Note saves on blur, creates its `ShowNotes` row the first time, and survives refresh
-- [ ] Design queue: upcoming shows by default, sorted by Ship; columns follow `DesignQueueFields`; a row turns gray when each box is checked or holds `-`/`N/a`, and stays in place
+- [ ] Design queue: upcoming shows by default, sorted by Ship; shown columns follow `DesignQueueFields`, in the view's order; a row turns gray when Setups is checked, and stays in place
 - [ ] Schedule page unchanged and read-only; it shows the written values after refresh
 
 **Modals (Phase 6)**

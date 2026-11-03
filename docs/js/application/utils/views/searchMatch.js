@@ -14,6 +14,7 @@
  *
  * Pure: no Vue, no DOM. Safe to import from tests.
  */
+import { escapeHtml } from './fieldFormat.js';
 
 export const SEARCH_LIMITS = Object.freeze({ minTermLength: 2, abortRatio: 0.8, abortMinRows: 100 });
 
@@ -117,12 +118,33 @@ export function matchRows(rows, tiers, words, limits = SEARCH_LIMITS) {
 }
 
 /**
- * Convenience: is a precomputed count over the abort threshold for a set of the given size?
- * @param {number} count
- * @param {number} total
- * @param {Object} [limits]
- * @returns {boolean}
+ * The one search highlighter: build it once per search, then call it per value.
+ * Returns text → escaped HTML with each match (case-insensitive, overlaps merged) wrapped in
+ * <span class="search-match">. With no words it only escapes.
+ * @param {string[]} words lowercase words from searchWords()
+ * @returns {(text: *) => string}
  */
-export function isBroadSearch(count, total, limits = SEARCH_LIMITS) {
-    return total > limits.abortMinRows && count > limits.abortRatio * total;
+export function makeHighlighter(words) {
+    const regexes = (words || []).map(w => new RegExp(w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'));
+    return (text) => {
+        const s = text == null ? '' : String(text);
+        if (!regexes.length || !s) return escapeHtml(s);
+        const ranges = [];
+        for (const re of regexes) {
+            re.lastIndex = 0;
+            let m;
+            while ((m = re.exec(s)) !== null) ranges.push([m.index, m.index + m[0].length]);
+        }
+        ranges.sort((a, b) => a[0] - b[0]);
+        let out = '';
+        let pos = 0;
+        let i = 0;
+        while (i < ranges.length) {
+            let [start, end] = ranges[i++];
+            while (i < ranges.length && ranges[i][0] <= end) end = Math.max(end, ranges[i++][1]);
+            out += escapeHtml(s.slice(pos, start)) + `<span class="search-match">${escapeHtml(s.slice(start, end))}</span>`;
+            pos = end;
+        }
+        return out + escapeHtml(s.slice(pos));
+    };
 }

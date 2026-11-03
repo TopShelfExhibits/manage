@@ -1,17 +1,33 @@
 import { html, InventoryTableComponent, hamburgerMenuRegistry, NavigationRegistry, Requests, DataView, DashboardToggleComponent, getReactiveStore, findMatchingStores, createAnalysisConfig, generateStoreKey, authState, invalidateCache, todayISOString } from '../../index.js';
-import { createVisibilityManager } from './InventoryTable.js';
 import { ShowInventoryReport } from './ShowInventoryReport.js';
 import { InventoryItemReport } from './InventoryItemReport.js';
 import { InventoryItemTimeline } from './InventoryItemTimeline.js';
+import { getProposalsStore, PROPOSALS_PATH } from '../../utils/inventoryProposals.js';
 
-// What each inventory overview key is (rows from Requests.getAllInventoryData)
+/** Route key of the per-category history page: inventory/<category>/edit-history */
+export const EDIT_HISTORY_ROUTE = 'edit-history';
+
+/**
+ * Split an inventory path into its category slug and sub-route.
+ * @param {string} path - Container path (query parameters allowed)
+ * @returns {{ category: string|null, subRoute: string|null }}
+ */
+function parseInventoryPath(path) {
+    const segments = String(path || '').split('?')[0].split('/').filter(Boolean);
+    if (segments[0] !== 'inventory') return { category: null, subRoute: null };
+    return { category: segments[1] || null, subRoute: segments[2] || null };
+}
+import { itemImageStyle } from '../../utils/views/viewStyles.js';
+
+// What each inventory overview key is (rows from Requests.getAllInventoryData).
+// image holds no data: the thumbnail column (see itemImageStyle).
 const INVENTORY_FIELDS = [
-    { key: 'tab', label: 'Category', sortable: true, cell: 'slot' },
-    { key: 'image', labelHtml: '<span class="material-symbols-outlined">imagesmode</span>', label: 'I', sortable: false, cell: 'image', cellOptions: { itemKey: 'itemNumber', size: 32 } },
-    { key: 'itemNumber', label: 'Item#', type: 'item', sortable: true },
-    { key: 'quantity', label: 'Qty', format: 'number', type: 'number', sortable: true },
-    { key: 'description', label: 'Description', sortable: true },
-    { key: 'notes', label: 'Notes', sortable: false }
+    { key: 'tab', label: 'Category' },
+    { key: 'image', label: 'I' },
+    { key: 'itemNumber', label: 'Item#', type: 'item' },
+    { key: 'quantity', label: 'Qty', format: 'number', type: 'number' },
+    { key: 'description', label: 'Description' },
+    { key: 'notes', label: 'Notes' }
 ];
 
 /**
@@ -23,6 +39,9 @@ const INVENTORY_VIEWS = {
     id: 'inventory',
     default: 'items',
     theme: 'purple',
+    // Shared by both views: the page draws Category (#cell); the item thumbnail
+    sortable: ['tab', 'itemNumber', 'quantity', 'description'],
+    style: { tab: { cell: 'slot' }, image: itemImageStyle('itemNumber', { size: 32 }) },
     views: [
         {
             id: 'items',
@@ -31,7 +50,7 @@ const INVENTORY_VIEWS = {
             layout: 'table',
             columns: ['tab', 'image', 'itemNumber', 'quantity'],
             details: ['description', 'notes'],
-            style: { tab: { width: 120 }, image: { width: 1 } },
+            style: { tab: { width: 120 } },
             table: { sticky: { start: ['image'] } },
             sort: [{ key: 'tab', dir: 'asc' }, { key: 'itemNumber', dir: 'asc' }],
             action: 'button'
@@ -56,11 +75,26 @@ export const InventoryMenuComponent = {
         currentSegment: String,
         title: String,
         refreshCallback: Function,
-        navigateToPath: Function,
-        tabTitle: String
+        navigateToPath: Function
     },
     inject: ['$modal', 'appContext'],
+    data() {
+        return { proposalsStore: getProposalsStore() };
+    },
     computed: {
+        hasActiveProposals() {
+            return (this.proposalsStore?.data || []).some(entry => !entry.committed);
+        },
+        // Derived from the menu's current containerPath (supplied fresh each time the menu opens)
+        inventoryLocation() {
+            const { category, subRoute } = parseInventoryPath(this.containerPath);
+            const isRegisteredCategory = !!category && !!NavigationRegistry.getRoute(`inventory/${category}`);
+            return {
+                category,
+                isCategoryTable: isRegisteredCategory && !subRoute,
+                isEditHistory: isRegisteredCategory && subRoute === EDIT_HISTORY_ROUTE
+            };
+        },
         hasSearchTerm() {
             // Get current path and check for searchTerm
             const currentCleanPath = (this.appContext?.currentPath || '').split('?')[0];
@@ -75,13 +109,23 @@ export const InventoryMenuComponent = {
             
             // Add clear filter if searchTerm is present
             if (this.hasSearchTerm) {
-                items.push({ 
-                    label: 'Clear Filter', 
+                items.push({
+                    label: 'Clear Filter',
                     action: 'clearFilter',
                     class: 'yellow'
                 });
             }
-            
+
+            if (this.inventoryLocation.isCategoryTable) {
+                items.push({ label: 'See Edit History', action: 'openEditHistory' });
+            } else if (this.inventoryLocation.isEditHistory) {
+                items.push({ label: 'Back to Table', action: 'closeEditHistory' });
+            }
+
+            if (this.hasActiveProposals) {
+                items.push({ label: 'View Proposals', action: 'viewProposals' });
+            }
+
             return items;
         }
     },
@@ -102,6 +146,20 @@ export const InventoryMenuComponent = {
                         this.navigateToPath(newPath);
                         this.$emit('close-modal');
                     }
+                    break;
+                case 'openEditHistory':
+                case 'closeEditHistory': {
+                    const base = `inventory/${this.inventoryLocation.category}`;
+                    const target = action === 'openEditHistory' ? `${base}/${EDIT_HISTORY_ROUTE}` : base;
+                    // Keep the search term so the same items stay highlighted
+                    const { searchTerm } = NavigationRegistry.getParametersForContainer(this.containerPath, this.appContext?.currentPath);
+                    this.navigateToPath?.(NavigationRegistry.buildPath(target, { searchTerm }));
+                    this.$emit('close-modal');
+                    break;
+                }
+                case 'viewProposals':
+                    this.navigateToPath?.(PROPOSALS_PATH);
+                    this.$emit('close-modal');
                     break;
                 default:
                     this.$modal.alert(`Action ${action} not implemented yet.`, 'Info');
@@ -138,27 +196,24 @@ export const InventoryContent = {
         navigateToPath: Function,
     },
     inject: ['$modal'],
-    provide() {
-        return {
-            _tableVisibility: this.visibilityManager
-        };
-    },
     data() {
         return {
             categoriesStore: null, // Reactive store for inventory categories (lock analysis)
             inventoryStore: null, // All inventory item rows (overview table and category card members)
             suppressedTabs: new Set(), // Description-only tabs hidden from the overview table
             autoSavedCategories: new Set(), // Track which categories have auto-saved data
-            visibilityManager: Vue.markRaw(createVisibilityManager()),
             INVENTORY_FIELDS,
             INVENTORY_VIEWS,
-            // Primary action: category cards → the category; overview rows → the item timeline (R3.8)
+            // Primary action: category cards → the category; overview rows → the item timeline (R3.8),
+            // the standard action button under a calendar header icon
             inventoryAction: {
                 to: (row) => {
                     if (!row?.tab) return null;
                     if (row._bucket !== undefined) return 'inventory/' + String(row.tab).toLowerCase();
                     return row.itemNumber ? `inventory/${String(row.tab).toLowerCase()}/${row.itemNumber}` : null;
-                }
+                },
+                headerIcon: 'calendar_month',
+                title: 'View item timeline'
             }
         };
     },
@@ -244,6 +299,33 @@ export const InventoryContent = {
         },
         authIsAuthenticated() {
             return authState.isAuthenticated;
+        },
+        // Registered sub-route of a category (e.g. edit-history), checked before item numbers
+        registeredSubRoute() {
+            NavigationRegistry.routeRegistrationVersion.value; // re-evaluate when routes register
+            const { category, subRoute } = parseInventoryPath(this.cleanContainerPath);
+            if (!category || !subRoute) return null;
+            return NavigationRegistry.getRoute(`inventory/${category}/${subRoute}`) ? subRoute : null;
+        },
+        isEditHistoryView() {
+            return this.registeredSubRoute === EDIT_HISTORY_ROUTE;
+        },
+        isInventorySubPath() {
+            return !!parseInventoryPath(this.cleanContainerPath).subRoute;
+        },
+        // Category titles; reading every element tracks in-place updates to the store's array
+        categoryTitles() {
+            return (this.categoriesStore?.data || []).map(cat => cat?.title).filter(Boolean);
+        },
+        // Sub-routes are registered from the category list, so wait for it before treating
+        // an unknown third segment as an item number
+        categoryRoutesReady() {
+            NavigationRegistry.routeRegistrationVersion.value; // re-evaluate when routes register
+            const { category } = parseInventoryPath(this.cleanContainerPath);
+            if (category && NavigationRegistry.getRoute(`inventory/${category}`)) return true;
+            // Unknown category: resolve once the category list has finished loading (or failed)
+            const store = this.categoriesStore;
+            return !!store && !store.isLoading && !store.initialLoad && (this.categoryTitles.length > 0 || !!store.error);
         }
     },
     watch: {
@@ -252,6 +334,13 @@ export const InventoryContent = {
             if (isAuth && !wasAuth) {
                 this.initializeCategoriesStore();
             }
+        },
+        // Register category routes (and their history pages) whenever the category list changes
+        categoryTitles: {
+            handler(titles) {
+                this.registerCategoryRoutes(titles);
+            },
+            immediate: true
         },
         // Watch for when categories data is loaded and check for auto-saved data
         'categoriesStore.data': {
@@ -264,6 +353,15 @@ export const InventoryContent = {
         }
     },
     methods: {
+        registerCategoryRoutes(titles) {
+            for (const title of titles || []) {
+                if (title === 'INDEX' || title.startsWith('_')) continue;
+                const slug = title.toLowerCase();
+                const displayName = title.charAt(0).toUpperCase() + title.slice(1).toLowerCase();
+                NavigationRegistry.addDynamicRoute('inventory', slug, { displayName });
+                NavigationRegistry.addDynamicRoute(`inventory/${slug}`, EDIT_HISTORY_ROUTE, { displayName: 'Edit History' });
+            }
+        },
         async checkAutoSavedCategories() {
             if (!authState.isAuthenticated || !authState.user?.email || !this.categoriesStore?.data) return;
 
@@ -409,9 +507,6 @@ export const InventoryContent = {
             }
         }
     },
-    beforeUnmount() {
-        this.visibilityManager?.destroy?.();
-    },
     async mounted() {
         // Initialize categories store with lock analysis, and the item rows
         this.initializeCategoriesStore();
@@ -449,8 +544,7 @@ export const InventoryContent = {
                     const lockInfo = await Requests.getInventoryLock(categoryName.toUpperCase());
                     //console.log('[InventoryContent] Lock info from API:', lockInfo);
                     return lockInfo;
-                },
-                tabTitle: this.currentCategoryName
+                }
             }
         });
     },
@@ -479,7 +573,6 @@ export const InventoryContent = {
                 :show-refresh="isCategoriesView"
                 :show-search="true"
                 :sync-search-with-url="true"
-                :show-header="true"
                 :show-footer="true"
                 :empty-message="isCategoriesView ? 'No categories available' : 'No inventory items found across all categories'"
                 @refresh="handleRefresh"
@@ -496,9 +589,26 @@ export const InventoryContent = {
                 </template>
             </DataView>
 
+            <!-- inventory/<cat>/<segment>: wait for registered sub-routes before resolving -->
+            <div v-else-if="isInventorySubPath && !categoryRoutesReady" class="loading-message">
+                <img src="assets/loading.gif" alt="..."/>
+                <p>Loading...</p>
+            </div>
+
+            <!-- Edit History Subpage: inventory/<cat>/edit-history -->
+            <inventory-table
+                ref="inventoryTable"
+                v-else-if="isEditHistoryView && currentCategoryName"
+                :key="'history:' + currentCategoryName"
+                :container-path="containerPath"
+                :inventory-name="'Edit History: ' + currentCategoryName.toLowerCase()"
+                :tab-title="currentCategoryName"
+                :history-mode="true"
+            ></inventory-table>
+
             <!-- Item Timeline Subpage: inventory/<cat>/<item#> -->
             <inventory-item-timeline
-                v-else-if="containerPath.startsWith('inventory/') && cleanContainerPath.split('/').length >= 3"
+                v-else-if="isInventorySubPath"
                 :container-path="containerPath"
                 :navigate-to-path="navigateToPath"
             />
@@ -507,6 +617,7 @@ export const InventoryContent = {
             <inventory-table
                 ref="inventoryTable"
                 v-else-if="containerPath.startsWith('inventory/') && currentCategoryName"
+                :key="'table:' + currentCategoryName"
                 :container-path="containerPath"
                 :inventory-name="'Inventory: ' + currentCategoryName.toLowerCase()"
                 :tab-title="currentCategoryName"

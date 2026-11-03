@@ -4,7 +4,8 @@ import { useStickyHeader } from '../../utils/useStickyHeader.js';
 import { formatText, escapeHtml } from '../../utils/views/fieldFormat.js';
 import { matchRows } from '../../utils/views/searchMatch.js';
 import { ContentHeaderComponent } from './contentHeaderComponent.js';
-import { CellRenderer, DecorationCards, placeDecorations } from './cells.js';
+import { CellRenderer, DecorationCards } from './cells.js';
+import { placeDecorations } from '../../utils/views/decorations.js';
 import { colorFor, rowColorFor } from '../../utils/views/viewColor.js';
 
 export const CalendarComponent = {
@@ -36,7 +37,6 @@ export const CalendarComponent = {
     emits: ['refresh', 'row-action'],
     setup(props) {
         const search = useSearch({
-            formatValue: null,
             syncWithUrl: props.syncSearchWithUrl,
             navigationRegistry: NavigationRegistry,
             containerPath: props.containerPath,
@@ -77,6 +77,15 @@ export const CalendarComponent = {
                 const f = r.fieldMap.get(key) || { key };
                 return { ...f, label: f.label ?? key, colorRule: r.style[key]?.color || null };
             }));
+        },
+        // Cells in the chip's end button bar (view calendar.actions), before the decoration cards
+        chipActionFields() {
+            const r = this.resolved;
+            return (r?.calendar?.actions || []).map(key => r.fieldMap.get(key) || { key });
+        },
+        // A shown action cell (style cell 'action') is the primary action's button
+        actionInCell() {
+            return [...this.chipLines.flat(), ...this.chipActionFields].some(f => f.cell === 'action');
         },
         chipFields() {
             return this.chipLines.flat();
@@ -128,7 +137,7 @@ export const CalendarComponent = {
         },
         hasActionButton() {
             const a = this.effectiveAction;
-            return a.kind !== 'none' && a.trigger === 'button';
+            return a.kind !== 'none' && a.trigger === 'button' && !this.actionInCell;
         },
         chipIsTrigger() {
             const a = this.effectiveAction;
@@ -334,9 +343,9 @@ export const CalendarComponent = {
     },
     methods: {
         _isGroupMaster(row) {
-            if (!row || !row.MetaData) return false;
+            if (!row || !row.metadata) return false;
             try {
-                const meta = typeof row.MetaData === 'string' ? JSON.parse(row.MetaData) : row.MetaData;
+                const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata;
                 return !!meta?.grouping?.isGroupMaster;
             } catch { return false; }
         },
@@ -442,6 +451,19 @@ export const CalendarComponent = {
             this.selectSearchResultFor(row);
             this.performAction(row);
         },
+        // The row's primary action for an action cell
+        rowActionFor(row) {
+            if (this.effectiveAction.kind === 'none') return null;
+            return {
+                run: () => this.handleActionButton(row),
+                disabled: this.isActionDisabled(row),
+                title: this.effectiveAction.title || this.effectiveAction.label || ''
+            };
+        },
+        // A material symbol name ('calendar_month') rather than a glyph ('☷')
+        isSymbolName(text) {
+            return typeof text === 'string' && /^[a-z][a-z0-9_]*$/.test(text);
+        },
         handleKeyDown(event, row) {
             if (event.target !== event.currentTarget) return;
             if (event.key === 'Enter' || event.key === ' ') {
@@ -529,34 +551,41 @@ export const CalendarComponent = {
                             @click="handleEventClick(seg.row, $event)"
                             @keydown="handleKeyDown($event, seg.row)"
                         >
-                            <!-- Primary action button at the chip start (stays visible when narrow) -->
-                            <button
-                                v-if="hasActionButton && seg.isStart"
-                                :class="['button-symbol', 'chip-action-button', theme || 'white', isDetailsOnlyMatch(seg.row) ? 'search-match' : '']"
-                                :disabled="isActionDisabled(seg.row)"
-                                :title="effectiveAction.label || 'Details'"
-                                @click.stop="handleActionButton(seg.row)"
-                            >{{ effectiveAction.label || effectiveAction.icon || '☷' }}</button>
                             <div class="chip-text">
                                 <!-- N chip lines (resolved.calendar.chip); the first line is the title line -->
                                 <span v-for="(line, li) in chipLines" :key="li" :class="li === 0 ? 'chip-first-row' : 'chip-second-row'">
                                     <template v-for="(col, colIdx) in line" :key="col.key">
                                         <span v-if="colIdx > 0" class="chip-sep"> | </span>
-                                        <span :class="['chip-val', valueColorClass(seg.row, col)]"><CellRenderer :row="seg.row" :field="col" renderer="calendar" density="compact" :highlight="highlightValue" :theme="theme" :search-term="search.searchKey.value" :cell-slot="$slots.cell" /></span>
+                                        <span :class="['chip-val', valueColorClass(seg.row, col)]"><CellRenderer :row="seg.row" :field="col" renderer="calendar" density="compact" :highlight="highlightValue" :theme="theme" :search-term="search.searchKey.value" :cell-slot="$slots.cell" :row-action="col.cell === 'action' ? rowActionFor(seg.row) : null" /></span>
                                         <DecorationCards :cards="inlineCards(seg.row, col.key)" :inline="true" />
                                     </template>
                                 </span>
                             </div>
-                            <div v-if="seg.isEnd && hasEndCards && endCards(seg.row).length > 0" class="chip-actions hide-when-narrow">
+                            <!-- Chip end: one button bar with the view's action cells (calendar.actions), the
+                                 decoration cards (hidden when narrow) and the primary action button, last -->
+                            <div v-if="seg.isEnd && (chipActionFields.length || hasActionButton || (hasEndCards && endCards(seg.row).length))" class="chip-actions button-bar">
+                                <template v-for="f in chipActionFields" :key="f.key">
+                                    <CellRenderer :row="seg.row" :field="f" renderer="calendar" density="compact" :highlight="highlightValue" :theme="theme" :search-term="search.searchKey.value" :cell-slot="$slots.cell" :row-action="f.cell === 'action' ? rowActionFor(seg.row) : null" />
+                                    <DecorationCards :cards="inlineCards(seg.row, f.key)" :inline="true" />
+                                </template>
+                                <template v-if="hasEndCards">
+                                    <button
+                                        v-for="(card, ci) in endCards(seg.row)"
+                                        :key="ci + '-' + card.message"
+                                        :class="['card', 'hide-when-narrow', card.color || card.class, { 'clickable': card.action && !card.disabled }]"
+                                        :title="card.title || card.hoverMessage || null"
+                                        :disabled="card.disabled"
+                                        @click.stop="card.action && !card.disabled ? card.action() : null"
+                                        v-html="card.message"
+                                    ></button>
+                                </template>
                                 <button
-                                    v-for="card in endCards(seg.row)"
-                                    :key="card.message"
-                                    :class="['card', card.color || card.class, { 'clickable': card.action && !card.disabled }]"
-                                    :title="card.title || card.hoverMessage || null"
-                                    :disabled="card.disabled"
-                                    @click.stop="card.action && !card.disabled ? card.action() : null"
-                                    v-html="card.message"
-                                ></button>
+                                    v-if="hasActionButton"
+                                    :class="['button-symbol', 'chip-action-button', theme || 'white', isDetailsOnlyMatch(seg.row) ? 'search-match' : '']"
+                                    :disabled="isActionDisabled(seg.row)"
+                                    :title="effectiveAction.title || effectiveAction.label || 'Details'"
+                                    @click.stop="handleActionButton(seg.row)"
+                                ><template v-if="effectiveAction.label">{{ effectiveAction.label }}</template><span v-else-if="isSymbolName(effectiveAction.icon)" class="material-symbols-outlined">{{ effectiveAction.icon }}</span><template v-else>{{ effectiveAction.icon || '☷' }}</template></button>
                             </div>
                         </div>
                     </div>

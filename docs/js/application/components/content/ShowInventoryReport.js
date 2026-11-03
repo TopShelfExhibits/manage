@@ -1,5 +1,6 @@
 import { html, DataView, Requests, getReactiveStore, createAnalysisConfig, NavigationRegistry, ItemImageComponent, ScheduleFilterSelect, InventoryCategoryFilter, Priority, invalidateCache, toISODateString, todayISOString, offsetToISO, getAutoColorClass } from '../../index.js';
-import { normalizeFilterValues } from '../../../data_management/utils/helpers.js';
+import { textFiltersToSearchParams } from '../../../data_management/utils/helpers.js';
+import { itemImageStyle } from '../../utils/views/viewStyles.js';
 
 /**
  * Component for displaying inventory report across multiple shows
@@ -41,24 +42,30 @@ export const ShowInventoryReport = {
             return Array.from(showSet).sort();
         },
 
-        // What each report key is; show columns are dynamic (show_<identifier>)
+        // What each report key is; show columns are dynamic (show_<identifier>), named by the
+        // show identifier. image holds no data: the thumbnail column (see itemImageStyle).
         reportFields() {
             const fields = [
-                { key: 'image', labelHtml: '<span class="material-symbols-outlined">imagesmode</span>', label: 'IMG', sortable: false, cell: 'image', cellOptions: { itemKey: 'itemId', size: 48 } },
-                { key: 'itemId', label: 'Item#', type: 'item', sortable: true, cell: 'slot' },
-                { key: 'description', label: 'Item Description', type: 'item', sortable: true },
-                { key: 'available', label: 'Inv Qty.', sortable: true },
-                { key: 'minQty', label: 'Min Qty', format: 'number', type: 'number', sortable: true },
+                { key: 'image', label: 'IMG' },
+                { key: 'itemId', label: 'Item#', type: 'item' },
+                { key: 'description', label: 'Item Description', type: 'item' },
+                { key: 'available', label: 'Inv Qty.' },
+                { key: 'minQty', label: 'Min Qty', format: 'number', type: 'number' },
                 { key: 'tabName', label: 'Category' }
             ];
-            // Show columns: abbreviated "CLI... SHO..." label, full identifier as the tooltip
-            const abbreviate = (text) => text.length > 5 ? text.substring(0, 3) + '...' : text;
             for (const showId of this.showIdentifiers) {
-                const match = showId.match(/^(.+?)\s+(\d{4})\s+(.+)$/);
-                const label = match ? `${abbreviate(match[1])} ${abbreviate(match[3])}` : showId;
-                fields.push({ key: `show_${showId}`, label, title: showId, format: 'number', type: 'number', sortable: true, cell: 'slot' });
+                fields.push({ key: `show_${showId}`, label: showId, format: 'number', type: 'number' });
             }
             return fields;
+        },
+        // Show column headers: abbreviated "CLI... SHO...", the full identifier as the tooltip
+        showHeaderStyles() {
+            const abbreviate = (text) => text.length > 5 ? text.substring(0, 3) + '...' : text;
+            return Object.fromEntries(this.showIdentifiers.map(showId => {
+                const match = showId.match(/^(.+?)\s+(\d{4})\s+(.+)$/);
+                const label = match ? `${abbreviate(match[1])} ${abbreviate(match[3])}` : showId;
+                return [`show_${showId}`, { label, title: showId }];
+            }));
         },
         // Show usage report view (views-and-renderers-plan §5, Phase 4). The per-column hide
         // button (allowHide) is removed: show columns can't be hidden per run until customization exists.
@@ -74,12 +81,16 @@ export const ShowInventoryReport = {
                     columns: ['image', 'itemId', 'available', 'minQty', 'show_*'],
                     details: ['description'],
                     hidden: ['tabName'],
+                    sortable: ['itemId', 'description', 'available', 'minQty', 'show_*'],
+                    // The page draws Item# and each show's quantity (#cell)
                     style: {
-                        image: { width: 1 },
+                        image: itemImageStyle('itemId'),
+                        itemId: { cell: 'slot' },
                         minQty: { color: 'auto' },
-                        'show_*': { width: 1, font: 'narrow', columnColor: 'striped gray' }
+                        'show_*': { width: 1, font: 'narrow', columnColor: 'striped gray', cell: 'slot' },
+                        ...this.showHeaderStyles
                     },
-                    table: { sticky: { start: ['image'] } }
+                    table: { sticky: { start: ['image'] }, hideRowsOnSearch: false }
                 }]
             };
         },
@@ -191,17 +202,8 @@ export const ShowInventoryReport = {
             this.referenceDate = resolvedStart ?? todayISOString();
             this.endDate = resolvedEnd ?? null;
 
-            // Apply text filters
-            if (searchData.textFilters && searchData.textFilters.length > 0) {
-                searchData.textFilters.forEach(textFilter => {
-                    if (textFilter.column && (textFilter.values || textFilter.value)) {
-                        searchParams[textFilter.column] = {
-                            values: normalizeFilterValues(textFilter),
-                            type: textFilter.type || 'contains'
-                        };
-                    }
-                });
-            }
+            // Apply text filters (filters on the same column are kept together and OR'd)
+            Object.assign(searchParams, textFiltersToSearchParams(searchData.textFilters));
 
             // Store search params and initialize report store
             this.searchFilter = filter;
@@ -348,7 +350,6 @@ export const ShowInventoryReport = {
                 :sync-search-with-url="true"
                 :container-path="containerPath || 'reports/show-usage'"
                 :navigate-to-path="navigateToPath"
-                :hide-rows-on-search="false"
                 :is-loading="isLoading"
                 :is-analyzing="isAnalyzing"
                 :loading-message="loadingMessage"

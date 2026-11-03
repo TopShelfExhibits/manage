@@ -2,7 +2,7 @@ import { html, Requests, parseDate, toUSDateString, DataView, getReactiveStore, 
 import { IndexResolutionComponent } from '../interface/IndexResolutionModal.js';
 import { TransshipmentModal } from '../interface/ScheduleModals.js';
 import { buildScheduleFields } from '../../../data_management/abstraction/scheduleFields.js';
-import { shipReturnAnalysis, withTransshipShipDate, shipReturnCards } from '../../utils/scheduleShipping.js';
+import { shipReturnAnalysis, withShipDate, estimatedShipText, shipReturnCards } from '../../utils/scheduleShipping.js';
 
 /**
  * Schedule page view registry (views-and-renderers-plan §4.3). Presentation only: which fields
@@ -13,6 +13,8 @@ const SCHEDULE_VIEWS = {
     id: 'schedule',
     default: 'table',
     theme: '',
+    // Sortable in every view: the shown columns, except the packlist actions
+    sortable: ['Show', 'Client', 'City', 'Size', 'S. Start', 'S. End', 'Ship', 'Recieved'],
     views: [
         {
             id: 'table',
@@ -85,9 +87,10 @@ export const ScheduleTableComponent = {
             type: Object,
             default: null
         },
-        hideRowsOnSearch: {
-            type: Boolean,
-            default: true
+        // View patches (e.g. a picker that hides non-matching rows: { table: { hideRowsOnSearch: true } })
+        patches: {
+            type: Array,
+            default: () => []
         },
         templateName: {
             type: String,
@@ -107,20 +110,21 @@ export const ScheduleTableComponent = {
     data() {
         return {
             scheduleTableStore: null,
+            columnTypesStore: null,
             SCHEDULE_VIEWS,
             SCHEDULE_DECORATION_KEYS
         };
     },
 
     computed: {
-        // FieldDefs built from the sheet headers (shared with other Schedule pages)
+        // FieldDefs built from the sheet headers (shared with other Schedule pages), typed by ColumnTypes
         fields() {
-            return buildScheduleFields(this.scheduleTableStore ? this.scheduleTableStore.data : []);
+            return buildScheduleFields(this.scheduleTableStore ? this.scheduleTableStore.data : [], { types: this.columnTypesStore?.data });
         },
         tableData() {
             const rawData = this.scheduleTableStore ? this.scheduleTableStore.data : [];
             // Use source show's end date as the sort/display ship date for transship rows
-            return rawData.map(withTransshipShipDate);
+            return rawData.map(withShipDate);
         },
         originalData() {
             return this.scheduleTableStore && Array.isArray(this.scheduleTableStore.originalData)
@@ -211,6 +215,7 @@ export const ScheduleTableComponent = {
         }
     },
     async mounted() {
+        this.columnTypesStore = getReactiveStore(Requests.getColumnTypes, null, ['PROD_SCHED', 'Production Schedule']);
         this.recreateStore();
     },
     methods: {
@@ -221,8 +226,8 @@ export const ScheduleTableComponent = {
                 return;
             }
             
-            // Ship and return info (shared with the Design Queue): ship date, then transshipments
-            const [shipDate, ...transship] = shipReturnAnalysis();
+            // Transshipment info (shared with the Design Queue); the shown Ship date comes from withShipDate
+            const transship = shipReturnAnalysis();
             // Create analysis configuration to check packlist existence for each row
             const analysisConfig = [
                 createAnalysisConfig(
@@ -236,7 +241,6 @@ export const ScheduleTableComponent = {
                     Priority.ANALYSIS,
                     true // extractColumnsAsObject
                 ),
-                shipDate,
                 // Normalize show start dates to always include year
                 createAnalysisConfig(
                     Requests.normalizeStartDate,
@@ -479,8 +483,10 @@ export const ScheduleTableComponent = {
             const originalRow = this.scheduleTableStore?.data?.find(r =>
                 r.Client === row.Client && String(r.Year) === String(row.Year) && r.Show === row.Show
             ) || row;
+            // The modal windows its show list around this Ship date: give it the estimate with its year
+            const shipText = estimatedShipText(originalRow);
             this.$modal.custom(TransshipmentModal, {
-                preselectedRow: originalRow,
+                preselectedRow: shipText ? { ...originalRow, Ship: shipText } : originalRow,
                 preselectedDirection: direction,
                 size: 'page',
                 tall: true
@@ -576,7 +582,7 @@ export const ScheduleTableComponent = {
             :loading-message="loadingMessage"
             :show-search="true"
             :sync-search-with-url="true"
-            :hide-rows-on-search="hideRowsOnSearch"
+            :patches="patches"
             @refresh="handleRefresh"
         >
             <template #header-area>

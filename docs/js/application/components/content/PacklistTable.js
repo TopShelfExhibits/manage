@@ -1,5 +1,6 @@
 import { html, TableComponent, DataView, Requests, getReactiveStore, NavigationRegistry, createAnalysisConfig, invalidateCache, Priority, tableRowSelectionState, EditHistoryUtils, authState, undoRegistry, todayISOString, getAutoColorClass } from '../../index.js';
 import { resolveView } from '../../utils/views/resolveView.js';
+import { itemImageStyle } from '../../utils/views/viewStyles.js';
 import { ItemImageComponent } from './InventoryTable.js';
 import { sheetLockMixin } from '../../utils/sheetLockMixin.js';
 import { packlistIndexResolutionMixin } from '../interface/IndexResolutionModal.js';
@@ -81,9 +82,9 @@ const RowOptionsMenuComponent = {
     computed: {
         anyHighlighted() {
             return this.selectedRows.some(({ row }) => {
-                if (!row || !row.MetaData) return false;
+                if (!row || !row.metadata) return false;
                 try {
-                    const metadata = typeof row.MetaData === 'string' ? JSON.parse(row.MetaData) : row.MetaData;
+                    const metadata = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata;
                     return metadata?.highlight?.class === 'yellow';
                 } catch (e) {
                     return false;
@@ -144,6 +145,7 @@ const PACKLIST_ITEMS_VIEW = {
     id: 'packlist-items',
     layout: 'table',
     hidden: ['Pack', 'Check', 'Extracted Item', 'Extracted Qty'],
+    table: { hideRowsOnSearch: false },
     style: {
         '*': { width: 40, font: 'narrow' },
         'Description': { width: 200, font: '' },
@@ -152,9 +154,16 @@ const PACKLIST_ITEMS_VIEW = {
     variants: { print: { hidden: ['Extracted Item', 'Extracted Qty'] } }
 };
 
+// Editable headers; edits apply only while the page is in edit mode (tableEditMode 'batch')
+const CRATE_EDITABLE = ['Type', 'L', 'W', 'H', 'Weight'];
+const ITEM_EDITABLE = ['Description', 'Packing/shop notes'];
+
+// The crates table's row number column (drawn by the page: the visible row count)
+const PIECE_NUMBER = 'Piece #';
+
 // Width/font by header for the crates table (structural class packlist-table, R3.6)
 function crateColumnStyle(label) {
-    if (label === 'Piece #') return { width: 10, font: 'narrow' };
+    if (label === PIECE_NUMBER) return { width: 10, font: 'narrow' };
     const width = ['Description', 'Packing/shop notes'].includes(label) ? 200 : ['L', 'W', 'H'].includes(label) ? 20 : 40;
     const font = ['Pack', 'Check', 'Weight'].includes(label) ? 'narrow' : undefined;
     return font ? { width, font } : { width };
@@ -175,6 +184,7 @@ export const PacklistTable = {
             isPrinting: false,
             databaseItemHeaders: null,
             NavigationRegistry,
+            PIECE_NUMBER,
             lockNamespace: 'PACK_LISTS',
             itemGroupVisibilityOverride: null,
             descriptionOnlyTabs: [],
@@ -184,12 +194,8 @@ export const PacklistTable = {
     computed: {
         // Items view resolved once (print variant while printing); shared by all crates
         itemsResolved() {
-            const fields = this.itemHeaders.map(label => ({
-                key: label,
-                label,
-                editable: this.editMode && ['Description', 'Packing/shop notes'].includes(label)
-            }));
-            return resolveView(fields, PACKLIST_ITEMS_VIEW, { print: this.isPrinting, editMode: this.editMode ? 'batch' : 'none' });
+            const fields = this.itemHeaders.map(key => ({ key, label: key, editable: ITEM_EDITABLE.includes(key) }));
+            return resolveView(fields, PACKLIST_ITEMS_VIEW, { print: this.isPrinting, editMode: this.tableEditMode });
         },
         tableEditMode() {
             return this.editMode ? 'batch' : 'none';
@@ -198,22 +204,22 @@ export const PacklistTable = {
         hiddenColumns() {
             return this.itemHeaders.filter(k => this.itemsResolved.hidden.has(k));
         },
-        // Crates view: the sheet's crate headers, in sheet order
+        // Crates view: the sheet's crate headers, in sheet order. Piece # and the nested item table
+        // are page cells (#cell); the item table's cell spans the item headers after it.
         cratesResolved() {
-            // Piece # and the nested item table are page cells (#cell); the rest are plain values
-            const fields = this.mainColumns.map(c => ({
-                key: c.key, label: c.label, editable: !!c.editable, isIndex: c.isIndex, colspan: c.colspan,
-                cell: (c.isIndex || c.key === this.itemHeadersStart) ? 'slot' : undefined
-            }));
+            const fields = this.mainHeaders.map(key => ({ key, label: key, editable: CRATE_EDITABLE.includes(key) }));
             const style = {};
-            for (const c of this.mainColumns) style[c.key] = crateColumnStyle(c.key);
+            for (const key of this.mainHeaders) style[key] = crateColumnStyle(key);
+            if (style[PIECE_NUMBER]) style[PIECE_NUMBER].cell = 'slot';
+            if (style[this.itemHeadersStart]) Object.assign(style[this.itemHeadersStart], { cell: 'slot', colspan: this.itemHeaders.length });
             return resolveView(fields, {
                 id: 'packlist-crates',
                 layout: 'table',
                 className: 'packlist-table',
-                columns: this.mainColumns.map(c => c.key),
-                style
-            }, { editMode: this.editMode ? 'batch' : 'none' });
+                columns: this.mainHeaders,
+                style,
+                table: { hideRowsOnSearch: false }
+            }, { editMode: this.tableEditMode });
         },
         mainHeaders() {
             // Use headers from the first crate if available, else use default schema
@@ -229,32 +235,6 @@ export const PacklistTable = {
             // Default schema when no data is available
             return ['Piece #', 'Type', 'L', 'W', 'H', 'Weight', 'Pack', 'Check', 'Description', 'Packing/shop notes'];
         },
-        mainColumns() {
-            return this.mainHeaders.map((label, idx) => {
-                if (label === 'Piece #') {
-                    return { key: label, label, editable: false, isIndex: true };
-                }
-                // Only make columns editable if editMode is true
-                const isEditable = this.editMode && ['Type','L','W','H','Weight'].includes(label);
-
-                // When not in edit mode, move Type, L, W, H, Weight to details
-                //const isDetailsColumn = !this.editMode && ['Type','L','W','H','Weight'].includes(label);
-
-                if (label === this.itemHeadersStart) {
-                    return {
-                        key: label,
-                        label,
-                        colspan: this.itemHeaders.length
-                    };
-                } else {
-                    return {
-                        key: label,
-                        label,
-                        editable: isEditable
-                    };
-                };
-            });
-        },
         mainTableData() {
             // Use the reactive array directly from the store
             if (this.packlistTableStore && Array.isArray(this.packlistTableStore.data)) {
@@ -267,6 +247,10 @@ export const PacklistTable = {
                 return JSON.parse(JSON.stringify(this.packlistTableStore.originalData));
             }
             return [];
+        },
+        // Loaded crates by row id, so a moved crate's item table compares with its own loaded items
+        originalCratesById() {
+            return new Map(this.originalData.map(crate => [crate?.AppData?._rowId, crate]));
         },
         itemHeaders() {
             // Try to infer item headers from the first crate's Items array
@@ -291,7 +275,9 @@ export const PacklistTable = {
             return this.packlistTableStore ? this.packlistTableStore.isLoading : false;
         },
         loadingMessage() {
-            return this.packlistTableStore ? (this.packlistTableStore.loadingMessage || 'Loading data...') : 'Loading data...';
+            const store = this.packlistTableStore;
+            if (store?.isAnalyzing && !store.isLoading) return store.analysisMessage || 'Analyzing data...';
+            return store?.loadingMessage || 'Loading data...';
         },
         // Check if data has been modified (uses reactive store's computed property)
         isDirty() {
@@ -588,7 +574,7 @@ export const PacklistTable = {
                     Requests.checkCadSourceHistory,
                     'cadSourceAlert',
                     'Checking CAD source history...',
-                    'EditHistory',
+                    'edithistory',
                     [],
                     null,
                     false,
@@ -771,15 +757,16 @@ export const PacklistTable = {
                     };
                 },
                 computed: {
+                    // image holds no data: the thumbnail column (see itemImageStyle)
                     fields() {
                         return [
-                            { key: 'image', labelHtml: '<span class="material-symbols-outlined">imagesmode</span>', label: 'IMG', sortable: false, cell: 'image', cellOptions: { itemKey: 'itemNumber', size: 48 } },
-                            { key: 'itemNumber', label: 'Item#', type: 'item', sortable: true },
-                            { key: 'description', label: 'Description', sortable: true },
-                            { key: 'quantity', label: 'Available', sortable: true }
+                            { key: 'image', label: 'IMG' },
+                            { key: 'itemNumber', label: 'Item#', type: 'item' },
+                            { key: 'description', label: 'Description' },
+                            { key: 'quantity', label: 'Available' }
                         ];
                     },
-                    // Single-view registry in a modal (no URL); "+ Add Item" is the primary action
+                    // Single-view registry in a modal (no URL); adding the item is the primary action (a row click)
                     registry() {
                         return {
                             id: 'packlist-inventory-selector',
@@ -788,9 +775,12 @@ export const PacklistTable = {
                             views: [{
                                 id: 'table', name: 'Inventory', layout: 'table',
                                 columns: ['image', 'itemNumber', 'description', 'quantity'],
-                                style: { image: { width: 1 }, itemNumber: { width: 120 }, quantity: { width: 100 } },
+                                sortable: ['itemNumber', 'description', 'quantity'],
+                                style: { image: itemImageStyle('itemNumber'), itemNumber: { width: 120 }, quantity: { width: 100 } },
                                 table: { sticky: { start: ['image'] } },
-                                sort: { key: 'itemNumber', dir: 'asc' }
+                                sort: { key: 'itemNumber', dir: 'asc' },
+                                // Clicking a row adds the item
+                                action: 'row'
                             }]
                         };
                     },
@@ -870,7 +860,6 @@ export const PacklistTable = {
                         :showSearch="true"
                         :showRefresh="false"
                         :showFooter="true"
-                        :sortable="true"
                         :emptyMessage="'No inventory items found'"
                         :loadingMessage="inventoryStore && inventoryStore.isAnalyzing ? 'Loading images...' : 'Loading inventory...'"
                     >
@@ -959,11 +948,6 @@ export const PacklistTable = {
             await this.packlistTableStore.save('Saving packlist...');
         },
 
-        handleInnerTableDirty(isDirty, rowIndex) {
-            if (this.$refs.mainTableComponent && this.$refs.mainTableComponent.checkDirtyCells) {
-                this.$refs.mainTableComponent.checkDirtyCells();
-            }
-        },
 
         /**
          * Get card color for an alert
@@ -999,9 +983,9 @@ export const PacklistTable = {
         },
 
         getRowGrouping(row) {
-            if (!row || !row.MetaData) return null;
+            if (!row || !row.metadata) return null;
             try {
-                const metadata = typeof row.MetaData === 'string' ? JSON.parse(row.MetaData) : row.MetaData;
+                const metadata = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata;
                 return metadata?.grouping || null;
             } catch (e) {
                 return null;
@@ -1382,14 +1366,14 @@ export const PacklistTable = {
         },
 
         highlightRows(selectedRows, shouldRemove = false) {
-            // Toggle highlight class in MetaData for selected rows
+            // Toggle highlight class in metadata for selected rows
             selectedRows.forEach(({ row }) => {
                 if (row) {
-                    // Parse MetaData (handle both string and object formats)
+                    // Parse metadata (handle both string and object formats)
                     let metadata = {};
-                    if (row.MetaData) {
+                    if (row.metadata) {
                         try {
-                            metadata = typeof row.MetaData === 'string' ? JSON.parse(row.MetaData) : row.MetaData;
+                            metadata = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata;
                         } catch (e) {
                             metadata = {};
                         }
@@ -1413,7 +1397,7 @@ export const PacklistTable = {
                     }
                     
                     // Store back as JSON string
-                    row.MetaData = JSON.stringify(metadata);
+                    row.metadata = JSON.stringify(metadata);
                 }
             });
         },
@@ -1449,24 +1433,21 @@ export const PacklistTable = {
                     :resolved="cratesResolved"
                     :edit-mode="tableEditMode"
                     :class="cratesResolved.className"
-                    :rowKey="'Piece #'"
+                    :rowKey="'AppData._rowId'"
                     :title="tabName"
                     :showRefresh="!editMode"
                     :showSearch="true"
                     :sync-search-with-url="true"
                     :container-path="containerPath || 'packlist/' + tabName"
                     :navigate-to-path="(path) => $emit('navigate-to-path', path)"
-                    :hideRowsOnSearch="false"
                     :emptyMessage="'No crates'"
                     :draggable="editMode"
                     :newRow="editMode"
                     :isLoading="isLoading"
                     :isAnalyzing="packlistTableStore ? packlistTableStore.isAnalyzing : false"
-                    :loading-message="packlistTableStore && packlistTableStore.isLoading ? (packlistTableStore.loadingMessage || 'Loading data...') : (packlistTableStore && packlistTableStore.isAnalyzing ? (packlistTableStore.analysisMessage.loadingMessage || 'Analyzing data...') : loadingMessage)"
-                    :loading-progress="packlistTableStore && packlistTableStore.isAnalyzing ? packlistTableStore.analysisProgress : -1"
                     :loading-message="loadingMessage"
+                    :loading-progress="packlistTableStore && packlistTableStore.isAnalyzing ? packlistTableStore.analysisProgress : -1"
                     :drag-id="'packlist-crates'"
-                    :drag-label="'Crates'"
                     :hide-group-members="true"
                     @refresh="handleRefresh"
                     @cell-edit="handleCellEdit"
@@ -1515,14 +1496,14 @@ export const PacklistTable = {
                         </div>
                     </template>
                     <template #cell="{ row, rowIndex, field: column, onInnerTableDirty }">
-                        <template v-if="column && column.isIndex">
+                        <template v-if="column && column.key === PIECE_NUMBER">
                             <!-- Only count visible (not marked-for-deletion) rows for Piece # -->
                             {{
                                 mainTableData
                                     .filter(r => {
-                                        if (!r || !r.MetaData) return true;
+                                        if (!r || !r.metadata) return true;
                                         try {
-                                            const metadata = typeof r.MetaData === 'string' ? JSON.parse(r.MetaData) : r.MetaData;
+                                            const metadata = typeof r.metadata === 'string' ? JSON.parse(r.metadata) : r.metadata;
                                             return metadata?.deletion?.marked !== true;
                                         } catch (e) {
                                             return true;
@@ -1535,7 +1516,7 @@ export const PacklistTable = {
                             <TableComponent
                                 v-if="row.Items"
                                 :data="row.Items"
-                                :originalData="originalData && originalData[rowIndex] ? originalData[rowIndex].Items : []"
+                                :originalData="originalCratesById.get(row.AppData?._rowId)?.Items || []"
                                 :rowKey="'AppData._rowId'"
                                 :resolved="itemsResolved"
                                 :edit-mode="tableEditMode"
@@ -1549,19 +1530,12 @@ export const PacklistTable = {
                                 :showHeader="false"
                                 :isLoading="isLoading"
                                 :drag-id="'packlist-items'"
-                                :drag-label="'Items'"
                                 :parent-search-value="$refs.mainTableComponent?.search?.debouncedValue?.value || ''"
                                 :showSearch="true"
-                                :hideRowsOnSearch="false"
                                 :showSelectionBubble="editMode"
                                 @cell-edit="(itemRowIdx, itemColKey, value) => { row.Items[itemRowIdx][itemColKey] = value; }"
                                 @new-row="(positionData) => { handleAddItem(rowIndex, positionData); }"
-                                @inner-table-dirty="(isDirty) => { 
-                                    if (typeof onInnerTableDirty === 'function') {
-                                        onInnerTableDirty(isDirty);
-                                    }
-                                    handleInnerTableDirty(isDirty, rowIndex);
-                                }"
+                                @inner-table-dirty="onInnerTableDirty"
                                 @row-options="handleRowOptions"
                                 class="table-fixed"
                             >

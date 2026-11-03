@@ -1,5 +1,5 @@
 // Dynamic Google Sheets Service selection
-import { isLocalhost } from '../../google_sheets_services/FakeGoogle.js';
+import { isLocalhost } from '../utils/helpers.js';
 let GoogleSheetsService, GoogleSheetsAuth;
 
 if (isLocalhost()) {
@@ -17,6 +17,7 @@ if (isLocalhost()) {
 
 import { wrapMethods, invalidateCache, stampDataChange, EditHistoryUtils } from '../index.js';
 import { ApplicationUtils } from '../index.js';
+import { ARCHIVE_TAB_NAME, ARCHIVE_HEADERS } from '../utils/metadata-utils.js';
 
 class database_uncached {
     /**
@@ -118,7 +119,9 @@ class database_uncached {
      * @param {File} file - The image file to upload
      * @param {string} itemNumber - The item number used to name the file
      * @param {string} folderId - Google Drive folder ID for thumbnails
-     * @returns {Promise<string|null>} The new image URL, or null on failure
+     * @returns {Promise<{fileId: string, file: File}|null>} The new Drive file ID and the image
+     *   that was uploaded (already resized — lets the caller show it without downloading it back),
+     *   or null on failure
      */
     static async uploadItemImage(file, itemNumber, folderId = window.ENDPOINT_IDS.THUMBNAILS) {
         const itemNumberStr = String(itemNumber).trim();
@@ -133,7 +136,7 @@ class database_uncached {
 
         // Check if this item currently has a thumbnail record that points to a prefix file
         // If so, we need to preserve that file when uploading the item's own image
-        const currentRecord = await ApplicationUtils.getThumbnailRecord(null, itemNumberStr);
+        const currentRecord = await ApplicationUtils.getThumbnailRecord(itemNumberStr);
         const prefixFileIdsToPreserve = new Set();
         if (currentRecord && currentRecord.file) {
             // Extract prefix from item number
@@ -142,7 +145,7 @@ class database_uncached {
             if (parts.length >= 2 && parts[0]) {
                 const prefix = parts[0];
                 // Check if the current file belongs to the prefix (not the item itself)
-                const prefixRecord = await ApplicationUtils.getThumbnailRecord(null, prefix);
+                const prefixRecord = await ApplicationUtils.getThumbnailRecord(prefix);
                 if (prefixRecord && prefixRecord.file === currentRecord.file) {
                     // This item is using a prefix file - preserve it
                     prefixFileIdsToPreserve.add(prefixRecord.file);
@@ -179,64 +182,22 @@ class database_uncached {
             if (oldId === uploaded.id) continue;
             await GoogleSheetsService.deleteDriveFile(oldId);
         }
-        
-        invalidateCache([
-            { namespace: 'database', methodName: 'getItemImageBlobUrl', args: [itemNumberStr] }
-        ], true);
 
-        // Fetch blob and store file reference to CACHE sheet (without blob URL generation)
-        const blobUrl = await GoogleSheetsService.getAuthenticatedImageUrl(uploaded.id);
-        if (blobUrl) {
-            ApplicationUtils.storeThumbnailRecord(itemNumberStr, uploaded.id, null)
-                .catch(err => console.warn('[icons] Failed to store thumbnail record on upload:', err));
-            return blobUrl;
-        }
-        return null;
+        ApplicationUtils.storeThumbnailRecord(itemNumberStr, uploaded.id, null)
+            .catch(err => console.warn('[icons] Failed to store thumbnail record on upload:', err));
+        return { fileId: uploaded.id, file: resizedFile };
     }
 
     /**
-     * Fetch the full-resolution image for an item as a blob URL.
-     * Only called when the full-size image modal is opened.
-     * @param {Object} deps - Dependency decorator
-     * @param {string} itemNumber - Item number to search for
-     * @param {string} folderId - Google Drive folder ID
-     * @returns {Promise<string>} Blob URL or empty string
-     */
-    static async getItemImageBlobUrl(deps, itemNumber, folderId = window.ENDPOINT_IDS.THUMBNAILS) {
-        if (!itemNumber) return '';
-        const itemNumberStr = String(itemNumber).trim();
-        if (!itemNumberStr) return '';
-
-        const extensions = ['jpg', 'jpeg', 'png'];
-        for (const ext of extensions) {
-            const fileName = `${itemNumberStr}.${ext}`;
-            const file = await GoogleSheetsService.searchDriveFileInFolder(fileName, folderId);
-            if (file && file.id) {
-                const blobUrl = await GoogleSheetsService.getAuthenticatedImageUrl(file.id);
-                if (blobUrl) return blobUrl;
-            }
-        }
-
-        const separators = /[\s\-_]+/;
-        const parts = itemNumberStr.split(separators);
-        // Prefix fallback commented out — only search for exact match for now.
-        // if (parts.length > 1 && parts[0]) {
-        //     return await deps.call(Database.getItemImageBlobUrl, parts[0], folderId);
-        // }
-
-        return '';
-    }
-
-    /**
-     * Fetch an authenticated blob URL directly from a Drive file ID.
-     * Used by the thumbnail store analysis step to convert stored file IDs to displayable URLs.
-     * @param {Object} deps - Dependency decorator
+     * Fetch a Drive file's raw content as a Blob.
+     * NOT CACHED — callers own the result: the thumbnail cache (application/utils/thumbnailCache.js)
+     * downscales and persists it per device; the full-size image modal frees it on close.
      * @param {string} fileId - Google Drive file ID
-     * @returns {Promise<string|null>} Blob URL or null
+     * @returns {Promise<Blob|null>} The file content, or null on failure
      */
-    static async getDriveBlobUrl(deps, fileId) {
+    static async getDriveFileBlob(fileId) {
         if (!fileId) return null;
-        return await GoogleSheetsService.getAuthenticatedImageUrl(fileId);
+        return await GoogleSheetsService.getDriveFileBlob(fileId);
     }
 
     /* MUTATION FUNCTIONS */
@@ -251,53 +212,31 @@ class database_uncached {
      * @param {Object} [mapping] - Optional mapping for object keys to sheet headers
      * @param {Object} [options] - Optional parameters for edithistory tracking
      * @param {string} [options.username] - Username making the change
-     * @param {boolean} [options.skipMetadata] - Skip edithistory generation (for EditHistory table itself)
-     * @param {string} [options.identifierKey] - Key to identify rows (for deletion tracking)
-     * @param {string} [options.source] - Source system for history entries ('web' | 'cad')
+     * @param {boolean} [options.skipMetadata] - Skip edithistory generation (caller manages EditHistory itself)
+     * @param {string} [options.source] - Source for history entries ('web' | 'cad', or an inventory note)
      * @returns {Promise<boolean>} - Success status
      */
     static async setData(tableId, tabName, updates, mapping = null, options = {}) {
         const {
             username = null,
             skipMetadata = false,
-            identifierKey = null,
             source = 'web'
         } = options;
 
         let updatesWithMetadata = updates;
+        let deletedRows = [];
 
         // Add edithistory tracking if not skipped
-        if (!skipMetadata && mapping && mapping.edithistory) {
+        // Contract: docs/notes/metadata-implementation.md
+        if (!skipMetadata && mapping && mapping.edithistory && Array.isArray(updates)) {
             try {
                 // Get original data for comparison (use Database.getData to leverage cache)
                 const transformedOriginal = await Database.getData(tableId, tabName, mapping);
 
-                // Add edithistory to updated rows
-                updatesWithMetadata = await _addMetadataToRows(
-                    transformedOriginal,
-                    updates,
-                    username,
-                    mapping,
-                    source
-                );
-
-                // Detect and archive deleted rows
-                if (identifierKey) {
-                    const deletedRows = EditHistoryUtils.detectDeletedRows(
-                        transformedOriginal,
-                        updates,
-                        identifierKey
-                    );
-
-                    if (deletedRows.length > 0) {
-                        await _archiveDeletedRows(
-                            tableId,
-                            tabName,
-                            deletedRows,
-                            username
-                        );
-                    }
-                }
+                // Match rows by EditHistory.i, assign missing identities, append history
+                const result = _addMetadataToRows(transformedOriginal, updates, username, source);
+                updatesWithMetadata = result.rows;
+                deletedRows = result.deletedRows;
             } catch (error) {
                 console.warn('Failed to add edithistory, continuing with save:', error);
                 // Continue with save even if edithistory fails
@@ -329,11 +268,16 @@ class database_uncached {
         invalidateCache([
             { namespace: 'database', methodName: 'getData', args: [tableId, tabName] }
         ], true);
-        
+
+        // Archive only after the main write succeeded
+        if (deletedRows.length > 0) {
+            await _archiveDeletedRows(tableId, tabName, deletedRows, username);
+        }
+
         return result;
     }
 
-    
+
     /**
      * Updates a single row in a table/tab using a unique identifier.
      * @param {Object} deps - Dependency decorator for tracking calls
@@ -355,12 +299,19 @@ class database_uncached {
             ? GoogleSheetsService.transformSheetData(existingData, mapping, tabName)
             : GoogleSheetsService.sheetArrayToObjects(existingData);
 
-        const rowIndex = transformedData.findIndex(row => {
-            const identifierKey = mapping ? Object.keys(mapping).find(k => k.includes('Number') || k.includes('Id')) : 'id';
-            const updateKey = Object.keys(update).find(k => k.includes('Number') || k.includes('Id')) || Object.keys(update)[0];
-            return row[identifierKey] === update[updateKey];
-        });
-        
+        // Prefer row identity (EditHistory.i); fall back to the legacy key guess for rows not yet touched
+        const updateIdentity = EditHistoryUtils.getRowIndex(update.edithistory);
+        let rowIndex = updateIdentity !== null
+            ? transformedData.findIndex(row => EditHistoryUtils.getRowIndex(row.edithistory) === updateIdentity)
+            : -1;
+        if (rowIndex === -1) {
+            rowIndex = transformedData.findIndex(row => {
+                const identifierKey = mapping ? Object.keys(mapping).find(k => k.includes('Number') || k.includes('Id')) : 'id';
+                const updateKey = Object.keys(update).find(k => k.includes('Number') || k.includes('Id')) || Object.keys(update)[0];
+                return row[identifierKey] === update[updateKey];
+            });
+        }
+
         if (rowIndex === -1) {
             throw new Error(`Row with identifier not found in tab ${tabName}`);
         }
@@ -369,14 +320,17 @@ class database_uncached {
 
         // Calculate changes and add edithistory if mapping includes it
         let updatedRow = { ...originalRow, ...update };
-        if (mapping && mapping.edithistory && username) {
-            const changes = EditHistoryUtils.calculateRowDiff(originalRow, update);
-            if (changes.length > 0) {
-                const metaEntry = EditHistoryUtils.createEditHistoryEntry(username, changes, source);
-                const existingMetadata = originalRow.edithistory || originalRow.EditHistory || '';
-                const newMetadata = EditHistoryUtils.appendToEditHistory(existingMetadata, metaEntry);
-                updatedRow.edithistory = newMetadata;
+        if (mapping && mapping.edithistory) {
+            const edithistory = { ...(EditHistoryUtils.parseEditHistory(originalRow.edithistory) || {}) };
+            if (EditHistoryUtils.getRowIndex(edithistory) === null) {
+                edithistory.i = EditHistoryUtils.nextRowIndex([transformedData]);
             }
+            const changes = EditHistoryUtils.calculateRowDiff(originalRow, updatedRow);
+            if (changes.length > 0 && username) {
+                const metaEntry = EditHistoryUtils.createEditHistoryEntry(username, changes, source);
+                EditHistoryUtils._addEntry(edithistory, metaEntry, undefined, updatedRow);
+            }
+            updatedRow.edithistory = JSON.stringify(edithistory);
         }
 
         // Update the transformed row
@@ -479,6 +433,26 @@ class database_uncached {
     }
 
     /**
+     * Delete whole rows of one tab in a single request, then invalidate the tab's cached data.
+     * Positional: callers check the rows just before and verify after (rows move under it).
+     * @param {string} tableId
+     * @param {string} tabName
+     * @param {number[]} rowNumbers - 1-based sheet rows (the header row is never deleted)
+     * @returns {Promise<boolean>}
+     */
+    static async deleteSheetRows(tableId, tabName, rowNumbers) {
+        if (!rowNumbers || !rowNumbers.length) return true;
+        await GoogleSheetsService.deleteSheetRows(tableId, tabName, rowNumbers);
+
+        stampDataChange(`database:getData:"${tableId}","${tabName}"`);
+        invalidateCache([
+            { namespace: 'database', methodName: 'getData', args: [tableId, tabName] }
+        ], true);
+
+        return true;
+    }
+
+    /**
      * Append a single row to the end of a tab using a targeted range write.
      * @param {string} tableId - Identifier for the table
      * @param {string} tabName - Sheet/tab name
@@ -546,12 +520,11 @@ class database_uncached {
 }
 
 // Wrap and export the class with caching, excluding mutation methods
-// Image URLs get infinite cache since they rarely change and are expensive Google Drive API calls
 export const Database = wrapMethods(
     database_uncached, 
     'database', 
-    ['createTab', 'hideTabs', 'showTabs', 'setData', 'updateRow', 'setCellValue', 'setCellValues', 'appendSheetRow', 'uploadItemImage', 'readFresh', 'readFreshRanges', 'columnLetter', 'a1Range'],
-    ['getItemImageBlobUrl', 'getDriveBlobUrl', 'getTabs'], // Infinite cache: image URLs (expensive Google Drive API calls)
+    ['createTab', 'hideTabs', 'showTabs', 'setData', 'updateRow', 'setCellValue', 'setCellValues', 'deleteSheetRows', 'appendSheetRow', 'uploadItemImage', 'getDriveFileBlob', 'readFresh', 'readFreshRanges', 'columnLetter', 'a1Range'], // getDriveFileBlob: uncached read (callers own the Blob)
+    ['getTabs'], // Infinite cache
     {
         // Sheet data: infinite for INVENTORY and PACK_LISTS (cross-session poller handles freshness);
         // 20-minute default for everything else (PROD_SCHED, CACHE, etc.)
@@ -561,94 +534,99 @@ export const Database = wrapMethods(
 
 
 /**
- * Add edithistory to rows that have changed
+ * Match incoming rows to stored rows by EditHistory.i, assign missing identities,
+ * and append history entries for changed rows.
+ * Contract: docs/notes/metadata-implementation.md "Row Identity" and "Write Rules".
  * @private
+ * @returns {{ rows: Array<Object>, deletedRows: Array<{identifier: string, rowData: Object}> }}
  */
-async function _addMetadataToRows(originalRows, updatedRows, username, mapping, source = 'web') {
-    if (!Array.isArray(updatedRows)) {
-        return updatedRows;
-    }
+function _addMetadataToRows(originalRows, updatedRows, username, source = 'web') {
+    const originals = Array.isArray(originalRows) ? originalRows : [];
+    const { matchOf, duplicates, deleted } = EditHistoryUtils.matchRows(originals, updatedRows);
+    let nextIndex = EditHistoryUtils.nextRowIndex([originals, updatedRows]);
+    const creationHistory = () => username ? [EditHistoryUtils.createEditHistoryEntry(username, [], source)] : [];
 
-    return updatedRows.map((updatedRow, index) => {
-        const originalRow = originalRows[index];
+    const rows = updatedRows.map((updatedRow, u) => {
+        const o = matchOf[u];
 
-        // Calculate changes for this row
-        const changes = EditHistoryUtils.calculateRowDiff(originalRow, updatedRow);
-
-        // If changes exist, append to edithistory
-        if (changes.length > 0 && username) {
-            const metaEntry = EditHistoryUtils.createEditHistoryEntry(username, changes, source);
-            const existingMetadata = updatedRow.edithistory || '';
-            const newMetadata = EditHistoryUtils.appendToEditHistory(existingMetadata, metaEntry);
-
-            // Update the edithistory field using the mapping key (always 'edithistory')
-            return { ...updatedRow, edithistory: newMetadata };
+        if (o !== -1) {
+            // Existing row: stored history is authoritative, the incoming copy may be stale
+            const originalRow = originals[o];
+            const edithistory = {
+                ...(EditHistoryUtils.parseEditHistory(originalRow.edithistory)
+                    || EditHistoryUtils.parseEditHistory(updatedRow.edithistory)
+                    || {})
+            };
+            if (EditHistoryUtils.getRowIndex(edithistory) === null) {
+                edithistory.i = nextIndex++;
+            }
+            const changes = EditHistoryUtils.calculateRowDiff(originalRow, updatedRow);
+            if (changes.length > 0 && username) {
+                const entry = EditHistoryUtils.createEditHistoryEntry(username, changes, source);
+                EditHistoryUtils._addEntry(edithistory, entry, undefined, updatedRow);
+            }
+            return { ...updatedRow, edithistory: JSON.stringify(edithistory) };
         }
 
-        return updatedRow;
+        if (duplicates.has(u)) {
+            // Copy of another row: new identity, history restarts (copied h and p are dropped)
+            return { ...updatedRow, edithistory: JSON.stringify({ i: nextIndex++, h: creationHistory() }) };
+        }
+
+        const edithistory = { ...(EditHistoryUtils.parseEditHistory(updatedRow.edithistory) || {}) };
+        if (EditHistoryUtils.getRowIndex(edithistory) !== null) {
+            // Carries an identity not stored in this tab (moved in from elsewhere): keep as-is
+            return updatedRow;
+        }
+        edithistory.i = nextIndex++;
+        if (!Array.isArray(edithistory.h) || edithistory.h.length === 0) {
+            edithistory.h = creationHistory();
+        }
+        return { ...updatedRow, edithistory: JSON.stringify(edithistory) };
     });
+
+    const deletedRows = deleted
+        .filter(o => !EditHistoryUtils.isBlankRow(originals[o]))
+        .map(o => ({
+            identifier: String(EditHistoryUtils.getRowIndex(originals[o].edithistory) ?? `row_${o + 1}`),
+            rowData: originals[o]
+        }));
+
+    return { rows, deletedRows };
 }
 
+
 /**
- * Archive deleted rows to EditHistory table
+ * Append deleted rows to the _EditHistory tab of the same spreadsheet.
+ * Existing archive rows are never rewritten.
  * @private
  */
 async function _archiveDeletedRows(sourceTable, sourceTab, deletedRows, username) {
     try {
-        // Get existing edithistory table data (use Database to leverage cache if available)
-        let edithistoryTableData = [];
-        try {
-            // Try to get with mapping first
-            const edithistoryMapping = {
-                SourceTable: 'SourceTable',
-                SourceTab: 'SourceTab',
-                RowIdentifier: 'RowIdentifier',
-                Username: 'Username',
-                Timestamp: 'Timestamp',
-                Operation: 'Operation',
-                RowData: 'RowData'
-            };
-            
-            edithistoryTableData = await Database.getData(sourceTable, 'EditHistory', edithistoryMapping);
-        } catch (error) {
-            // EditHistory tab doesn't exist yet, will be created
-            //console.log('EditHistory tab does not exist yet, will create');
-            edithistoryTableData = [];
+        const tabs = await Database.getTabs(sourceTable);
+        if (!tabs.some(tab => tab.title === ARCHIVE_TAB_NAME)) {
+            await Database.createTab(sourceTable, null, ARCHIVE_TAB_NAME);
         }
 
-        // Create archive entries for deleted rows
-        const archiveEntries = deletedRows.map(deleted => 
-            EditHistoryUtils.createArchiveEntry(
+        // Use the tab's own header order; write headers if the tab is new or unrecognized
+        const rawData = await GoogleSheetsService.getSheetData(sourceTable, ARCHIVE_TAB_NAME);
+        let headers = (rawData?.[0] || []).map(h => String(h ?? '').trim());
+        if (!ARCHIVE_HEADERS.every(h => headers.includes(h))) {
+            headers = ARCHIVE_HEADERS;
+            const endCol = _numberToColumnLetter(headers.length);
+            await GoogleSheetsService.setSheetData(sourceTable, `${ARCHIVE_TAB_NAME}!A1:${endCol}1`, [headers], null);
+        }
+
+        for (const deleted of deletedRows) {
+            const entry = EditHistoryUtils.createArchiveEntry(
                 sourceTable,
                 sourceTab,
                 deleted.identifier,
                 deleted.rowData,
                 username
-            )
-        );
-
-        // Append to existing edithistory
-        const updatedMetadata = [...edithistoryTableData, ...archiveEntries];
-
-        // Save to EditHistory table (skip edithistory for this table itself)
-        const edithistoryMapping = {
-            SourceTable: 'SourceTable',
-            SourceTab: 'SourceTab',
-            RowIdentifier: 'RowIdentifier',
-            Username: 'Username',
-            Timestamp: 'Timestamp',
-            Operation: 'Operation',
-            RowData: 'RowData'
-        };
-
-        await GoogleSheetsService.setSheetData(
-            sourceTable,
-            '_EditHistory',
-            updatedMetadata,
-            edithistoryMapping
-        );
-
-        //console.log(`Archived ${deletedRows.length} deleted rows to EditHistory table`);
+            );
+            await Database.appendSheetRow(sourceTable, ARCHIVE_TAB_NAME, headers.map(h => entry[h] ?? ''));
+        }
     } catch (error) {
         console.error('Failed to archive deleted rows:', error);
         // Don't throw - archival failure shouldn't block the main save

@@ -1,5 +1,12 @@
 @import url('theme.css');
 
+/*
+ * Styling conventions (see CLAUDE.md, "Styling"): shared structural classes (.content,
+ * .button-bar, .card, .details-grid/.detail-item, .cell-button-list), adapted to a context by one
+ * parent-scoped rule; no layout-only wrappers; one size scale per context as custom properties;
+ * fix the generic rule you're fighting instead of patching single elements.
+ */
+
 body, #app {
     color: var(--color-text);
     background: var(--color-primary-gradient);
@@ -422,15 +429,16 @@ div#app-content > div.empty-message {
     padding: var(--padding-md);
 }
 
-td .card, .button-bar .card, .content-footer .card, .content-header .card, .calendar-chip .card {
+/* Cards beside a value (table cells and detail items) and in bars: one compact card */
+td .card, .detail-item > span .card, .button-bar .card, .content-footer .card, .content-header .card {
     font-size: .875em;
     padding: var(--padding-sm);
     border-radius: var(--radius-md);
 }
-td .card, .calendar-chip .card {
+td .card, .detail-item > span .card {
     display: inline-block;
 }
-td span:not(:empty):has(+ .card) {
+td span:not(:empty):has(+ .card), .detail-item > span span:not(:empty):has(+ .card) {
     margin-right:var(--padding-sm);
 }
 
@@ -923,26 +931,6 @@ tr:hover + .column-button.between-rows, .column-button.between-rows:has(+ tr:hov
     opacity: 1;
 }
 
-/* Designed to overlap the container when hovered */
-.column-button-hint {
-    opacity: 0;
-    display: block !important;
-    position: absolute;
-    pointer-events: none;
-    top:0;
-    background: var(--color-red-bg);
-    outline: 1px solid var(--color-red);
-    border-radius: var(--radius-md);
-    padding: var(--padding-sm);
-    z-index: 9;
-}
-.column-button-hint:has(+ .column-button:hover) {
-    opacity: 1;
-}
-.table-edit-textarea:has(~ .column-button:hover) {
-    opacity: 0;
-}
-
 /* Modal Close Buttons */
 .modal-header > .column-button {
     opacity: 1;
@@ -1193,6 +1181,67 @@ tr.in-group:not(:has(+ .in-group)) > td:not(.row-drag-handle) {
     box-shadow: inset 0 -12px 12px -12px var(--color-shadow);
 }
 
+/* Inventory sub-rows (InventoryTable): tr.detail-row plus .detail-row-pending (scheduled
+   changes, category table) or .detail-row-history (past states, Edit History page) */
+
+/* Edit History: Date / User / Note columns, and the deleted-items table. Main rows get the
+   background from the view's columnColor (on <col>) and draw the text in a span.history-meta;
+   sub-rows mark the td. */
+td.history-meta,
+col.history-meta {
+    background-color: var(--color-purple-bg);
+}
+td.history-meta,
+span.history-meta {
+    color: var(--color-text-light);
+    font-size: 0.85em;
+}
+
+/* Red marks:
+   .history-changed       sub-row value that the row above replaced (HIGHLIGHT_CHANGES flag)
+   .history-unsaved       main-row value not saved yet, e.g. after a revert
+   .history-unsaved-label "Unsaved" in the main row's Date column */
+td.history-changed,
+td.history-unsaved,
+.history-unsaved-label {
+    color: var(--color-red);
+    font-weight: bold;
+}
+td.history-unsaved {
+    background-color: var(--color-red-bg-transparent);
+}
+
+/* Placeholders: "(empty)" in a highlighted cell, and the "Unsaved" label */
+.history-empty,
+.history-unsaved-label {
+    font-style: italic;
+}
+.history-empty {
+    font-weight: normal;
+    opacity: 0.75;
+}
+
+/* Inventory proposals: rows under items on the category table, and the proposal page */
+tr.detail-row-proposal > td {
+    color: var(--color-purple);
+    font-style: italic;
+}
+td.proposal-increase {
+    color: var(--color-green);
+    font-weight: bold;
+}
+td.proposal-decrease,
+td.proposal-changed {
+    color: var(--color-red);
+    font-weight: bold;
+}
+.proposal-choice {
+    display: flex;
+    align-items: center;
+    gap: 0.5em;
+    font-weight: normal;
+}
+
 /* Group Toggle Button */
 .group-toggle {
     position: absolute;
@@ -1279,11 +1328,10 @@ td.col-sticky-start, td.col-sticky-end {
     border-top: none;
 }
 
-.details-content {
+/* A table row's details: the shared .content (padding, column, gap) as a panel under the row */
+.details-container > .content {
     position: sticky;
     left: 0;
-    box-sizing: border-box;
-    padding: var(--padding-md);
     background-color: var(--background-color);
     margin: 0 1px var(--padding-md) 1px;
     border-radius: 0 0 var(--radius-lg) var(--radius-lg);
@@ -1291,10 +1339,6 @@ td.col-sticky-start, td.col-sticky-end {
     border-top: none;
     overflow: hidden;
     box-shadow: 0 4px 8px var(--color-shadow);
-
-    display: flex;
-    flex-direction: column;
-    gap: var(--padding-md);
 }
 
 .details-grid {
@@ -1315,7 +1359,8 @@ td.col-sticky-start, td.col-sticky-end {
     gap: var(--padding-sm);
 }
 
-.detail-item span {
+/* The value under a detail's label (not spans inside its cards) */
+.detail-item > span {
     color: var(--color-text);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -1339,7 +1384,6 @@ td.col-sticky-start, td.col-sticky-end {
     object-fit: contain;
 }
 
-/* Image layer styles for transition-group fade-in/fade-out */
 .item-image-container .image-layer {
     position: absolute;
     top: 0;
@@ -1347,6 +1391,17 @@ td.col-sticky-start, td.col-sticky-end {
     width: 100%;
     height: 100%;
     object-fit: contain;
+}
+
+/* Fades in only images that arrive after the cell rendered; cached images appear instantly.
+   A CSS animation (opacity only, compositor-driven) rather than a Vue transition, which would
+   force a layout for every image that loads. */
+.item-image-container .image-fade-in {
+    animation: image-fade-in 0.4s ease-out;
+}
+
+@keyframes image-fade-in {
+    from { opacity: 0; }
 }
 
 .item-image-container.image-missing::after {
@@ -1362,6 +1417,9 @@ td.col-sticky-start, td.col-sticky-end {
     opacity: 1;
 }
 
+/* ── Editable cells (batch and instant edit modes) ── */
+
+/* Text editor (contenteditable text cell) and number input */
 .table-edit-textarea, td input[type="number"] {
     width: 100%;
     display: inline-block;
@@ -1374,6 +1432,20 @@ td.col-sticky-start, td.col-sticky-end {
     outline: none;
 }
 
+/* Preserve newlines in multi-line notes */
+.table-edit-textarea {
+    white-space: pre-wrap;
+}
+
+.table-edit-textarea[data-placeholder]:empty::before {
+    content: attr(data-placeholder);
+    opacity: 0.25;
+    font-style: italic;
+}
+td:hover:has(.table-cell-container > .table-edit-textarea), td:hover:has(.table-cell-container > input[type="number"]) {
+    background-color: var(--color-blue-bg-transparent);
+    cursor: text;
+}
 .table-cell-container:has(input[type="number"]),
 .table-cell-container:has(button:only-child) {
     display: flex;
@@ -1381,6 +1453,30 @@ td.col-sticky-start, td.col-sticky-end {
     gap: var(--padding-sm);
     align-items: center;
 }
+
+/* Checkbox and select cells */
+.table-cell-container:has(.cell-checkbox:only-child) {
+    text-align: center;
+}
+.cell-checkbox {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--padding-sm);
+    cursor: pointer;
+}
+.cell-checkbox.cell-readonly {
+    cursor: default;
+}
+select.cell-select {
+    width: 100%;
+    box-sizing: border-box;
+    min-width: 0;
+}
+select.cell-select:only-child {
+    border: none;
+}
+
+/* Changed batch cells: the original value (number cells, click to revert) */
 .original-value {
     display: block;
     white-space: nowrap;
@@ -1396,26 +1492,37 @@ td.col-sticky-start, td.col-sticky-end {
     outline: 1px solid var(--color-red);
     opacity: 1;
 }
+/* Changed batch cells: hovering the revert button shows the original value over the editor */
+.column-button-hint {
+    opacity: 0;
+    display: block !important;
+    position: absolute;
+    pointer-events: none;
+    top:0;
+    background: var(--color-red-bg);
+    outline: 1px solid var(--color-red);
+    border-radius: var(--radius-md);
+    padding: var(--padding-sm);
+    z-index: 9;
+}
+.column-button-hint:has(+ .column-button:hover) {
+    opacity: 1;
+}
+.table-edit-textarea:has(~ .column-button:hover) {
+    opacity: 0;
+}
 
-/* Dirty cells (batch edits) and cells with an instant write pending look the same */
-.mark-dirty .dirty,
-td.instant-pending {
+/* Edit states (utils/cellEdits.js). Unsaved: a batch edit not saved yet, or an instant write
+   queued or in flight. Pack lists don't colour unsaved cells (see the pack list styles). */
+td.cell-unsaved {
     background-color: var(--color-red-bg-transparent);
 }
-
-td:hover:has(.table-cell-container > .table-edit-textarea), td:hover:has(.table-cell-container > input[type="number"]) {
-    background-color: var(--color-blue-bg-transparent);
-    cursor: text;
+/* Instant write failed (the value was reverted) */
+td.cell-failed {
+    outline: 2px solid var(--color-red);
+    outline-offset: -3px;
+    background-color: var(--color-red-bg) !important;
 }
-/* tr:hover > td > .table-cell-container > .table-edit-textarea, tr:hover > td > .table-cell-container > input[type="number"] {
-    background-color: var(--color-blue-bg-transparent);
-}
-.mark-dirty .dirty > .table-cell-container > .table-edit-textarea:focus, .mark-dirty .dirty > .table-cell-container > input[type="number"]:focus {
-    outline: solid 2px var(--color-red-bg);
-}
-.table-edit-textarea:focus, td input[type="number"]:focus {
-    outline: solid 2px var(--color-blue-bg-hover);
-} */
 
 /* Search highlighting */
 .search-match:not(:has(.search-match)):not(:has(button)):not(:has(input)),
@@ -1476,17 +1583,6 @@ button.search-highlight {
     border: 2px solid var(--color-yellow) !important;
     box-shadow: 0 0 4px var(--color-yellow) !important;
 }
-
-/*.dirty::after {
-    content: "edited";
-    display: inline-block;
-    font-size: 0.8rem;
-    color: var(--color-red);
-    border-radius: var(--radius-md);
-    border: 1px dashed var(--color-red);
-    padding: 1.5px;
-    margin: 0 4px;
-}*/
 
 /* Messages */
 .loading-message, .empty-message {
@@ -1575,57 +1671,6 @@ html.row-dragging * {
 }
 
 
-/* Status Indicators */
-
-/* Removed per design decision, keep in case it's useful later
-.unsaved:has(.unsaved)::after,
-.alert:has(.alert)::after,
-.dirty:has(.dirty)::after {
-    content: none;
-    display: none;
-}
-.unsaved::after, .alert::after, .dirty::after {
-    width: 1.2rem;
-    height: 1.2rem;
-    border-radius: .6rem;
-    display: block;
-    opacity: .8;
-    line-height: 1.1rem;
-    position: absolute;
-    right: 3px;
-    top: calc(50% - .6rem);
-    text-align: center;
-    pointer-events: none;
-    transition: width 0.3s ease;
-}
-.unsaved::after {
-    content: "●";
-    background: var(--color-red);
-    color: var(--color-text-inverted);
-}
-:hover.unsaved::after {
-    content: "unsaved";
-    width: 4.5rem;
-}
-.alert::after {
-    content: "⚠";
-    background: var(--color-yellow);
-    color: var(--color-text);
-}
-:hover.alert::after {
-    content: "alert";
-    width: 3rem;
-}
-.dirty::after {
-    content: "✎";
-    background: var(--color-red);
-    color: var(--color-text-inverted);
-}
-:hover.dirty::after {
-    content: "edited";
-    width: 3.5rem;
-}
-*/
 
 
 
@@ -1767,7 +1812,11 @@ html.row-dragging * {
     border-right: 1px solid var(--color-border);
 }
 
+/* Calendar chips: one compact scale for everything inside a chip (cards in the text lines and
+   every control in the end bar share --chip-control-height and --chip-font) */
 .calendar-chip {
+    --chip-control-height: 20px;
+    --chip-font: 0.7rem;
     border: 1px solid;
     border-radius: var(--radius-md);
     padding: var(--padding-sm);
@@ -1837,25 +1886,59 @@ html.row-dragging * {
     justify-content: center;
 }
 
-.calendar-chip .chip-text .card {
-    font-size: 0.65rem;
+.calendar-chip .card {
+    font-size: var(--chip-font);
     padding: 1px 4px;
     line-height: 1.3;
     white-space: nowrap;
     display: inline-block;
+    border-radius: var(--radius-md);
 }
 .chip-first-row .card,
 .chip-second-row .card {
     margin-left: 3px;
     vertical-align: middle;
 }
-.chip-actions {
+/* Chip end: one button bar (action cells, decoration cards, the primary action button last).
+   Every control is the same height and font; the generic .button-bar sizing (28px symbol
+   buttons, growing buttons) doesn't apply inside a chip. */
+.calendar-chip .chip-actions.button-bar {
     flex-shrink: 0;
+    display: flex;
+    align-items: stretch;
+    gap: 0;
+    margin-left: auto;
+}
+.calendar-chip .chip-actions.button-bar > * {
+    box-sizing: border-box;
+    height: var(--chip-control-height);
+    min-height: 0;
+    margin: 0;
+    padding: 0 4px;
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: var(--chip-font);
+    line-height: 1;
+    white-space: nowrap;
+}
+.calendar-chip .chip-actions.button-bar > .button-symbol {
+    width: var(--chip-control-height);
+    padding: 0;
+}
+
+/* A list of buttons in one cell (the showList cell, the overlapping shows modal): stacked, full width */
+.cell-button-list {
     display: flex;
     flex-direction: column;
     align-items: stretch;
     gap: 2px;
-    margin-left: var(--padding-sm);
+    width: 100%;
+}
+td .cell-button-list > .card {
+    display: block;
+    width: 100%;
 }
 
 @container container-component (width < 600px) {
@@ -1883,6 +1966,10 @@ html.row-dragging * {
 .packlist-crates:not(.editing) table tr:last-child td {
     border-bottom: none;
 } 
+/* Editing a pack list changes most cells, so unsaved cells keep their normal background */
+.packlist-crates td.cell-unsaved {
+    background-color: transparent;
+}
 .packlist-crates td:has(.table-edit-textarea), .packlist-crates td:has(.empty-message) {
     padding: var(--padding-sm);
 }
@@ -2208,6 +2295,13 @@ html.row-dragging * {
 
 
 @media print {
+    /* Button lists in cells print as left-aligned lines of text, one per line */
+    td .cell-button-list > button {
+        display: block !important;
+        width: 100% !important;
+        text-align: left !important;
+    }
+
     /* Set page margins to allow space for browser headers/footers */
     @page {
         margin-top: .125in;    /* Space for browser header + our header */
@@ -2399,46 +2493,9 @@ td.details-cell button.action-button {
     padding: 0 var(--padding-sm);
 }
 
-/* Calendar: action button at the chip start; chips without a row trigger aren't clickable */
-.calendar-chip .chip-action-button {
-    width: 20px;
-    height: 20px;
-    flex-basis: 20px;
-    font-size: 0.75rem;
-    line-height: 1;
-}
+/* Calendar: chips without a row trigger aren't clickable */
 .calendar-chip.chip-no-trigger {
     cursor: default;
-}
-
-/* ── Views system: editable cells and instant writes (views-and-renderers-plan §4.16) ── */
-
-.cell-checkbox {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--padding-sm);
-    cursor: pointer;
-}
-.cell-checkbox input[type="checkbox"] {
-    width: 18px;
-    height: 18px;
-    margin: 0;
-    cursor: pointer;
-}
-.cell-checkbox.cell-readonly, .cell-checkbox.cell-readonly input {
-    cursor: default;
-}
-select.cell-select, input.cell-text-input {
-    width: 100%;
-    box-sizing: border-box;
-    min-width: 0;
-}
-
-/* Instant-write failure (pending cells share the dirty-cell style above) */
-td.instant-failed {
-    outline: 2px solid var(--color-red);
-    outline-offset: -3px;
-    background-color: var(--color-red-bg) !important;
 }
 
 /* Preferences in the hamburger menu: long values (JSON lists) are clamped; the full value is the tooltip */
@@ -2455,10 +2512,4 @@ td.instant-failed {
 /* Full-width container mode (view.fullWidth): the page container drops its max-width */
 .container:has(.view-full-width) {
     max-width: 100%;
-}
-
-/* Empty contenteditable cells show their placeholder */
-.table-edit-textarea[data-placeholder]:empty::before {
-    content: attr(data-placeholder);
-    opacity: 0.5;
 }

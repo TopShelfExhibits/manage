@@ -1,37 +1,45 @@
-import { html, Requests, DataView, getReactiveStore, invalidateCache, ScheduleFilterSelect } from '../../index.js';
+import { html, Requests, DataView, getReactiveStore, invalidateCache, ScheduleFilterSelect, createAnalysisConfig, Priority } from '../../index.js';
 import { buildScheduleFields } from '../../../data_management/abstraction/scheduleFields.js';
-import { isCheckedValue } from '../../../data_management/utils/checkbox-values.js';
-import { normalizeFilterValues } from '../../../data_management/utils/helpers.js';
-import { shipReturnAnalysis, withTransshipShipDate, shipReturnCards, SHIP_RETURN_DECORATION_KEYS } from '../../utils/scheduleShipping.js';
+import { isInstantColumn, identityKey, columnText } from '../../../data_management/utils/instant-write-config.js';
+import { textFiltersToSearchParams } from '../../../data_management/utils/helpers.js';
+import { shipReturnAnalysis, withShipDate, shipReturnCards, SHIP_RETURN_DECORATION_KEYS } from '../../utils/scheduleShipping.js';
 
 /**
- * Design queue — views-and-renderers-plan Phase 2 (R6.1, R7.1, R8.1, R8.2).
+ * Design queue (views-and-renderers-plan §4.16).
  *
  * A page under Schedule (route schedule/design-queue) that shares the Schedule data and fields
  * (scheduleFields.js) but has its own purpose: track design work per show.
  *
- *  - editMode 'instant': checkbox / select / note edits are verified writes after a short delay.
- *    Edits made close together go as one batch (DataView queue → commitCells →
+ *  - editMode 'instant': edits to the instant-write columns are verified writes after a short
+ *    delay. Edits made close together go as one batch (DataView queue → commitCells →
  *    Requests.writeCellsVerified for Schedule columns, saveShowNote for each note).
- *  - Writable columns and row identity come from the InstantWriteTables preference; the shown
- *    columns from DesignQueueFields (a view patch); Assignee options from DesignQueueAssignees.
- *  - Note is not a Schedule column: it is joined from CACHE/ShowNotes by computeIdentifier.
- *  - Completed rows (Elev, Panels and Setups each X, - or N/a) stay in place and turn gray via
- *    a derived colour field (_rowColor) recomputed from the local row.
- *  - Sorted by Ship ascending; the initial filter is the "Upcoming" schedule search.
+ *  - Setup (Requests.getDesignQueueSetup, one store): the InstantWriteTables preference names the
+ *    row identity and the columns written immediately; the ColumnTypes preference says what each
+ *    column holds, and the table draws an editable column's cell from that type (checkbox,
+ *    select, else text). A select names its option list; this page supplies its lists by name
+ *    (optionLists: DesignQueueAssignees from preferences). The DesignQueueFields preference
+ *    chooses which columns show; the view orders them. Until setup loads, instant cells render
+ *    read-only.
+ *  - Note is not a Schedule column: a per-row analysis on the schedule store reads it from
+ *    CACHE/ShowNotes by computeIdentifier (Requests.getShowNoteForRow). It keeps the last note
+ *    while refreshing, and re-runs when the notes tab changes.
+ *  - Rows whose Setups is checked (X) stay in place and turn gray: a view colour rule
+ *    (rowColor 'checked:gray') on the shown row, so the row grays as soon as the box is clicked.
+ *  - Ship shows the estimated ship date (sorted ascending); the initial filter is the
+ *    "Upcoming" schedule search.
  * The Schedule page itself stays read-only.
  */
 
 const DQ_DATABASE = 'PROD_SCHED';
 const DQ_TAB = 'Production Schedule';
 
-// Code default for the shown columns; the DesignQueueFields preference patches it.
-export const DESIGN_QUEUE_DEFAULT_FIELDS = Object.freeze(['Client', 'Show', 'Size', 'Elev', 'Panels', 'Setups', 'Assignee', 'Account Manager', 'Ship', 'Note', 'Booth#']);
-// Instant cells assumed when the InstantWriteTables preference is missing (they render read-only).
-const DEFAULT_INSTANT_COLUMNS = Object.freeze({ Elev: 'checkbox', Panels: 'checkbox', Setups: 'checkbox', Assignee: 'select' });
-const TASK_COLUMNS = Object.freeze(['Elev', 'Panels', 'Setups']);
-// For the gray "completed" rule only: '-' and 'N/a' count as done (the cell still shows unchecked)
-const DONE_VALUES = Object.freeze(['x', 'true', '-', 'n/a']);
+// The shown columns, in order. The DesignQueueFields preference may choose a subset (or add
+// columns, which follow these); it never reorders them.
+export const DESIGN_QUEUE_DEFAULT_FIELDS = Object.freeze(['Client', 'Show', 'Size', 'Note', 'Elev', 'Panels', 'Setups', 'Assignee', 'Account Manager', 'Ship', 'Booth#']);
+// Instant columns assumed when the InstantWriteTables preference is missing (they render read-only).
+const DEFAULT_INSTANT_COLUMNS = Object.freeze(['Elev', 'Panels', 'Setups', 'Assignee']);
+// Row identity when the preference is missing (the Schedule's show identity)
+const DEFAULT_IDENTITY = Object.freeze(['Client', 'Year', 'Show']);
 
 const DESIGN_QUEUE_VIEWS = {
     id: 'design-queue',
@@ -44,33 +52,51 @@ const DESIGN_QUEUE_VIEWS = {
             icon: 'table',
             layout: 'table',
             columns: [...DESIGN_QUEUE_DEFAULT_FIELDS],
-            hidden: ['_rowColor', '_identifier'],
+            hidden: ['_identifier'],
             sort: { key: 'Ship', dir: 'asc' },
-            rowColor: { field: '_rowColor', rule: 'value' },
+            sortable: ['Client', 'Show', 'Size', 'Ship', 'Assignee', 'Account Manager'],
+            // A row whose Setups is checked turns gray (and stays in place)
+            rowColor: { field: 'Setups', rule: 'checked:gray' },
             fullWidth: true,
             table: { hideRowsOnSearch: false },
+            // Every column but Note has a width, so Note takes the rest of the row (and wraps)
             style: {
-                Client: { width: 150 },
-                Show: { width: 200 },
-                Elev: { width: 60, font: 'narrow' },
-                Panels: { width: 60, font: 'narrow' },
-                Setups: { width: 60, font: 'narrow' },
-                Assignee: { width: 140 },
-                'Account Manager': { width: 150 },
-                Ship: { width: 120, color: 'auto' },
-                Note: { width: 250 }
+                Note: { cellOptions: { placeholder: 'Add a note' } },
+                Client: { width: 110 },
+                Show: { width: 140 },
+                Size: { width: 70, font: 'narrow' },
+                Elev: { width: 56, font: 'narrow' },
+                Panels: { width: 56, font: 'narrow' },
+                Setups: { width: 56, font: 'narrow' },
+                Assignee: { width: 120 },
+                'Account Manager': { width: 120 },
+                Ship: { width: 110, color: 'auto' },
+                'Booth#': { width: 80 }
             }
         }
     ]
 };
 
-function identityKey(row) {
-    return ['Client', 'Year', 'Show'].map(k => String(row?.[k] ?? '').trim().toLowerCase()).join('|');
+// Each row's show note ({ identifier, note } in AppData.showNote). Notes belong to a show
+// (computeIdentifier inputs), whatever the row identity is. A function: index.js exports are
+// not ready at module evaluation.
+function showNoteAnalysis() {
+    return {
+        ...createAnalysisConfig(
+            Requests.getShowNoteForRow,
+            'showNote',
+            'Loading show notes...',
+            ['Show', 'Client', 'Year'],
+            [],
+            null,
+            false,
+            Priority.ANALYSIS,
+            true // extractColumnsAsObject
+        ),
+        keepWhileRefreshing: true
+    };
 }
 
-function isTaskDone(value) {
-    return DONE_VALUES.includes(String(value ?? '').trim().toLowerCase());
-}
 
 export const DesignQueueContent = {
     name: 'DesignQueueContent',
@@ -84,9 +110,7 @@ export const DesignQueueContent = {
         return {
             filter: null,
             scheduleStore: null,
-            prefsStore: null,
-            notesStore: null,
-            identifiers: {},            // identityKey → computeIdentifier result
+            setupStore: null,
             DESIGN_QUEUE_VIEWS,
             SHIP_RETURN_DECORATION_KEYS
         };
@@ -95,74 +119,83 @@ export const DesignQueueContent = {
         basePath() {
             return (this.containerPath || 'schedule/design-queue').split('?')[0];
         },
-        prefs() {
-            return this.prefsStore?.data || [];
+        // Preferences and column kinds (Requests.getDesignQueueSetup); null until loaded
+        setup() {
+            return this.setupStore?.data?.[0] || null;
         },
-        jsonPref() {
-            return (id, fallback) => {
-                const p = this.prefs.find(x => x.id === id);
-                if (!p || p.value === undefined || p.value === '') return fallback;
-                try { return JSON.parse(p.value); } catch { return fallback; }
-            };
-        },
+        // { identity, columns } from InstantWriteTables, or null (cells then render read-only)
         instantConfig() {
-            const all = this.jsonPref('InstantWriteTables', {});
-            const entry = all && all[`${DQ_DATABASE}/${DQ_TAB}`];
-            if (!entry || !Array.isArray(entry.identity) || !entry.identity.length || !entry.columns) return null;
-            return entry;
+            return this.setup?.instant || null;
         },
         instantColumns() {
             return this.instantConfig?.columns || DEFAULT_INSTANT_COLUMNS;
         },
-        assignees() {
-            const list = this.jsonPref('DesignQueueAssignees', []);
-            return Array.isArray(list) ? list.map(String) : [];
+        identity() {
+            return this.instantConfig?.identity || DEFAULT_IDENTITY;
         },
-        // DesignQueueFields preference → one view patch (affects only this page, R7.2)
+        // Option lists for select columns, by the name ColumnTypes gives them ({ "options": "<list name>" }).
+        // options are the allowed values (data); colors (option → colour word) are presentation.
+        optionLists() {
+            return {
+                DesignQueueAssignees: { options: this.setup?.assignees || [], colors: this.setup?.assigneeColors || {} }
+            };
+        },
+        // View patches from preferences (this page only):
+        //  - DesignQueueFields chooses the shown columns. The view orders them; chosen columns the
+        //    view doesn't list follow, in the preference's order.
+        //  - Each select column's option colours (from its option list) style its cell.
         patches() {
-            const cols = this.jsonPref('DesignQueueFields', null);
-            return Array.isArray(cols) && cols.length ? [{ patch: { columns: cols } }] : [];
+            const patches = [];
+            const chosen = this.setup?.fields;
+            if (chosen) {
+                const wanted = new Set(chosen.map(columnText));
+                const inView = new Set(DESIGN_QUEUE_DEFAULT_FIELDS.map(columnText));
+                const columns = [
+                    ...DESIGN_QUEUE_DEFAULT_FIELDS.filter(k => wanted.has(columnText(k))),
+                    ...chosen.filter(k => !inView.has(columnText(k)))
+                ];
+                patches.push({ patch: { columns } });
+            }
+            const style = {};
+            for (const f of this.fields) {
+                const colors = f.type === 'select' ? this.optionLists[f.optionList]?.colors : null;
+                if (colors && Object.keys(colors).length) style[f.key] = { cellOptions: { colors } };
+            }
+            if (Object.keys(style).length) patches.push({ patch: { style } });
+            return patches;
         },
         rawRows() {
             return this.scheduleStore?.data || [];
         },
-        // FieldDefs: Schedule fields, instant cells from the preference, the joined Note, derived fields
+        // FieldDefs: Schedule fields typed by ColumnTypes (a select gets its list's values),
+        // instant columns editable, the Note, derived fields
         fields() {
-            const base = buildScheduleFields(this.rawRows, { packlist: false });
+            const base = buildScheduleFields(this.rawRows, { packlist: false, types: this.setup?.types });
             if (!this.rawRows.length) {
                 // Before data loads, keep the default columns so the header renders without warnings
                 const have = new Set(base.map(f => f.key));
                 for (const key of DESIGN_QUEUE_DEFAULT_FIELDS) if (!have.has(key) && key !== 'Note') base.push({ key, label: key });
             }
-            const keys = new Set(base.map(f => f.key));
+            const keys = new Set(base.map(f => columnText(f.key)));
             const fields = base.map(f => {
-                const type = Object.entries(this.instantColumns).find(([c]) => c.trim().toLowerCase() === f.key.trim().toLowerCase())?.[1];
-                if (!type) return f;
-                const field = { ...f, type, cell: type, editable: true, sortable: f.sortable || type === 'select' };
-                if (type === 'select') field.cellOptions = { options: this.assignees };
-                return field;
+                const field = isInstantColumn({ columns: this.instantColumns }, f.key) ? { ...f, editable: true } : f;
+                if (f.type !== 'select') return field;
+                const list = this.optionLists[f.optionList];
+                if (!list) console.warn(`[DesignQueue] no option list "${f.optionList}" for select column "${f.key}"`);
+                return { ...field, options: list?.options || [] };
             });
-            for (const col of Object.keys(this.instantColumns)) {
-                if (!keys.has(col) && this.rawRows.length) console.warn(`[DesignQueue] instant-write column "${col}" is not in the sheet; skipped`);
+            for (const col of this.instantColumns) {
+                if (!keys.has(columnText(col)) && this.rawRows.length) console.warn(`[DesignQueue] instant-write column "${col}" is not in the sheet; skipped`);
             }
-            if (!keys.has('Note')) fields.push({ key: 'Note', label: 'Note', cell: 'text', editable: true, cellOptions: { placeholder: 'Add a note' } });
-            fields.push({ key: '_rowColor', label: 'Row colour' }, { key: '_identifier', label: 'Identifier' });
+            if (!keys.has('note')) fields.push({ key: 'Note', label: 'Note', editable: true });
+            fields.push({ key: '_identifier', label: 'Identifier' });
             return fields;
         },
-        rowIdentityList() {
-            return this.rawRows.map(identityKey).join(';;');
-        },
-        notesByIdentifier() {
-            const map = new Map();
-            for (const n of this.notesStore?.data || []) {
-                if (n?.Identifier) map.set(String(n.Identifier).trim().toUpperCase(), n.Note ?? '');
-            }
-            return map;
-        },
+        // Identities shared by more than one loaded row (writes to those rows are refused)
         duplicateIdentities() {
             const seen = new Map();
             for (const r of this.rawRows) {
-                const k = identityKey(r);
+                const k = this.rowId(r);
                 seen.set(k, (seen.get(k) || 0) + 1);
             }
             return new Set([...seen].filter(([, n]) => n > 1).map(([k]) => k));
@@ -171,11 +204,12 @@ export const DesignQueueContent = {
             const sheetHasNote = this.rawRows.length && Object.prototype.hasOwnProperty.call(this.rawRows[0], 'Note');
             if (sheetHasNote) console.warn('[DesignQueue] the Schedule sheet has its own Note column; the sheet value wins over CACHE/ShowNotes');
             return this.rawRows.map(row => {
-                const identifier = this.identifiers[identityKey(row)] || '';
-                // Transship rows show (and sort by) the source show's end date as Ship
-                const out = { ...withTransshipShipDate(row), _identifier: identifier };
-                if (!sheetHasNote) out.Note = identifier ? (this.notesByIdentifier.get(identifier.trim().toUpperCase()) ?? '') : '';
-                return this.deriveRow(out);
+                // null until the row's note analysis has run
+                const showNote = row.AppData?.showNote || null;
+                // Ship shows (and sorts by) the estimated ship date; transship rows the source show's end
+                const out = { ...withShipDate(row), _identifier: showNote?.identifier || '' };
+                if (!sheetHasNote) out.Note = showNote ? showNote.note : null;
+                return out;
             });
         },
         // Decorations: the shared transship cards on Ship (and Recieved, when shown)
@@ -195,42 +229,41 @@ export const DesignQueueContent = {
                 if (JSON.stringify(newFilter) !== JSON.stringify(oldFilter)) this.createScheduleStore();
             },
             deep: true
-        },
-        // Resolve show identifiers (for notes) whenever the set of rows changes; the store may fill its array in place
-        rowIdentityList: {
-            handler() { this.resolveIdentifiers(); },
-            immediate: true
         }
     },
     mounted() {
-        this.prefsStore = getReactiveStore(Requests.getPreferences, null, []);
-        this.notesStore = getReactiveStore(Requests.getShowNotes, null, []);
+        this.setupStore = getReactiveStore(Requests.getDesignQueueSetup, null, [DQ_DATABASE, DQ_TAB]);
     },
     methods: {
-        // Derived fields recomputed from the (local) row: the row turns gray when every task is done
-        deriveRow(row) {
-            const complete = TASK_COLUMNS.every(col => isTaskDone(row[col]));
-            return { ...row, _rowColor: complete ? 'gray' : '' };
-        },
+        // Row identity: the preference's identity columns (Client + Year + Show by default)
         rowId(row) {
-            return identityKey(row);
+            return identityKey(this.identity, k => row?.[k]);
         },
         cellDisabled(row, key) {
-            const isInstantCell = Object.keys(this.instantColumns).some(c => c.trim().toLowerCase() === String(key).trim().toLowerCase());
-            if (key === 'Note') return row._identifier ? '' : 'write disabled: no show identifier yet';
-            if (!isInstantCell) return '';
+            if (key === 'Note') {
+                if (row._identifier) return '';
+                return row.Note === null ? 'write disabled: loading the note' : 'write disabled: no show identifier';
+            }
+            if (!isInstantColumn({ columns: this.instantColumns }, key)) return '';
+            // Until setup loads, a column's type (and so its cell) isn't known: shown read-only
+            if (!this.setup) return 'write disabled: loading setup';
             if (!this.instantConfig) return 'write disabled: no row identity';
-            if (this.duplicateIdentities.has(identityKey(row))) return 'write disabled: duplicate row identity';
+            if (this.duplicateIdentities.has(this.rowId(row))) return 'write disabled: duplicate row identity';
             return '';
         },
-        // Routing writes (§4.16): Note → saveShowNote (one upsert per note); every other column
+        // The sheet row behind a shown row (identity values as the sheet has them)
+        sheetRow(row) {
+            const id = row?.AppData?._rowId;
+            return (id && this.rawRows.find(r => r?.AppData?._rowId === id)) || row;
+        },
+        // Routing writes: Note → saveShowNote (one upsert per note); every other column
         // → one verified batch (writeCellsVerified). Results come back in entry order.
         async commitCells(entries) {
             const results = new Array(entries.length);
             const batch = [];
             entries.forEach((e, n) => { if (e.key !== 'Note') batch.push(n); });
             const scheduleWrite = batch.length
-                ? Requests.writeCellsVerified(DQ_DATABASE, DQ_TAB, batch.map(n => ({ row: entries[n].row, column: entries[n].key, value: entries[n].value })))
+                ? Requests.writeCellsVerified(DQ_DATABASE, DQ_TAB, batch.map(n => ({ row: this.sheetRow(entries[n].row), column: entries[n].key, value: entries[n].value })))
                     .catch(err => batch.map(() => ({ ok: false, reason: err?.message || 'error' })))
                 : Promise.resolve([]);
             for (let n = 0; n < entries.length; n++) {
@@ -238,24 +271,11 @@ export const DesignQueueContent = {
                 if (e.key !== 'Note') continue;
                 results[n] = e.row._identifier
                     ? await Requests.saveShowNote(e.row._identifier, e.value)
-                    : { ok: false, reason: 'no show identifier' };
+                    : { ok: false, reason: 'no-identifier' };
             }
             const written = await scheduleWrite;
-            batch.forEach((n, k) => { results[n] = written[k] || { ok: false, reason: 'no result' }; });
+            batch.forEach((n, k) => { results[n] = written[k] || { ok: false, reason: 'no-result' }; });
             return results;
-        },
-        async resolveIdentifiers() {
-            for (const row of this.rawRows) {
-                const k = identityKey(row);
-                if (this.identifiers[k] !== undefined) continue;
-                this.identifiers[k] = '';
-                try {
-                    const id = await Requests.computeIdentifier(row.Show, row.Client, row.Year);
-                    this.identifiers[k] = id || '';
-                } catch {
-                    this.identifiers[k] = '';
-                }
-            }
         },
         createScheduleStore() {
             if (this.filter === null) {
@@ -263,8 +283,8 @@ export const DesignQueueContent = {
                 return;
             }
             const { searchParams, ...dateFilter } = this.filter || {};
-            // Ship and return info, shared with the Schedule page (same cached analysis calls)
-            const analysisConfig = shipReturnAnalysis();
+            // Show notes first, then ship and return info shared with the Schedule page (same cached analysis calls)
+            const analysisConfig = [showNoteAnalysis(), ...shipReturnAnalysis()];
             this.scheduleStore = getReactiveStore(
                 Requests.getProductionScheduleData,
                 null,
@@ -277,18 +297,10 @@ export const DesignQueueContent = {
                 this.filter = null;
                 return;
             }
-            const filter = { searchParams: {} };
+            const filter = { searchParams: textFiltersToSearchParams(searchData.textFilters) };
             if (searchData.dateFilters && searchData.dateFilters.length > 0) {
                 filter.dateFilters = searchData.dateFilters;
             }
-            (searchData.textFilters || []).forEach(textFilter => {
-                if (textFilter.column && (textFilter.values || textFilter.value)) {
-                    filter.searchParams[textFilter.column] = {
-                        values: normalizeFilterValues(textFilter),
-                        type: textFilter.type || 'contains'
-                    };
-                }
-            });
             this.filter = filter;
         },
         handleRefresh() {
@@ -314,7 +326,6 @@ export const DesignQueueContent = {
                 :decoration-keys="SHIP_RETURN_DECORATION_KEYS"
                 :row-id="rowId"
                 :cell-disabled="cellDisabled"
-                :derive="deriveRow"
                 :is-loading="isLoading"
                 :is-analyzing="isAnalyzing"
                 :loading-progress="scheduleStore ? scheduleStore.analysisProgress : -1"

@@ -554,7 +554,7 @@ export const undoRegistry = Vue.reactive({
         }
         
         // Blur any focused contenteditable cell
-        if (document.activeElement && document.activeElement.contentEditable === 'true') {
+        if (document.activeElement && document.activeElement.isContentEditable) {
             document.activeElement.blur();
         }
         

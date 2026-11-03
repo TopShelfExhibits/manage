@@ -8,13 +8,15 @@
  *
  * Lines: cards.card[0] → title (plain text), other card lines → content (HTML, values escaped),
  * cards.footer → contentFooter. Field colour renders as a badge on the value; rowColor → cardClass.
- * Row-level decorations become footer actions; decorations marked `status: true` become footer text.
+ * Decorations are placed as in every renderer (placeDecorations): a decorated key shown on the card
+ * gets its cards inline; the rest become footer actions, or footer text when marked `status: true`.
  *
  * NOTE: `bucketBy` is unrelated to packlist row groups (hideGroupMembers / MetaData grouping):
  * buckets are cards that summarize many rows; row groups are table rows nested under a master row.
  */
 import { formatText, escapeHtml } from './fieldFormat.js';
 import { colorFor, rowColorFor } from './viewColor.js';
+import { placeDecorations } from './decorations.js';
 
 function lineText(row, keys, resolved) {
     return keys
@@ -23,7 +25,7 @@ function lineText(row, keys, resolved) {
         .join(' | ');
 }
 
-function lineHtml(row, keys, resolved, decorations) {
+function lineHtml(row, keys, resolved, inlineCards) {
     const parts = [];
     for (const k of keys) {
         const field = resolved.fieldMap.get(k) || { key: k };
@@ -34,8 +36,7 @@ function lineHtml(row, keys, resolved, decorations) {
             const safe = escapeHtml(text).replace(/\n/g, '<br>');
             html = color ? `<span class="card ${escapeHtml(color)} value-badge">${safe}</span>` : safe;
         }
-        const cards = decorations ? safeDecorations(decorations, row, k) : [];
-        for (const c of cards) {
+        for (const c of inlineCards.get(k) || []) {
             if (c.status || c.action) continue; // actionable cards can't live inside v-html content
             html += ` <span class="card ${escapeHtml(c.class || c.color || '')}">${c.message}</span>`;
         }
@@ -44,12 +45,8 @@ function lineHtml(row, keys, resolved, decorations) {
     return parts.join(' | ');
 }
 
-function safeDecorations(fn, row, key) {
-    try { return fn(row, key) || []; } catch (e) { console.warn('[cardsAdapter] decorations failed', e); return []; }
-}
-
 /** Split decoration cards into footer status text and footer actions. */
-export function decorationsToFooter(cards) {
+function decorationsToFooter(cards) {
     const status = [];
     const actions = [];
     for (const c of cards || []) {
@@ -67,21 +64,14 @@ export function decorationsToFooter(cards) {
  */
 export function rowsToCards(rows, resolved, hooks = {}) {
     const { decorations = null, decorationKeys = [], idKey = null } = hooks;
-    const lines = resolved.cards?.card || [];
+    const [titleKeys = [], ...contentLines] = resolved.cards?.card || [];
     const footerLines = resolved.cards?.footer || [];
-    const shownKeys = new Set([...lines.flat(), ...footerLines.flat()]);
+    const shownKeys = new Set(resolved.shown);
     return (rows || []).map((row, i) => {
-        const [titleKeys = [], ...contentLines] = lines;
+        const { byKey, rowLevel } = placeDecorations(decorations, decorationKeys, row, shownKeys);
         const title = lineText(row, titleKeys, resolved);
-        const content = contentLines.map(keys => lineHtml(row, keys, resolved, decorations)).filter(Boolean).join('<br>');
-        const footerParts = footerLines.map(keys => lineHtml(row, keys, resolved, decorations)).filter(Boolean);
-
-        // Row-level decorations plus decorated keys not shown on the card
-        let rowLevel = [];
-        if (decorations) {
-            for (const k of decorationKeys) if (!shownKeys.has(k)) rowLevel.push(...safeDecorations(decorations, row, k));
-            rowLevel.push(...safeDecorations(decorations, row, null));
-        }
+        const content = contentLines.map(keys => lineHtml(row, keys, resolved, byKey)).filter(Boolean).join('<br>');
+        const footerParts = footerLines.map(keys => lineHtml(row, keys, resolved, byKey)).filter(Boolean);
         const { status, actions } = decorationsToFooter(rowLevel);
         const contentFooter = [...footerParts, ...status].join('<br>') || undefined;
 

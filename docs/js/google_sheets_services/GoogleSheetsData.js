@@ -244,6 +244,33 @@ export class GoogleSheetsService {
     }
 
     /**
+     * Delete whole rows of one tab in a single request (bottom up, so the numbers stay valid).
+     * @param {string} tableId
+     * @param {string} tabName
+     * @param {number[]} rowNumbers - 1-based sheet rows
+     * @returns {Promise<boolean>}
+     */
+    static async deleteSheetRows(tableId, tabName, rowNumbers) {
+        if (!(await GoogleSheetsAuth.checkAuth())) GoogleSheetsService._throwAuthError();
+        const spreadsheetId = window.ENDPOINT_IDS[tableId];
+        if (!spreadsheetId) throw new Error(`[GoogleSheetsData.deleteSheetRows] SPREADSHEET_NOT_FOUND: Spreadsheet ID not found for table: ${tableId}`);
+        const rows = [...new Set((rowNumbers || []).map(Number).filter(n => Number.isInteger(n) && n > 1))].sort((a, b) => b - a);
+        if (!rows.length) return true;
+        const info = await GoogleSheetsService.withExponentialBackoff(() =>
+            gapi.client.sheets.spreadsheets.get({ spreadsheetId, includeGridData: false })
+        );
+        const sheet = (info.result?.sheets || []).find(s => s.properties.title === tabName);
+        if (!sheet) throw new Error(`[GoogleSheetsData.deleteSheetRows] SHEET_NOT_FOUND: ${tabName}`);
+        const requests = rows.map(n => ({
+            deleteDimension: { range: { sheetId: sheet.properties.sheetId, dimension: 'ROWS', startIndex: n - 1, endIndex: n } }
+        }));
+        await GoogleSheetsService.withExponentialBackoff(() =>
+            gapi.client.sheets.spreadsheets.batchUpdate({ spreadsheetId, resource: { requests } })
+        );
+        return true;
+    }
+
+    /**
      * Set sheet data from array of JS objects
      * @param {string} tableId
      * @param {string} tabName
@@ -791,17 +818,16 @@ export class GoogleSheetsService {
     }
 
     /**
-     * Fetch a Drive file's content as an authenticated blob URL.
-     * Use this for any file that is not publicly shared — the blob URL
-     * works in <img> tags without needing auth headers.
+     * Fetch a Drive file's raw content as a Blob (authenticated — works for files that are not
+     * publicly shared). Wrap it with URL.createObjectURL to show it in an <img>.
      * @param {string} fileId - Google Drive file ID
-     * @returns {Promise<string|null>} A blob object URL, or null on failure
+     * @returns {Promise<Blob|null>} The file content, or null on failure
      */
-    static async getAuthenticatedImageUrl(fileId) {
+    static async getDriveFileBlob(fileId) {
         try {
             const token = gapi.client.getToken();
             if (!token || !token.access_token) {
-                console.warn('[icons] getAuthenticatedImageUrl: no token available');
+                console.warn('[icons] getDriveFileBlob: no token available');
                 return null;
             }
             const response = await fetch(
@@ -809,13 +835,12 @@ export class GoogleSheetsService {
                 { headers: { Authorization: `Bearer ${token.access_token}` } }
             );
             if (!response.ok) {
-                console.warn(`[icons] getAuthenticatedImageUrl failed for ${fileId}: HTTP ${response.status}`);
+                console.warn(`[icons] getDriveFileBlob failed for ${fileId}: HTTP ${response.status}`);
                 return null;
             }
-            const blob = await response.blob();
-            return URL.createObjectURL(blob);
+            return await response.blob();
         } catch (error) {
-            console.error('[icons] getAuthenticatedImageUrl error:', error);
+            console.error('[icons] getDriveFileBlob error:', error);
             return null;
         }
     }

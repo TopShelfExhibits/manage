@@ -1,16 +1,18 @@
-import { html, DataView, Requests, getReactiveStore, createAnalysisConfig, NavigationRegistry, ItemImageComponent, ScheduleFilterSelect, InventoryCategoryFilter, Priority, invalidateCache, toISODateString, todayISOString, offsetToISO, OverlappingShowsModal } from '../../index.js';
-import { normalizeFilterValues } from '../../../data_management/utils/helpers.js';
+import { html, DataView, Requests, getReactiveStore, createAnalysisConfig, NavigationRegistry, ItemImageComponent, ScheduleFilterSelect, InventoryCategoryFilter, Priority, invalidateCache, toISODateString, todayISOString, offsetToISO } from '../../index.js';
+import { textFiltersToSearchParams } from '../../../data_management/utils/helpers.js';
+import { itemImageStyle } from '../../utils/views/viewStyles.js';
 
-// What each report key is (calendarStart/End are derived ranges on a computed copy of the rows)
+// What each report key is (calendarStart/End are derived ranges on a computed copy of the rows).
+// image holds no data: the thumbnail column (see itemImageStyle).
 const ITEM_REPORT_FIELDS = [
-    { key: 'image', labelHtml: '<span class="material-symbols-outlined">imagesmode</span>', label: 'IMG', sortable: false, cell: 'image', cellOptions: { itemKey: 'itemId', size: 48 } },
-    { key: 'itemId', label: 'Item#', type: 'item', sortable: true, cell: 'itemId' },
-    { key: 'description', label: 'Description', sortable: true },
-    { key: 'startDate', label: 'Start', format: 'date', type: 'date', sortable: true },
-    { key: 'endDate', label: 'End', format: 'date', type: 'date', sortable: true },
-    { key: 'inventoryQty', label: 'Inv Qty', format: 'number', type: 'number', sortable: true },
-    { key: 'minQty', label: 'Min Qty', format: 'number', type: 'number', sortable: true },
-    { key: 'overlappingShows', label: 'Overlapping Shows', sortable: false, cell: 'slot' },
+    { key: 'image', label: 'IMG' },
+    { key: 'itemId', label: 'Item#', type: 'item' },
+    { key: 'description', label: 'Description' },
+    { key: 'startDate', label: 'Start', format: 'date', type: 'date' },
+    { key: 'endDate', label: 'End', format: 'date', type: 'date' },
+    { key: 'inventoryQty', label: 'Inv Qty', format: 'number', type: 'number' },
+    { key: 'minQty', label: 'Min Qty', format: 'number', type: 'number' },
+    { key: 'overlappingShows', label: 'Overlapping Shows' },
     { key: 'tabName', label: 'Category' },
     { key: 'calendarStart', label: 'Start', format: 'date', type: 'date' },
     { key: 'calendarEnd', label: 'End', format: 'date', type: 'date' }
@@ -21,6 +23,14 @@ const ITEM_REPORT_VIEWS = {
     id: 'item-shortages',
     default: 'table',
     theme: 'blue',
+    // Shared by both views: the thumbnail; Item# is the primary action's button (the item page,
+    // purple); Overlapping Shows is a list of show buttons (two inline, more in a modal)
+    sortable: ['itemId', 'description', 'startDate', 'endDate', 'inventoryQty', 'minQty'],
+    style: {
+        image: itemImageStyle('itemId'),
+        itemId: { cell: 'action', cellOptions: { class: 'purple' } },
+        overlappingShows: { cell: 'showList', cellOptions: { max: 2, to: 'packlist/{value}' } }
+    },
     views: [
         {
             id: 'table',
@@ -30,22 +40,23 @@ const ITEM_REPORT_VIEWS = {
             columns: ['image', 'itemId', 'startDate', 'endDate', 'inventoryQty', 'minQty', 'overlappingShows'],
             hidden: ['tabName', 'calendarStart', 'calendarEnd'],
             style: {
-                image: { width: 1 },
                 minQty: { color: 'auto' },
                 overlappingShows: { columnColor: 'gray' }
             },
-            table: { sticky: { start: ['image'] } },
-            action: 'row'
+            table: { sticky: { start: ['image'] }, hideRowsOnSearch: false },
+            // Printing lists every show (never the "N shows" button)
+            variants: { print: { style: { overlappingShows: { cellOptions: { max: null } } } } }
         },
         {
             id: 'calendar',
             name: 'Calendar',
             icon: 'calendar_month',
             layout: 'calendar',
-            calendar: { start: 'calendarStart', end: 'calendarEnd', chip: [['minQty', 'itemId', 'description']] },
+            // Item# and the shows summary ("N shows", always the modal) in the chip's end button bar
+            calendar: { start: 'calendarStart', end: 'calendarEnd', chip: [['minQty', 'description']], actions: ['itemId', 'overlappingShows'] },
             hidden: ['tabName', 'calendarStart', 'calendarEnd', 'image'],
-            rowColor: { field: 'minQty', rule: 'auto', fallback: 'green' },
-            action: 'row'
+            style: { overlappingShows: { cellOptions: { max: 0 } } },
+            rowColor: { field: 'minQty', rule: 'auto', fallback: 'green' }
         }
     ]
 };
@@ -56,7 +67,7 @@ const ITEM_REPORT_VIEWS = {
  *   item# | description | startDate | endDate | Inv Qty | Min Qty | Overlapping Shows
  */
 export const InventoryItemReport = {
-    components: { DataView, ItemImageComponent, ScheduleFilterSelect, InventoryCategoryFilter, OverlappingShowsModal },
+    components: { DataView, ItemImageComponent, ScheduleFilterSelect, InventoryCategoryFilter },
     inject: ['$modal', 'appContext'],
     props: {
         containerPath: { type: String, default: '' },
@@ -163,7 +174,7 @@ export const InventoryItemReport = {
                         minQty: lowestMinQty === Infinity ? null : lowestMinQty,
                         shows: combinedShows,
                         overlappingShows: allOverlappingShows,
-                        MetaData: JSON.stringify({ grouping: { groupId, isGroupMaster: true } })
+                        metadata: JSON.stringify({ grouping: { groupId, isGroupMaster: true } })
                     };
                     result.push(masterRow);
 
@@ -171,12 +182,12 @@ export const InventoryItemReport = {
                     rows.forEach(row => {
                         let existingMeta = {};
                         try {
-                            existingMeta = JSON.parse(row.MetaData || '{}');
+                            existingMeta = JSON.parse(row.metadata || '{}');
                         } catch (e) {}
                         
                         result.push({
                             ...row,
-                            MetaData: JSON.stringify({
+                            metadata: JSON.stringify({
                                 ...existingMeta,
                                 grouping: { groupId, isGroupMaster: false }
                             })
@@ -202,11 +213,12 @@ export const InventoryItemReport = {
             }));
         },
 
-        // Primary action: the item page (row trigger in both views)
+        // Primary action: the item page, drawn as the Item# button (action cell) in both views
         reportAction() {
             return {
                 to: (row) => this.itemPagePath(row),
-                disabled: (row) => !row.tabName || !row.itemId
+                disabled: (row) => !row.tabName || !row.itemId,
+                title: 'View item timeline'
             };
         },
 
@@ -239,14 +251,6 @@ export const InventoryItemReport = {
                 return 'No items found for the selected search criteria.';
             }
             return 'Select a schedule filter to load shows and generate report';
-        },
-
-        currentSearchText() {
-            const params = NavigationRegistry.getParametersForContainer(
-                this.containerPath || 'reports/item-shortages',
-                this.appContext?.currentPath
-            );
-            return params?.searchText || '';
         }
     },
     watch: {
@@ -302,16 +306,8 @@ export const InventoryItemReport = {
             this.referenceDate = resolvedStart ?? todayISOString();
             this.endDate = resolvedEnd ?? null;
 
-            if (searchData.textFilters && searchData.textFilters.length > 0) {
-                searchData.textFilters.forEach(textFilter => {
-                    if (textFilter.column && (textFilter.values || textFilter.value)) {
-                        searchParams[textFilter.column] = {
-                            values: normalizeFilterValues(textFilter),
-                            type: textFilter.type || 'contains'
-                        };
-                    }
-                });
-            }
+            // Apply text filters (filters on the same column are kept together and OR'd)
+            Object.assign(searchParams, textFiltersToSearchParams(searchData.textFilters));
 
             this.searchFilter = filter;
             this.searchParams = searchParams;
@@ -481,18 +477,6 @@ export const InventoryItemReport = {
             }, 100);
         },
 
-        openOverlappingShowsModal(shows) {
-            this.$modal.custom(OverlappingShowsModal, { shows, modalClass: 'hamburger-menu', size: 'card' }, `${shows.length} Overlapping Shows`);
-        },
-
-        showsMatchSearch(shows) {
-            if (!this.currentSearchText || !this.currentSearchText.trim() || !Array.isArray(shows)) {
-                return false;
-            }
-            const searchWords = this.currentSearchText.toLowerCase().trim().split(/\s+/).filter(word => word.length > 0);
-            const showsText = shows.join(' ').toLowerCase();
-            return searchWords.some(word => showsText.includes(word));
-        }
     },
     mounted() {
         const params = NavigationRegistry.getParametersForContainer(
@@ -526,10 +510,10 @@ export const InventoryItemReport = {
                 :container-path="containerPath || 'reports/item-shortages'"
                 :navigate-to-path="navigateToPath"
                 :action="reportAction"
+                :printing="isPrinting"
                 :hide-group-members="false"
                 :show-search="true"
                 :sync-search-with-url="true"
-                :hide-rows-on-search="false"
                 :show-refresh="true"
                 :is-loading="isLoading"
                 :is-analyzing="isAnalyzing"
@@ -557,27 +541,6 @@ export const InventoryItemReport = {
                             <span class="material-symbols-outlined">print</span>
                         </button>
                     </div>
-                </template>
-
-                <!-- Page cell for overlappingShows (field.cell = 'slot') -->
-                <template #cell="{ row, field, density }">
-                    <template v-if="field.key === 'overlappingShows'">
-                        <span v-if="!Array.isArray(row.overlappingShows) || row.overlappingShows.length === 0">—</span>
-                        <span v-else-if="row.overlappingShows.length <= 2" class="overlapping-shows-buttons">
-                            <button v-for="showId in row.overlappingShows"
-                                    :key="showId"
-                                    @click.stop="navigateToPath && navigateToPath('packlist/' + showId)"
-                                    class="card white">
-                                {{ showId }}
-                            </button>
-                        </span>
-                        <span v-else>
-                            <button @click.stop="openOverlappingShowsModal(row.overlappingShows)"
-                                    :class="['card', 'white', 'font-black', showsMatchSearch(row.overlappingShows) ? 'search-highlight' : '']">
-                                {{ row.overlappingShows.length }} shows
-                            </button>
-                        </span>
-                    </template>
                 </template>
             </DataView>
         </div>

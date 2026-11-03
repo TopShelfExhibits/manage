@@ -3,6 +3,8 @@ Dig into the logic that sets editHistory and that sets pending changes for inven
 Does this correctly distinguish between the google popup showing at odd times during silent refresh, and the application modal that is shown to alert the user that auth is expiring?
 Intended functionality: The google popup (automatic when attempting silent refresh) should not show when the app is hidden. The user prompt should show whenever auth is going to expire even when the document is inactive so that the user can log back in if silent refresh failed in the background or was suppressed. If it is helpful, maybe we should keep the document activate listener so that if the document was truly fully inactive and not running any code when auth expired, the auth check runs and shows the user prompt if auth is expired.
 
+I am having some trouble with authentication. The current code is messy and mixed, and the authentication system needs to be
+
 ## TopShelf Live Inventory Notes
 
 Deployment Notes
@@ -74,6 +76,7 @@ Ongoing User Conversations:
 
 **chores**
 
+- [ ] fix cards-grid sort by in small views
 - [ ] we need to unify api functions to reduce the number of wrappers, create generic passthrough functions and use in reactiveStores
 - [ ] move complex api logic into the most relevant abstraction area
 - [ ] ! bring more clarity to the advanced filter, and potentially unify with api filtering. (fix the weird options available in views that don't support them)
@@ -90,6 +93,12 @@ Ongoing User Conversations:
 
 **problems**
 
+- [ ] things like CNTR-008l and CNTR-008r don't get inventoried correctly, because only the unified "CNTR-008" exists in inventory. Do we need a "sub-parts" system?
+- [ ] inventory tabs still lose dirty state during the process of making modifications which is disorienting.
+- [ ] Search needs to stay in a logical way, not on every navigation. Maybe give search boxes "findId"s that allow syncing/clearing of search across nav
+- [ ] AUTH def still automatically auths and needs to be revamped. We need to remove the auto auth and ensure the "expired" modal always shows
+- [ ] some odd thumbnail behavior...... mostly not loading in right away
+- [ ] dashboard slows down css animations, implying too many listeners
 - [ ] ! mobile view some things don't show well (arrows, button sizes for transshipments)
 - [ ] some sticky headers too high on mobile after page switch, dashboard nav issue
 - [ ] thumbnails slow on chromium
@@ -116,7 +125,10 @@ inventory updates
 
 Architecture Improvements
 
-- [ ] !!! better "Find..." tools for nonfiltered searching with up/down navigation and a "selected" found item index, probably just a numberbox attached to the find box and some javascript to autoset this by nearest match or something, and url searchterm updating perhaps
+- [x] !!! better "Find..." tools for nonfiltered searching with up/down navigation and a "selected" found item index, probably just a numberbox attached to the find box and some javascript to autoset this by nearest match or something, and url searchterm updating perhaps
+- [ ] make dashboard more usable: single screen page layout, allow sub-scrolling, configurable button areas, mobile dashboard auto-swap with buttons instead
+- [ ] dashboard option to add special container that allows navigation and starts with a global nav menu
+- [ ] hide/show alerts area (show alerts in nav when hidden?) instead of default banner, and move floating alert button into navigation bar next to dot menu OR next to hamburger menu on mobile?
 - [ ] !!! history and last edit viewing tools: Provide tools to revert changes from history (steal from inventory upcoming changes ui), and tools to revert based on source,history modification utility for viewing changes over time and changing their values if necessary? Inventory specific future changes updating?
 - [ ] ! test and validate offline mode
 - [ ] charts?
@@ -148,6 +160,7 @@ Pack Lists in Web
 - [ ] ! automations interface, packlist rules: allow user to configure automations, automatic packlist rule suggestion jobs run in the background (Ex: description change recommendations for common or similar items that checks or aggregates history, allow for quick addition of typical client or show items)
 - [ ] store and display source and viewing data, allow clearing (approve incoming changes) for cad additions/changes?
 - [ ] support for "concept packlist" that has a partial packlist with some things already filled in, but clearly labeled as concept model export
+- [ ] consider extracting nested tables into a nestedTable component to simplify the tablecomponent, and make it packlist specific?
       show icons for all items in the packlist
       create a more advanced filtering component for tables that includes multi-select, ranges, and text search and integrates with urlparams similar to the advanced search select
       allow adding items to inventory through packlist via simple interface (use item as description, extract quantity if exists, user choose category, auto add and save)

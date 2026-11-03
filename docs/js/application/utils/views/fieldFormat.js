@@ -58,7 +58,18 @@ export function formatText(value, field) {
 }
 
 /**
- * Escape HTML special characters (XSS-safe text for v-html).
+ * Does a value have something to display? Blank, empty arrays and objects don't.
+ * @param {*} value
+ * @returns {boolean}
+ */
+export function hasDisplayValue(value) {
+    if (value === null || value === undefined || value === '') return false;
+    if (Array.isArray(value)) return value.length > 0;
+    return typeof value !== 'object';
+}
+
+/**
+ * Escape HTML special characters (XSS-safe text for v-html). The app's one escaper.
  * @param {*} text
  * @returns {string}
  */

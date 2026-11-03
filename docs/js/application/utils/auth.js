@@ -1,5 +1,5 @@
 // Dynamically select GoogleSheetsAuth based on environment
-import { isLocalhost } from '../../google_sheets_services/FakeGoogle.js';
+import { isLocalhost } from '../../data_management/utils/helpers.js';
 let GoogleSheetsAuth;
 if (isLocalhost()) {
     // eslint-disable-next-line no-undef

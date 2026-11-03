@@ -2,10 +2,14 @@
  * Views engine (§4.2–§4.4, §4.8, §4.15).
  *
  *   resolveView(fields, view, { size, print, patches, editMode }) → ResolvedView   (pure)
- *   resolveAction(actionDef, resolved, editMode, { hasRowDetails })  → ResolvedAction (pure)
+ *   resolveAction(actionDef, resolved, { hasRowDetails })            → ResolvedAction (pure)
  * Renderers read the ResolvedView directly (Phase 5 renderer contract, §4.4).
  *
- * Fields describe what the data is (FieldDef). Views describe presentation (ViewDef).
+ * Fields describe what the data is (FieldDef: key, label, type, format, editable, options).
+ * Views describe presentation (ViewDef): which columns show and in what order, widths, fonts,
+ * colours, header text and icons, which columns sort, and which cell draws a value (style).
+ * A registry may hold `style` and `sortable` shared by all its views (withRegistryDefaults).
+ * The resolved fields renderers read are the data fields with the view's presentation merged in.
  * Validation never throws: problems are reported through devWarn() and resolved to a safe result.
  *
  * Pure: no Vue, no DOM. Safe to import from tests.
@@ -37,13 +41,20 @@ export function devWarn(msg) {
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-export const ALWAYS_HIDDEN = Object.freeze(['AppData', 'EditHistory', 'MetaData']);
+const ALWAYS_HIDDEN = Object.freeze(['AppData', 'edithistory', 'metadata']);
 
 /** Presentation properties that belong to views, not fields (§4.1). Ignored, with a dev warning. */
-export const LEGACY_FIELD_PROPS = Object.freeze([
+const LEGACY_FIELD_PROPS = Object.freeze([
     'width', 'font', 'autoColor', 'cellClass', 'columnClass', 'allowHide', 'details',
-    'stackUnder', 'sticky', 'firstRow', 'secondRow', 'whenSmall'
+    'stackUnder', 'sticky', 'firstRow', 'secondRow', 'whenSmall',
+    'labelHtml', 'title', 'sortable', 'cell', 'cellOptions', 'colspan', 'isIndex'
 ]);
+
+/** View style properties merged into the resolved field renderers read (label overrides the field's). */
+const STYLE_FIELD_PROPS = Object.freeze(['label', 'labelHtml', 'title', 'cell', 'cellOptions', 'colspan']);
+
+/** Cells that follow the data type when the view names none (read-only ones render disabled). */
+const TYPE_CELLS = Object.freeze({ checkbox: 'checkbox', select: 'select' });
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -116,8 +127,15 @@ function normalizeSlots(columns, fieldKeys) {
     return slots;
 }
 
+/** The view's sort ({ key, dir } or a list of them) as [{ key, direction: 'asc'|'desc' }]. */
+function normalizeSort(sort) {
+    return (Array.isArray(sort) ? sort : [sort])
+        .filter(s => s && typeof s.key === 'string' && s.key)
+        .map(s => ({ key: s.key, direction: s.dir === 'desc' ? 'desc' : 'asc' }));
+}
+
 /** Apply medium / narrow / print variants in cascade order. */
-export function applyVariants(view, size = 'wide', print = false) {
+function applyVariants(view, size = 'wide', print = false) {
     const { variants, ...base } = view || {};
     let out = base;
     if (variants) {
@@ -128,8 +146,20 @@ export function applyVariants(view, size = 'wide', print = false) {
     return out;
 }
 
+/**
+ * A registry's view with the registry-level presentation under it: registry.style and
+ * registry.sortable apply to every view; the view's own entries win (objects merge, lists replace).
+ */
+export function withRegistryDefaults(registry, view) {
+    if (!view || !registry || (!registry.style && !registry.sortable)) return view;
+    const defaults = {};
+    if (registry.style) defaults.style = registry.style;
+    if (registry.sortable) defaults.sortable = registry.sortable;
+    return mergeView(defaults, view);
+}
+
 /** Apply component patches (§4.15) whose sizes include `size` (omitted sizes = all sizes). */
-export function applyPatches(view, patches = [], size = 'wide') {
+function applyPatches(view, patches = [], size = 'wide') {
     let out = view;
     for (const p of patches || []) {
         if (!p || !p.patch) continue;
@@ -173,7 +203,9 @@ export function resolveView(fields, view, opts = {}) {
         if (!f || typeof f.key !== 'string' || fieldMap.has(f.key)) continue;
         const legacy = LEGACY_FIELD_PROPS.filter(p => f[p] !== undefined);
         if (legacy.length) devWarn(`field "${f.key}" has presentation props (${legacy.join(', ')}); they are ignored — set them in the view`);
-        fieldMap.set(f.key, f);
+        const data = { ...f };
+        for (const p of legacy) delete data[p];
+        fieldMap.set(f.key, data);
     }
     const fieldKeys = [...fieldMap.keys()];
     const known = (key) => fieldMap.has(key);
@@ -187,6 +219,7 @@ export function resolveView(fields, view, opts = {}) {
     // 3a. Shown tier: the layout's primary section
     let slotKeyLines = [];          // table: string[][][]
     let chip = [];                  // calendar: string[][]
+    let chipActions = [];           // calendar: string[] (cells in the chip's end button bar)
     let card = [], footer = [];     // cards: string[][]
     const claimShown = (key, where) => {
         if (!known(key)) { warnUnknown(where, key); return false; }
@@ -210,6 +243,7 @@ export function resolveView(fields, view, opts = {}) {
         }
     } else if (layout === 'calendar') {
         chip = claimLines(normalizeLines(v.calendar?.chip, fieldKeys), 'calendar.chip');
+        chipActions = claimLines([normalizeLine(v.calendar?.actions || [], fieldKeys)], 'calendar.actions')[0] || [];
     } else if (layout === 'cards') {
         card = claimLines(normalizeLines(v.cards?.card, fieldKeys), 'cards.card');
         footer = claimLines(normalizeLines(v.cards?.footer, fieldKeys), 'cards.footer');
@@ -263,6 +297,18 @@ export function resolveView(fields, view, opts = {}) {
         if (!isPattern(pat) && !known(pat)) warnUnknown('style', pat);
     }
 
+    // 4b. Resolved fields: the data field plus the view's presentation (style props, sortable,
+    //     and a type's cell when the view names none)
+    // (unknown names in `sortable` are ignored silently: a list may name headers a sheet lacks)
+    const sortableDecl = Array.isArray(v.sortable) ? v.sortable.filter(e => typeof e === 'string') : [];
+    for (const [key, f] of fieldMap) {
+        const s = style[key] || {};
+        const resolvedField = { ...f, sortable: sortableDecl.some(p => matchesKeyPattern(p, key)) };
+        for (const p of STYLE_FIELD_PROPS) if (s[p] !== undefined) resolvedField[p] = s[p];
+        if (!resolvedField.cell && TYPE_CELLS[f.type]) resolvedField.cell = TYPE_CELLS[f.type];
+        fieldMap.set(key, resolvedField);
+    }
+
     // Table section
     const stickyDecl = v.table?.sticky || {};
     const stickyStart = (stickyDecl.start || []).flatMap(e => expandEntry(e, fieldKeys));
@@ -292,7 +338,7 @@ export function resolveView(fields, view, opts = {}) {
     let invalid = null;
     if (layout === 'calendar') {
         const c = v.calendar || {};
-        calendar = { start: c.start, end: c.end, weekStart: c.weekStart || 'sunday', yearColumn: c.yearColumn || null, chip };
+        calendar = { start: c.start, end: c.end, weekStart: c.weekStart || 'sunday', yearColumn: c.yearColumn || null, chip, actions: chipActions };
         if (!c.start || !c.end || !known(c.start) || !known(c.end)) {
             invalid = 'calendar-fields';
             devWarn(`view "${viewId}": calendar start/end field missing (${c.start}, ${c.end})`);
@@ -307,21 +353,17 @@ export function resolveView(fields, view, opts = {}) {
         if (c.bucketBy && !known(c.bucketBy)) warnUnknown('cards.bucketBy', c.bucketBy);
     }
 
-    // 5. Trigger (edit-mode rule)
+    // 5. Trigger (edit-mode rule: a table being edited can't use the whole row as its trigger)
     let trigger = v.action === 'row' ? 'row' : 'button';
     if (trigger === 'row' && editMode !== 'none') {
         devWarn(`view "${viewId}": action 'row' is not allowed with editMode '${editMode}'; using 'button'`);
         trigger = 'button';
     }
-    if (editMode === 'none') {
-        const editable = fieldKeys.filter(k => fieldMap.get(k).editable);
-        if (editable.length) devWarn(`view "${viewId}": editable fields ignored with editMode 'none': ${editable.join(', ')}`);
-    }
 
     // 6. Output
     const shown = layout === 'table'
         ? slots.flatMap(s => s.lines.flat())
-        : layout === 'calendar' ? chip.flat() : [...card.flat(), ...footer.flat()];
+        : layout === 'calendar' ? [...chip.flat(), ...chipActions] : [...card.flat(), ...footer.flat()];
     const details = detailsOrder.map(k => fieldMap.get(k));
     const hidden = new Set(fieldKeys.filter(k => tier.get(k) === 'hidden'));
     for (const k of ALWAYS_HIDDEN) hidden.add(k);
@@ -343,7 +385,7 @@ export function resolveView(fields, view, opts = {}) {
         hidden,
         tier,
         rowColor: v.rowColor || null,
-        sort: v.sort || null,
+        sort: normalizeSort(v.sort),
         table,
         calendar,
         cards,
@@ -363,7 +405,9 @@ export function resolveView(fields, view, opts = {}) {
  * @property {'navigate'|'run'|'details'|'none'} kind
  * @property {'button'|'row'} trigger
  * @property {string} [label]
- * @property {string} [icon]
+ * @property {string} [icon]        a glyph ('☷') or a material symbol name ('calendar_month')
+ * @property {string} [headerIcon]  the action column's header (glyph or symbol name)
+ * @property {string} [title]       the button's tooltip
  * @property {(row) => string} [to]
  * @property {(row) => void} [run]
  * @property {(row) => boolean} [disabled]
@@ -371,15 +415,14 @@ export function resolveView(fields, view, opts = {}) {
 
 /**
  * Pick the row's one primary action (§4.8): page action, else details, else none.
- * @param {Object} [actionDef]  { to, run, label, icon, disabled }
+ * The trigger is the resolved view's (resolveView applies the edit-mode rule).
+ * @param {Object} [actionDef]  { to, run, label, icon, headerIcon, title, disabled }
  * @param {Object} resolved     ResolvedView
- * @param {string} [editMode]
  * @param {{ hasRowDetails?: boolean }} [opts] hasRowDetails: the page supplies a #row-details slot
  * @returns {ResolvedAction}
  */
-export function resolveAction(actionDef, resolved, editMode = resolved?.editMode || 'none', opts = {}) {
-    let trigger = resolved?.trigger === 'row' ? 'row' : 'button';
-    if (trigger === 'row' && editMode !== 'none') trigger = 'button';
+export function resolveAction(actionDef, resolved, opts = {}) {
+    const trigger = resolved?.trigger === 'row' ? 'row' : 'button';
     const def = actionDef || {};
     const disabled = typeof def.disabled === 'function' ? def.disabled : null;
 
@@ -394,15 +437,17 @@ export function resolveAction(actionDef, resolved, editMode = resolved?.editMode
             trigger,
             label: def.label || '',
             icon: def.icon || (def.label ? '' : '☷'),
+            headerIcon: def.headerIcon || '',
+            title: def.title || '',
             to: kind === 'navigate' ? def.to : null,
             run: kind === 'run' ? def.run : null,
             disabled
         };
     }
     if (resolved?.hasDetails || opts.hasRowDetails) {
-        return { kind: 'details', trigger, label: def.label || '', icon: def.icon || '☷', to: null, run: null, disabled };
+        return { kind: 'details', trigger, label: def.label || '', icon: def.icon || '☷', headerIcon: def.headerIcon || '', title: def.title || '', to: null, run: null, disabled };
     }
-    return { kind: 'none', trigger: 'button', label: '', icon: '', to: null, run: null, disabled: null };
+    return { kind: 'none', trigger: 'button', label: '', icon: '', headerIcon: '', title: '', to: null, run: null, disabled: null };
 }
 
 /** Search tiers for matchRow: shown and details keys (hidden fields are never searched). */

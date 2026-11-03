@@ -1,4 +1,4 @@
-import { CacheInvalidationBus, ProgressBus, Requests, authState, Auth } from '../index.js';
+import { CacheInvalidationBus, ProgressBus, Requests, authState, Auth, resolveInventoryNoteMaxLength } from '../index.js';
 import { PriorityQueue, Priority } from './priorityQueue.js';
 
 // Re-export Priority for component use
@@ -91,13 +91,13 @@ export const appSettings = Vue.reactive({
  */
 
 /**
- * Generate a clean identifier for a function, using cache edithistory when available
+ * Generate a clean identifier for a function, using cache metadata when available
  * @param {Function} fn - The function to identify
  * @returns {string} A clean identifier string
  */
 function getMethodIdentifier(fn) {
     if (!fn) return '';
-    // If function has cache wrapper edithistory, use it for a clean identifier
+    // If function has cache wrapper metadata, use it for a clean identifier
     if (fn._namespace && fn._methodName) {
         return `${fn._namespace}.${fn._methodName}`;
     }
@@ -147,7 +147,7 @@ export function generateStoreKey(apiCall, saveCall, apiArgs, analysisConfig) {
  * @returns {Set} Set of column names to exclude
  */
 function getExcludedColumns(analysisConfig = null) {
-    const excludedColumns = new Set(['AppData']); // EditHistory should persist, only AppData is ephemeral
+    const excludedColumns = new Set(['AppData']); // edithistory should persist, only AppData is ephemeral
     if (analysisConfig && Array.isArray(analysisConfig)) {
         analysisConfig.forEach(config => {
             if (config.targetColumn) {
@@ -174,9 +174,9 @@ function shouldExcludeColumn(key, excludedColumns) {
  * @returns {boolean} True if marked for deletion
  */
 function isMarkedForDeletion(obj) {
-    if (!isValidObject(obj) || !obj.MetaData) return false;
+    if (!isValidObject(obj) || !obj.metadata) return false;
     try {
-        const metadata = typeof obj.MetaData === 'string' ? JSON.parse(obj.MetaData) : obj.MetaData;
+        const metadata = typeof obj.metadata === 'string' ? JSON.parse(obj.metadata) : obj.metadata;
         return metadata?.deletion?.marked === true;
     } catch (e) {
         return false;
@@ -426,8 +426,48 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
     // isModified from running expensive JSON comparisons on every reactive evaluation.
     const isReadOnly = typeof saveCall !== 'function';
 
+    // Analyses marked keepWhileRefreshing keep their last result until a re-run replaces it: a
+    // reload carries each result to the new row with the same input values (sourceColumns), and an
+    // invalidation re-runs without clearing first. The rows never show a blank while refreshing.
+    const keptConfigs = (analysisConfig || []).filter(c => c.keepWhileRefreshing && c.sourceColumns?.length);
+    const inputKey = (row, c) => JSON.stringify(c.sourceColumns.map(k => row?.[k] ?? null));
+    const resultOf = (row, c) => (c.targetColumn ? row?.[c.targetColumn] : row?.AppData?.[c.resultKey]);
+    function keptResults(rows) {
+        return keptConfigs.map(c => new Map(rows
+            .filter(row => resultOf(row, c) != null)
+            .map(row => [inputKey(row, c), resultOf(row, c)])));
+    }
+    function restoreKept(rows, kept) {
+        keptConfigs.forEach((c, n) => {
+            for (const row of rows) {
+                const value = kept[n].get(inputKey(row, c));
+                if (value === undefined || !row?.AppData) continue;
+                if (c.targetColumn) row[c.targetColumn] = value;
+                else row.AppData[c.resultKey] = value;
+            }
+        });
+    }
+
+    // An evicted store that is still read loads again. Pages often get a store once (mounted) and
+    // read it through computeds, so eviction would otherwise leave them empty until remount.
+    // This module reads _data, so its own sweeps, timers and methods never wake an evicted store.
+    let reloadQueued = false;
+    function reloadWhenRead(s) {
+        if (reloadQueued) return;
+        reloadQueued = true;
+        Promise.resolve().then(() => {
+            reloadQueued = false;
+            if (s.needsReload && !s.isLoading) s.load('Reloading evicted store...');
+        });
+    }
+
     const store = Vue.reactive({
-        data: [],
+        _data: [],
+        // The rows (mutated in place, never reassigned)
+        get data() {
+            if (this.needsReload) reloadWhenRead(this);
+            return this._data;
+        },
         // For read-only stores this is kept as a plain (non-reactive) empty array.
         // Never populated — use store.isModified (always false) to check edit state.
         originalData: isReadOnly ? [] : [],
@@ -454,12 +494,12 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
         // Always returns false for read-only stores (saveCall === null) — no deep clone performed.
         get isModified() {
             if (isReadOnly) return false;
-            if (!this.data || !this.originalData) return false;
-            if (this.data.length === 0 && this.originalData.length === 0) return false;
+            if (!this._data || !this.originalData) return false;
+            if (this._data.length === 0 && this.originalData.length === 0) return false;
             
             // Create clean copies without AppData and analysis columns for comparison
             const cleanCurrent = removeAppData(
-                deepClone(this.data), 
+                deepClone(this._data), 
                 this.analysisConfig
             );
             const cleanOriginal = removeAppData(
@@ -479,7 +519,7 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
                 clearAnalysisResults(processedData, this.analysisConfig);
             }
             // Mutate existing array in place to preserve references (critical for undo system)
-            this.data.splice(0, this.data.length, ...processedData);
+            this._data.splice(0, this._data.length, ...processedData);
             // The rows were replaced: recorded analysis keys point at the old rows
             analysisKeyIndex.clear();
             // Clear auto-save hash when data changes
@@ -487,7 +527,7 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
             
             // Automatically run analysis if configured and data is loaded
             // Skip if main data is being reloaded (will run after reload completes)
-            if (this.analysisConfig && this.data.length > 0 && !this.isAnalyzing && !this.isReloadingMainData) {
+            if (this.analysisConfig && this._data.length > 0 && !this.isAnalyzing && !this.isReloadingMainData) {
                 // Use nextTick to ensure Vue has updated the DOM and reactive properties
                 Vue.nextTick(() => {
                     this.runConfiguredAnalysis();
@@ -512,7 +552,7 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
             analysisKeyIndex.clear();
             pendingTargets = new Map();
             // Clear arrays in place to preserve references for undo system
-            this.data.splice(0, this.data.length);
+            this._data.splice(0, this._data.length);
             this.originalData.splice(0, this.originalData.length);
             this.isLoading = false;
             this.loadingMessage = '';
@@ -531,6 +571,9 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
                 this.setData([]);
                 return;
             }
+            // Edits made while the fetch is in flight must not be overwritten when it resolves.
+            // A store that is already modified here is being discarded/refreshed on purpose.
+            const modifiedAtStart = !isReadOnly && this.isModified;
             this.setLoading(true, message);
             this.loadingProgress = -1;
             this.isReloadingMainData = true; // Lock to prevent analysis during reload
@@ -579,6 +622,12 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
                     priorities.load,
                     { label: message, type: 'load', store: 'reactive' }
                 );
+                // The user edited during the fetch: keep their edits and flag the newer server
+                // data as a conflict, as the invalidation handler does for a modified store.
+                if (!modifiedAtStart && !isReadOnly && this.isModified) {
+                    this.externalConflict = true;
+                    return;
+                }
                 // Handle null, undefined, or empty results by initializing empty arrays
                 const dataToSet = (result && Array.isArray(result)) ? result : [];
                 // Pre-assign stable row IDs before splitting into data and originalData.
@@ -587,13 +636,15 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
                 if (!isReadOnly) {
                     this.setOriginalData(dataToSet);
                 }
+                const kept = keptResults(this._data);
                 this.setData(dataToSet);
+                restoreKept(this._data, kept);
                 
                 // Release lock BEFORE running analysis so analysis can proceed
                 this.isReloadingMainData = false;
                 
                 // After data is loaded, run analysis if configured, data exists, and not skipped
-                if (!skipAnalysis && this.analysisConfig && this.analysisConfig.length > 0 && this.data.length > 0) {
+                if (!skipAnalysis && this.analysisConfig && this.analysisConfig.length > 0 && this._data.length > 0) {
                     await this.runConfiguredAnalysis();
                 }
             } catch (err) {
@@ -626,7 +677,7 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
             this.lockConflictOwner = null;
             try {
                 // Remove all objects marked for deletion and analysis target columns before saving
-                const cleanData = removeAppData(this.data, this.analysisConfig);
+                const cleanData = removeAppData(this._data, this.analysisConfig);
                 // Use priority queue for save operations (highest priority)
                 // Pass options as the last parameter to save functions that support it
                 const result = await PriorityQueue.enqueue(
@@ -639,7 +690,7 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
                 this.removeMarkedRows();
                 // Sync originalData to the saved state so isModified becomes false.
                 // Must happen after removeMarkedRows so deleted rows are not included in the baseline.
-                this.setOriginalData(this.data);
+                this.setOriginalData(this._data);
                 
                 // Remove backup from user data after successful save
                 const storeKey = generateStoreKey(apiCall, saveCall, apiArgs, analysisConfig);
@@ -676,18 +727,18 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
                 this.setLoading(false, '');
             }
         },
-        // Mark/unmark for deletion by index using MetaData
+        // Mark/unmark for deletion by index using metadata
         markRowForDeletion(idx, value = true) {
-            if (this.data[idx]) {
-                const row = this.data[idx];
+            if (this._data[idx]) {
+                const row = this._data[idx];
                 
-                // Parse existing MetaData
+                // Parse existing metadata
                 let metadata = {};
-                if (row.MetaData) {
+                if (row.metadata) {
                     try {
-                        metadata = typeof row.MetaData === 'string' ? JSON.parse(row.MetaData) : row.MetaData;
+                        metadata = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata;
                     } catch (e) {
-                        console.warn('Failed to parse MetaData:', e);
+                        console.warn('Failed to parse metadata:', e);
                     }
                 }
                 
@@ -698,17 +749,17 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
                     delete metadata.deletion;
                 }
                 
-                // Save back to MetaData
-                row.MetaData = Object.keys(metadata).length > 0 ? JSON.stringify(metadata) : null;
+                // Save back to metadata
+                row.metadata = Object.keys(metadata).length > 0 ? JSON.stringify(metadata) : null;
                 
                 // If marking for deletion and row is empty, remove immediately
                 if (value) {
-                    // Check if all fields (except 'AppData' and 'MetaData') are empty/falsy
+                    // Check if all fields (except 'AppData' and 'metadata') are empty/falsy
                     const hasContent = Object.keys(row).some(
-                        key => key !== 'AppData' && key !== 'MetaData' && !!row[key]
+                        key => key !== 'AppData' && key !== 'metadata' && !!row[key]
                     );
                     if (!hasContent) {
-                        this.data.splice(idx, 1);
+                        this._data.splice(idx, 1);
                     }
                 }
             }
@@ -716,7 +767,7 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
         // Remove all rows marked for deletion (and nested arrays)
         removeMarkedRows() {
             // Filter in place to preserve array reference for undo system
-            const filteredData = this.data.filter(obj => !isMarkedForDeletion(obj));
+            const filteredData = this._data.filter(obj => !isMarkedForDeletion(obj));
             
             // Recursively filter nested arrays in place too
             filteredData.forEach(obj => {
@@ -732,7 +783,7 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
             });
             
             // Replace data array contents in place (preserves reference)
-            this.data.splice(0, this.data.length, ...filteredData);
+            this._data.splice(0, this._data.length, ...filteredData);
         },
         addRow(row, fieldNames = null) {
             // Ensure AppData is set and nested arrays are initialized
@@ -753,15 +804,15 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
                     }
                 });
             }
-            this.data.push(row);
+            this._data.push(row);
         },
         addNestedRow(parentIdx, key, row, fieldNames = null, position = null) {
             // Add a row to a nested array (e.g., Items)
             // position: { position: 'above'|'below', targetIndex: number } or null for append
             if (
-                Array.isArray(this.data) &&
-                this.data[parentIdx] &&
-                Array.isArray(this.data[parentIdx][key])
+                Array.isArray(this._data) &&
+                this._data[parentIdx] &&
+                Array.isArray(this._data[parentIdx][key])
             ) {
                 if (row && typeof row === 'object') {
                     if (!('AppData' in row) || typeof row.AppData !== 'object' || row.AppData === null) {
@@ -786,26 +837,26 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
                     const insertIndex = position.position === 'above' 
                         ? position.targetIndex 
                         : position.targetIndex + 1;
-                    this.data[parentIdx][key].splice(insertIndex, 0, row);
+                    this._data[parentIdx][key].splice(insertIndex, 0, row);
                     
                     // If the row above the insertion point is in a group, add the new row to that group
-                    const items = this.data[parentIdx][key];
+                    const items = this._data[parentIdx][key];
                     const rowAbove = insertIndex > 0 ? items[insertIndex - 1] : null;
-                    if (rowAbove && rowAbove.MetaData) {
+                    if (rowAbove && rowAbove.metadata) {
                         try {
-                            const aboveMeta = JSON.parse(rowAbove.MetaData);
+                            const aboveMeta = JSON.parse(rowAbove.metadata);
                             const aboveGrouping = aboveMeta?.grouping;
                             if (aboveGrouping) {
                                 let meta = {};
-                                try { meta = JSON.parse(row.MetaData || '{}'); } catch (e) { meta = {}; }
+                                try { meta = JSON.parse(row.metadata || '{}'); } catch (e) { meta = {}; }
                                 meta.grouping = { groupId: aboveGrouping.groupId, isGroupMaster: false };
-                                row.MetaData = JSON.stringify(meta);
+                                row.metadata = JSON.stringify(meta);
                             }
-                        } catch (e) { /* malformed MetaData - skip grouping */ }
+                        } catch (e) { /* malformed metadata - skip grouping */ }
                     }
                 } else {
                     // Default: append to end
-                    this.data[parentIdx][key].push(row);
+                    this._data[parentIdx][key].push(row);
                 }
             }
         },
@@ -818,8 +869,9 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
             const clearSpecificResults = (item) => {
                 if (item && item.AppData) {
                     this.analysisConfig.forEach(config => {
-                        const shouldClear = identifiers.includes(config.resultKey) || 
-                                          identifiers.includes(config.targetColumn);
+                        // keepWhileRefreshing results stay until the re-run replaces them
+                        const shouldClear = !config.keepWhileRefreshing && (identifiers.includes(config.resultKey) ||
+                                          identifiers.includes(config.targetColumn));
                         
                         if (shouldClear) {
                             clearAnalysisResultsFromItem(item, config, true); // Clear target column data
@@ -828,7 +880,7 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
                 }
             };
 
-            this.data.forEach(item => {
+            this._data.forEach(item => {
                 clearSpecificResults(item);
                 // Also clear nested arrays if they exist
                 if (item && typeof item === 'object') {
@@ -881,7 +933,7 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
                             configResult.processMain = true;
                         } else {
                             // Check if any source columns exist in main data
-                            const mainSample = this.data[0];
+                            const mainSample = this._data[0];
                             if (mainSample) {
                                 const hasMainColumns = config.sourceColumns.some(col => 
                                     mainSample.hasOwnProperty(col) && 
@@ -946,10 +998,10 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
                 // Calculate total operations for progress tracking
                 configsToRun.forEach(config => {
                     if (config.processMain) {
-                        totalOperations += this.data.length;
+                        totalOperations += this._data.length;
                     }
                     config.processNested.forEach(arrayKey => {
-                        this.data.forEach(item => {
+                        this._data.forEach(item => {
                             if (item[arrayKey] && Array.isArray(item[arrayKey])) {
                                 totalOperations += item[arrayKey].length;
                             }
@@ -963,8 +1015,8 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
 
                     this.analysisMessage = `${config.label || 'Processing'} main data...`;
 
-                    for (let i = 0; i < this.data.length; i += batchSize) {
-                        const batch = this.data.slice(i, i + batchSize);
+                    for (let i = 0; i < this._data.length; i += batchSize) {
+                        const batch = this._data.slice(i, i + batchSize);
                         
                         // Create batch promises for concurrent execution via priority queue
                         const batchPromises = batch.map(async (item) => {
@@ -1027,7 +1079,7 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
                     for (const arrayKey of config.processNested) {
                         this.analysisMessage = `${config.label || 'Processing'} ${arrayKey} data...`;
 
-                        for (const parentItem of this.data) {
+                        for (const parentItem of this._data) {
                             if (!parentItem[arrayKey] || !Array.isArray(parentItem[arrayKey])) continue;
 
                             const nestedArray = parentItem[arrayKey];
@@ -1149,7 +1201,7 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
                     const wanted = keys.has('*') || config.passFullItem ? [...byArgs.keys()] : [...keys];
                     for (const k of wanted) {
                         for (const [item, parentItem] of byArgs.get(k) || []) {
-                            if (seen.has(item) || !this.data.length) continue;
+                            if (seen.has(item) || !this._data.length) continue;
                             seen.add(item);
                             jobs.push({ config, item, parentItem });
                         }
@@ -1233,7 +1285,7 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
             const backupInfo = await loadStoreBackupFromUserData(storeKey);
             if (!backupInfo) return false;
             if (backupInfo.mode === 'diff') {
-                const restoredData = applyDiffToData(this.data, backupInfo.diff);
+                const restoredData = applyDiffToData(this._data, backupInfo.diff);
                 this.setData(restoredData);
             } else if (backupInfo.mode === 'full') {
                 this.setData(backupInfo.data);
@@ -1251,7 +1303,7 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
          * The LRU eviction sweep checks all four guards before calling this.
          */
         evict() {
-            this.data.splice(0, this.data.length);
+            this._data.splice(0, this._data.length);
             if (!isReadOnly) this.originalData.splice(0, this.originalData.length);
             this.isAnalyzing = false;
             this.analysisProgress = 0;
@@ -1260,7 +1312,7 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
         }
     });
 
-    // Helper to strip AppData, EditHistory, and analysis target columns from objects (including filtering out items marked for deletion)
+    // Helper to strip AppData and analysis target columns from objects (including filtering out items marked for deletion)
     function removeAppData(arr, analysisConfig = null) {
         if (!Array.isArray(arr)) return arr;
         
@@ -1298,29 +1350,7 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
         return row;
     }
 
-    // Compute the store key (same as used in getReactiveStore)
-    const storeKey = generateStoreKey(apiCall, saveCall, apiArgs, analysisConfig);
-
-    // Wrap store with Proxy to track data access
-    // When components read store.data, increment access count and update lastAccess timestamp
-    const storeProxy = new Proxy(store, {
-        get(target, property, receiver) {
-            const value = Reflect.get(target, property, receiver);
-            
-            // Track access when data property is read (not on every property access to avoid overhead)
-            if (property === 'data' && value && Array.isArray(value) && value.length > 0) {
-                const meta = storeMetaRegistry[storeKey];
-                if (meta) {
-                    meta.lastAccess = Date.now();
-                    meta.accessCount++;
-                }
-            }
-            
-            return value;
-        }
-    });
-
-    return storeProxy;
+    return store;
 }
 
 // Central registry for reactive stores, keyed by apiCall.toString() + JSON.stringify(apiArgs)
@@ -1384,12 +1414,17 @@ function shouldPreemptivelyEvict(key, store) {
     if (store.exemptFromEviction || store.isModified) {
         return false;
     }
+
+    // Same recency guard as the LRU sweep: a store fetched recently is in use
+    if (Date.now() - (storeMetaRegistry[key]?.lastAccess || 0) < RECENCY_GUARD_MS) {
+        return false;
+    }
     
     // Get all populated stores and their scores
     const allKeys = Object.keys(reactiveStoreRegistry);
     const populated = allKeys.filter(k => {
         const s = reactiveStoreRegistry[k];
-        return s && s.data && s.data.length > 0;
+        return s && s._data && s._data.length > 0;
     });
     
     // If we're not near the limit, don't preemptively evict
@@ -1427,7 +1462,7 @@ function scheduleLruEviction() {
         const allKeys = Object.keys(reactiveStoreRegistry);
         const populated = allKeys.filter(k => {
             const s = reactiveStoreRegistry[k];
-            return s && s.data && s.data.length > 0;
+            return s && s._data && s._data.length > 0;
         });
         if (populated.length <= MAX_POPULATED_STORES) return;
 
@@ -1482,7 +1517,7 @@ const AUTO_SAVE_INTERVAL_MS = 2 * 60 * 1000; // 2 minutes
  * Calculate diff between original and current data recursively
  * Only stores row indices with their changed fields for efficiency
  * Handles nested arrays recursively
- * Excludes AppData, EditHistory, and analysis target columns
+ * Excludes AppData and analysis target columns
  * @param {Array} originalData - Original data
  * @param {Array} currentData - Current modified data
  * @param {Array} analysisConfig - Analysis configuration to identify columns to exclude
@@ -1612,9 +1647,9 @@ export async function saveDirtyStoresToUserData(options = {}) {
         // Save each dirty store as a separate user data entry
         for (const [key, store] of Object.entries(reactiveStoreRegistry)) {
             const isModified = store.isModified;
-            const diff = calculateStoreDiff(store.originalData, store.data, store.analysisConfig);
+            const diff = calculateStoreDiff(store.originalData, store._data, store.analysisConfig);
             
-            if (isModified && store.originalData && store.data && diff) {
+            if (isModified && store.originalData && store._data && diff) {
                 // Calculate hash of current diff to check if already saved
                 const currentHash = JSON.stringify(diff);
                 
@@ -1758,25 +1793,43 @@ function normalizeBackupPayload(backupData) {
 
     // Current format: { diff: [...], timestamp }
     if (Array.isArray(backupData.diff)) {
-        return { mode: 'diff', diff: backupData.diff };
+        return { mode: 'diff', diff: renameLegacyRowKeys(backupData.diff) };
     }
 
     // Legacy format: direct diff array
     if (Array.isArray(backupData)) {
-        return { mode: 'diff', diff: backupData };
+        return { mode: 'diff', diff: renameLegacyRowKeys(backupData) };
     }
 
     // Legacy alias occasionally used in prototypes.
     if (Array.isArray(backupData.changes)) {
-        return { mode: 'diff', diff: backupData.changes };
+        return { mode: 'diff', diff: renameLegacyRowKeys(backupData.changes) };
     }
 
     // Legacy snapshot format: full data captured directly.
     if (Array.isArray(backupData.data)) {
-        return { mode: 'full', data: backupData.data };
+        return { mode: 'full', data: renameLegacyRowKeys(backupData.data) };
     }
 
     return null;
+}
+
+// Row keys renamed to lowercase; backups saved before the rename still use the old names
+const LEGACY_ROW_KEYS = { MetaData: 'metadata', EditHistory: 'edithistory' };
+
+/**
+ * Recursively rename legacy row keys in a backup payload.
+ * @param {*} value - Backup payload (arrays/objects are copied, other values returned as-is)
+ * @returns {*}
+ */
+function renameLegacyRowKeys(value) {
+    if (Array.isArray(value)) return value.map(renameLegacyRowKeys);
+    if (!value || typeof value !== 'object') return value;
+    const renamed = {};
+    for (const [key, child] of Object.entries(value)) {
+        renamed[LEGACY_ROW_KEYS[key] || key] = renameLegacyRowKeys(child);
+    }
+    return renamed;
 }
 
 /**
@@ -1960,10 +2013,10 @@ export function getReactiveStore(apiCall, saveCall = null, apiArgs = [], analysi
                     await store.load('Loading data...', hasBackup);
                     
                     // Apply backup after load if found
-                    if (hasBackup && store.data) {
+                    if (hasBackup && store._data) {
                         //console.log('[ReactiveStore] Applying backup to store data');
                         if (backupInfo.mode === 'diff') {
-                            const restoredData = applyDiffToData(store.data, backupInfo.diff);
+                            const restoredData = applyDiffToData(store._data, backupInfo.diff);
                             store.setData(restoredData);
                         } else if (backupInfo.mode === 'full') {
                             store.setData(backupInfo.data);
@@ -2113,7 +2166,8 @@ function setupCacheInvalidationListeners(store, apiCall, apiArgs, analysisConfig
  * @param {number} priority - Priority level (0-9, default: Priority.ANALYSIS=1)
  * @param {boolean} extractColumnsAsObject - If true and sourceColumns has multiple items, extract all as {col1, col2, ...} object
  * @param {boolean} essential - If true (default), this analysis is essential and runs even when onlyRunEssentialAnalysis is enabled
- * @returns {Object} Analysis configuration object
+ * @returns {Object} Analysis configuration object. Set `keepWhileRefreshing: true` on it to keep the
+ *   last result until a re-run replaces it (reloads carry it to rows with the same sourceColumns values).
  */
 export function createAnalysisConfig(apiFunction, resultKey, label, sourceColumns = null, additionalParams = [], targetColumn = null, passFullItem = false, priority = Priority.ANALYSIS, extractColumnsAsObject = false, essential = true) {
     return {
@@ -2169,6 +2223,15 @@ export function getPreferencesStore() {
     );
 }
 
+/**
+ * Maximum inventory save note length (InventoryNoteMaxLength preference, default 25 until loaded).
+ * Reactive: computed properties that call it update when the preference changes.
+ * @returns {number}
+ */
+export function getInventoryNoteMaxLength() {
+    return resolveInventoryNoteMaxLength(getPreferencesStore().data);
+}
+
 export function runNonessentialAnalysisOnAllStores() {
     let triggeredCount = 0;
     Object.values(reactiveStoreRegistry).forEach(store => {
@@ -2176,7 +2239,7 @@ export function runNonessentialAnalysisOnAllStores() {
         
         // Check if this store has any nonessential analysis
         const hasNonessential = store.analysisConfig.some(config => config.essential === false);
-        if (hasNonessential && store.data && store.data.length > 0 && !store.isAnalyzing) {
+        if (hasNonessential && store._data && store._data.length > 0 && !store.isAnalyzing) {
             // Trigger analysis with essentialOnly=false to run all analysis
             store.runConfiguredAnalysis({ essentialOnly: false });
             triggeredCount++;
@@ -2230,7 +2293,7 @@ export async function clearAllReactiveStores(options = {}) {
     // Components hold direct object references to these stores; deleting registry entries makes
     // those references stale and prevents reloadErrorStores() from reloading them after re-login.
     Object.values(reactiveStoreRegistry).forEach(store => {
-        store.data.splice(0, store.data.length);
+        store._data.splice(0, store._data.length);
         store.originalData.splice(0, store.originalData.length);
         store.isLoading = false;
         store.loadingMessage = '';

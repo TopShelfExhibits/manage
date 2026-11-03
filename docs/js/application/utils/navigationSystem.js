@@ -214,11 +214,9 @@ export const NavigationRegistry = {
                     
                     // Convert searchParams object format to textFilters array
                     if (converted.searchParams && Object.keys(converted.searchParams).length > 0) {
-                        parameters.textFilters = Object.entries(converted.searchParams).map(([column, data]) => ({
-                            column,
-                            values: data.values,
-                            type: data.type
-                        }));
+                        // A column may hold a list of filters (same-column filters are kept together)
+                        parameters.textFilters = Object.entries(converted.searchParams).flatMap(([column, data]) =>
+                            (Array.isArray(data) ? data : [data]).map(d => ({ column, values: d.values, type: d.type })));
                     }
                     
                     // Preserve any other non-filter params that weren't converted

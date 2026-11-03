@@ -2,7 +2,9 @@ import { html, LoadingBarComponent, NavigationRegistry, parseDate } from '../../
 import { useSearch, SearchBoxComponent, scrollToActiveResult } from '../../utils/useSearch.js';
 import { useStickyHeader } from '../../utils/useStickyHeader.js';
 import { matchRows, valueContains } from '../../utils/views/searchMatch.js';
-import { formatText } from '../../utils/views/fieldFormat.js';
+import { formatText, escapeHtml } from '../../utils/views/fieldFormat.js';
+import { searchTiers } from '../../utils/views/resolveView.js';
+import { rowsToCards, bucketRowsToCards } from '../../utils/views/cardsAdapter.js';
 import { ContentHeaderComponent } from './contentHeaderComponent.js';
 
 function normalizeItemSortWords(value) {
@@ -37,14 +39,14 @@ function compareItemLikeValues(aValue, bValue) {
 const MAX_MATCHED_FIELDS = 6;
 
 /**
- * CardsComponent — draws cards built by the cards adapter (views-and-renderers-plan §4.6).
- *
- * `cards`: [{ id, title, content, contentFooter, footerActions, cardClass, AppData, row, rows, bucket }]
- *   produced by rowsToCards / bucketRowsToCards (DataView). Pages don't hand-build cards.
- * Search: one matcher over the member rows (`searchTiers`: shown and details keys; hidden never
- *   searched), with the minimum term length and the broad-search abort (§4.5). Cards whose match
- *   comes from fields not on the card list the matched fields; with a row trigger they also get
- *   `details-match`, with a button trigger the action button glows.
+ * CardsComponent — the cards renderer (views-and-renderers-plan §4.6). Same contract as the table
+ * and calendar: `resolved` (the ResolvedView), `data` (rows), `action`, decorations. Cards are built
+ * by the cards adapter: one per row, or one per bucket (cards.bucketBy) with the bucket hooks.
+ * Search: one matcher over the member rows (shown and details keys; hidden never searched), with
+ *   the minimum term length and the broad-search abort (§4.5). Cards whose match comes from fields
+ *   not on the card list the matched fields; with a row trigger they also get `details-match`,
+ *   with a button trigger the action button glows.
+ * Sort: the view's sort; the sort select lists sortable fields (bucket cards sort by title).
  * Primary action (§4.8): `action.trigger === 'row'` → the whole card; 'button' → a footer button.
  */
 export const CardsComponent = {
@@ -52,43 +54,38 @@ export const CardsComponent = {
     components: { LoadingBarComponent, SearchBoxComponent, ContentHeaderComponent },
     inject: ['appContext'],
     props: {
-        theme: { type: String, default: 'gray' },
-        cards: { type: Array, default: () => [] },
+        resolved: { type: Object, required: true },
+        data: { type: Array, default: () => [] },
         // ResolvedAction + perform(row, ctx) from DataView
         action: { type: Object, default: null },
-        // { shown: string[], details: string[] } keys searched on member rows
-        searchTiers: { type: Object, default: () => ({ shown: [], details: [] }) },
-        // key → label, for the matched-fields list
-        fieldLabels: { type: Object, default: () => ({}) },
+        // decorations(row, key) → Card[] with decorationKeys (the keys the page decorates)
+        decorations: { type: Function, default: null },
+        decorationKeys: { type: Array, default: () => [] },
+        // Bucket cards: bucketKeys seed empty buckets; bucketDecorations(key, rows) → Card[]
+        bucketKeys: { type: Array, default: () => [] },
+        bucketDecorations: { type: Function, default: null },
+        bucketLabel: { type: Function, default: null },
+        bucketAppData: { type: Function, default: null },
         isLoading: { type: Boolean, default: false },
         isAnalyzing: { type: Boolean, default: false },
         loadingProgress: { type: Number, default: -1 },
         loadingMessage: { type: String, default: 'Loading...' },
         emptyMessage: { type: String, default: 'No items available' },
-        showHeader: { type: Boolean, default: false },
+        showHeader: { type: Boolean, default: true },
         showRefresh: { type: Boolean, default: false },
         showSearch: { type: Boolean, default: false },
         syncSearchWithUrl: { type: Boolean, default: false },
         containerPath: { type: String, default: '' },
         navigateToPath: { type: Function, default: null },
         viewSelect: { type: Object, default: null },
-        hideCardsOnSearch: { type: Boolean, default: true },
         showPinButtons: { type: Boolean, default: false },
         pinnedItems: { type: Set, default: () => new Set() },
         showPinnedOnly: { type: Boolean, default: false },
-        showSort: { type: Boolean, default: false },
-        sortColumns: { type: Array, default: () => [] },
-        defaultSortColumn: { type: [String, Array], default: null },
-        defaultSortDirection: {
-            type: String,
-            default: 'asc',
-            validator: (value) => ['asc', 'desc'].includes(String(value || '').toLowerCase())
-        }
+        showSort: { type: Boolean, default: false }
     },
     emits: ['refresh', 'toggle-pin', 'row-action'],
     setup(props) {
         const search = useSearch({
-            formatValue: null,
             syncWithUrl: props.syncSearchWithUrl,
             navigationRegistry: NavigationRegistry,
             containerPath: props.containerPath,
@@ -108,16 +105,39 @@ export const CardsComponent = {
         };
     },
     computed: {
+        theme() {
+            return this.resolved.theme || 'gray';
+        },
+        cards() {
+            const r = this.resolved;
+            if (r.cards?.bucketBy) {
+                return bucketRowsToCards(this.data, r, {
+                    bucketKeys: this.bucketKeys,
+                    bucketDecorations: this.bucketDecorations,
+                    bucketLabel: this.bucketLabel,
+                    bucketAppData: this.bucketAppData
+                });
+            }
+            return rowsToCards(this.data, r, { decorations: this.decorations, decorationKeys: this.decorationKeys });
+        },
+        // { shown, details } keys searched on member rows
+        searchTiers() {
+            return searchTiers(this.resolved);
+        },
+        hideCardsOnSearch() {
+            return this.resolved.cards?.hideOnSearch !== false;
+        },
+        // The sort select: sortable fields, or the title for bucket cards
         sortableColumns() {
-            return (this.sortColumns || [])
-                .filter(col => col && typeof col.key === 'string' && col.key.trim())
-                .filter(col => col.sortable !== false)
-                .map(col => ({
-                    key: col.key.trim(),
-                    label: col.label || col.key,
-                    type: col.type || null,
-                    sortable: true
-                }));
+            const r = this.resolved;
+            if (r.cards?.bucketBy) return [{ key: 'title', label: r.fieldMap.get(r.cards.bucketBy)?.label || 'Title', type: 'string' }];
+            return r.fields.filter(f => f.sortable).map(f => ({ key: f.key, label: f.label ?? f.key, type: f.type || null }));
+        },
+        sortableSignature() {
+            return this.sortableColumns.map(c => c.key).join('|');
+        },
+        defaultSortSignature() {
+            return JSON.stringify(this.resolved.sort || []);
         },
         shouldShowEmpty() {
             return !this.isLoading && !this.isAnalyzing && this.cards && this.cards.length === 0;
@@ -171,7 +191,7 @@ export const CardsComponent = {
                     for (const k of keys) {
                         if (entry.matchedFields.length >= MAX_MATCHED_FIELDS) break;
                         if (words.some(w => valueContains(row[k], w))) {
-                            entry.matchedFields.push({ fieldName: this.fieldLabels[k] || k, value: formatText(row[k], { key: k }) });
+                            entry.matchedFields.push({ fieldName: this.resolved.fieldMap.get(k)?.label || k, value: formatText(row[k], { key: k }) });
                         }
                     }
                 }
@@ -218,22 +238,15 @@ export const CardsComponent = {
         activeSearchIndex() { return this.search.searchIndex.value; }
     },
     watch: {
-        sortColumns: {
-            handler() {
-                const selectedColumnStillExists = this.sortableColumns.some(col => col.key === this.selectedSortKey);
-                if (!selectedColumnStillExists) {
-                    this.applyDefaultSortColumn({ force: true });
-                }
-            },
-            deep: true
-        },
-        defaultSortColumn() {
-            this.applyDefaultSortColumn({ force: true });
-        },
-        defaultSortDirection() {
-            if (this.isUsingDefaultSort) {
-                this.selectedSortDirection = this.getNormalizedDefaultSortDirection();
+        sortableSignature() {
+            const selectedColumnStillExists = this.sortableColumns.some(col => col.key === this.selectedSortKey);
+            if (!selectedColumnStillExists) {
+                this.applyDefaultSortColumn({ force: true });
             }
+        },
+        // The view's sort changed (view switch, patch): apply it
+        defaultSortSignature() {
+            this.applyDefaultSortColumn({ force: true });
         },
         activeSearchIndex(newIndex) {
             if (newIndex == null) return;
@@ -291,7 +304,7 @@ export const CardsComponent = {
     },
     methods: {
         highlightText(text) {
-            return this.searchActive ? this.search.highlightRawText(text) : this.search.escapeHtml(text || '');
+            return this.searchActive ? this.search.highlightRawText(text) : escapeHtml(text);
         },
         highlightHtml(htmlContent) {
             return this.searchActive ? this.search.highlightHtmlContent(htmlContent) : (htmlContent || '');
@@ -341,32 +354,12 @@ export const CardsComponent = {
         handleRefresh() {
             this.$emit('refresh');
         },
-        getNormalizedDefaultSortDirection() {
-            return String(this.defaultSortDirection || '').toLowerCase() === 'desc' ? 'desc' : 'asc';
-        },
-        normalizeDefaultSortColumnConfig() {
-            const config = this.defaultSortColumn;
-            if (Array.isArray(config)) return config;
-            if (typeof config === 'string' && config.trim()) return [config.trim()];
-            return [];
-        },
+        // The view's sort (resolveView normalizes it to [{ key, direction }])
         getDefaultSortCriteria() {
-            const fallbackDirection = this.getNormalizedDefaultSortDirection();
-            return this.normalizeDefaultSortColumnConfig()
-                .map((entry) => {
-                    if (typeof entry === 'string') return { key: entry.trim(), direction: fallbackDirection };
-                    if (entry && typeof entry === 'object') {
-                        const key = typeof entry.key === 'string' ? entry.key.trim() : '';
-                        const direction = String(entry.direction || fallbackDirection).toLowerCase() === 'desc' ? 'desc' : 'asc';
-                        return { key, direction };
-                    }
-                    return null;
-                })
-                .filter(item => item && item.key)
-                .map(item => {
-                    const column = this.sortableColumns.find(col => col.key === item.key) || { key: item.key, type: null };
-                    return { column, direction: item.direction };
-                });
+            return (this.resolved.sort || []).map(({ key, direction }) => ({
+                column: this.sortableColumns.find(col => col.key === key) || { key, type: null },
+                direction
+            }));
         },
         getCurrentSortCriteria() {
             if (!this.selectedSortKey) return [];

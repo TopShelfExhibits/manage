@@ -28,16 +28,27 @@
  */
 
 import { Requests } from '../data_management/api.js';
-import { FakeGoogleSheetsAuth, FakeGoogleSheetsService, setFakeDelaysEnabled } from '../google_sheets_services/FakeGoogle.js';
-import { isCheckedValue } from '../data_management/abstraction/instant-write-utils.js';
-import { CacheInvalidationBus, ApplicationUtils, ProductionUtils, triggerCachePoll } from '../data_management/index.js';
-import { resolveView, resolveAction, pickView, mergeView, matchesKeyPattern, setViewWarningHandler } from '../application/utils/views/resolveView.js';
-import { SEARCH_LIMITS, searchWords, matchRow, matchRows } from '../application/utils/views/searchMatch.js';
+import { FakeGoogleSheetsAuth, FakeGoogleSheetsService, FakeGoogleState, setFakeDelaysEnabled } from '../google_sheets_services/FakeGoogle.js';
+import { refreshAppData } from './fakeGoogleDevTools.js';
+import { isCheckedValue } from '../data_management/utils/checkbox-values.js';
+import { useBatchEdits, useInstantEdits } from '../application/utils/cellEdits.js';
+import { CacheInvalidationBus, ApplicationUtils, ProductionUtils, triggerCachePoll, Database, EditHistoryUtils, InventoryUtils, ProposalUtils, resolveInventoryNoteMaxLength } from '../data_management/index.js';
+import { authState } from '../application/utils/auth.js';
+import { commitInventoryProposal } from '../application/utils/inventoryProposals.js';
+import { resolveView, resolveAction, pickView, mergeView, matchesKeyPattern, setViewWarningHandler, withRegistryDefaults } from '../application/utils/views/resolveView.js';
+import { SEARCH_LIMITS, searchWords, matchRow, matchRows, makeHighlighter } from '../application/utils/views/searchMatch.js';
 import { formatValue, formatText } from '../application/utils/views/fieldFormat.js';
 import { rowsToCards, bucketRowsToCards } from '../application/utils/views/cardsAdapter.js';
 import { applyColorRule, colorFor, rowColorFor } from '../application/utils/views/viewColor.js';
 import { containerTier, viewportTier, BREAKPOINTS } from '../application/utils/useContainerSize.js';
-import { todayISOString } from '../data_management/utils/helpers.js';
+import { todayISOString, searchFilter, textFiltersToSearchParams, parseSearchParameters } from '../data_management/utils/helpers.js';
+import { instantWriteEntry, identityKey, cellKey, joinKey } from '../data_management/utils/instant-write-config.js';
+import { estimateShipDate } from '../data_management/utils/ship-date.js';
+import { getReactiveStore, createAnalysisConfig } from '../application/index.js';
+import { checkSheetHealth } from './sheetHealth.js';
+import { guessColumnType, columnTypesEntry, columnTypeMap, columnTypeOf } from '../data_management/utils/column-types.js';
+import { buildScheduleFields } from '../data_management/abstraction/scheduleFields.js';
+import { withShipDate } from '../application/utils/scheduleShipping.js';
 
 // ── Runner ────────────────────────────────────────────────────────────────────
 
@@ -70,6 +81,13 @@ function assertFiniteNumber(val, label) {
 function assertLessThan(val, threshold, label) {
     if (!(val < threshold))
         throw new Error(`${label}\n    expected ${val} < ${threshold}`);
+}
+
+// Run fn as a logged-in user. Tests otherwise run logged out, so saves record no history entries.
+async function _asUser(fn) {
+    const previous = authState.user;
+    authState.user = { email: 'test@example.com' };
+    try { return await fn(); } finally { authState.user = previous; }
 }
 
 // ── Group 0: Authentication ──────────────────────────────────────────────────
@@ -659,7 +677,7 @@ test('CAD SOURCE HISTORY', 'FakeGoogle ATSC NAB fixture produces cad alert', asy
     const crates = await Requests.getPackList('ATSC 2025 NAB');
     const firstItem = crates?.[0]?.Items?.[0];
     if (!firstItem) throw new Error('ATSC 2025 NAB first item row not found');
-    const result = await Requests.checkCadSourceHistory(firstItem.EditHistory);
+    const result = await Requests.checkCadSourceHistory(firstItem.edithistory);
     if (!result) throw new Error('expected cad alert for ATSC NAB fixture item, got null');
     assertEqual(result.type, 'cad-source-change', 'ATSC NAB fixture cad alert type');
 });
@@ -806,7 +824,7 @@ test('IDENTIFIER SAFETY', 'deduplicateScheduleByShow uses canonical identifiers,
 
 // ── Group 20: Item Quantities Summary ─────────────────────────────────────────
 // getItemQuantitiesSummary extracts item quantities from a single packlist tab.
-// The extractItems loop explicitly skips EditHistory and MetaData fields to prevent
+// The extractItems loop explicitly skips the edithistory and metadata fields to prevent
 // old description values in the EditHistory JSON from being parsed as item codes.
 // Tests cover: known simple extractions, EditHistory-skip regression (ATSC NAB),
 // and the Lockheed suffix variant tabs (primary and MEETING ROOM).
@@ -1311,8 +1329,9 @@ test('PAGE NOTES', 'getPageNotes returns an array', async () => {
 // The bus fires synchronously inside invalidate(), so events are always
 // captured before the mutation's await resolves — no timing gaps.
 // Mutations use round-trip saves (read → write same data back) to stay
-// idempotent: calculateRowDiff returns empty changes, so no edithistory
-// is appended and FakeGoogle's mockData is effectively unchanged.
+// idempotent: calculateRowDiff returns empty changes, so no history entry
+// is appended. The first round-trip of a tab assigns EditHistory.i to rows
+// that lack it (first touch); field values in mockData are unchanged.
 
 test('CACHE INVALIDATION', 'savePackList fires getPackList invalidation', async () => {
     await Requests.getPackList('CHAINCO 2026 SPRING EXPO'); // warm: registers dependency chain
@@ -1475,9 +1494,9 @@ test('PREFERENCES', 'getPreferences returns an array', async () => {
     if (!Array.isArray(result)) throw new Error(`expected array, got ${typeof result}`);
 });
 
-test('PREFERENCES', 'getPreferences returns 7 rows', async () => {
+test('PREFERENCES', 'getPreferences returns every fixture row', async () => {
     const result = await Requests.getPreferences();
-    assertEqual(result.length, 10, 'getPreferences row count');
+    assertEqual(result.length, 12, 'getPreferences row count');
 });
 
 test('PREFERENCES', 'all rows have required fields', async () => {
@@ -1512,6 +1531,467 @@ test('PREFERENCES', 'schedule prefs have page "schedule*"', async () => {
     if (schedulePrefs.length === 0) throw new Error('no schedule preferences found');
     for (const p of schedulePrefs) {
         if (p.page !== 'schedule*') throw new Error(`expected page "schedule*" for ${p.id}, got "${p.page}"`);
+    }
+});
+
+// ── Group 36: Edit History ────────────────────────────────────────────────────
+// Contract: docs/notes/metadata-implementation.md
+// Pure tests cover EditHistoryUtils matching and aggregation. Integration tests save
+// through Database.setData into a dedicated hidden PACK_LISTS tab (_HISTORY_TEST) so
+// fixture tabs are untouched; deletions archive to PACK_LISTS/_EditHistory.
+
+const _eh = (obj) => JSON.stringify(obj);
+const _row = (name, qty, edithistory = '') => ({ name, qty, edithistory });
+
+test('EDIT HISTORY', 'getRowIndex reads positive integer i only', async () => {
+    assertEqual(EditHistoryUtils.getRowIndex(_eh({ i: 4, h: [] })), 4, 'valid i');
+    assertEqual(EditHistoryUtils.getRowIndex(_eh({ i: 0 })), null, 'zero rejected');
+    assertEqual(EditHistoryUtils.getRowIndex(_eh({ i: '4' })), null, 'string rejected');
+    assertEqual(EditHistoryUtils.getRowIndex(''), null, 'empty');
+});
+
+test('EDIT HISTORY', 'matchRows matches by i across reorder and insertion', async () => {
+    const originals = [_row('A', 1, _eh({ i: 1 })), _row('B', 2, _eh({ i: 2 })), _row('C', 3, _eh({ i: 3 }))];
+    const updated = [_row('NEW', 0), originals[2], originals[0], { ...originals[1], qty: 9 }];
+    const { matchOf, duplicates, deleted } = EditHistoryUtils.matchRows(originals, updated);
+    assertEqual(matchOf, [-1, 2, 0, 1], 'matchOf');
+    assertEqual([...duplicates], [], 'duplicates');
+    assertEqual(deleted, [], 'deleted');
+});
+
+test('EDIT HISTORY', 'matchRows: copied row closest to the original keeps i', async () => {
+    const originals = [_row('A', 1, _eh({ i: 1 })), _row('B', 2, _eh({ i: 2 }))];
+    const updated = [originals[0], originals[1], { ...originals[0] }];
+    const { matchOf, duplicates } = EditHistoryUtils.matchRows(originals, updated);
+    assertEqual(matchOf, [0, 1, -1], 'matchOf');
+    assertEqual([...duplicates], [2], 'duplicates');
+});
+
+test('EDIT HISTORY', 'matchRows: legacy rows without i match by content, then within gap', async () => {
+    const originals = [_row('X', 1), _row('Y', 2), _row('Z', 3)];
+    const updated = [_row('W', 5), _row('X', 1), _row('Y', 7), _row('Z', 3)];
+    const { matchOf, deleted } = EditHistoryUtils.matchRows(originals, updated);
+    assertEqual(matchOf, [-1, 0, 1, 2], 'matchOf (W new, edited Y matched in gap)');
+    assertEqual(deleted, [], 'deleted');
+});
+
+test('EDIT HISTORY', 'matchRows: unmatched stored row is reported deleted', async () => {
+    const originals = [_row('A', 1, _eh({ i: 1 })), _row('B', 2, _eh({ i: 2 }))];
+    const { deleted } = EditHistoryUtils.matchRows(originals, [originals[1]]);
+    assertEqual(deleted, [0], 'deleted');
+});
+
+test('EDIT HISTORY', 'aggregation merges same user+source within an hour, keeping the older o', async () => {
+    const first = { u: 'dan', t: 1000, s: 'web', c: [{ n: 'qty', o: '1' }] };
+    const second = { u: 'dan', t: 1000 + 600, s: 'web', c: [{ n: 'qty', o: '2' }, { n: 'name', o: 'A' }] };
+    const result = JSON.parse(EditHistoryUtils.appendToEditHistory(_eh({ i: 1, h: [first] }), second, undefined, { qty: '3', name: 'B' }));
+    assertEqual(result.h.length, 1, 'merged into one entry');
+    assertEqual(result.h[0].t, 1600, 'timestamp advanced');
+    assertEqual(result.h[0].c, [{ n: 'qty', o: '1' }, { n: 'name', o: 'A' }], 'older o kept, new field added');
+    assertEqual(result.i, 1, 'root keys preserved');
+});
+
+test('EDIT HISTORY', 'aggregation drops reverted fields and empty merged entries', async () => {
+    const first = { u: 'dan', t: 1000, s: 'web', c: [{ n: 'qty', o: '1' }] };
+    const second = { u: 'dan', t: 1100, s: 'web', c: [{ n: 'qty', o: '2' }] };
+    const result = JSON.parse(EditHistoryUtils.appendToEditHistory(_eh({ h: [first] }), second, undefined, { qty: '1' }));
+    assertEqual(result.h, [], 'edit + revert within window leaves no entry');
+});
+
+test('EDIT HISTORY', 'aggregation does not merge across source, window, or creation markers', async () => {
+    const base = { u: 'dan', t: 1000, s: 'web', c: [{ n: 'qty', o: '1' }] };
+    const cad = { u: 'dan', t: 1100, s: 'cad', c: [{ n: 'qty', o: '2' }] };
+    const late = { u: 'dan', t: 1000 + 36001, s: 'web', c: [{ n: 'qty', o: '2' }] };
+    const created = { u: 'dan', t: 1000, s: 'web', c: [] };
+    const soon = { u: 'dan', t: 1100, s: 'web', c: [{ n: 'qty', o: '0' }] };
+    assertEqual(JSON.parse(EditHistoryUtils.appendToEditHistory(_eh({ h: [base] }), cad)).h.length, 2, 'different source');
+    assertEqual(JSON.parse(EditHistoryUtils.appendToEditHistory(_eh({ h: [base] }), late)).h.length, 2, 'outside window');
+    assertEqual(JSON.parse(EditHistoryUtils.appendToEditHistory(_eh({ h: [created] }), soon)).h.length, 2, 'creation marker');
+});
+
+test('EDIT HISTORY', 'history is capped at 10 entries', async () => {
+    let eh = '';
+    for (let n = 0; n < 15; n++) {
+        eh = EditHistoryUtils.appendToEditHistory(eh, { u: `user${n}`, t: n, s: 'web', c: [{ n: 'qty', o: String(n) }] });
+    }
+    const parsed = JSON.parse(eh);
+    assertEqual(parsed.h.length, 10, 'cap');
+    assertEqual(parsed.h[0].u, 'user14', 'newest first');
+});
+
+test('EDIT HISTORY', 'applyNeValue returns strings like sheet cells', async () => {
+    assertEqual(EditHistoryUtils.applyNeValue('12', '+6'), '18', 'delta');
+    assertEqual(EditHistoryUtils.applyNeValue('', '+5'), '5', 'delta on empty');
+    assertEqual(EditHistoryUtils.applyNeValue('3', 10), '10', 'absolute number');
+    assertEqual(EditHistoryUtils.applyNeValue('a', 'b'), 'b', 'absolute string');
+    const { updatedItems } = EditHistoryUtils.applyPendingChangesToData(
+        [{ quantity: '12', edithistory: _eh({ i: 1, h: [], p: [{ u: 'dan', t: 1, d: 1, s: 'n', c: [{ n: 'quantity', ne: '+6' }] }] }) }],
+        Math.floor(Date.now() / 100)
+    );
+    assertEqual(updatedItems[0].quantity, '18', 'applied pending quantity is a string');
+});
+
+const _HISTORY_TAB = '_HISTORY_TEST';
+const _HISTORY_MAPPING = { name: 'Name', qty: 'Qty', edithistory: 'EditHistory' };
+const _historySave = (rows) => Database.setData('PACK_LISTS', _HISTORY_TAB, rows, _HISTORY_MAPPING, { username: 'test@example.com', source: 'web' });
+// Copy rows: getData returns the cached array, and editing it in place would also edit the "stored" rows
+const _historyRead = async () => (await Database.getData('PACK_LISTS', _HISTORY_TAB, _HISTORY_MAPPING)).map(r => ({ ...r }));
+const _parsed = (row) => JSON.parse(row.edithistory || '{}');
+
+test('EDIT HISTORY', 'first touch assigns i to legacy rows without adding history', async () => {
+    await Database.setData('PACK_LISTS', _HISTORY_TAB, [_row('A', '1'), _row('B', '2'), _row('C', '3')], _HISTORY_MAPPING, { skipMetadata: true });
+    await _historySave(await _historyRead());
+    const rows = await _historyRead();
+    assertEqual(rows.map(r => _parsed(r).i), [1, 2, 3], 'identities');
+    assertEqual(rows.map(r => (_parsed(r).h || []).length), [0, 0, 0], 'no history entries');
+});
+
+test('EDIT HISTORY', 'inserting a row above others records no changes on shifted rows', async () => {
+    const rows = await _historyRead();
+    rows[1] = { ...rows[1], qty: '20' };
+    await _historySave([_row('NEW', '5'), ...rows]);
+    const saved = await _historyRead();
+    assertEqual(saved.map(r => r.name), ['NEW', 'A', 'B', 'C'], 'order');
+    assertEqual(_parsed(saved[0]).i, 4, 'new row gets next identity');
+    assertEqual(_parsed(saved[0]).h.map(e => e.c), [[]], 'new row has a creation marker');
+    assertEqual((_parsed(saved[1]).h || []).length, 0, 'A unchanged');
+    assertEqual(_parsed(saved[2]).h[0].c, [{ n: 'qty', o: '2' }], 'B records its own old qty');
+    assertEqual((_parsed(saved[3]).h || []).length, 0, 'C unchanged');
+});
+
+test('EDIT HISTORY', 'repeat edit within the hour aggregates into one entry', async () => {
+    const rows = await _historyRead();
+    rows[2] = { ...rows[2], qty: '25' };
+    await _historySave(rows);
+    const b = (await _historyRead())[2];
+    assertEqual(_parsed(b).h.length, 1, 'single entry');
+    assertEqual(_parsed(b).h[0].c, [{ n: 'qty', o: '2' }], 'oldest value kept');
+});
+
+test('EDIT HISTORY', 'copied row gets a fresh identity and history', async () => {
+    const rows = await _historyRead();
+    await _historySave([...rows, { ...rows[2] }]);
+    const saved = await _historyRead();
+    assertEqual(_parsed(saved[2]).i, 2, 'original B keeps i=2');
+    assertEqual(_parsed(saved[4]).i, 5, 'copy gets i=5');
+    assertEqual(_parsed(saved[4]).h.map(e => e.c), [[]], 'copy history restarts');
+});
+
+test('EDIT HISTORY', 'deletions append to _EditHistory without overwriting earlier archive rows', async () => {
+    const archiveMapping = { SourceTab: 'SourceTab', RowIdentifier: 'RowIdentifier', Operation: 'Operation' };
+    const archived = async () => (await Database.getData('PACK_LISTS', '_EditHistory', archiveMapping))
+        .filter(r => r.SourceTab === _HISTORY_TAB);
+    let rows = await _historyRead();
+    await _historySave(rows.filter(r => r.name !== 'C'));
+    rows = await _historyRead();
+    await _historySave(rows.filter(r => r.name !== 'NEW'));
+    const entries = await archived();
+    assertEqual(entries.map(r => r.RowIdentifier), ['3', '4'], 'both deletions archived by identity');
+    assertEqual(entries.map(r => r.Operation), ['delete', 'delete'], 'operation');
+});
+
+test('EDIT HISTORY', 'packlist crates and items use lowercase edithistory/metadata keys', async () => {
+    const crates = await Requests.getPackList('ATSC 2025 NAB');
+    const objects = crates.flatMap(crate => [crate, ...(crate.Items || [])]);
+    for (const obj of objects) {
+        if ('EditHistory' in obj || 'MetaData' in obj)
+            throw new Error(`capitalized key on packlist object: ${Object.keys(obj).join(', ')}`);
+    }
+    if (!crates[0].Items[0].edithistory.includes('cadbot'))
+        throw new Error('fixture history not found on item.edithistory');
+});
+
+test('EDIT HISTORY', 'packlist round-trip keeps history and assigns identity', async () => {
+    // ATSC 2025 NAB is the only fixture with history but is locked by another user; round-trip an unlocked copy
+    const tab = '_HISTORY_PACKLIST';
+    await Requests.createNewTab('PACK_LISTS', 'ATSC 2025 NAB', tab);
+    const crates = await Requests.getPackList(tab);
+    const notes = (list) => list.flatMap(c => (c.Items || []).map(i => i['Packing/shop notes'])).filter(Boolean);
+    // Run as a logged-in user so a false change would also show up as a history entry
+    await _asUser(() => Requests.savePackList(crates, tab));
+    const saved = await Requests.getPackList(tab);
+    // The sheet header is "Packing/shop\nnotes"; rows use the normalized key
+    assertEqual(notes(saved), notes(crates), 'packing notes survive the round trip');
+    const parsed = JSON.parse(saved[0].Items[0].edithistory);
+    assertEqual(parsed.h.map(e => e.u), ['cadbot', 'dan'], 'existing history preserved');
+    if (!Number.isInteger(parsed.i)) throw new Error(`expected integer i, got ${parsed.i}`);
+});
+
+// ── Group 37: Edit History View ───────────────────────────────────────────────
+// Plan: docs/notes/inventory-edit-history-view-plan.md
+// FakeGoogle FURNITURE fixtures:
+//   CHAIR-003  qty 12, three history entries (restock +2, description edit, qty+notes edit)
+//   CHAIR-004  qty '', past-due scheduled change (+5)
+//   INVENTORY/_EditHistory  one archived FURNITURE row (CHAIR-099)
+
+const _VIEW_FIELDS = ['quantity', 'description', 'notes'];
+const _furnitureRow = async (itemNumber) => (await Requests.getInventoryTabData('FURNITURE')).find(r => r.itemNumber === itemNumber);
+
+test('EDIT HISTORY VIEW', 'getHistoryStates rewinds CHAIR-003 newest first', async () => {
+    const states = EditHistoryUtils.getHistoryStates(await _furnitureRow('CHAIR-003'), _VIEW_FIELDS);
+    assertEqual(states.map(s => s.kind), ['current', 'change', 'change', 'earliest'], 'kinds');
+    assertEqual(states.map(s => s.state.quantity), ['12', '10', '10', '8'], 'quantity at each state');
+    assertEqual(states.map(s => s.state.notes), ['', '', '', 'check legs'], 'notes at each state');
+    assertEqual(states[2].state.description, 'Cube chair (black) collapsible', 'description before sam\'s edit');
+    assertEqual(states.map(s => s.entry?.u ?? null), ['dan', 'sam', 'dan', null], 'entry paired with each state');
+    assertEqual([...states[2].changed].sort(), ['notes', 'quantity'], 'fields changed by the oldest entry');
+});
+
+test('EDIT HISTORY VIEW', 'getHistoryStates ends with a created row when history reaches creation', async () => {
+    const row = { quantity: '3', edithistory: JSON.stringify({ i: 1, h: [
+        { u: 'dan', t: 200, s: 'web', c: [{ n: 'quantity', o: '1' }, { m: 4 }] },
+        { u: 'dan', t: 100, s: 'web', c: [] }
+    ] }) };
+    const states = EditHistoryUtils.getHistoryStates(row, ['quantity']);
+    assertEqual(states.map(s => s.kind), ['current', 'created'], 'kinds (no earliest row)');
+    assertEqual(states.map(s => s.state.quantity), ['3', '1'], 'created state; move record ignored');
+});
+
+test('EDIT HISTORY VIEW', 'getHistoryStates with no history returns only the current row', async () => {
+    const states = EditHistoryUtils.getHistoryStates({ quantity: '4', edithistory: '' }, ['quantity']);
+    assertEqual(states.map(s => s.kind), ['current'], 'kinds');
+    assertEqual(states[0].entry, null, 'no entry');
+});
+
+test('EDIT HISTORY VIEW', 'applied scheduled change reads like a normal entry (CHAIR-004)', async () => {
+    const row = await _furnitureRow('CHAIR-004');
+    const { updatedItems } = EditHistoryUtils.applyPendingChangesToData([row], Math.floor(Date.now() / 100));
+    const states = EditHistoryUtils.getHistoryStates(updatedItems[0], _VIEW_FIELDS);
+    assertEqual(states.map(s => s.state.quantity), ['5', ''], 'quantity after and before the scheduled change');
+    assertEqual(states[0].entry.s, 'new stock', 'note from the scheduled entry');
+});
+
+test('EDIT HISTORY VIEW', 'getArchivedRows returns this tab\'s deleted rows, parsed', async () => {
+    const rows = await Requests.getArchivedRows('INVENTORY', 'FURNITURE');
+    assertEqual(rows.length, 1, 'one archived FURNITURE row');
+    assertEqual(rows[0].RowData.itemNumber, 'CHAIR-099', 'RowData parsed');
+    assertFiniteNumber(rows[0].Timestamp, 'Timestamp is a number');
+    assertEqual(await Requests.getArchivedRows('INVENTORY', 'CABINETS'), [], 'other tab has none');
+});
+
+test('EDIT HISTORY VIEW', 'getArchivedRows returns [] when the spreadsheet has no archive tab', async () => {
+    assertEqual(await Requests.getArchivedRows('CACHE', 'Notes'), [], 'no CACHE/_EditHistory tab');
+});
+
+test('EDIT HISTORY VIEW', 'item timeline shows field changes and rebuilt quantities (CHAIR-003)', async () => {
+    const events = await Requests.getItemTimeline('CHAIR-003', '2026-01-01', '2026-12-31');
+    const balance = events.find(e => e.event === 'Balance');
+    assertEqual(balance.quantity, 8, 'opening balance is the earliest known quantity');
+    const changes = events.filter(e => e.event === 'Inv. Change');
+    assertEqual(changes.map(e => e.change), [
+        'quantity: +2, notes: "check legs" → ""',
+        'description: "Cube chair (black) collapsible" → "Cube chair (black?) collapsible"',
+        'quantity: +2'
+    ], 'change labels, oldest first');
+    assertEqual(changes.map(e => e.quantity), [10, 10, 12], 'running quantity');
+    assertEqual(changes[2].note, 'dan: restock', 'note');
+});
+
+test('EDIT HISTORY VIEW', 'item timeline labels scheduled changes by their own field', async () => {
+    const events = await Requests.getItemTimeline('CHAIR-003', '2027-01-01', '2027-12-31');
+    const scheduled = events.find(e => e.event === 'Scheduled');
+    assertEqual(scheduled.change, 'quantity: +6', 'scheduled label');
+    assertEqual(scheduled.quantity, 18, 'quantity after scheduled restock');
+});
+
+test('EDIT HISTORY VIEW', 'entryNote hides the default web/app source but keeps notes and cad', async () => {
+    assertEqual(EditHistoryUtils.entryNote({ s: 'web' }), '', 'web hidden');
+    assertEqual(EditHistoryUtils.entryNote({ s: 'app' }), '', 'legacy app hidden');
+    assertEqual(EditHistoryUtils.entryNote({}), '', 'missing s');
+    assertEqual(EditHistoryUtils.entryNote({ s: 'restock' }), 'restock', 'note kept');
+    assertEqual(EditHistoryUtils.entryNote({ s: 'cad' }), 'cad', 'cad kept');
+});
+
+test('EDIT HISTORY VIEW', 'createEditHistoryEntry omits s when no source is given', async () => {
+    const entry = EditHistoryUtils.createEditHistoryEntry('dan@example.com', [{ column: 'quantity', old: '1' }], null);
+    assertEqual('s' in entry, false, 'no s');
+    assertEqual(EditHistoryUtils.createEditHistoryEntry('dan@example.com', []).s, 'web', 'default source still web');
+});
+
+test('EDIT HISTORY VIEW', 'inventory save stores the note in s, and omits s without a note', async () => {
+    const save = async (quantity, note) => {
+        const rows = (await Requests.getInventoryTabData('FURNITURE')).map(r => ({ ...r }));
+        rows.find(r => r.itemNumber === 'STOOL-002').quantity = quantity;
+        await InventoryUtils.saveInventoryTabData(rows, 'FURNITURE', undefined, null, 'test@example.com', { source: 'web', note });
+        return JSON.parse((await _furnitureRow('STOOL-002')).edithistory).h[0];
+    };
+    const withoutNote = await save('13', '');
+    assertEqual('s' in withoutNote, false, 'no s without a note');
+    const withNote = await save('14', 'recount');
+    assertEqual(withNote.s, 'recount', 'note stored in s');
+});
+
+// ── INVENTORY PROPOSALS ──────────────────────────────────────────────────────
+// Fixtures (CACHE/InventoryProposals): "Spring buy" (FURNITURE + HANGING SIGNS), "Cabinet fix"
+// (CABINETS, locked by another user), "Fall buy" (committed). These tests run last: commits change inventory.
+
+const _proposalRows = async (name) => (await Requests.getInventoryProposals()).filter(e => e.proposal === name);
+
+
+test('INVENTORY PROPOSALS', 'validateName enforces length, characters and case-insensitive uniqueness', async () => {
+    const existing = ['Spring buy', 'Fall buy'];
+    assertEqual(ProposalUtils.validateName('', existing), 'Enter a proposal name', 'empty');
+    assertEqual(ProposalUtils.validateName('x'.repeat(16), existing), 'Use at most 15 characters', 'too long');
+    assertEqual(ProposalUtils.validateName('---', existing), 'Use at least one letter or number', 'no letters');
+    assertEqual(ProposalUtils.validateName('SPRING BUY', existing), 'A proposal with this name already exists', 'duplicate ignoring case');
+    assertEqual(ProposalUtils.validateName('Spring-buy', existing), 'A proposal with this name already exists', 'duplicate by slug');
+    assertEqual(ProposalUtils.validateName('Winter buy', existing), null, 'valid');
+    assertEqual(ProposalUtils.commitNote('Winter buy'), 'proposal: Winter buy', 'default commit note');
+});
+
+test('INVENTORY PROPOSALS', 'diffRow stores quantity as a delta and text fields as new values', async () => {
+    const saved = { quantity: '12', description: 'Chair', notes: '' };
+    assertEqual(ProposalUtils.diffRow(saved, { quantity: '20', description: 'Chair', notes: 'buy black' }),
+        [{ n: 'quantity', ne: '+8' }, { n: 'notes', ne: 'buy black' }], 'delta and new value');
+    assertEqual(ProposalUtils.diffRow(saved, { quantity: '9', description: 'Chair', notes: '' }), [{ n: 'quantity', ne: '-3' }], 'negative delta');
+    assertEqual(ProposalUtils.diffRow(saved, { ...saved }), [], 'no change');
+});
+
+test('INVENTORY PROPOSALS', 'applyChanges adds quantity deltas but sets text literally', async () => {
+    const row = ProposalUtils.applyChanges({ quantity: '12', description: 'Pole' }, [
+        { n: 'quantity', ne: '+8' }, { n: 'description', ne: '-5 ft pole' }
+    ]);
+    assertEqual(row.quantity, '20', 'quantity delta applied');
+    assertEqual(row.description, '-5 ft pole', 'signed text is not a delta');
+});
+
+test('INVENTORY PROPOSALS', 'mergeIntoProposal overwrites listed fields and keeps everything else', async () => {
+    const entries = ProposalUtils.parseRows([
+        { proposal: 'Spring buy', category: 'FURNITURE', itemNumber: 'CHAIR-003', changes: JSON.stringify([{ n: 'quantity', ne: '+4' }, { n: 'notes', ne: 'legs' }]), updated: '1' },
+        { proposal: 'Spring buy', category: 'FURNITURE', itemNumber: 'CHAIR-001', changes: JSON.stringify([{ n: 'quantity', ne: '+8' }]), updated: '1' }
+    ]);
+    const merged = ProposalUtils.mergeIntoProposal(entries, 'spring BUY', 'FURNITURE', [
+        { itemNumber: 'CHAIR-003', changes: [{ n: 'quantity', ne: '+2' }] },
+        { itemNumber: 'TABLE-001', changes: [{ n: 'quantity', ne: '+1' }] }
+    ], 'sam', 99);
+    const chair3 = merged.find(e => e.itemNumber === 'CHAIR-003');
+    assertEqual(chair3.changes, [{ n: 'notes', ne: 'legs' }, { n: 'quantity', ne: '+2' }], 'quantity replaced, notes kept');
+    assertEqual(merged.find(e => e.itemNumber === 'CHAIR-001').changes, [{ n: 'quantity', ne: '+8' }], 'untouched item kept');
+    assertEqual(merged.find(e => e.itemNumber === 'TABLE-001').proposal, 'Spring buy', 'new item uses the stored name');
+});
+
+test('INVENTORY PROPOSALS', 'replaceActiveEntries and markCommitted only touch the named proposal', async () => {
+    const entries = ProposalUtils.parseRows([
+        { proposal: 'Spring buy', category: 'FURNITURE', itemNumber: 'CHAIR-001', changes: JSON.stringify([{ n: 'quantity', ne: '+8' }]), updatedBy: 'sam', updated: '5' },
+        { proposal: 'Spring buy', category: 'FURNITURE', itemNumber: 'CHAIR-003', changes: JSON.stringify([{ n: 'quantity', ne: '+4' }]), updatedBy: 'sam', updated: '5' },
+        { proposal: 'Spring buy', category: 'HANGING SIGNS', itemNumber: 'HS-001', changes: JSON.stringify([{ n: 'quantity', ne: '+2' }]), updatedBy: 'dan', updated: '5' },
+        { proposal: 'Fall buy', category: 'FURNITURE', itemNumber: 'STOOL-001', changes: JSON.stringify([{ n: 'quantity', ne: '+4' }]), updated: '1', committedBy: 'dan', committed: '2' }
+    ]);
+    const row = (itemNumber, quantityChange) => ({ category: 'FURNITURE', itemNumber, quantityChange, description: '', currentDescription: '', notes: '', currentNotes: '' });
+    // CHAIR-001 unchanged, CHAIR-003 edited, HS-001 removed from the page
+    const replaced = ProposalUtils.replaceActiveEntries(entries, 'spring buy', [row('CHAIR-001', '8'), row('CHAIR-003', '6')], 'test', 99);
+    const spring = ProposalUtils.entriesOf(replaced, 'Spring buy');
+    assertEqual(spring.map(e => `${e.itemNumber} ${e.changes[0].ne} ${e.updatedBy}`), ['CHAIR-001 +8 sam', 'CHAIR-003 +6 test'], 'unchanged keeps its author; removed row dropped');
+    assertEqual(ProposalUtils.entriesOf(replaced, 'Fall buy').length, 1, 'other proposal kept');
+    let error = null;
+    try { ProposalUtils.replaceActiveEntries(entries, 'Fall buy', [], 'test', 99); } catch (e) { error = e; }
+    assertEqual(!!error, true, 'committed proposal refused');
+    const marked = ProposalUtils.markCommitted(entries, 'Spring buy', ['FURNITURE'], 'test', 99);
+    assertEqual(ProposalUtils.entriesOf(marked, 'Spring buy').map(e => e.committed), [99, 99, 0], 'only the committed category');
+    assertEqual(ProposalUtils.isCommitted(ProposalUtils.entriesOf(marked, 'Spring buy')), false, 'partially committed is still active');
+});
+
+test('INVENTORY PROPOSALS', 'groupProposals lists active proposals before committed ones', async () => {
+    const proposals = ProposalUtils.groupProposals(await Requests.getInventoryProposals());
+    assertEqual(proposals.map(p => p.name), ['Spring buy', 'Cabinet fix', 'Fall buy'], 'order');
+    assertEqual(proposals.map(p => !!p.committed), [false, false, true], 'committed flags');
+    assertEqual(proposals[0].categories, ['FURNITURE', 'HANGING SIGNS'], 'categories');
+    assertEqual(proposals[0].slug, 'spring-buy', 'slug');
+});
+
+test('INVENTORY PROPOSALS', 'proposal table joins current values and projects owned quantity by date', async () => {
+    const rows = await Requests.getInventoryProposalTable('spring buy');
+    assertEqual(rows.map(r => r.itemNumber), ['CHAIR-001', 'CHAIR-003', 'HS-001'], 'items');
+    const chair3 = rows.find(r => r.itemNumber === 'CHAIR-003');
+    assertEqual([chair3.currentQuantity, chair3.quantityChange, chair3.notes, chair3.currentNotes], ['12', '4', 'order matching legs', ''], 'joined values');
+    const ds = (iso) => Math.floor(new Date(`${iso}T12:00:00`).getTime() / 100);
+    assertEqual(ProposalUtils.projectQuantity(chair3, ds('2027-05-01')), 16, 'before the scheduled +6');
+    assertEqual(ProposalUtils.projectQuantity(chair3, ds('2027-07-01')), 22, 'after the scheduled +6');
+});
+
+test('INVENTORY PROPOSALS', 'saving the proposal table replaces its rows and drops unchanged ones', async () => {
+    const rows = (await Requests.getInventoryProposalTable('Cabinet fix')).map(r => ({ ...r }));
+    rows[0].quantityChange = '-2';
+    rows[0].description = 'Curved counter';
+    await _asUser(() => Requests.saveInventoryProposalTable(rows, 'Cabinet fix'));
+    assertEqual((await _proposalRows('Cabinet fix'))[0].changes, [{ n: 'quantity', ne: '-2' }, { n: 'description', ne: 'Curved counter' }], 'changes saved');
+    assertEqual((await _proposalRows('Spring buy')).length, 3, 'other proposals untouched');
+});
+
+test('INVENTORY PROPOSALS', 'committed proposals cannot be edited', async () => {
+    let error = null;
+    try { await Requests.saveInventoryProposalTable([], 'Fall buy'); } catch (e) { error = e; }
+    assertEqual(!!error, true, 'save refused');
+    assertEqual((await _proposalRows('Fall buy')).length, 1, 'committed row kept');
+});
+
+test('INVENTORY PROPOSALS', 'commit refuses when a category has unsaved edits', async () => {
+    const store = getReactiveStore(Requests.getInventoryTabData, Requests.saveInventoryTabData, ['FURNITURE', undefined, undefined, undefined]);
+    for (let i = 0; i < 100 && (store.isLoading || store.initialLoad); i++) await new Promise(r => setTimeout(r, 50));
+    store.data[0].notes = 'unsaved edit';
+    let error = null;
+    try { await _asUser(() => commitInventoryProposal('Spring buy', new Date().toISOString().slice(0, 10), 'proposal: Spring buy')); } catch (e) { error = e; }
+    store.setData(store.originalData);
+    assertEqual(/unsaved changes in FURNITURE/.test(error?.message || ''), true, `refused: ${error?.message}`);
+    assertEqual((await _proposalRows('Spring buy')).every(e => !e.committed), true, 'nothing committed');
+});
+
+test('INVENTORY PROPOSALS', 'commit changes nothing when a category is locked by another user', async () => {
+    let error = null;
+    try { await _asUser(() => commitInventoryProposal('Cabinet fix', new Date().toISOString().slice(0, 10), 'proposal: Cabinet fix')); } catch (e) { error = e; }
+    assertEqual(/CABINETS is locked/.test(error?.message || ''), true, `refused: ${error?.message}`);
+    const cab = (await Requests.getInventoryTabData('CABINETS')).find(r => r.itemNumber === 'CAB-004');
+    assertEqual(cab.quantity, '10', 'quantity unchanged');
+    assertEqual((await _proposalRows('Cabinet fix'))[0].committed, 0, 'not committed');
+});
+
+test('INVENTORY PROPOSALS', 'commit applies every category with the note and marks the proposal committed', async () => {
+    const today = new Date();
+    const iso = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+    const result = await _asUser(() => commitInventoryProposal('Spring buy', iso, 'proposal: Spring buy'));
+    assertEqual(result, { committed: ['FURNITURE', 'HANGING SIGNS'], failed: [] }, 'both categories saved');
+    const furniture = await Requests.getInventoryTabData('FURNITURE');
+    const chair1 = furniture.find(r => r.itemNumber === 'CHAIR-001');
+    const chair3 = furniture.find(r => r.itemNumber === 'CHAIR-003');
+    assertEqual([chair1.quantity, chair3.quantity, chair3.notes], ['28', '16', 'order matching legs'], 'FURNITURE changed');
+    assertEqual(JSON.parse(chair1.edithistory).h[0].s, 'proposal: Spring buy', 'history note');
+    const sign = (await Requests.getInventoryTabData('HANGING SIGNS')).find(r => r.itemNumber === 'HS-001');
+    assertEqual(sign.quantity, '2', 'HANGING SIGNS changed');
+    assertEqual((await _proposalRows('Spring buy')).every(e => e.committed && e.committedBy === 'test'), true, 'rows committed');
+    assertEqual(await Requests.getSheetLock('INVENTORY', 'FURNITURE'), null, 'FURNITURE lock released');
+});
+
+// ── NOTE LENGTH (InventoryNoteMaxLength preference) ───────────────────────────
+
+test('NOTE LENGTH', 'resolveInventoryNoteMaxLength reads the preference and falls back to 25', async () => {
+    const pref = (value) => [{ id: 'InventoryNoteMaxLength', value }];
+    assertEqual(resolveInventoryNoteMaxLength(pref('10')), 10, 'integer value');
+    assertEqual([resolveInventoryNoteMaxLength(null), resolveInventoryNoteMaxLength([])], [25, 25], 'missing');
+    assertEqual(['abc', '0', '-3'].map(v => resolveInventoryNoteMaxLength(pref(v))), [25, 25, 25], 'invalid');
+    assertEqual(await Requests.getInventoryNoteMaxLength(), 25, 'fixture preference');
+});
+
+test('NOTE LENGTH', 'proposal names and commit notes follow the note limit', async () => {
+    assertEqual([ProposalUtils.nameMaxLength(25), ProposalUtils.nameMaxLength(20), ProposalUtils.nameMaxLength(5)], [15, 10, 1], 'name limits');
+    assertEqual(ProposalUtils.validateName('Eleven char', [], 20), 'Use at most 10 characters', 'shorter limit');
+    assertEqual(ProposalUtils.commitNote('Spring buy', 15), 'proposal: Sprin', 'commit note truncated');
+});
+
+test('NOTE LENGTH', 'inventory saves truncate notes to the preference', async () => {
+    const setLimit = async (value) => {
+        const prefs = (await Requests.getPreferences()).map(p => ({ ...p, value: p.id === 'InventoryNoteMaxLength' ? value : p.value }));
+        await _asUser(() => Requests.savePreferences(prefs));
+    };
+    await setLimit('10');
+    try {
+        assertEqual(await Requests.getInventoryNoteMaxLength(), 10, 'preference change picked up');
+        const rows = (await Requests.getInventoryTabData('FURNITURE')).map(r => ({ ...r }));
+        rows.find(r => r.itemNumber === 'STOOL-003').quantity = '21';
+        await _asUser(() => Requests.saveInventoryTabData(rows, 'FURNITURE', undefined, undefined, undefined, { note: 'a long recount note' }));
+        const saved = (await Requests.getInventoryTabData('FURNITURE')).find(r => r.itemNumber === 'STOOL-003');
+        assertEqual(JSON.parse(saved.edithistory).h[0].s, 'a long rec', 'note truncated to 10');
+    } finally {
+        await setLimit('25');
     }
 });
 
@@ -1568,6 +2048,51 @@ test('VIEWS ENGINE', 'narrow variant replaces columns; medium/wide keep them', a
     assertEqual(medium.slots.length, 7, 'medium');
     assertEqual(narrow.slots[0].lines, [['Show'], ['Client']], 'narrow stacks Client under Show');
     assertEqual(narrow.details.map(f => f.key).includes('City'), true, 'City moves to details when narrow');
+});
+
+test('VIEWS ENGINE', 'presentation comes from the view: style props, sortable list, type cells; fields keep data only', async () => {
+    const fields = [
+        { key: 'item', label: 'Item#', type: 'item' },
+        { key: 'done', label: 'Done', type: 'checkbox' },
+        { key: 'who', label: 'Who', type: 'select', options: ['A', 'B'] },
+        { key: 'pic', label: 'IMG', cell: 'image', sortable: true }
+    ];
+    const view = {
+        id: 'v', layout: 'table', columns: ['pic', 'item', 'done', 'who'],
+        sortable: ['item', 'w*'],
+        style: { pic: { width: 1, cell: 'image', labelHtml: '<i>img</i>', cellOptions: { itemKey: 'item' } }, item: { label: 'No.', title: 'Item number' } }
+    };
+    const { result: r, warnings } = withViewWarnings(() => resolveView(fields, view));
+    const f = (k) => r.fieldMap.get(k);
+    assertEqual([f('item').label, f('item').title, f('item').sortable, f('who').sortable, f('done').sortable], ['No.', 'Item number', true, true, false], 'label, title, sortable (patterns)');
+    assertEqual([f('pic').cell, f('pic').labelHtml, f('pic').cellOptions, f('done').cell, f('who').cell, f('who').options], ['image', '<i>img</i>', { itemKey: 'item' }, 'checkbox', 'select', ['A', 'B']], 'view cells, type cells, data options');
+    assertEqual(warnings.filter(w => /presentation props \(sortable, cell\)/.test(w)).length, 1, 'presentation on a field warns');
+    const bare = resolveView([{ key: 'pic', cell: 'image' }], { id: 'b', layout: 'table', columns: ['pic'] });
+    assertEqual(bare.fieldMap.get('pic').cell, undefined, 'and is ignored');
+});
+
+test('VIEWS ENGINE', 'calendar.actions: keys drawn in the chip end bar are shown; print variants can change cell options', async () => {
+    const fields = ['s', 'e', 'a', 'b', 'c'].map(key => ({ key, label: key }));
+    const view = {
+        id: 'cal', layout: 'calendar',
+        calendar: { start: 's', end: 'e', chip: [['a']], actions: ['b', 'nope'] },
+        hidden: ['s', 'e', 'c'],
+        style: { b: { cell: 'showList', cellOptions: { max: 2 } } },
+        variants: { print: { style: { b: { cellOptions: { max: null } } } } }
+    };
+    const { result: r, warnings } = withViewWarnings(() => resolveView(fields, view));
+    assertEqual([r.calendar.actions, r.shown], [['b'], ['a', 'b']], 'actions shown after the chip lines');
+    assertEqual(warnings.some(w => /unknown key "nope" in calendar.actions/.test(w)), true, 'unknown key warns');
+    const printed = resolveView(fields, view, { print: true });
+    assertEqual([r.fieldMap.get('b').cellOptions.max, printed.fieldMap.get('b').cellOptions.max], [2, null], 'print variant');
+});
+
+test('VIEWS ENGINE', 'registry style and sortable apply to every view; a view overrides them', async () => {
+    const registry = { style: { a: { width: 10, cell: 'slot' } }, sortable: ['a'], views: [] };
+    const merged = withRegistryDefaults(registry, { id: 'v', style: { a: { width: 20 } }, sortable: ['b'] });
+    assertEqual([merged.style.a, merged.sortable], [{ width: 20, cell: 'slot' }, ['b']], 'style merges, lists replace');
+    const plain = { id: 'p' };
+    assertEqual(withRegistryDefaults({ views: [] }, plain) === plain, true, 'no registry defaults: the view itself');
 });
 
 test('VIEWS ENGINE', 'patches apply after variants and respect sizes', async () => {
@@ -1656,7 +2181,7 @@ test('VIEWS ACTION', 'page action wins, then details, then none', async () => {
     assertEqual(resolveAction(null, r).kind, 'details', 'details');
     const { result: noDetails } = withViewWarnings(() => resolveView([{ key: 'a' }], { id: 'n', layout: 'table', columns: ['a'] }));
     assertEqual(resolveAction(null, noDetails).kind, 'none', 'none');
-    assertEqual(resolveAction(null, noDetails, 'none', { hasRowDetails: true }).kind, 'details', 'row-details slot');
+    assertEqual(resolveAction(null, noDetails, { hasRowDetails: true }).kind, 'details', 'row-details slot');
 });
 
 test('VIEWS ACTION', 'both to and run → to, with a warning', async () => {
@@ -1664,6 +2189,13 @@ test('VIEWS ACTION', 'both to and run → to, with a warning', async () => {
     const { result: a, warnings } = withViewWarnings(() => resolveAction({ to: () => 'x', run: () => {} }, r));
     assertEqual(a.kind, 'navigate', 'to wins');
     if (!warnings.length) throw new Error('expected warning');
+});
+
+test('VIEWS SEARCH', 'makeHighlighter escapes, wraps matches and merges overlaps', async () => {
+    const h = makeHighlighter(['ab', 'bc']);
+    assertEqual(h('xABCx <b>'), 'x<span class="search-match">ABC</span>x &lt;b&gt;', 'merged, case-insensitive, escaped');
+    assertEqual([makeHighlighter([])('<i>'), h(null), h(0)], ['&lt;i&gt;', '', '0'], 'no words only escapes');
+    assertEqual(makeHighlighter(['a.b'])('a.b axb'), '<span class="search-match">a.b</span> axb', 'regex characters are literal');
 });
 
 test('VIEWS SEARCH', 'searchWords drops words shorter than 2 characters', async () => {
@@ -1708,6 +2240,7 @@ test('VIEWS COLOR', 'colour rules: auto numbers/dates, value, literal; rowColor 
     assertEqual(applyColorRule('auto', 0, { format: 'number' }), 'orange', 'zero');
     assertEqual(applyColorRule('auto', 5, { format: 'number' }), '', 'positive');
     assertEqual(applyColorRule('auto', '', { format: 'number' }), '', 'blank');
+    assertEqual(['X', 'true', '', '-', '8/1'].map(v => applyColorRule('checked:gray', v)), ['gray', 'gray', '', '', ''], 'checked:<class>');
     assertEqual(applyColorRule('value', 'gray', {}), 'gray', 'value');
     assertEqual(applyColorRule('purple', 'x', {}), 'purple', 'literal');
     const today = todayISOString();
@@ -1716,6 +2249,18 @@ test('VIEWS COLOR', 'colour rules: auto numbers/dates, value, literal; rowColor 
     assertEqual(rowColorFor({ quantity: 3 }, resolved), 'green', 'fallback');
     assertEqual(rowColorFor({ quantity: -2 }, resolved), 'red', 'auto row');
     assertEqual(colorFor({ quantity: 0 }, { key: 'quantity', format: 'number' }, resolved), 'orange', 'cell colour');
+});
+
+test('VIEWS COLOR', 'colour rules: sign and differs (the proposal table)', async () => {
+    const sign = 'sign:proposal-increase:proposal-decrease';
+    assertEqual(['8', '+3', '-2', '0', '', 'x'].map(v => applyColorRule(sign, v)), ['proposal-increase', 'proposal-increase', 'proposal-decrease', '', '', ''], 'sign');
+    assertEqual(applyColorRule('sign::red', 4), '', 'empty positive class');
+    const resolved = { style: { description: { color: 'differs:currentDescription:proposal-changed' } } };
+    const field = { key: 'description' };
+    assertEqual(colorFor({ description: 'New', currentDescription: 'Old' }, field, resolved), 'proposal-changed', 'differs');
+    assertEqual(colorFor({ description: 'Same', currentDescription: 'Same' }, field, resolved), '', 'same text');
+    assertEqual(colorFor({ description: '', currentDescription: undefined }, field, resolved), '', 'blank and missing are equal');
+    assertEqual(applyColorRule('differs:currentDescription:proposal-changed', 'New'), '', 'no row, no colour');
 });
 
 test('VIEWS SIZE', 'container and viewport tiers use the shared breakpoints', async () => {
@@ -1755,14 +2300,20 @@ test('VIEWS CARDS', 'bucketRowsToCards: buckets by key, empty buckets seeded, no
     assertEqual([cards[1].row.tab, cards[1].hasDetails, cards[1].cardClass], ['FURNITURE', false, 'purple'], 'synthetic row, no details');
 });
 
-// ── Instant write (views-and-renderers-plan §4.16, Phase 2) ──────────────────
-// writeCellVerified locates rows by identity (Client + Year + Show) and columns by header name,
+// ── Instant write (views-and-renderers-plan §4.16) ───────────────────────────
+// writeCellsVerified locates rows by identity (Client + Year + Show) and columns by header name,
 // reads, writes, re-reads, and retries once if rows moved. These tests run against FakeGoogle's
 // Production Schedule and restore every cell they touch.
 
 const IW_DB = 'PROD_SCHED';
 const IW_TAB = 'Production Schedule';
 const IW_ROW = { Client: 'Gearfire', Year: '2025', Show: 'SHOT Show' };
+
+// One verified cell write (a batch of one); resolves to its result
+async function writeOneVerified(database, tab, row, column, value) {
+    const [result] = await Requests.writeCellsVerified(database, tab, [{ row, column, value }]);
+    return result;
+}
 
 function iwSheet() {
     return FakeGoogleSheetsService.mockData[IW_DB][IW_TAB];
@@ -1778,13 +2329,13 @@ test('INSTANT WRITE', 'checkbox reading: X/TRUE checked, any other value uncheck
     assertEqual(['X', 'x', ' TRUE ', '-', 'N/a', '1/10', '', null].map(isCheckedValue), [true, true, true, false, false, false, false, false], 'isChecked');
 });
 
-test('INSTANT WRITE', 'writeCellVerified writes one cell by identity and verifies it', async () => {
+test('INSTANT WRITE', 'a verified write changes one cell by identity and verifies it', async () => {
     const before = iwCell(IW_ROW, 'Elev');
     try {
-        const res = await Requests.writeCellVerified(IW_DB, IW_TAB, IW_ROW, 'Elev', 'X');
+        const res = await writeOneVerified(IW_DB, IW_TAB, IW_ROW, 'Elev', 'X');
         assertEqual(res.ok, true, 'ok');
         assertEqual(iwCell(IW_ROW, 'Elev').value, 'X', 'cell written');
-        const res2 = await Requests.writeCellVerified(IW_DB, IW_TAB, IW_ROW, 'Elev', '');
+        const res2 = await writeOneVerified(IW_DB, IW_TAB, IW_ROW, 'Elev', '');
         assertEqual([res2.ok, iwCell(IW_ROW, 'Elev').value], [true, ''], 'uncheck writes blank');
     } finally {
         iwSheet()[before.r][before.c] = before.value;
@@ -1792,9 +2343,9 @@ test('INSTANT WRITE', 'writeCellVerified writes one cell by identity and verifie
 });
 
 test('INSTANT WRITE', 'refuses columns not listed in InstantWriteTables and tables without an entry', async () => {
-    const r1 = await Requests.writeCellVerified(IW_DB, IW_TAB, IW_ROW, 'City', 'X');
+    const r1 = await writeOneVerified(IW_DB, IW_TAB, IW_ROW, 'City', 'X');
     assertEqual(r1, { ok: false, reason: 'column-not-writable' }, 'column refused');
-    const r2 = await Requests.writeCellVerified(IW_DB, 'Some Other Tab', IW_ROW, 'Elev', 'X');
+    const r2 = await writeOneVerified(IW_DB, 'Some Other Tab', IW_ROW, 'Elev', 'X');
     assertEqual(r2, { ok: false, reason: 'no-config' }, 'no config');
 });
 
@@ -1804,7 +2355,7 @@ test('INSTANT WRITE', 'duplicate identity is never guessed', async () => {
     const copy = [...sheet[src.r]];
     sheet.push(copy);
     try {
-        const res = await Requests.writeCellVerified(IW_DB, IW_TAB, IW_ROW, 'Elev', 'X');
+        const res = await writeOneVerified(IW_DB, IW_TAB, IW_ROW, 'Elev', 'X');
         assertEqual(res, { ok: false, reason: 'duplicate' }, 'duplicate');
         assertEqual(sheet[src.r][src.c], src.value, 'original untouched');
     } finally {
@@ -1827,7 +2378,7 @@ test('INSTANT WRITE', 'row moved mid-write: re-located by identity and written c
         return original.call(this, tableId, range);
     };
     try {
-        const res = await Requests.writeCellVerified(IW_DB, IW_TAB, IW_ROW, 'Panels', 'X');
+        const res = await writeOneVerified(IW_DB, IW_TAB, IW_ROW, 'Panels', 'X');
         assertEqual(res.ok, true, 'ok after retry');
         const after = iwCell(IW_ROW, 'Panels');
         assertEqual([after.r, after.value], [before.r + 1, 'X'], 'written at the moved row');
@@ -1864,7 +2415,366 @@ test('INSTANT WRITE', 'design queue preferences are readable as json', async () 
     assertContains(fields, 'Assignee', 'DesignQueueFields');
     const cfg = await Requests.getInstantWriteConfig('PROD_SCHED', 'Production Schedule');
     assertEqual(cfg.identity, ['Client', 'Year', 'Show'], 'identity');
-    assertEqual(cfg.columns.Assignee, 'select', 'Assignee select');
+    assertEqual(cfg.columns, ['Elev', 'Panels', 'Setups', 'Assignee'], 'columns');
+});
+
+// ── Instant-write preference, column kinds, ship estimate ────────────────────
+
+test('INSTANT WRITE', 'InstantWriteTables: columns as a list, the older typed object still read', async () => {
+    const key = 'PROD_SCHED/Production Schedule';
+    assertEqual(instantWriteEntry({ [key]: { identity: ['Client', 'Year', 'Show', 'Size'], columns: ['Elev', 'Assignee'] } }, 'PROD_SCHED', 'Production Schedule'),
+        { identity: ['Client', 'Year', 'Show', 'Size'], columns: ['Elev', 'Assignee'] }, 'list form');
+    assertEqual(instantWriteEntry({ [key]: { identity: ['Client'], columns: { Elev: 'checkbox', Assignee: 'select' } } }, 'PROD_SCHED', 'Production Schedule'),
+        { identity: ['Client'], columns: ['Elev', 'Assignee'] }, 'object form');
+    assertEqual([instantWriteEntry({ [key]: { identity: [], columns: ['Elev'] } }, 'PROD_SCHED', 'Production Schedule'), instantWriteEntry({}, 'PROD_SCHED', 'Production Schedule')], [null, null], 'incomplete');
+});
+
+test('INSTANT WRITE', 'keys: identities match trimmed and case-insensitively; cells by normalized column', async () => {
+    const id = ['Client', 'Year', 'Show'];
+    const key = (row) => identityKey(id, k => row[k]);
+    assertEqual(key({ Client: ' QGenda ', Year: 2025, Show: 'HIMSS' }), key({ Client: 'qgenda', Year: '2025', Show: 'himss ' }), 'same identity');
+    assertEqual(key({ Client: 'A|B', Year: '', Show: 'C' }) === key({ Client: 'A', Year: 'B', Show: 'C' }), false, 'a value with | is not split');
+    assertEqual(cellKey('r', 'Account  Manager'), cellKey('r', 'account manager'), 'column names normalized');
+    assertEqual(joinKey('a', null, 1).split(''), ['a', '', '1'], 'parts');
+});
+
+test('COLUMN TYPES', 'declared types win; undeclared columns are text unless the name reads as a date, number or currency', async () => {
+    const all = { 'DB/Tab': { 'Ship BKD': 'checkbox', Owner: { type: 'select', options: 'People' }, Odd: 'colour', ' ': 'text' } };
+    const list = columnTypesEntry(all, 'DB', 'Tab');
+    assertEqual(list, [{ column: 'Ship BKD', type: 'checkbox' }, { column: 'Owner', type: 'select', options: 'People' }], 'unknown types and blank names skipped');
+    assertEqual(columnTypesEntry(all, 'DB', 'Other'), [], 'other tab');
+    const map = columnTypeMap(list);
+    assertEqual([columnTypeOf(map, 'ship  bkd'), columnTypeOf(map, 'Owner'), columnTypeOf(map, 'Ship'), columnTypeOf(map, 'Notes')],
+        [{ type: 'checkbox' }, { type: 'select', options: 'People' }, { type: 'date' }, { type: 'text' }], 'declared, then guessed');
+    assertEqual(['S. Start', 'Qty', 'Total Cost', 'Booth#'].map(guessColumnType), ['date', 'number', 'currency', 'text'], 'name guesses');
+});
+
+test('COLUMN TYPES', 'getColumnTypes reads the ColumnTypes preference; schedule fields carry the types', async () => {
+    const types = await Requests.getColumnTypes('PROD_SCHED', 'Production Schedule');
+    const byName = Object.fromEntries(types.map(t => [t.column, t]));
+    assertEqual([byName.Elev?.type, byName.Assignee], ['checkbox', { column: 'Assignee', type: 'select', options: 'DesignQueueAssignees' }], 'declared');
+    const fields = Object.fromEntries(buildScheduleFields([{ Elev: '', 'Ship BKD': '', Ship: '', Client: '', Assignee: '' }], { packlist: false, types }).map(f => [f.key, f]));
+    assertEqual([fields.Elev.type, fields['Ship BKD'].type, fields.Ship.type, fields.Client.type, fields.Assignee.optionList], ['checkbox', 'checkbox', 'date', undefined, 'DesignQueueAssignees'], 'field types');
+});
+
+test('INSTANT WRITE', 'design queue setup: instant config, shown fields, assignees and column types in one call', async () => {
+    const [setup] = await Requests.getDesignQueueSetup('PROD_SCHED', 'Production Schedule');
+    assertEqual(setup.instant, { identity: ['Client', 'Year', 'Show'], columns: ['Elev', 'Panels', 'Setups', 'Assignee'] }, 'instant config');
+    assertContains(setup.fields, 'Note', 'DesignQueueFields');
+    assertEqual(setup.assignees, ['Alex', 'Sam Smith'], 'assignees');
+    assertEqual(setup.assigneeColors, { Alex: 'red', 'Sam Smith': 'blue' }, 'assignee colour words');
+    assertEqual(setup.types, await Requests.getColumnTypes('PROD_SCHED', 'Production Schedule'), 'the declared column types');
+});
+
+test('INSTANT WRITE', 'Ship shows the estimate (with year, from show dates when missing); transship uses the source end', async () => {
+    const row = { Ship: '', 'S. Start': '3/20', 'S. End': '3/23', Year: '2026' };
+    assertEqual(withShipDate(row).Ship, '03/06/2026', 'S. Start minus 14 days');
+    assertEqual(withShipDate({ ...row, Ship: '3/1' }).Ship, '03/01/2026', 'sheet value gains its year');
+    assertEqual(withShipDate({ ...row, AppData: { transshipSource: 'X', transshipSourceEndDate: '03/02/2026' } }).Ship, '03/02/2026', 'transship');
+    assertEqual(estimateShipDate({ Year: '2026' }), null, 'no dates');
+});
+
+// ── Filters: same-column OR, is empty, checked / unchecked ───────────────────
+
+test('FILTERS', 'filters on one column match rows meeting either; excludes still apply', async () => {
+    const rows = [{ N: 'Bob' }, { N: '' }, { N: 'Ann' }, { N: 'Bobby' }];
+    const sp = textFiltersToSearchParams([
+        { column: 'N', values: ['bob'], type: 'contains' },
+        { column: 'N', values: [], type: 'empty' },
+        { column: 'N', values: ['bobby'], type: 'excludes' }
+    ]);
+    assertEqual(searchFilter(rows, sp).map(r => r.N), ['Bob', ''], 'Bob or empty, not Bobby');
+    assertEqual(searchFilter(rows, textFiltersToSearchParams([{ column: 'N', values: [], type: 'empty' }])).map(r => r.N), [''], 'is empty alone');
+    assertEqual(searchFilter(rows, textFiltersToSearchParams([{ column: 'N', values: [''], type: 'contains' }])).length, 4, 'a contains filter without a value is ignored');
+});
+
+test('FILTERS', 'checkbox filters: checked is X or TRUE, unchecked is anything else', async () => {
+    const rows = [{ E: 'X' }, { E: '' }, { E: '-' }, { E: 'TRUE' }, { E: 'N/a' }];
+    assertEqual(searchFilter(rows, textFiltersToSearchParams([{ column: 'E', type: 'checked' }])).map(r => r.E), ['X', 'TRUE'], 'checked');
+    assertEqual(searchFilter(rows, textFiltersToSearchParams([{ column: 'E', type: 'unchecked' }])).map(r => r.E), ['', '-', 'N/a'], 'unchecked');
+});
+
+test('FILTERS', 'URL filter parameters keep same-column filters and value-less types', async () => {
+    const sp = parseSearchParameters({ Col1: 'Client', Val1: 'a|b', Type1: 'contains', Col2: 'Client', Val2: '', Type2: 'empty' }).searchParams;
+    assertEqual(sp, { Client: [{ values: ['a', 'b'], type: 'contains' }, { values: [], type: 'empty' }] }, 'grouped');
+    const all = await Requests.getProductionScheduleData(null, null);
+    const want = all.filter(r => isCheckedValue(r.Setups) && (/o/i.test(r.Client) || !String(r.Client).trim()));
+    const data = await Requests.getProductionScheduleData(null, textFiltersToSearchParams([
+        { column: 'Setups', type: 'checked' },
+        { column: 'Client', values: ['o'], type: 'contains' },
+        { column: 'Client', values: [], type: 'empty' }
+    ]));
+    assertEqual([data.length > 0, data.length], [true, want.length], 'schedule data filtered');
+});
+
+// ── Show notes: empty notes are removed, never appended ──────────────────────
+
+function notesSheet() {
+    return FakeGoogleSheetsService.mockData.CACHE.ShowNotes;
+}
+function notesSnapshot() {
+    return notesSheet().map(r => r.slice());
+}
+function notesRestore(snap) {
+    const s = notesSheet();
+    s.length = 0;
+    snap.forEach(r => s.push(r.slice()));
+}
+
+test('SHOW NOTES', "a schedule row's note comes from its show identifier and follows note saves", async () => {
+    const snap = notesSnapshot();
+    const id = 'CHAINCO 2026 SPRING EXPO';
+    const row = { Show: 'Spring Expo', Client: 'ChainCo', Year: '2026' };
+    try {
+        await Requests.saveShowNote(id, 'first');
+        assertEqual(await Requests.getShowNoteForRow(row), { identifier: id, note: 'first' }, 'note by identifier');
+        await Requests.saveShowNote(id, 'second');
+        assertEqual((await Requests.getShowNoteForRow(row)).note, 'second', 'a save refreshes the cached note');
+        assertEqual(await Requests.getShowNoteForRow({ Show: null, Client: null, Year: null }), { identifier: '', note: '' }, 'no identifier');
+    } finally {
+        await Requests.saveShowNote(id, '');
+        notesRestore(snap);
+    }
+});
+
+test('SHOW NOTES', 'clearing a note removes its row; an empty note is never appended', async () => {
+    const snap = notesSnapshot();
+    try {
+        const id = 'TESTCO 2099 CLEAR TEST';
+        await Requests.saveShowNote(id, 'to be cleared');
+        assertEqual(notesSheet().some(r => r[0] === id), true, 'created');
+        const res = await Requests.saveShowNote(id, '   ');
+        assertEqual([res.ok, notesSheet().some(r => r[0] === id)], [true, false], 'row removed');
+        const len = notesSheet().length;
+        const res2 = await Requests.saveShowNote('TESTCO 2099 NEVER', '');
+        assertEqual([res2.ok, notesSheet().length], [true, len], 'nothing appended');
+        assertEqual(notesSheet()[0], ['Identifier', 'Note', 'EditHistory'], 'header kept');
+    } finally {
+        notesRestore(snap);
+    }
+});
+
+test('SHOW NOTES', 'any save removes rows with empty notes and keeps every other note', async () => {
+    const snap = notesSnapshot();
+    const s = notesSheet();
+    try {
+        s.push(['TESTCO 2099 EMPTY A', '', 'old history'], ['', '', ''], ['TESTCO 2099 KEEP', 'keep me', ''], ['TESTCO 2099 EMPTY B', ' ', '']);
+        const res = await Requests.saveShowNote('TESTCO 2099 NEW', 'a new note');
+        assertEqual(res.ok, true, 'ok');
+        const ids = s.slice(1).map(r => r[0]);
+        assertEqual(ids.filter(id => /EMPTY/.test(id)).length + ids.filter(id => !id).length, 0, 'empty rows removed');
+        assertContains(ids, 'TESTCO 2099 KEEP', 'other note kept');
+        assertEqual(s.find(r => r[0] === 'TESTCO 2099 NEW')?.[1], 'a new note', 'new note written');
+        snap.slice(1).forEach(r => assertContains(ids, r[0], 'fixture note kept'));
+    } finally {
+        notesRestore(snap);
+    }
+});
+
+test('SHOW NOTES', 'rows moving before a removal never lose a note', async () => {
+    const snap = notesSnapshot();
+    const s = notesSheet();
+    try {
+        s.push(['TESTCO 2099 EMPTY', '', ''], ['TESTCO 2099 A', 'note a', ''], ['TESTCO 2099 B', 'note b', '']);
+        let fired = false;
+        const res = await withFaults({
+            // Another save inserts a note at the top just before the removal: positions shift by one
+            beforeDelete: () => { if (!fired) { fired = true; s.splice(1, 0, ['TESTCO 2099 OTHER', 'other note', '']); } }
+        }, () => Requests.saveShowNote('TESTCO 2099 A', 'note a, edited'));
+        assertEqual(res.ok, true, 'ok');
+        const notes = Object.fromEntries(s.slice(1).map(r => [r[0], r[1]]));
+        assertEqual([notes['TESTCO 2099 A'], notes['TESTCO 2099 B'], notes['TESTCO 2099 OTHER']], ['note a, edited', 'note b', 'other note'], 'every note present');
+        snap.slice(1).forEach(r => assertEqual(notes[r[0]], r[1], 'fixture note ' + r[0]));
+    } finally {
+        notesRestore(snap);
+    }
+});
+
+test('SHOW NOTES', 'a note write that lands on a moved row is undone and retried', async () => {
+    const snap = notesSnapshot();
+    const s = notesSheet();
+    try {
+        s.push(['TESTCO 2099 FIRST', 'first note', ''], ['TESTCO 2099 TARGET', 'target note', '']);
+        let fired = false;
+        const res = await withFaults({
+            beforeBatchWrite: (t) => { if (t === 'CACHE' && !fired) { fired = true; s.splice(1, 0, ['TESTCO 2099 INSERTED', 'inserted note', '']); } }
+        }, () => Requests.saveShowNote('TESTCO 2099 TARGET', 'target, edited'));
+        assertEqual(res.ok, true, 'ok');
+        const notes = Object.fromEntries(s.slice(1).map(r => [r[0], r[1]]));
+        assertEqual([notes['TESTCO 2099 TARGET'], notes['TESTCO 2099 FIRST'], notes['TESTCO 2099 INSERTED']], ['target, edited', 'first note', 'inserted note'], 'only the target changed');
+    } finally {
+        notesRestore(snap);
+    }
+});
+
+// ── Cell edits (utils/cellEdits.js): batch and instant edits ─────────────────
+
+const editWait = (ms) => new Promise(r => setTimeout(r, ms));
+
+function batchHarness(rowKey = null) {
+    const rows = [{ k: '1', A: 'x', metadata: 'm' }, { k: '2', A: 'y' }];
+    const originals = rows.map(r => ({ ...r }));
+    const emitted = [];
+    const edits = useBatchEdits({
+        rows: () => rows,
+        originalRows: () => originals,
+        rowKey: () => rowKey,
+        undoRoute: () => null,
+        // The page writes its rows on cell-edit
+        emitEdit: (i, key, value) => { emitted.push([i, key, value]); rows[i][key] = value; }
+    });
+    return { rows, emitted, edits };
+}
+
+test('CELL EDITS', 'batch: an edit marks the cell unsaved until it is back to the loaded value', async () => {
+    const { edits, emitted } = batchHarness();
+    edits.edit(0, 'A', 'z');
+    assertEqual([edits.cellState(0, 'A'), edits.hasUnsaved.value, emitted.length], ['unsaved', true, 1], 'changed');
+    edits.edit(0, 'A', 'x');
+    assertEqual([edits.cellState(0, 'A'), edits.hasUnsaved.value], ['', false], 'back to loaded');
+});
+
+test('CELL EDITS', 'batch: revert, nested tables, and recompare (with metadata)', async () => {
+    const { rows, edits, emitted } = batchHarness();
+    edits.edit(1, 'A', 'q');
+    edits.revert(1, 'A');
+    assertEqual([rows[1].A, edits.cellState(1, 'A'), emitted[emitted.length - 1]], ['y', '', [1, 'A', 'y']], 'reverted');
+    edits.setNested(0, 'Items', true);
+    assertEqual([edits.cellState(0, 'Items'), edits.hasUnsaved.value], ['unsaved', true], 'nested changed');
+    edits.setNested(0, 'Items', false);
+    assertEqual(edits.hasUnsaved.value, false, 'nested back');
+    rows[0].metadata = 'changed';
+    edits.compareAll(['A']);
+    assertEqual([edits.cellState(0, 'A'), edits.hasUnsaved.value], ['', true], 'metadata counts as a change');
+});
+
+test('CELL EDITS', 'batch: loaded values follow the row key when rows move', async () => {
+    const { rows, edits } = batchHarness('k');
+    rows.reverse();
+    assertEqual([edits.originalValue(rows[0], 0, 'A'), edits.originalValue(rows[1], 1, 'A')], ['y', 'x'], 'by key');
+});
+
+test('CELL EDITS', 'batch with a row key: moved rows mark the table, not cells; edits compare by key', async () => {
+    const { rows, edits } = batchHarness('k');
+    rows.reverse();
+    edits.compareAll(['A']);
+    assertEqual([edits.cellState(0, 'A'), edits.cellState(1, 'A'), edits.hasUnsaved.value], ['', '', true], 'moved: unsaved, no cells');
+    edits.edit(0, 'A', 'q');
+    assertEqual(edits.cellState(0, 'A'), 'unsaved', 'edit after a move');
+    edits.edit(0, 'A', 'y');
+    assertEqual(edits.cellState(0, 'A'), '', 'back to its own loaded value');
+    rows.reverse();
+    edits.compareAll(['A']);
+    assertEqual(edits.hasUnsaved.value, false, 'order restored');
+    rows.pop();
+    edits.compareAll(['A']);
+    assertEqual(edits.hasUnsaved.value, true, 'a removed row counts as a change');
+});
+
+function instantHarness(commit) {
+    const rows = [{ id: 'a', Elev: '', Note: '' }, { id: 'b', Elev: 'X', Note: 'n' }];
+    const calls = { commits: [], errors: [], refreshes: 0 };
+    const edits = useInstantEdits({
+        enabled: () => true,
+        rows: () => rows,
+        rowId: (r) => r.id,
+        commitCells: async (entries) => {
+            calls.commits.push(entries.map(e => `${e.row.id}.${e.key}=${e.value}`));
+            return commit(entries);
+        },
+        derive: (r) => ({ ...r, done: r.Elev === 'X' }),
+        field: (key) => (key === 'Elev' ? { key, label: 'Elev', type: 'checkbox' } : { key, label: key }),
+        delay: () => 20,
+        modal: () => ({ error: (m) => calls.errors.push(m), alert: () => {} }),
+        refresh: () => { calls.refreshes++; }
+    });
+    return { rows, calls, edits };
+}
+const allOk = async (entries) => entries.map(() => ({ ok: true }));
+
+test('CELL EDITS', 'instant: edits show at once and nearby edits are written as one batch', async () => {
+    const { rows, calls, edits } = instantHarness(allOk);
+    edits.edit(rows[0], 'Elev', 'X');
+    edits.edit(rows[1], 'Note', 'new');
+    assertEqual([edits.cellState(rows[0], 'Elev'), edits.overlay(rows)[0]], ['unsaved', { id: 'a', Elev: 'X', Note: '', done: true }], 'shown and derived');
+    await editWait(80);
+    assertEqual(calls.commits, [['a.Elev=X', 'b.Note=new']], 'one batch');
+    assertEqual(edits.cellState(rows[0], 'Elev'), '', 'saved');
+    rows[0].Elev = 'X';
+    rows[1].Note = 'new';
+    edits.reconcile();
+    assertEqual(Object.keys(edits.pending).length, 0, 'overlay dropped once the rows carry the values');
+});
+
+test('CELL EDITS', 'instant: a cell back to its loaded value within the delay is not written', async () => {
+    const { rows, calls, edits } = instantHarness(allOk);
+    edits.edit(rows[0], 'Elev', 'X');
+    edits.edit(rows[0], 'Elev', '');
+    edits.edit(rows[1], 'Elev', 'TRUE'); // checked, like the loaded X
+    await editWait(80);
+    assertEqual([calls.commits, Object.keys(edits.pending).length], [[], 0], 'nothing written');
+});
+
+test('CELL EDITS', 'instant: a failed write reverts, reports once and asks for a refresh', async () => {
+    const { rows, calls, edits } = instantHarness(async (entries) => entries.map(() => ({ ok: false, reason: 'not-found' })));
+    edits.edit(rows[0], 'Elev', 'X');
+    await editWait(80);
+    assertEqual([edits.cellState(rows[0], 'Elev'), edits.overlay(rows), calls.refreshes], ['failed', rows, 1], 'reverted');
+    assertEqual(calls.errors.length === 1 && calls.errors[0].includes('Elev: the row was not found in the sheet'), true, 'message');
+});
+
+test('CELL EDITS', 'instant: an edit made while its cell is being written is written next', async () => {
+    const { rows, calls, edits } = instantHarness(async (entries) => { await editWait(60); return entries.map(() => ({ ok: true })); });
+    edits.edit(rows[0], 'Note', 'one');
+    await editWait(40); // the write is in flight
+    edits.edit(rows[0], 'Note', 'two');
+    await editWait(250);
+    assertEqual(calls.commits, [['a.Note=one'], ['a.Note=two']], 'two writes in order');
+});
+
+// ── Reactive stores: eviction ────────────────────────────────────────────────
+
+test('REACTIVE STORES', 'an evicted store that is read loads again; an unread one stays evicted', async () => {
+    const calls = { shown: 0, unread: 0 };
+    const tag = Date.now();
+    const shown = getReactiveStore(async () => { calls.shown++; return [{ a: 1 }]; }, null, [`evict-shown-${tag}`], null, false);
+    const unread = getReactiveStore(async () => { calls.unread++; return [{ a: 1 }]; }, null, [`evict-unread-${tag}`], null, false);
+    await shown.load();
+    await unread.load();
+    const el = document.createElement('div');
+    const app = Vue.createApp({ render: () => Vue.h('span', String(shown.data.length)) });
+    app.mount(el);
+    try {
+        shown.evict();
+        unread.evict();
+        await editWait(300);
+        assertEqual([calls.shown, shown.data.length, el.textContent], [2, 1, '1'], 'rendered store reloaded');
+        assertEqual([calls.unread, unread.needsReload], [1, true], 'unread store stays evicted');
+    } finally {
+        app.unmount();
+    }
+});
+
+test('REACTIVE STORES', 'a keepWhileRefreshing analysis keeps its last result through reloads and re-runs', async () => {
+    let rows = [{ k: 'a' }, { k: 'b' }];
+    let gate = null; // while set, the analysis waits for it
+    const analyze = async (k) => { const n = rows.length; if (gate) await gate; return `${k}${n}`; };
+    const config = { ...createAnalysisConfig(analyze, 'res', 'test', ['k']), keepWhileRefreshing: true };
+    const store = getReactiveStore(async () => rows.map(r => ({ ...r })), null, [`keep-${Date.now()}`], [config], false);
+    await store.load();
+    assertEqual(store.data.map(r => r.AppData.res), ['a2', 'b2'], 'analysed');
+    let release;
+    gate = new Promise(r => { release = r; });
+    rows = [{ k: 'b' }, { k: 'c' }, { k: 'a' }];
+    const reload = store.load();
+    await editWait(50);
+    assertEqual(store.data.map(r => r.AppData.res), ['b2', null, 'a2'], 'kept by input value while the re-run waits');
+    gate = null;
+    release();
+    await reload;
+    assertEqual(store.data.map(r => r.AppData.res), ['b3', 'c3', 'a3'], 'replaced by the re-run');
+    store.clearSpecificAnalysisResults(['res']);
+    assertEqual(store.data[0].AppData.res, 'b3', 'an invalidation does not clear it first');
 });
 
 // ── Batched verified writes, fault injection, sheet health ───────────────────
@@ -2099,32 +3009,20 @@ test('INSTANT WRITE', 'randomized faults never change cells outside the batch (s
     function normalize(h) { return String(h ?? '').replace(/\s+/g, ' ').trim(); }
 });
 
-// The fake schedule deliberately holds multi-booth shows (two rows, one Client + Year + Show);
-// writes to those rows are refused. Any other issue means the fixture data is in a bad state.
-const IW_KNOWN_DUPLICATES = ['multiboothco / 2026 / multi booth', 'qgenda / 2024 / himss', 'qgenda / 2025 / himss'];
-
-test('INSTANT WRITE', 'sheet health: the fake Production Schedule has only its known multi-booth duplicates', async () => {
-    const health = await Requests.checkSheetHealth(IW_DB, IW_TAB);
-    const other = health.issues.filter(i => i.kind !== 'duplicate-identity').map(i => i.message);
-    assertEqual(other, [], 'no other issues');
-    const dups = health.issues.filter(i => i.kind === 'duplicate-identity').map(i => i.message.replace(/^Rows [\d, ]+ share the identity /, '')).sort();
-    assertEqual(dups, IW_KNOWN_DUPLICATES, 'known duplicates only');
-});
-
-test('INSTANT WRITE', 'sheet health reports duplicate identities, duplicate headers and missing columns', async () => {
+test('INSTANT WRITE', 'sheet health (test only) reports duplicate identities, duplicate headers and missing columns', async () => {
     const snap = iwSnapshot();
     const s = iwSheet();
     try {
         s.push(iwUniqueRows()[0].slice());
         s[0][iwHeaderIndex('Setups')] = 'Elev';
-        const health = await Requests.checkSheetHealth(IW_DB, IW_TAB);
+        const health = await checkSheetHealth(IW_DB, IW_TAB);
         const kinds = health.issues.map(i => i.kind);
         assertEqual(health.ok, false, 'not ok');
         ['duplicate-identity', 'duplicate-header', 'missing-writable-column'].forEach(k => assertContains(kinds, k, k));
         const dup = health.issues.find(i => i.kind === 'duplicate-identity');
         assertEqual(dup.rows.length, 2, 'both rows listed');
-        const noConfig = await Requests.checkSheetHealth(IW_DB, 'Some Other Tab');
-        assertEqual(noConfig.issues.map(i => i.kind), ['no-config'], 'no config');
+        const noIdentity = await checkSheetHealth(IW_DB, IW_TAB, { identity: [], columns: [] });
+        assertEqual(noIdentity.issues.map(i => i.kind), ['duplicate-header'], 'a spec without identity skips identity rules');
     } finally {
         iwRestore(snap);
     }
@@ -2225,8 +3123,32 @@ test('TARGETED ANALYSIS', 'a key no row produced re-runs nothing', async () => {
 
 // ── Runner export ─────────────────────────────────────────────────────────────
 
+// ── Sheet health: last, after every test that writes to the fixture sheets ─────
+// A test (or the process it covers) that leaves a sheet in a state the app can't rely on fails
+// here before it is deployed. tests/sheetHealth.js is test-only and never loads on the live site.
+
+// The fake schedule deliberately holds multi-booth shows (two rows, one Client + Year + Show);
+// writes to those rows are refused. Any other issue means the fixture data is in a bad state.
+const IW_KNOWN_DUPLICATES = ['multiboothco / 2026 / multi booth', 'qgenda / 2024 / himss', 'qgenda / 2025 / himss'];
+
+test('SHEET HEALTH', 'the Production Schedule has only its known multi-booth duplicates', async () => {
+    const health = await checkSheetHealth(IW_DB, IW_TAB);
+    const other = health.issues.filter(i => i.kind !== 'duplicate-identity').map(i => i.message);
+    assertEqual(other, [], 'no other issues');
+    const dups = health.issues.filter(i => i.kind === 'duplicate-identity').map(i => i.message.replace(/^Rows [\d, ]+ share the identity /, '')).sort();
+    assertEqual(dups, IW_KNOWN_DUPLICATES, 'known duplicates only');
+});
+
+test('SHEET HEALTH', 'ShowNotes has one row per show identifier', async () => {
+    const health = await checkSheetHealth('CACHE', 'ShowNotes', { identity: ['Identifier'], columns: ['Identifier', 'Note', 'EditHistory'] });
+    assertEqual(health.issues.map(i => i.message), [], 'no issues');
+});
+
 export async function runTests() {
     setFakeDelaysEnabled(false);
+    // Run against pristine fixtures; local data (saved across reloads) is restored afterwards
+    const endSandbox = FakeGoogleState.beginSandbox();
+    refreshAppData();
     try {
         // Ensure authenticated before any API-dependent tests run.
         // Auth tests below start with logout() so they still test from an unauthenticated state.
@@ -2261,6 +3183,8 @@ export async function runTests() {
 
         return { passed, failed };
     } finally {
+        endSandbox();
+        refreshAppData();
         setFakeDelaysEnabled(true);
     }
 }
