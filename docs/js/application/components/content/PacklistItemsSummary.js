@@ -1,4 +1,4 @@
-import { html, DataView, Requests, getReactiveStore, createAnalysisConfig, NavigationRegistry, ItemImageComponent, InventoryCategoryFilter, Priority, invalidateCache, todayISOString, OverlappingShowsModal } from '../../index.js';
+import { html, DataView, Requests, getReactiveStore, createAnalysisConfig, NavigationRegistry, ItemImageComponent, InventoryCategoryFilter, Priority, invalidateCache, todayISOString } from '../../index.js';
 import { itemImageStyle } from '../../utils/views/viewStyles.js';
 
 // What each summary key is. image holds no data: the thumbnail column (see itemImageStyle).
@@ -24,12 +24,13 @@ const SUMMARY_VIEWS = {
         columns: ['image', 'itemId', 'quantity', 'available', 'remaining', 'overlappingShows'],
         hidden: ['tabName'],
         sortable: ['itemId', 'quantity', 'available', 'tabName', 'remaining'],
-        // The page draws Item# and Overlapping Shows (#cell)
+        // Item# is the primary action's button (the item page, purple); Overlapping Shows is a list
+        // of show buttons (four inline, more in a modal)
         style: {
             image: itemImageStyle('itemId'),
-            itemId: { cell: 'slot' },
+            itemId: { cell: 'action', cellOptions: { class: 'purple' } },
             remaining: { color: 'auto' },
-            overlappingShows: { cell: 'slot', columnColor: 'gray' }
+            overlappingShows: { cell: 'showList', cellOptions: { max: 4 }, columnColor: 'gray' }
         },
         table: { sticky: { start: ['image'] }, hideRowsOnSearch: false }
     }]
@@ -40,7 +41,7 @@ const SUMMARY_VIEWS = {
  * Shows: Item ID, Quantity, Available, Remaining, Overlapping Shows
  */
 export const PacklistItemsSummary = {
-    components: { DataView, ItemImageComponent, InventoryCategoryFilter, OverlappingShowsModal },
+    components: { DataView, ItemImageComponent, InventoryCategoryFilter },
     props: {
         projectIdentifier: { type: String, required: true },
         containerPath: { type: String, default: '' },
@@ -78,12 +79,13 @@ export const PacklistItemsSummary = {
             return data;
         },
 
-        currentSearchText() {
-            const params = NavigationRegistry.getParametersForContainer(
-                this.containerPath || ('packlist/' + this.projectIdentifier + '/details'),
-                this.appContext?.currentPath
-            );
-            return params?.searchText || '';
+        // Primary action: the item page, drawn as the Item# button (action cell)
+        itemAction() {
+            return {
+                to: (row) => this.itemPagePath(row),
+                disabled: (row) => !row.tabName || !row.itemId,
+                title: 'View item timeline'
+            };
         }
     },
     watch: {
@@ -165,8 +167,9 @@ export const PacklistItemsSummary = {
             ], true);
         },
 
-        navigateToItemPage(row) {
-            if (!row.tabName || !row.itemId) return;
+        // The item's page, filtered to this show's ship-to-return dates when known
+        itemPagePath(row) {
+            if (!row.tabName || !row.itemId) return null;
             const basePath = `inventory/${row.tabName.toLowerCase()}/${row.itemId}`;
             const dateFilters = (this.projectShipDate && this.projectReturnDate)
                 ? [
@@ -174,10 +177,7 @@ export const PacklistItemsSummary = {
                     { column: 'Date', value: this.projectReturnDate, type: 'before' }
                   ]
                 : null;
-            const finalPath = dateFilters
-                ? NavigationRegistry.buildPath(basePath, { dateFilters })
-                : basePath;
-            this.appContext.navigateToPath(finalPath);
+            return dateFilters ? NavigationRegistry.buildPath(basePath, { dateFilters }) : basePath;
         },
 
         handleCategorySelected(categoryName) {
@@ -210,18 +210,6 @@ export const PacklistItemsSummary = {
             }
         },
 
-        openOverlappingShowsModal(shows) {
-            this.$modal.custom(OverlappingShowsModal, { shows, modalClass: 'hamburger-menu', size: 'card' }, `${shows.length} Overlapping Shows`);
-        },
-
-        showsMatchSearch(shows) {
-            if (!this.currentSearchText || !this.currentSearchText.trim() || !Array.isArray(shows)) {
-                return false;
-            }
-            const searchWords = this.currentSearchText.toLowerCase().trim().split(/\s+/).filter(word => word.length > 0);
-            const showsText = shows.join(' ').toLowerCase();
-            return searchWords.some(word => showsText.includes(word));
-        }
     },
     template: html`
         <slot class="packlist-items-summary">
@@ -239,6 +227,7 @@ export const PacklistItemsSummary = {
                 :fields="SUMMARY_FIELDS"
                 :rows="tableData"
                 :registry="SUMMARY_VIEWS"
+                :action="itemAction"
                 :show-search="true"
                 :showRefresh="false"
                 :sync-search-with-url="true"
@@ -258,37 +247,6 @@ export const PacklistItemsSummary = {
                         :navigate-to-path="appContext.navigateToPath"
                         @category-selected="handleCategorySelected"
                     />
-                </template>
-                <!-- Page cells (field.cell = 'slot'); every other field uses the formatted fallback -->
-                <template #cell="{ row, field: column }">
-                    <slot v-if="column.key === 'itemId'">
-                        <button v-if="row.tabName"
-                                @click="navigateToItemPage(row)"
-                                class="purple card"
-                                :title="'View timeline for ' + row.itemId">
-                            {{ row.itemId }}
-                        </button>
-                        <span v-else>{{ row.itemId }}</span>
-                    </slot>
-                    <slot v-else-if="column.key === 'overlappingShows'">
-                        <slot v-if="!Array.isArray(row.overlappingShows) || row.overlappingShows.length === 0">
-                            —
-                        </slot>
-                        <slot v-else-if="row.overlappingShows.length <= 4" class="overlapping-shows-buttons">
-                            <button v-for="packlistId in row.overlappingShows"
-                                    :key="packlistId"
-                                    @click="appContext.navigateToPath('packlist/' + packlistId + '/details')"
-                                    class="card white">
-                                {{ packlistId }}
-                            </button>
-                        </slot>
-                        <slot v-else>
-                            <button @click="openOverlappingShowsModal(row.overlappingShows)"
-                                    :class="['card', 'white', 'font-black', showsMatchSearch(row.overlappingShows) ? 'search-highlight' : '']">
-                                {{ row.overlappingShows.length }} shows
-                            </button>
-                        </slot>
-                    </slot>
                 </template>
             </DataView>
         </slot>
