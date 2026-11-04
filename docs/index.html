@@ -16,6 +16,8 @@
         
         <!-- Initialize deployment version early to detect stale code caching -->
         <script>
+            // Room to list every file the page loads (the update banner's refresh re-downloads them)
+            performance.setResourceTimingBufferSize(2000);
             (async () => {
                 try {
                     // Use cache-busting query param to ensure version.json is always fresh from server

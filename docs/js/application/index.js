@@ -8,7 +8,7 @@ export { ProposalUtils, PROPOSAL_LOCK_NAMESPACE } from '../data_management/utils
 // Utils
 export { html } from './utils/template-helpers.js';
 export { Auth, authState, getDeviceId } from './utils/auth.js';
-export { getReactiveStore, createAnalysisConfig, findMatchingStores, clearAllReactiveStores, generateStoreKey, appSettings, runNonessentialAnalysisOnAllStores, getPreferencesStore, getInventoryNoteMaxLength } from './utils/reactiveStores.js';
+export { getReactiveStore, createAnalysisConfig, findMatchingStores, clearAllReactiveStores, generateStoreKey, appSettings, runNonessentialAnalysisOnAllStores, getPreferencesStore, saveDirtyStoresToUserData, getInventoryNoteMaxLength } from './utils/reactiveStores.js';
 export { Priority } from './utils/priorityQueue.js';
 export { undoRegistry, setTableRowSelectionState } from './utils/undoRegistry.js';
 export { getAutoColorClass, shouldAutoColor } from './utils/autoColor.js';

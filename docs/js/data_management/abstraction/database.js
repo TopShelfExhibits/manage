@@ -15,7 +15,7 @@ if (isLocalhost()) {
     ({ GoogleSheetsService, GoogleSheetsAuth } = await import('../../google_sheets_services/index.js'));
 }
 
-import { wrapMethods, invalidateCache, stampDataChange, EditHistoryUtils } from '../index.js';
+import { wrapMethods, invalidateCache, stampDataChange, EditHistoryUtils, assertAppCurrent } from '../index.js';
 import { ApplicationUtils } from '../index.js';
 import { ARCHIVE_TAB_NAME, ARCHIVE_HEADERS } from '../utils/metadata-utils.js';
 
@@ -124,6 +124,7 @@ class database_uncached {
      *   or null on failure
      */
     static async uploadItemImage(file, itemNumber, folderId = window.ENDPOINT_IDS.THUMBNAILS) {
+        await assertAppCurrent();
         const itemNumberStr = String(itemNumber).trim();
         const ext = file.type === 'image/png' ? 'png' : 'jpg';
         const fileName = `${itemNumberStr}.${ext}`;
@@ -201,6 +202,9 @@ class database_uncached {
     }
 
     /* MUTATION FUNCTIONS */
+    // Every write (uploadItemImage too) starts with assertAppCurrent(): a session running an
+    // out-of-date version (a newer deploy is live) never writes shared data. Only the session's own
+    // bookkeeping (user data, short links) passes `bookkeeping: true` to setData and createTab.
 
 
     /**
@@ -211,12 +215,15 @@ class database_uncached {
      * @param {Array<Object>} updates - Array of JS objects to save
      * @param {Object} [mapping] - Optional mapping for object keys to sheet headers
      * @param {Object} [options] - Optional parameters for edithistory tracking
+     * @param {boolean} [options.bookkeeping] - The session's own bookkeeping (user data, short links):
+     *   allowed while the app is out of date (assertAppCurrent)
      * @param {string} [options.username] - Username making the change
      * @param {boolean} [options.skipMetadata] - Skip edithistory generation (caller manages EditHistory itself)
      * @param {string} [options.source] - Source for history entries ('web' | 'cad', or an inventory note)
      * @returns {Promise<boolean>} - Success status
      */
     static async setData(tableId, tabName, updates, mapping = null, options = {}) {
+        if (!options.bookkeeping) await assertAppCurrent();
         const {
             username = null,
             skipMetadata = false,
@@ -291,6 +298,7 @@ class database_uncached {
      * @returns {Promise<boolean>} - Success status
      */
     static async updateRow(tableId, tabName, update, mapping = null, options = {}) {
+        await assertAppCurrent();
           const { username = null, source = 'web' } = options;
 
         const existingData = await GoogleSheetsService.getSheetData(tableId, tabName);
@@ -393,6 +401,7 @@ class database_uncached {
      * @returns {Promise<boolean>}
      */
     static async setCellValues(tableId, tabName, cells) {
+        await assertAppCurrent();
         if (!cells || !cells.length) return true;
         const data = cells.map(c => {
             const col = _numberToColumnLetter(c.columnNumber);
@@ -419,6 +428,7 @@ class database_uncached {
      * @returns {Promise<boolean>}
      */
     static async setCellValue(tableId, tabName, rowNumber, columnNumber, value) {
+        await assertAppCurrent();
         const colLetter = _numberToColumnLetter(columnNumber);
         const range = Database.a1Range(tabName, `${colLetter}${rowNumber}:${colLetter}${rowNumber}`);
 
@@ -441,6 +451,7 @@ class database_uncached {
      * @returns {Promise<boolean>}
      */
     static async deleteSheetRows(tableId, tabName, rowNumbers) {
+        await assertAppCurrent();
         if (!rowNumbers || !rowNumbers.length) return true;
         await GoogleSheetsService.deleteSheetRows(tableId, tabName, rowNumbers);
 
@@ -460,6 +471,7 @@ class database_uncached {
      * @returns {Promise<number>} 1-based row number that was appended
      */
     static async appendSheetRow(tableId, tabName, values) {
+        await assertAppCurrent();
         const rawData = await GoogleSheetsService.getSheetData(tableId, tabName);
         const nextRow = (Array.isArray(rawData) ? rawData.length : 0) + 1;
         const endCol = _numberToColumnLetter(Math.max(values.length, 1));
@@ -482,6 +494,7 @@ class database_uncached {
      * @param {Array<{title: string, sheetId: number}>} tabs - Tabs to hide
      */
     static async hideTabs(tableId, tabs) {
+        await assertAppCurrent();
         await GoogleSheetsService.hideTabs(tableId, tabs);
     }
     
@@ -492,6 +505,7 @@ class database_uncached {
      * @param {Array<{title: string, sheetId: number}>} tabs - Tabs to show
      */
     static async showTabs(tableId, tabs) {
+        await assertAppCurrent();
         await GoogleSheetsService.showTabs(tableId, tabs);
     }
     
@@ -501,9 +515,11 @@ class database_uncached {
      * @param {string} tableId - Identifier for the table
      * @param {{title: string, sheetId: number}|null} templateTab - Template tab to copy (null for blank tab)
      * @param {string} newTabName - Name for the new tab
+     * @param {{bookkeeping?: boolean}} [options] - bookkeeping: as in setData
      * @returns {Promise<void>}
      */
-    static async createTab(tableId, templateTab, newTabName) {
+    static async createTab(tableId, templateTab, newTabName, options = {}) {
+        if (!options.bookkeeping) await assertAppCurrent();
         if (templateTab && templateTab.sheetId) {
             await GoogleSheetsService.copySheetTab(tableId, templateTab, newTabName);
         } else {
