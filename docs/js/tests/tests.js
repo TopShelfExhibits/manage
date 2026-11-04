@@ -3246,6 +3246,13 @@ test('PERSISTED RESULTS', 'a computed result is saved with its value and source 
     if (isNaN(new Date(row[1]).getTime())) throw new Error(`SavedAt is not a date: ${row[1]}`);
 });
 
+test('PERSISTED RESULTS', 'only data reads and app_utils sources are saved, not pure cached leaves', async () => {
+    // findBestProjectIdentifierMatch keys embed every show name; saving them overflowed the cell
+    const sources = JSON.parse((await savedAlertsRow([CAB_004_ALERT]))[2]);
+    const other = sources.filter(source => !source.startsWith('database:') && !source.startsWith('app_utils:'));
+    assertEqual(other, [], 'no other sources');
+});
+
 test('PERSISTED RESULTS', 'a new session restores a row no source has changed since', async () => {
     setSavedAlertsRow(new Date(Date.now() + 60000).toISOString(), _alertSources, RESTORED_MARKER);
     assertEqual(await restoreAlerts(), RESTORED_MARKER, 'restored');

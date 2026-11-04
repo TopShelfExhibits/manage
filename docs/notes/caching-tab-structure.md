@@ -145,7 +145,7 @@ Spreadsheet `CACHE`, tab `Analytics`. Row 1 holds the headers; each later row ho
 
 - **Key:** the method's cache key, from `generateCacheKey`.
 - **SavedAt:** an ISO timestamp, written like the Caching tab's. This is when the oldest source read was filled, which can be earlier than the save itself.
-- **Sources:** a JSON list of the leaf cache keys the result was computed from, gathered from the recorded dependency chain (`collectSourceKeys`).
+- **Sources:** a JSON list of the leaf cache keys the result was computed from, gathered from the recorded dependency chain (`collectSourceKeys`). Only keys a stamp can name are kept (the store's `sourcePrefixes`: `database:` reads and the `app_utils:` sources, the clock and the locks). Pure cached leaves such as `findBestProjectIdentifierMatch` are left out: their keys embed every show name and can never mark the row stale.
 - **Value:** the result as JSON. A row is written only if every cell stays under the 50,000-character Sheets cell limit; otherwise the save is skipped with a console warning.
 
 Reads and writes use `GoogleSheetsService` directly, in `application-utils.js` (`setPersistentStore`), the same way as the Caching tab. Saving a result therefore never invalidates cached reads. If the tab is missing, restores and saves fail quietly (with a console warning) and results are computed as before.

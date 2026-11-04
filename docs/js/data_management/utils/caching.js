@@ -267,7 +267,9 @@ class CacheManager {
     static async persist(key, value, startedAt) {
         const store = CacheManager._persistentStore;
         if (!store || networkState.isOffline) return;
-        const sources = CacheManager.collectSourceKeys(key);
+        // Only sources a Caching tab stamp can name; pure cached leaves never go stale
+        const sources = CacheManager.collectSourceKeys(key)
+            .filter(source => !store.sourcePrefixes || store.sourcePrefixes.some(prefix => source.startsWith(prefix)));
         const asOf = Math.min(startedAt, ...sources.map(s => CacheManager.filledAt.get(s) ?? startedAt));
         try {
             await store.write({ key, value, savedAt: new Date(asOf).toISOString(), sources });
@@ -844,7 +846,9 @@ export function setTimestampWriter(fn) {
  * Set where persisted results are kept (see wrapMethods persistentMethods).
  * @param {{ read: (key: string) => Promise<{value: *, savedAt: string, sources: string[]}|null>,
  *           write: (entry: {key: string, value: *, savedAt: string, sources: string[]}) => Promise,
- *           readSourceTimestamps: () => Promise<Array<{key: string, timestamp: string}>|null> }} store
+ *           readSourceTimestamps: () => Promise<Array<{key: string, timestamp: string}>|null>,
+ *           sourcePrefixes?: string[] }} store - sourcePrefixes: the source keys worth saving, those
+ *           a source timestamp can name (default: all)
  */
 export function setPersistentStore(store) {
     CacheManager._persistentStore = store;

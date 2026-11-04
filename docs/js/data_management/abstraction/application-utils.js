@@ -982,6 +982,10 @@ async function readAnalyticsRows() {
 }
 
 setPersistentStore({
+    // Data reads (stamped by Database writes), and this class's own sources: the clock and the
+    // locks. Pure cached leaves such as findBestProjectIdentifierMatch carry long argument lists
+    // and can never mark a row stale
+    sourcePrefixes: ['database:', 'app_utils:'],
     async read(key) {
         const row = (await readAnalyticsRows()).slice(1).find(r => Array.isArray(r) && r[0] === key);
         if (!row || !row[1] || !row[3]) return null;
@@ -989,8 +993,9 @@ setPersistentStore({
     },
     async write({ key, value, savedAt, sources }) {
         const line = [key, savedAt, JSON.stringify(sources), JSON.stringify(value)];
-        if (line.some(cell => cell.length > SHEETS_CELL_LIMIT)) {
-            console.warn(`[Analytics] Not saved: ${key} is larger than a sheet cell allows`);
+        const oversize = line.findIndex(cell => cell.length > SHEETS_CELL_LIMIT);
+        if (oversize !== -1) {
+            console.warn(`[Analytics] Not saved: ${key} ${ANALYTICS_HEADERS[oversize]} is ${line[oversize].length} characters; a sheet cell holds ${SHEETS_CELL_LIMIT}`);
             return;
         }
         const raw = await readAnalyticsRows();
