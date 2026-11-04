@@ -1,4 +1,4 @@
-import { Database, ProductionUtils, PackListUtils, wrapMethods, parseDate, toISODateString, searchFilter, todayISOString, ApplicationUtils, invalidateCache, EditHistoryUtils, DEFAULT_INVENTORY_NOTE_MAX_LENGTH } from '../index.js';
+import { Database, ProductionUtils, PackListUtils, wrapMethods, parseDate, toISODateString, searchFilter, todayISOString, startOfTodayMs, offsetToISO, ApplicationUtils, invalidateCache, EditHistoryUtils, DEFAULT_INVENTORY_NOTE_MAX_LENGTH } from '../index.js';
 
 /** Normalize an identifier for loose matching (strips spaces, case, non-alphanumeric) */
 function _normalizeId(v) { return String(v || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, ''); }
@@ -404,7 +404,7 @@ class inventoryUtils_uncached {
         }
 
         const rows = await Database.getData('INVENTORY', resolvedTabName, mapping);
-        const todayDeciseconds = Math.floor(new Date().setHours(0, 0, 0, 0) / 100);
+        const todayDeciseconds = Math.floor(startOfTodayMs() / 100);
         const { updatedItems, hasChanges } = EditHistoryUtils.applyPendingChangesToData(rows, todayDeciseconds);
 
         if (!hasChanges) return { applied: false };
@@ -745,7 +745,7 @@ class inventoryUtils_uncached {
         const endDate = returnDates[returnDates.length - 1] || startDate;
 
         // Get inventory qty as of the earliest ship date
-        const refDate = startDate || todayISOString();
+        const refDate = startDate || await deps.call(ApplicationUtils.getToday);
         const inventoryQty = await deps.call(PackListUtils.getItemInventoryQuantity, itemId, refDate);
 
         if (inventoryQty === null) {
@@ -772,12 +772,7 @@ class inventoryUtils_uncached {
         if (!itemId) return null;
         // getItemTimeline only includes show ship/return events when both dates are provided.
         // Use a 2-year fallback so the full demand window is always evaluated.
-        let effectiveEnd = endDate;
-        if (!effectiveEnd) {
-            const d = new Date();
-            d.setFullYear(d.getFullYear() + 2);
-            effectiveEnd = toISODateString(d);
-        }
+        const effectiveEnd = endDate || offsetToISO(730, await deps.call(ApplicationUtils.getToday));
         const events = await deps.call(InventoryUtils.getItemTimeline, itemId, startDate, effectiveEnd);
         const quantities = events.map(e => e.quantity).filter(q => q !== null && q !== undefined && !isNaN(q));
         const result = quantities.length > 0 ? Math.min(...quantities) : null;

@@ -1,4 +1,4 @@
-import { wrapMethods, normalizeHeaderName, Database, InventoryUtils, PackListUtils, ProductionUtils, ApplicationUtils, EditHistoryUtils, InstantWriteUtils, ARCHIVE_TAB_NAME, ARCHIVE_HEADERS, todayISOString, offsetToISO, sanitizeTabName, mapWithConcurrency, ProgressBus, getRandomLoadingQuote, DEFAULT_INVENTORY_MAPPING, ProposalUtils, PROPOSALS_TAB_NAME, PROPOSAL_MAPPING, resolveInventoryNoteMaxLength } from './index.js';
+import { wrapMethods, normalizeHeaderName, Database, InventoryUtils, PackListUtils, ProductionUtils, ApplicationUtils, EditHistoryUtils, InstantWriteUtils, ARCHIVE_TAB_NAME, ARCHIVE_HEADERS, offsetToISO, sanitizeTabName, mapWithConcurrency, ProgressBus, getRandomLoadingQuote, DEFAULT_INVENTORY_MAPPING, ProposalUtils, PROPOSALS_TAB_NAME, PROPOSAL_MAPPING, resolveInventoryNoteMaxLength } from './index.js';
 import { authState } from '../application/utils/auth.js';
 import { instantWriteEntry, identityText, parseColoredName } from './utils/instant-write-config.js';
 import { columnTypesEntry } from './utils/column-types.js';
@@ -881,7 +881,7 @@ class Requests_uncached {
         // if (isSuppressed) {
         //     return null;
         // }
-        
+
         // Get comparison result from business logic layer
         const result = await deps.call(PackListUtils.checkDescriptionMatch, itemNumber, description);
         
@@ -1099,8 +1099,9 @@ class Requests_uncached {
         );
         const itemRows = rawItemRows.filter(row => !suppressedPrefixes.has((row.itemId || '').split('-')[0]));
 
+        const today = await deps.call(ApplicationUtils.getToday);
         const dateFilters = Array.isArray(filter?.dateFilters) ? filter.dateFilters : [];
-        const getFilterDate = (column, type) => offsetToISO(dateFilters.find(f => f.column === column && f.type === type)?.value);
+        const getFilterDate = (column, type) => offsetToISO(dateFilters.find(f => f.column === column && f.type === type)?.value, today);
 
         let reportStart = getFilterDate('Date', 'after') || getFilterDate('Ship', 'after') || null;
         let reportEnd = getFilterDate('Date', 'before') || getFilterDate('Ship', 'before') || null;
@@ -1108,7 +1109,7 @@ class Requests_uncached {
         const shipDates = resolvedShows.map(show => show.shipDate).filter(Boolean).sort();
         const returnDates = resolvedShows.map(show => show.returnDate).filter(Boolean).sort();
         if (!reportStart) {
-            reportStart = shipDates[0] || todayISOString();
+            reportStart = shipDates[0] || today;
         }
         if (!reportEnd) {
             reportEnd = returnDates[returnDates.length - 1] || shipDates[shipDates.length - 1] || reportStart;
@@ -1351,7 +1352,7 @@ class Requests_uncached {
         try {
             // Resolve ship date so remaining quantity reflects inventory at time of packing
             const shipDate = await deps.call(ProductionUtils.getProjectShipDate, currentProjectId);
-            const referenceDate = shipDate || todayISOString();
+            const referenceDate = shipDate || await deps.call(ApplicationUtils.getToday);
 
             // Get remaining quantity from business logic layer
             const remaining = await deps.call(PackListUtils.calculateRemainingQuantity, currentProjectId, itemNumber, referenceDate);

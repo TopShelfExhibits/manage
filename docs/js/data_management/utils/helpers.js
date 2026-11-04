@@ -18,7 +18,7 @@ export function parseDate(val, forceLocal = true, defaultYear = null) {
             let year = mdy[3] ? Number(mdy[3]) : null;
             if (year && year < 100) year += 2000; // handle 2-digit years
             if (!year && defaultYear) year = Number(defaultYear);
-            if (!year) year = new Date().getFullYear();
+            if (!year) year = currentDate().getFullYear();
             return new Date(year, month - 1, day, 12, 0, 0, 0);
         }
         
@@ -33,11 +33,11 @@ export function parseDate(val, forceLocal = true, defaultYear = null) {
             };
             const month = monthMap[monthName];
             if (month !== undefined) {
-                const year = defaultYear ? Number(defaultYear) : new Date().getFullYear();
+                const year = defaultYear ? Number(defaultYear) : currentDate().getFullYear();
                 return new Date(year, month, day, 12, 0, 0, 0);
             }
         }
-        
+
         // Handle 'MMM-DD' or 'MMM-D' format (e.g., 'Jan-21', 'Dec-3')
         let mmd = val.match(/^([A-Za-z]{3})-(\d{1,2})$/);
         if (mmd) {
@@ -49,7 +49,7 @@ export function parseDate(val, forceLocal = true, defaultYear = null) {
             };
             const month = monthMap[monthName];
             if (month !== undefined) {
-                const year = defaultYear ? Number(defaultYear) : new Date().getFullYear();
+                const year = defaultYear ? Number(defaultYear) : currentDate().getFullYear();
                 return new Date(year, month, day, 12, 0, 0, 0);
             }
         }
@@ -138,12 +138,45 @@ export function sanitizeTabName(tabName) {
         .trim();                          // Remove leading/trailing whitespace
 }
 
+// ── Calendar clock ──────────────────────────────────────────────────────────
+// The one source of "now" for date logic. Every date check uses the browser's local calendar
+// (toISODateString, parseDate's local noon); to change the calendar, change it here.
+// Cached functions read today through ApplicationUtils.getToday, which is invalidated when the
+// local date rolls over, so results that depend on today refresh through the cache chain.
+let _testToday = null;
+
+/**
+ * The current moment, or local noon of the pinned test date.
+ * @returns {Date}
+ */
+export function currentDate() {
+    return _testToday ? parseDate(_testToday) : new Date();
+}
+
+/**
+ * Tests only: pin today to an ISO date (YYYY-MM-DD), or pass null to follow the real clock.
+ * @param {string|null} isoDate
+ */
+export function setTestToday(isoDate) {
+    _testToday = isoDate || null;
+}
+
 /**
  * Returns today's date as a YYYY-MM-DD string using the local calendar date.
  * @returns {string}
  */
 export function todayISOString() {
-    return toISODateString(new Date());
+    return toISODateString(currentDate());
+}
+
+/**
+ * Local midnight at the start of today.
+ * @returns {number} Milliseconds since the epoch
+ */
+export function startOfTodayMs() {
+    const d = currentDate();
+    d.setHours(0, 0, 0, 0);
+    return d.getTime();
 }
 
 /**
@@ -151,12 +184,14 @@ export function todayISOString() {
  * Returns null for anything else (undefined, non-ISO strings, etc.).
  * Single entry point for resolving date filter values from the URL / presets.
  * @param {number|string|null|undefined} value
+ * @param {string|null} [today] - ISO date the offset counts from; cached code passes
+ *        ApplicationUtils.getToday so the result is invalidated at the date rollover
  * @returns {string|null}
  */
-export function offsetToISO(value) {
+export function offsetToISO(value, today = null) {
     if (value === null || value === undefined) return null;
     if (typeof value === 'number') {
-        const d = new Date();
+        const d = today ? parseDate(today) : currentDate();
         d.setDate(d.getDate() + value);
         return toISODateString(d);
     }

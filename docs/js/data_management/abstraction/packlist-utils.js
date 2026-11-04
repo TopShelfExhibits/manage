@@ -1,4 +1,4 @@
-import { Database, InventoryUtils, ProductionUtils, wrapMethods, GetParagraphMatchRating, todayISOString, parseDate, toISODateString, EditHistoryUtils, ApplicationUtils, invalidateCache, normalizeHeaderName, ProgressBus } from '../index.js';
+import { Database, InventoryUtils, ProductionUtils, wrapMethods, GetParagraphMatchRating, parseDate, toISODateString, EditHistoryUtils, ApplicationUtils, invalidateCache, normalizeHeaderName, ProgressBus } from '../index.js';
 
 /** Normalize an identifier for loose matching (strips spaces, case, non-alphanumeric) */
 function _normalizeId(v) { return String(v || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, ''); }
@@ -92,8 +92,8 @@ class packListUtils_uncached {
 
         try {
             // Get all hardware items from the HARDWARE inventory tab
-            const hardwareData = await deps.call(InventoryUtils.getInventoryTabData, 'HARDWARE', undefined, undefined, todayISOString());
-            
+            const hardwareData = await deps.call(InventoryUtils.getInventoryTabData, 'HARDWARE', undefined, undefined, await deps.call(ApplicationUtils.getToday));
+
             if (!hardwareData || hardwareData.length === 0) {
                 return {
                     quantity: 1,
@@ -553,7 +553,7 @@ class packListUtils_uncached {
 
         try {
             // Get inventory description for this item (current state, for description matching)
-            const inventoryDescription = await deps.call(InventoryUtils.getItemDescription, itemNumber, todayISOString());
+            const inventoryDescription = await deps.call(InventoryUtils.getItemDescription, itemNumber, await deps.call(ApplicationUtils.getToday));
             
             if (!inventoryDescription) {
                 return {

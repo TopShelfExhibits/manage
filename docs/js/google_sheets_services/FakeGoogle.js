@@ -737,6 +737,10 @@ export class FakeGoogleSheetsService {
             'Caching': [
                 ['Key', 'Timestamp']
             ],
+            // Persisted analytics (caching.js persistentMethods): one row per saved result
+            'Analytics': [
+                ['Key', 'SavedAt', 'Sources', 'Value']
+            ],
             'Locks': [
                 ['Lock Key', 'locked.user@example.com', 'another.user@example.com'], // Row 0: Headers with users
                 ['PACK_LISTS:ATSC 2025 NAB', '2026-01-19T10:30:00.000Z', '0'], // Row 1+: Lock key rows with timestamps
@@ -1141,7 +1145,8 @@ export class FakeGoogleSheetsService {
             { title: 'NameOverrides', sheetId: 8 },
             { title: 'ScheduleOverrides', sheetId: 9 },
             { title: 'Preferences', sheetId: 10 },
-            { title: 'InventoryProposals', sheetId: 11 }
+            { title: 'InventoryProposals', sheetId: 11 },
+            { title: 'Analytics', sheetId: 12 }
         ]
     };
 

@@ -1,8 +1,9 @@
 import { Database, wrapMethods, invalidateCache, stampDataChange, normalizeHeaderName } from '../index.js';
-import { setTimestampWriter, startCacheTimestampPoller, startCacheCleanup } from '../utils/caching.js';
+import { setTimestampWriter, setPersistentStore, startCacheTimestampPoller, startCacheCleanup } from '../utils/caching.js';
+import { networkState } from '../utils/networkState.js';
 
 // Dynamically import GoogleSheetsAuth based on environment
-import { isLocalhost } from '../utils/helpers.js';
+import { isLocalhost, todayISOString, startOfTodayMs } from '../utils/helpers.js';
 let GoogleSheetsAuth, GoogleSheetsService;
 if (isLocalhost()) {
     ({ GoogleSheetsAuth, GoogleSheetsService } = await import('../../google_sheets_services/FakeGoogle.js'));
@@ -771,6 +772,18 @@ class applicationUtils_uncached {
     }
 
     /**
+     * Today's date (YYYY-MM-DD, local calendar). Cached functions whose results depend on today
+     * read it through deps.call, so the date rollover (checkDateRollover) invalidates them and
+     * their reactive stores reload.
+     * @param {Object} deps - Dependency decorator for tracking calls
+     * @returns {Promise<string>}
+     */
+    static async getToday(deps) {
+        _servedToday = todayISOString();
+        return _servedToday;
+    }
+
+    /**
      * Write a timestamp to the CACHE/Caching tab for external cache invalidation signaling.
      * Used by Database.setData after mutations to notify other sessions.
      * 
@@ -1014,9 +1027,68 @@ export const ApplicationUtils = wrapMethods(
     applicationUtils_uncached, 
     'app_utils', 
     ['storeUserData', 'initializeDefaultSavedSearches', 'lockSheet', 'unlockSheet', 'forceUnlockSheet', 'releaseAllUserLocks', '_writeUserColumn', '_writeLockKeyRow', '_writeLockCell', '_numberToColumnLetter', '_initializeLocksSheet', 'writeCacheTimestamp', 'readCacheTimestamps', 'storeThumbnailRecord', 'getShortLink', 'expandShortLink'], // Mutation methods
-    ['getThumbnailRecord', 'expandShortLink'], // Infinite cache methods
+    ['getThumbnailRecord', 'expandShortLink', 'getToday'], // Infinite cache methods
     { 'getSheetLock': 10000, 'getLocksData': 10000 } // Custom cache durations (10 seconds for getSheetLock and getLocksData)
 );
+
+// ─── Date rollover ───────────────────────────────────────────────────────────
+// The date getToday last returned; null when nothing has read it since the last rollover.
+let _servedToday = null;
+const TODAY_CACHE_KEY = 'app_utils:getToday:';
+
+/**
+ * Invalidate getToday, and everything computed from it, once the local date differs from the one
+ * it served. Checked every minute: a timer set for midnight fires late after the computer sleeps.
+ * While offline, invalidation is skipped and retried on a later check.
+ */
+export function checkDateRollover() {
+    if (!_servedToday || todayISOString() === _servedToday || networkState.isOffline) return;
+    _servedToday = null;
+    invalidateCache([{ namespace: 'app_utils', methodName: 'getToday', args: [] }]);
+}
+setInterval(checkDateRollover, 60 * 1000);
+
+// ─── Persisted analytics (CACHE/Analytics) ──────────────────────────────────
+// One row per persisted result (caching.js, wrapMethods persistentMethods):
+//   Key | SavedAt | Sources | Value
+// Read and written directly, like the Caching tab, so saving a result never invalidates cached
+// reads. Validity is checked against the Caching tab timestamps, plus local midnight for getToday.
+const ANALYTICS_TAB = 'Analytics';
+const ANALYTICS_HEADERS = ['Key', 'SavedAt', 'Sources', 'Value'];
+const SHEETS_CELL_LIMIT = 50000;
+
+async function readAnalyticsRows() {
+    const raw = await GoogleSheetsService.getSheetData('CACHE', ANALYTICS_TAB);
+    return Array.isArray(raw) ? raw : [];
+}
+
+setPersistentStore({
+    async read(key) {
+        const row = (await readAnalyticsRows()).slice(1).find(r => Array.isArray(r) && r[0] === key);
+        if (!row || !row[1] || !row[3]) return null;
+        return { savedAt: row[1], sources: JSON.parse(row[2] || '[]'), value: JSON.parse(row[3]) };
+    },
+    async write({ key, value, savedAt, sources }) {
+        const line = [key, savedAt, JSON.stringify(sources), JSON.stringify(value)];
+        if (line.some(cell => cell.length > SHEETS_CELL_LIMIT)) {
+            console.warn(`[Analytics] Not saved: ${key} is larger than a sheet cell allows`);
+            return;
+        }
+        const raw = await readAnalyticsRows();
+        if (!raw.length || !raw[0]?.length) {
+            await GoogleSheetsService.setSheetData('CACHE', ANALYTICS_TAB, [ANALYTICS_HEADERS, line], null);
+            return;
+        }
+        const rowIndex = raw.slice(1).findIndex(r => Array.isArray(r) && r[0] === key);
+        const sheetRow = rowIndex === -1 ? raw.length + 1 : rowIndex + 2;
+        await GoogleSheetsService.setSheetData('CACHE', `${ANALYTICS_TAB}!A${sheetRow}:D${sheetRow}`, [line], null);
+    },
+    async readSourceTimestamps() {
+        const stamps = await ApplicationUtils.readCacheTimestamps();
+        if (!stamps) return null;
+        return [...stamps, { key: TODAY_CACHE_KEY, timestamp: new Date(startOfTodayMs()).toISOString() }];
+    }
+});
 
 setTimestampWriter((prefix) => ApplicationUtils.writeCacheTimestamp(prefix));
 startCacheTimestampPoller(() => ApplicationUtils.readCacheTimestamps(), isLocalhost() ? 10_000 : 30_000);
