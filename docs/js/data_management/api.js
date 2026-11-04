@@ -1,11 +1,10 @@
-import { wrapMethods, normalizeHeaderName, Database, InventoryUtils, PackListUtils, ProductionUtils, ApplicationUtils, EditHistoryUtils, InstantWriteUtils, ARCHIVE_TAB_NAME, ARCHIVE_HEADERS, offsetToISO, resolveShortageAlertDays, shortageAlertDateFilters, sanitizeTabName, mapWithConcurrency, ProgressBus, getRandomLoadingQuote, DEFAULT_INVENTORY_MAPPING, ProposalUtils, PROPOSALS_TAB_NAME, PROPOSAL_MAPPING, resolveInventoryNoteMaxLength } from './index.js';
+import { wrapMethods, normalizeHeaderName, Database, InventoryUtils, PackListUtils, ProductionUtils, ApplicationUtils, EditHistoryUtils, InstantWriteUtils, ARCHIVE_TAB_NAME, ARCHIVE_HEADERS, offsetToISO, resolveShortageAlertDays, shortageAlertDateFilters, PREFERENCES_MAPPING, INVENTORY_TAB_PREFERENCES, sanitizeTabName, mapWithConcurrency, ProgressBus, getRandomLoadingQuote, DEFAULT_INVENTORY_MAPPING, ProposalUtils, PROPOSALS_TAB_NAME, PROPOSAL_MAPPING, resolveInventoryNoteMaxLength } from './index.js';
 import { authState } from '../application/utils/auth.js';
 import { instantWriteEntry, identityText, parseColoredName } from './utils/instant-write-config.js';
 import { columnTypesEntry } from './utils/column-types.js';
 
 // CACHE tabs with tracked history. EditHistory is always mapped to the key 'edithistory'.
 const NOTES_MAPPING = { Path: 'Path', Note: 'Note', Color: 'Color', Size: 'Size', edithistory: 'EditHistory' };
-const PREFERENCES_MAPPING = { id: 'ID', name: 'Name', description: 'Description', page: 'Page', type: 'Type', value: 'Value', edithistory: 'EditHistory' };
 
 /**
  * CACHING ARCHITECTURE NOTES:
@@ -847,13 +846,14 @@ class Requests_uncached {
     }
 
     /**
-     * Extract hardware item information from text by checking against HARDWARE inventory
+     * Extract an item with a nonstandard item number (tabs in InventoryCustomItemNumbers) from text
      * @param {Object} deps - Dependency decorator for tracking calls
-     * @param {string} text - Text to extract hardware item information from
+     * @param {string} text - Text to extract the item from
+     * @param {string[]} [ctgFilter] - Only these tabs (case insensitive)
      * @returns {Promise<Object>} Object with {quantity: number, itemNumber: string|null, description: string}
      */
-    static async extractHardwareFromText(deps, text) {
-        return await deps.call(PackListUtils.extractHardwareFromText, text);
+    static async extractCustomItemFromText(deps, text, ctgFilter = undefined) {
+        return await deps.call(PackListUtils.extractCustomItemFromText, text, ctgFilter);
     }
 
     /**
@@ -874,14 +874,6 @@ class Requests_uncached {
             return null;
         }
         
-        // Skip alert generation for items with suppressAnalysis set
-        // const prefix = itemNumber.split('-')[0];
-        // const indexData = await deps.call(Requests.getInventoryIndexData);
-        // const isSuppressed = indexData?.some(row => row.prefix === prefix && row.metadata?.suppressAnalysis === 'true');
-        // if (isSuppressed) {
-        //     return null;
-        // }
-
         // Get comparison result from business logic layer
         const result = await deps.call(PackListUtils.checkDescriptionMatch, itemNumber, description);
         
@@ -1090,14 +1082,12 @@ class Requests_uncached {
             ProgressBus.off('packlist:extractItemsFromMultipleShows', _onExtractProgress);
         }
 
-        // Filter out items whose prefix has suppressAnalysis set
-        const indexData = await deps.call(InventoryUtils.getInventoryIndex);
-        const suppressedPrefixes = new Set(
-            indexData
-                .filter(row => row.metadata?.suppressAnalysis === 'true')
-                .map(row => row.prefix)
-        );
-        const itemRows = rawItemRows.filter(row => !suppressedPrefixes.has((row.itemId || '').split('-')[0]));
+        // Leave out items in tabs the InventorySuppressCategoryAnalysis preference lists
+        const skippedTabs = await deps.call(InventoryUtils.getPreferenceTabs, INVENTORY_TAB_PREFERENCES.skipAnalysis);
+        const itemTabs = skippedTabs.length
+            ? await mapWithConcurrency(rawItemRows, row => deps.call(InventoryUtils.getTabNameForItem, row.itemId), 8)
+            : [];
+        const itemRows = rawItemRows.filter((row, i) => !skippedTabs.includes(itemTabs[i]));
 
         const today = await deps.call(ApplicationUtils.getToday);
         const dateFilters = Array.isArray(filter?.dateFilters) ? filter.dateFilters : [];
@@ -1367,11 +1357,8 @@ class Requests_uncached {
         
         // Skip alert generation for tabs in InventorySuppressCategoryAnalysis preference
         const tab = await deps.call(InventoryUtils.getTabNameForItem, itemNumber);
-        const prefs = await deps.call(Requests.getPreferences);
-        const suppressValue = prefs?.find(p => p.id === 'InventorySuppressCategoryAnalysis')?.value || '[]';
-        let suppressedTabs = [];
-        try { suppressedTabs = JSON.parse(suppressValue); } catch {}
-        if (tab && suppressedTabs.includes(tab)) {
+        const skippedTabs = await deps.call(InventoryUtils.getPreferenceTabs, INVENTORY_TAB_PREFERENCES.skipAnalysis);
+        if (tab && skippedTabs.includes(tab)) {
             return null;
         }
         

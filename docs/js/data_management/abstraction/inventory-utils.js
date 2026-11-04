@@ -1,13 +1,7 @@
-import { Database, ProductionUtils, PackListUtils, wrapMethods, parseDate, toISODateString, searchFilter, todayISOString, startOfTodayMs, offsetToISO, ApplicationUtils, invalidateCache, EditHistoryUtils, DEFAULT_INVENTORY_NOTE_MAX_LENGTH } from '../index.js';
+import { Database, ProductionUtils, PackListUtils, wrapMethods, PREFERENCES_MAPPING, INVENTORY_TAB_PREFERENCES, resolveInventoryTabList, parseDate, toISODateString, searchFilter, todayISOString, startOfTodayMs, offsetToISO, ApplicationUtils, invalidateCache, EditHistoryUtils, DEFAULT_INVENTORY_NOTE_MAX_LENGTH } from '../index.js';
 
 /** Normalize an identifier for loose matching (strips spaces, case, non-alphanumeric) */
 function _normalizeId(v) { return String(v || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, ''); }
-
-/** Parse a MetaData JSON string from the inventory INDEX into an object */
-function _parseMetadata(str) {
-    if (!str) return {};
-    try { return JSON.parse(str); } catch { return {}; }
-}
 
 /** Fields reconstructed for the item timeline (contract: "Reconstructing past row states") */
 const TIMELINE_FIELDS = ['itemNumber', 'quantity', 'description', 'notes'];
@@ -52,20 +46,27 @@ class inventoryUtils_uncached {
     static INDEX_MAPPING = {
         prefix: 'PREFIX',
         tab: 'INVENTORY',
-        folder: 'FOLDER',
-        metadata: 'MetaData'
+        folder: 'FOLDER'
     };
 
     /**
-     * Fetch and parse the inventory INDEX with full metadata.
-     * Returns an array of { prefix, tab, folder, metadata } where metadata is parsed JSON.
+     * The inventory INDEX: which tab each item-number prefix belongs to.
+     * Returns an array of { prefix, tab, folder }. Per-tab settings live in preferences
+     * (INVENTORY_TAB_PREFERENCES, getPreferenceTabs), not here.
      */
     static async getInventoryIndex(deps) {
-        const rows = await deps.call(Database.getData, 'CACHE', 'Inventory', inventoryUtils_uncached.INDEX_MAPPING);
-        return rows.map(row => ({
-            ...row,
-            metadata: _parseMetadata(row.metadata)
-        }));
+        return await deps.call(Database.getData, 'CACHE', 'Inventory', inventoryUtils_uncached.INDEX_MAPPING);
+    }
+
+    /**
+     * Tab names listed by an inventory tab preference (INVENTORY_TAB_PREFERENCES).
+     * @param {Object} deps - Dependency decorator for tracking calls
+     * @param {string} preferenceId
+     * @returns {Promise<string[]>}
+     */
+    static async getPreferenceTabs(deps, preferenceId) {
+        const prefs = await deps.call(Database.getData, 'CACHE', 'Preferences', PREFERENCES_MAPPING);
+        return resolveInventoryTabList(prefs, preferenceId);
     }
 
     static async getTabNameForItem(deps, itemName) {
@@ -86,10 +87,7 @@ class inventoryUtils_uncached {
         
         // If prefix lookup failed, check tabs listed in InventoryCustomItemNumbers preference
         if (!tab) {
-            const prefs = await deps.call(Database.getData, 'CACHE', 'Preferences', { id: 'ID', value: 'Value' });
-            const prefValue = prefs?.find(p => p.id === 'InventoryCustomItemNumbers')?.value || '[]';
-            let customTabs = [];
-            try { customTabs = JSON.parse(prefValue); } catch {}
+            const customTabs = await deps.call(InventoryUtils.getPreferenceTabs, INVENTORY_TAB_PREFERENCES.customItemNumbers);
             for (const customTab of customTabs) {
                 try {
                     const tabData = await deps.call(Database.getData, 'INVENTORY', customTab, inventoryUtils_uncached.DEFAULT_INVENTORY_MAPPING);

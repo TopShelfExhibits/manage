@@ -749,7 +749,7 @@ _Before Phase 2 starts_, add these rows to the live `CACHE/Preferences` sheet. A
 - **Guards:**
   - If a table in `instant` mode has no entry, or names a column that doesn't exist, its instant cells render read-only with a visible "write disabled: no row identity" hint.
   - If two loaded rows share an identity, instant cells on those rows are disabled. The write never guesses.
-- **Read path:** the page (for `columns` and the design queue preferences) and `writeCellsVerified` (for `identity` and `columns`) read the preferences through `Requests.getPreferences`, the way `InventorySuppressCategoryAnalysis` is read today ([api.js:1407](../js/data_management/api.js#L1407)).
+- **Read path:** the page (for `columns` and the design queue preferences) and `writeCellsVerified` (for `identity` and `columns`) read the preferences through `Requests.getPreferences`. Every read of `CACHE/Preferences` uses the one `PREFERENCES_MAPPING` in `helpers.js`, so they share a cache entry. The inventory tab lists (`INVENTORY_TAB_PREFERENCES`) are read with `InventoryUtils.getPreferenceTabs` in the data layer and `getInventoryTabList` in the UI.
 
 **Field data types and editability** belong to field definitions. In future, details cells get data types and editing through the same cell pipeline (§4.14).
 

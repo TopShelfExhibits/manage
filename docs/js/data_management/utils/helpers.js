@@ -199,6 +199,35 @@ export function offsetToISO(value, today = null) {
     return null;
 }
 
+/** CACHE/Preferences row object key → sheet header (the one mapping, so every read shares a cache entry) */
+export const PREFERENCES_MAPPING = { id: 'ID', name: 'Name', description: 'Description', page: 'Page', type: 'Type', value: 'Value', edithistory: 'EditHistory' };
+
+/**
+ * Preference rows whose value is a JSON list of inventory tab names. They are the only source of
+ * these settings (the inventory index has no flags).
+ */
+export const INVENTORY_TAB_PREFERENCES = {
+    skipAnalysis: 'InventorySuppressCategoryAnalysis',   // left out of shortage checks, reports and alerts
+    customItemNumbers: 'InventoryCustomItemNumbers',     // item numbers that don't follow PREFIX-NUMBER
+    descriptionOnly: 'InventoryDescriptionOnly'          // no quantity or item number; packed as a description
+};
+
+/**
+ * Tab names listed by a preference row ({ id, value }), e.g. Requests.getPreferences().
+ * @param {Array<{id: string, value: string}>} preferences
+ * @param {string} id - One of INVENTORY_TAB_PREFERENCES
+ * @returns {string[]} Empty when the row is missing or its value isn't a JSON list
+ */
+export function resolveInventoryTabList(preferences, id) {
+    const row = Array.isArray(preferences) ? preferences.find(p => p?.id === id) : null;
+    try {
+        const tabs = JSON.parse(row?.value || '[]');
+        return Array.isArray(tabs) ? tabs.filter(tab => typeof tab === 'string') : [];
+    } catch {
+        return [];
+    }
+}
+
 /** Preference row: days ahead the inventory shortage alerts look (missing or 0: alerts off) */
 export const SHORTAGE_ALERT_DAYS_PREFERENCE = 'InventoryShortageAlertDays';
 

@@ -41,7 +41,7 @@ import { formatValue, formatText } from '../application/utils/views/fieldFormat.
 import { rowsToCards, bucketRowsToCards } from '../application/utils/views/cardsAdapter.js';
 import { applyColorRule, colorFor, rowColorFor } from '../application/utils/views/viewColor.js';
 import { containerTier, viewportTier, BREAKPOINTS } from '../application/utils/useContainerSize.js';
-import { todayISOString, setTestToday, startOfTodayMs, resolveShortageAlertDays, shortageAlertDateFilters, searchFilter, textFiltersToSearchParams, parseSearchParameters } from '../data_management/utils/helpers.js';
+import { todayISOString, setTestToday, startOfTodayMs, resolveShortageAlertDays, shortageAlertDateFilters, INVENTORY_TAB_PREFERENCES, resolveInventoryTabList, searchFilter, textFiltersToSearchParams, parseSearchParameters } from '../data_management/utils/helpers.js';
 import { instantWriteEntry, identityKey, cellKey, joinKey } from '../data_management/utils/instant-write-config.js';
 import { estimateShipDate } from '../data_management/utils/ship-date.js';
 import { getReactiveStore, createAnalysisConfig } from '../application/index.js';
@@ -989,8 +989,8 @@ test('USER DATA', 'getUserDataByPrefix returns entry for dashboard prefix', asyn
 
 // ── Group 25: Hardware Inventory Resolution ───────────────────────────────────
 // Hardware items use non-standard item number formats that fail the prefix lookup
-// in getTabNameForItem and are resolved instead by scanning the HARDWARE tab's
-// customItemNumbers flag. Three distinct failure modes have been found historically:
+// in getTabNameForItem and are resolved instead by scanning the tabs the
+// InventoryCustomItemNumbers preference lists (HARDWARE). Three distinct failure modes have been found historically:
 //
 //   Multi-hyphen  VUE-V2C-LP / LED-EXL21-SL
 //     Standard regex extracts only the first segment (VUE-V2C); that partial ID
@@ -998,7 +998,7 @@ test('USER DATA', 'getUserDataByPrefix returns entry for dashboard prefix', asyn
 //   Spaced-numeric  901 00 030 MKII / 615 11 01 ANO
 //     Standard regex never fires (no [A-Z]+-digits prefix); direct hardware path.
 //   Text-based  HH BOLTHOG M8 LONG / HH BOLTHOG 1-4 20 x 2.5
-//     No standard prefix match; customItemNumbers scan finds exact row.
+//     No standard prefix match; the InventoryCustomItemNumbers scan finds the exact row.
 //     HH BOLTHOG 1-4 20 x 2.5 also tests the getItemInfo hyphen-split fallback:
 //     split('-')[1] yields '4 20 x 2.5' which doesn't exist; code retries with
 //     the full original item name.
@@ -1248,25 +1248,26 @@ test('LOCK WRAPPERS', 'getInventoryLock returns null for unlocked category', asy
     assertEqual(result, null, 'FURNITURE has no lock in FakeGoogle');
 });
 
-// ── Group 30: Hardware Extraction ─────────────────────────────────────────────
-// extractHardwareFromText scans the HARDWARE tab for matching item numbers using
-// pattern matching against non-standard item codes. FakeGoogle HARDWARE tab has
+// ── Group 30: Nonstandard Item Number Extraction ──────────────────────────────
+// extractCustomItemFromText scans the tabs listed in InventoryCustomItemNumbers (HARDWARE
+// in FakeGoogle) for matching item numbers using pattern matching against non-standard
+// item codes. FakeGoogle HARDWARE tab has
 // '901 00 030 MKII' and 'HH BOLTHOG M8 LONG' as known fixtures.
 
 test('HARDWARE EXTRACTION', '901 00 030 MKII extracted with correct quantity', async () => {
-    const result = await Requests.extractHardwareFromText('(10) 901 00 030 MKII Mounting brackets');
-    assertEqual(result.quantity, 10, 'extractHardwareFromText quantity');
-    assertEqual(result.itemNumber, '901 00 030 MKII', 'extractHardwareFromText itemNumber');
+    const result = await Requests.extractCustomItemFromText('(10) 901 00 030 MKII Mounting brackets');
+    assertEqual(result.quantity, 10, 'extractCustomItemFromText quantity');
+    assertEqual(result.itemNumber, '901 00 030 MKII', 'extractCustomItemFromText itemNumber');
 });
 
 test('HARDWARE EXTRACTION', 'HH BOLTHOG M8 LONG extracted with correct quantity', async () => {
-    const result = await Requests.extractHardwareFromText('(3) HH BOLTHOG M8 LONG Long bolts');
+    const result = await Requests.extractCustomItemFromText('(3) HH BOLTHOG M8 LONG Long bolts');
     assertEqual(result.quantity, 3, 'HH BOLTHOG M8 LONG quantity');
     assertEqual(result.itemNumber, 'HH BOLTHOG M8 LONG', 'HH BOLTHOG M8 LONG itemNumber');
 });
 
 test('HARDWARE EXTRACTION', 'text with no hardware returns null itemNumber', async () => {
-    const result = await Requests.extractHardwareFromText('plain text no hardware here');
+    const result = await Requests.extractCustomItemFromText('plain text no hardware here');
     assertEqual(result.itemNumber, null, 'no hardware match returns null itemNumber');
 });
 
@@ -1292,17 +1293,17 @@ test('DESCRIPTION MATCH', 'unrelated description returns non-null alert', async 
 });
 
 // ── Group 32: Inventory Level Check ──────────────────────────────────────────
-// checkInventoryLevel returns null for suppressed items and an alert for shortages.
+// checkInventoryLevel returns null for items in skipped tabs and an alert for shortages.
 // FURNITURE is in InventorySuppressCategoryAnalysis preference; TABLE-001 maps to FURNITURE.
 // CAB-004 during ATSC 2025 NAB window: 10 in stock, 22 needed (11 ATSC + 11 GEARFIRE same day).
 
-test('INVENTORY LEVEL CHECK', 'suppressed item prefix returns null', async () => {
-    // TABLE prefix has suppressAnalysis=true in FakeGoogle Inventory index
+test('INVENTORY LEVEL CHECK', 'item in a skipped tab returns null', async () => {
+    // TABLE-001 is in FURNITURE, which InventorySuppressCategoryAnalysis lists
     const result = await Requests.checkInventoryLevel(
         { 'Extracted Item': 'TABLE-001' },
         'CHAINCO 2026 SPRING EXPO'
     );
-    assertEqual(result, null, 'TABLE-001 (suppressAnalysis=true) must return null');
+    assertEqual(result, null, 'TABLE-001 (FURNITURE skipped) must return null');
 });
 
 test('INVENTORY LEVEL CHECK', 'oversold CAB-004 during ATSC NAB returns shortage alert', async () => {
@@ -1485,9 +1486,10 @@ test('CACHE INVALIDATION', 'remote Caching-tab timestamp for getTabs fires getPa
 });
 
 // ── Group 35: Preferences ─────────────────────────────────────────────────────
-// FakeGoogle CACHE/Preferences has 7 rows:
+// FakeGoogle CACHE/Preferences has 13 rows, among them:
 //   4 schedule* integer prefs (offsets 14, 14, 7, 7)
-//   3 inventory* json prefs   (suppress, customItemNumbers, descriptionOnly)
+//   3 inventory* json tab lists (InventorySuppressCategoryAnalysis, InventoryCustomItemNumbers,
+//     InventoryDescriptionOnly), the only source of those settings
 
 test('PREFERENCES', 'getPreferences returns an array', async () => {
     const result = await Requests.getPreferences();
@@ -3070,10 +3072,12 @@ async function restoreAlerts() {
     return await Requests.getInventoryShortageAlerts();
 }
 
-async function setAlertDays(value) {
-    const prefs = (await Requests.getPreferences()).map(p => ({ ...p, value: p.id === 'InventoryShortageAlertDays' ? value : p.value }));
+async function setPreference(id, value) {
+    const prefs = (await Requests.getPreferences()).map(p => ({ ...p, value: p.id === id ? value : p.value }));
     await _asUser(() => Requests.savePreferences(prefs));
 }
+
+const setAlertDays = (value) => setPreference('InventoryShortageAlertDays', value);
 
 test('SHORTAGE ALERTS', 'resolveShortageAlertDays reads the preference; missing, 0 or invalid turns alerts off', async () => {
     const pref = (value) => [{ id: 'InventoryShortageAlertDays', value }];
@@ -3166,6 +3170,68 @@ test('DATE ROLLOVER', 'the rollover invalidates results computed from today, onc
     } finally {
         pinToday(null);
     }
+});
+
+// ── Inventory tab preferences: the only source of per-tab inventory settings ──
+// InventorySuppressCategoryAnalysis, InventoryCustomItemNumbers and InventoryDescriptionOnly list
+// tab names; the inventory index has no flags. Fixture values: skip FURNITURE, MONITORS, LIGHTING,
+// ELECTRONICS, ADDITIONS; custom item numbers HARDWARE; description only ADDITIONS.
+// With today pinned to 2025-01-01, the 120-day report holds CAB-004 (CABINETS, runs short during
+// ATSC 2025 NAB; see SHORTAGE ALERTS) and CHAIR-WHITE (FURNITURE, skipped by the fixture list).
+
+const SKIP_TABS = '["FURNITURE","MONITORS","LIGHTING","ELECTRONICS","ADDITIONS"]';
+
+test('INVENTORY TAB PREFERENCES', 'resolveInventoryTabList reads a JSON list of tab names', async () => {
+    const id = INVENTORY_TAB_PREFERENCES.descriptionOnly;
+    const pref = (value) => [{ id, value }];
+    assertEqual(resolveInventoryTabList(pref('["ADDITIONS","SIGNS"]'), id), ['ADDITIONS', 'SIGNS'], 'list');
+    assertEqual([null, [], pref(''), pref('not json'), pref('{"a":1}')].map(p => resolveInventoryTabList(p, id)), [[], [], [], [], []], 'missing or invalid');
+    assertEqual(await InventoryUtils.getPreferenceTabs(INVENTORY_TAB_PREFERENCES.skipAnalysis), JSON.parse(SKIP_TABS), 'fixture skip list');
+});
+
+test('INVENTORY TAB PREFERENCES', 'the index carries no settings', async () => {
+    const index = await Requests.getInventoryIndexData();
+    assertEqual(Object.keys(index[0]).sort(), ['folder', 'prefix', 'tab'], 'index row keys');
+});
+
+test('INVENTORY TAB PREFERENCES', 'a skipped tab leaves the reports, alerts and pack list checks', async () => {
+    const reportItems = async () => (await Requests.getMultipleShowsItemsSummary({ dateFilters: shortageAlertDateFilters(120) }, {}, null, false)).map(row => row.itemId);
+    try {
+        pinToday(ALERTS_TODAY);
+        const before = await reportItems();
+        assertContains(before, 'CAB-004', 'fixture list: CABINETS reported');
+        assertNotContains(before, 'CHAIR-WHITE', 'fixture list: FURNITURE skipped');
+        await setPreference(INVENTORY_TAB_PREFERENCES.skipAnalysis, '["CABINETS"]');
+        assertEqual(await reportItems(), ['CHAIR-WHITE'], 'report: CABINETS skipped, FURNITURE back');
+        assertEqual(await Requests.getInventoryShortageAlerts(), [], 'alerts skip CABINETS');
+        assertEqual(await Requests.checkInventoryLevel({ 'Extracted Item': 'CAB-004' }, 'ATSC 2025 NAB'), null, 'pack list check skips CABINETS');
+    } finally {
+        await setPreference(INVENTORY_TAB_PREFERENCES.skipAnalysis, SKIP_TABS);
+        pinToday(null);
+    }
+});
+
+test('INVENTORY TAB PREFERENCES', 'every tab listed for custom item numbers is scanned', async () => {
+    const text = '(2) CAB-004 Curved-bottom counters';
+    const hardware = '(10) 901 00 030 MKII brackets';
+    assertEqual((await Requests.extractCustomItemFromText(text)).itemNumber, null, 'CABINETS not listed');
+    await setPreference(INVENTORY_TAB_PREFERENCES.customItemNumbers, '["HARDWARE","CABINETS"]');
+    try {
+        const found = await Requests.extractCustomItemFromText(text);
+        assertEqual([found.itemNumber, found.quantity], ['CAB-004', 2], 'CABINETS scanned');
+        assertEqual((await Requests.extractCustomItemFromText(text, ['HARDWARE'])).itemNumber, null, 'category filter respected');
+        assertEqual((await Requests.extractCustomItemFromText(hardware)).itemNumber, '901 00 030 MKII', 'HARDWARE still scanned');
+    } finally {
+        await setPreference(INVENTORY_TAB_PREFERENCES.customItemNumbers, '["HARDWARE"]');
+    }
+    await setPreference(INVENTORY_TAB_PREFERENCES.customItemNumbers, '[]');
+    try {
+        assertEqual(await Requests.getTabNameForItem('VUE-V2C-LP'), null, 'no tabs listed: hardware item numbers no longer resolve');
+        assertEqual((await Requests.extractCustomItemFromText(hardware)).itemNumber, null, 'no tabs listed: nothing scanned');
+    } finally {
+        await setPreference(INVENTORY_TAB_PREFERENCES.customItemNumbers, '["HARDWARE"]');
+    }
+    assertEqual(await Requests.getTabNameForItem('VUE-V2C-LP'), 'HARDWARE', 'restored');
 });
 
 // ── Runner export ─────────────────────────────────────────────────────────────

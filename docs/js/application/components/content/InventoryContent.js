@@ -1,4 +1,4 @@
-import { html, InventoryTableComponent, hamburgerMenuRegistry, NavigationRegistry, Requests, DataView, DashboardToggleComponent, getReactiveStore, findMatchingStores, createAnalysisConfig, generateStoreKey, authState, invalidateCache, todayISOString, getShortageAlertsStore, getShortageAlertDays, shortagesByItem, itemShortageCards, categoryShortageCards } from '../../index.js';
+import { html, InventoryTableComponent, hamburgerMenuRegistry, NavigationRegistry, Requests, DataView, DashboardToggleComponent, getReactiveStore, findMatchingStores, createAnalysisConfig, generateStoreKey, authState, invalidateCache, todayISOString, getInventoryTabList, INVENTORY_TAB_PREFERENCES, getShortageAlertsStore, getShortageAlertDays, shortagesByItem, itemShortageCards, categoryShortageCards } from '../../index.js';
 import { ShowInventoryReport } from './ShowInventoryReport.js';
 import { InventoryItemReport } from './InventoryItemReport.js';
 import { InventoryItemTimeline } from './InventoryItemTimeline.js';
@@ -200,7 +200,6 @@ export const InventoryContent = {
         return {
             categoriesStore: null, // Reactive store for inventory categories (lock analysis)
             inventoryStore: null, // All inventory item rows (overview table and category card members)
-            suppressedTabs: new Set(), // Description-only tabs hidden from the overview table
             autoSavedCategories: new Set(), // Track which categories have auto-saved data
             shortageAlertsStore: getShortageAlertsStore(),
             shortageDecorationKeys: ['itemNumber'],
@@ -249,9 +248,13 @@ export const InventoryContent = {
         allItemRows() {
             return this.inventoryStore?.data || [];
         },
+        // Description-only tabs (InventoryDescriptionOnly preference), hidden from the overview table
+        descriptionOnlyTabs() {
+            return getInventoryTabList(INVENTORY_TAB_PREFERENCES.descriptionOnly);
+        },
         overviewRows() {
-            if (!this.suppressedTabs.size) return this.allItemRows;
-            return this.allItemRows.filter(item => !this.suppressedTabs.has(item.tab));
+            if (!this.descriptionOnlyTabs.length) return this.allItemRows;
+            return this.allItemRows.filter(item => !this.descriptionOnlyTabs.includes(item.tab));
         },
         // The page owns its data: category cards bucket every item; the overview hides description-only tabs
         inventoryRows() {
@@ -438,13 +441,6 @@ export const InventoryContent = {
             this.navigateToPath(NavigationRegistry.buildPath(`inventory/${String(row.tab).toLowerCase()}`, { searchTerm: currentParams.searchTerm }));
         },
         initializeInventoryStore() {
-            // Hide tabs whose prefixes are all description-only from the overview table
-            Requests.getPreferences().then(prefs => {
-                const descPref = prefs?.find(p => p.id === 'InventoryDescriptionOnly');
-                let descOnlyTabs = [];
-                try { descOnlyTabs = JSON.parse(descPref?.value || '[]'); } catch {}
-                this.suppressedTabs = new Set(descOnlyTabs);
-            }).catch(() => {});
             // All inventory rows (pending changes applied as of today); autoLoad
             this.inventoryStore = getReactiveStore(Requests.getAllInventoryData, null, [todayISOString()]);
         },

@@ -1,4 +1,4 @@
-import { html, Requests, TableComponent, DataView, getReactiveStore, createAnalysisConfig, NavigationRegistry, Priority, invalidateCache, authState, undoRegistry, EditHistoryUtils, todayISOString, appSettings, ProposalUtils, getInventoryNoteMaxLength, getShortageAlertsStore, getShortageAlertDays, shortagesByItem, itemShortageCards } from '../../index.js';
+import { html, Requests, TableComponent, DataView, getReactiveStore, createAnalysisConfig, NavigationRegistry, Priority, invalidateCache, authState, undoRegistry, EditHistoryUtils, todayISOString, appSettings, ProposalUtils, getInventoryNoteMaxLength, getInventoryTabList, INVENTORY_TAB_PREFERENCES, getShortageAlertsStore, getShortageAlertDays, shortagesByItem, itemShortageCards } from '../../index.js';
 import { sheetLockMixin } from '../../utils/sheetLockMixin.js';
 import { ThumbnailCache } from '../../utils/thumbnailCache.js';
 import { itemImageStyle, iconLabel } from '../../utils/views/viewStyles.js';
@@ -893,7 +893,6 @@ export const InventoryTableComponent = {
             revertNote: '',
             INVENTORY_DELETED_VIEWS,
             lockNamespace: 'INVENTORY',
-            tabMetaFlags: { hideQuantity: false, hideItemNumber: false },
             shortageAlertsStore: getShortageAlertsStore(),
             shortageDecorationKeys: ['itemNumber']
         };
@@ -937,12 +936,11 @@ export const InventoryTableComponent = {
                 title: 'View item timeline'
             };
         },
-        // Tab metadata flags hide columns for this tab (data configuration → a view patch)
+        // A description-only tab (InventoryDescriptionOnly preference) has no quantity or item
+        // number columns (data configuration → a view patch)
         viewPatches() {
-            const hide = [];
-            if (this.tabMetaFlags.hideQuantity) hide.push('quantity');
-            if (this.tabMetaFlags.hideItemNumber) hide.push('itemNumber');
-            if (!hide.length) return [];
+            if (!getInventoryTabList(INVENTORY_TAB_PREFERENCES.descriptionOnly).includes(this.tabTitle)) return [];
+            const hide = ['quantity', 'itemNumber'];
             return [{ patch: { columns: this.registry.views[0].columns.filter(k => !hide.includes(k)), hidden: hide } }];
         },
         editModeName() {
@@ -1066,19 +1064,6 @@ export const InventoryTableComponent = {
         }
     },
     async mounted() {
-        // Load index metadata to derive column visibility flags for this tab
-        if (this.tabTitle) {
-            const tabTitle = this.tabTitle;
-            Requests.getPreferences().then(prefs => {
-                const descPref = prefs?.find(p => p.id === 'InventoryDescriptionOnly');
-                let descOnlyTabs = [];
-                try { descOnlyTabs = JSON.parse(descPref?.value || '[]'); } catch {}
-                if (descOnlyTabs.includes(tabTitle)) {
-                    this.tabMetaFlags = { hideQuantity: true, hideItemNumber: true };
-                }
-            }).catch(() => {});
-        }
-
         // Defensive: always set up the store before using it
         this.inventoryTableStore = getReactiveStore(
             Requests.getInventoryTabData,

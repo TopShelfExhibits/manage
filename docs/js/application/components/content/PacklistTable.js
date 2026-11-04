@@ -1,4 +1,4 @@
-import { html, TableComponent, DataView, Requests, getReactiveStore, NavigationRegistry, createAnalysisConfig, invalidateCache, Priority, tableRowSelectionState, EditHistoryUtils, authState, undoRegistry, todayISOString, getAutoColorClass } from '../../index.js';
+import { html, TableComponent, DataView, Requests, getReactiveStore, NavigationRegistry, createAnalysisConfig, invalidateCache, Priority, tableRowSelectionState, EditHistoryUtils, authState, undoRegistry, todayISOString, getAutoColorClass, getInventoryTabList, INVENTORY_TAB_PREFERENCES } from '../../index.js';
 import { resolveView } from '../../utils/views/resolveView.js';
 import { itemImageStyle } from '../../utils/views/viewStyles.js';
 import { ItemImageComponent } from './InventoryTable.js';
@@ -187,7 +187,6 @@ export const PacklistTable = {
             PIECE_NUMBER,
             lockNamespace: 'PACK_LISTS',
             itemGroupVisibilityOverride: null,
-            descriptionOnlyTabs: [],
             scheduleAttachment: null
         };
     },
@@ -438,12 +437,6 @@ export const PacklistTable = {
         this.$notify.clearBanners(this.containerPath);
     },
     async mounted() {
-        // Load InventoryDescriptionOnly preference for use in addItemFromInventory
-        Requests.getPreferences().then(prefs => {
-            const descPref = prefs?.find(p => p.id === 'InventoryDescriptionOnly');
-            try { this.descriptionOnlyTabs = JSON.parse(descPref?.value || '[]'); } catch { this.descriptionOnlyTabs = []; }
-        }).catch(() => {});
-
         // Initialize store if tabName is available
         if (this.tabName) {
             this.initializeStore();
@@ -904,11 +897,12 @@ export const PacklistTable = {
             
             // Populate with inventory data
             // Format: (1) ITEM# Description
-            // For prefixes with descriptionOnly, use just the description with no item# or stub
+            // Description-only tabs (InventoryDescriptionOnly preference) add just the description, no item# or stub
             const itemNumber = inventoryItem.itemNumber || '';
             const description = inventoryItem.description || '';
             const itemTab = await Requests.getTabNameForItem(itemNumber).catch(() => null);
-            const formattedDescription = (itemTab && this.descriptionOnlyTabs.includes(itemTab))
+            const descriptionOnlyTabs = getInventoryTabList(INVENTORY_TAB_PREFERENCES.descriptionOnly);
+            const formattedDescription = (itemTab && descriptionOnlyTabs.includes(itemTab))
                 ? description
                 : `(1) ${itemNumber} ${description}`;
             

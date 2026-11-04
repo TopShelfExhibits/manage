@@ -1,4 +1,4 @@
-import { Database, InventoryUtils, ProductionUtils, wrapMethods, GetParagraphMatchRating, parseDate, toISODateString, EditHistoryUtils, ApplicationUtils, invalidateCache, normalizeHeaderName, ProgressBus } from '../index.js';
+import { Database, InventoryUtils, ProductionUtils, wrapMethods, INVENTORY_TAB_PREFERENCES, GetParagraphMatchRating, parseDate, toISODateString, EditHistoryUtils, ApplicationUtils, invalidateCache, normalizeHeaderName, ProgressBus } from '../index.js';
 
 /** Normalize an identifier for loose matching (strips spaces, case, non-alphanumeric) */
 function _normalizeId(v) { return String(v || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, ''); }
@@ -38,8 +38,10 @@ class packListUtils_uncached {
             // Only return the item if its prefix exists in the inventory index
             // and matches the optional array ctgFilter (case insensitive)
             if (tabName && (!ctgFilter || ctgFilter.some(cat => cat.toUpperCase() === tabName.toUpperCase()))) {
-                if (tabName === 'HARDWARE') {
-                    return await deps.call(PackListUtils.extractHardwareFromText, text);
+                const customTabs = await deps.call(InventoryUtils.getPreferenceTabs, INVENTORY_TAB_PREFERENCES.customItemNumbers);
+                if (customTabs.includes(tabName)) {
+                    // A PREFIX-NUMBER match can be only part of a nonstandard item number
+                    return await deps.call(PackListUtils.extractCustomItemFromText, text, [tabName]);
                 } else {
                     // Extract clean description by removing the matched item code and quantity
                     const description = text
@@ -56,14 +58,12 @@ class packListUtils_uncached {
             }
         }
         
-        if (!ctgFilter || ctgFilter.includes('HARDWARE')) {
-            // No item found via prefix match — fall back to scanning tabs with customItemNumbers.
-            // This handles hardware-style item numbers that don't follow the LETTERS-NUMBERS pattern
-            // (e.g. "901 00 030 MKII", "VUE-V2C-LP", "HH BOLTHOG 1-4 20 x 2.5").
-            const hardwareResult = await deps.call(PackListUtils.extractHardwareFromText, text);
-            if (hardwareResult.itemNumber) {
-                return hardwareResult;
-            }
+        // No item found via prefix match — fall back to scanning the InventoryCustomItemNumbers tabs.
+        // This handles item numbers that don't follow the LETTERS-NUMBERS pattern
+        // (e.g. "901 00 030 MKII", "VUE-V2C-LP", "HH BOLTHOG 1-4 20 x 2.5").
+        const customResult = await deps.call(PackListUtils.extractCustomItemFromText, text, ctgFilter);
+        if (customResult.itemNumber) {
+            return customResult;
         }
 
         // No item found in text within the specified categories
@@ -75,13 +75,15 @@ class packListUtils_uncached {
     }
 
     /**
-     * Extract hardware item information from text by checking against HARDWARE inventory
-     * Searches for pattern: (qty) itemNumber where itemNumber exists in HARDWARE tab
+     * Extract an item with a nonstandard item number from text, by checking the item numbers of
+     * every tab in the InventoryCustomItemNumbers preference.
+     * Searches for pattern: (qty) itemNumber where itemNumber exists in one of those tabs
      * @param {Object} deps - Dependency decorator for tracking calls
-     * @param {string} text - Text to search for hardware item information
+     * @param {string} text - Text to search for item information
+     * @param {string[]} [ctgFilter] - Only these tabs (case insensitive)
      * @returns {Promise<Object>} Object with {quantity: number, itemNumber: string|null, description: string}
      */
-    static async extractHardwareFromText(deps, text) {
+    static async extractCustomItemFromText(deps, text, ctgFilter = undefined) {
         if (!text || typeof text !== 'string') {
             return {
                 quantity: 1,
@@ -91,24 +93,22 @@ class packListUtils_uncached {
         }
 
         try {
-            // Get all hardware items from the HARDWARE inventory tab
-            const hardwareData = await deps.call(InventoryUtils.getInventoryTabData, 'HARDWARE', undefined, undefined, await deps.call(ApplicationUtils.getToday));
+            const wanted = ctgFilter ? ctgFilter.map(cat => cat.toUpperCase()) : null;
+            const customTabs = (await deps.call(InventoryUtils.getPreferenceTabs, INVENTORY_TAB_PREFERENCES.customItemNumbers))
+                .filter(tab => !wanted || wanted.includes(tab.toUpperCase()));
+            const today = customTabs.length ? await deps.call(ApplicationUtils.getToday) : null;
 
-            if (!hardwareData || hardwareData.length === 0) {
-                return {
-                    quantity: 1,
-                    itemNumber: null,
-                    description: text
-                };
+            // Item numbers of every listed tab, in preference order
+            const customItemNumbers = [];
+            for (const tab of customTabs) {
+                const tabData = await deps.call(InventoryUtils.getInventoryTabData, tab, undefined, undefined, today);
+                for (const item of tabData || []) {
+                    if (item.itemNumber && item.itemNumber.trim() !== '') customItemNumbers.push(item.itemNumber);
+                }
             }
 
-            // Extract all hardware item numbers
-            const hardwareItemNumbers = hardwareData
-                .map(item => item.itemNumber)
-                .filter(num => num && num.trim() !== '');
-
-            // Check text for each hardware item number with pattern: (qty) itemNumber
-            for (const itemNum of hardwareItemNumbers) {
+            // Check text for each item number with pattern: (qty) itemNumber
+            for (const itemNum of customItemNumbers) {
                 // Escape special regex characters in item number
                 const escapedItemNum = itemNum.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
                 
@@ -117,7 +117,7 @@ class packListUtils_uncached {
                 const match = text.match(pattern);
                 
                 if (match) {
-                    // Extract clean description by removing the matched hardware code and quantity
+                    // Extract clean description by removing the matched item number and quantity
                     const description = text
                         .replace(match[0], '') // Remove the entire match (quantity + item number)
                         .replace(/\s+/g, ' ')  // Normalize whitespace
@@ -131,7 +131,7 @@ class packListUtils_uncached {
                 }
             }
 
-            // No hardware item found in text
+            // No item found in text
             return {
                 quantity: 1,
                 itemNumber: null,
@@ -139,7 +139,7 @@ class packListUtils_uncached {
             };
 
         } catch (error) {
-            console.error('Error extracting hardware from text:', error);
+            console.error('Error extracting a nonstandard item number from text:', error);
             return {
                 quantity: 1,
                 itemNumber: null,
