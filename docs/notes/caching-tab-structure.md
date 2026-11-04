@@ -133,7 +133,7 @@ All reads and writes use `GoogleSheetsService` directly (same pattern as the `Lo
 
 # Analytics Tab: Persisted Results
 
-Some cached API results take long enough to compute that a new session should start from the last saved copy. A method opts in through `wrapMethods`' last argument, `persistentMethods` (see the bottom of `api.js`). The only persisted method so far is `getInventoryShortageAlerts`.
+Some cached API results take long enough to compute that a new session should start from the last saved copy. A method opts in through `wrapMethods`' last argument, `persistentMethods` (see the bottom of `api.js`). The persisted methods are `getInventoryShortageAlerts` and `getItemThumbnails` (item thumbnails for report pages; it reads every inventory tab).
 
 ## Tab location and layout
 
