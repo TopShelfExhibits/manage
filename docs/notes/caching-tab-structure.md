@@ -130,3 +130,48 @@ Writes both columns A and B of the next empty row.
 ## Access method
 
 All reads and writes use `GoogleSheetsService` directly (same pattern as the `Locks` tab). Do not route through the cache layer or `Database`.
+
+# Analytics Tab: Persisted Results
+
+Some cached API results take long enough to compute that a new session should start from the last saved copy. A method opts in through `wrapMethods`' last argument, `persistentMethods` (see the bottom of `api.js`). The only persisted method so far is `getInventoryShortageAlerts`.
+
+## Tab location and layout
+
+Spreadsheet `CACHE`, tab `Analytics`. Row 1 holds the headers; each later row holds one saved result.
+
+| A (Key)                            | B (SavedAt)                | C (Sources)                                         | D (Value)               |
+| ---------------------------------- | -------------------------- | --------------------------------------------------- | ----------------------- |
+| `api:getInventoryShortageAlerts:` | `2026-11-04T16:19:54.842Z` | `["database:getData:\"CACHE\",\"Preferences\",…"]` | `[{"itemId":"CAB-004"…}]` |
+
+- **Key:** the method's cache key, from `generateCacheKey`.
+- **SavedAt:** an ISO timestamp, written like the Caching tab's. This is when the oldest source read was filled, which can be earlier than the save itself.
+- **Sources:** a JSON list of the leaf cache keys the result was computed from, gathered from the recorded dependency chain (`collectSourceKeys`).
+- **Value:** the result as JSON. A row is written only if every cell stays under the 50,000-character Sheets cell limit; otherwise the save is skipped with a console warning.
+
+Reads and writes use `GoogleSheetsService` directly, in `application-utils.js` (`setPersistentStore`), the same way as the Caching tab. Saving a result therefore never invalidates cached reads. If the tab is missing, restores and saves fail quietly (with a console warning) and results are computed as before.
+
+## Rules
+
+- **Saving.** Every computation of a persisted method writes its row, after the result is cached in memory. The write isn't awaited.
+- **Restoring.** Only the first cache miss of a session (or after `clearCache`) reads the row. The row is used only if no source has a newer timestamp than `SavedAt`. A source is checked against every Caching tab key it starts with, and `app_utils:getToday:` is checked against local midnight. When a row is restored, its sources are linked back as dependencies and marked as filled at `SavedAt`. From then on, a local save or a timestamp the poller picks up invalidates the restored value exactly as if it had been computed in this session.
+- **Stale rows** are never deleted. A stale row is ignored on read and overwritten by the next computation.
+- **Allowed sources.** A persisted method's result must be JSON, and it may depend only on `Database` reads and `ApplicationUtils.getToday`, since only those are checked on restore. In memory, persisted results never expire; only their sources invalidate them.
+- **Self-stamped writes.** `writeCacheTimestamp` adds one second to every stamp, so a result computed in the second after a source was saved is seen as stale by the next session. That costs one extra computation and never restores stale data.
+
+## Today and the date rollover
+
+`helpers.js` is the one source of "now" (`currentDate`, `todayISOString`, `startOfTodayMs`, `offsetToISO`), and it uses the browser's local calendar. Cached functions whose results depend on today read it with `deps.call(ApplicationUtils.getToday)`. `checkDateRollover` runs every minute; when the local date changes, it invalidates `getToday`. The invalidation cascades to every result computed from today, and their reactive stores reload. Tests pin the date with `setTestToday`.
+
+## Shortage alerts
+
+- **Preference.** `InventoryShortageAlertDays` sets how many days ahead the alerts look. Missing or `0` turns the alerts off.
+- **What's checked.** `getInventoryShortageAlerts` runs the item shortage report on shows dated from today through that many days ahead, and keeps the periods where an item's minimum quantity drops below 0.
+- **Where the alerts show** (`application/utils/shortageAlerts.js`):
+  - an app banner that links to the report;
+  - a "Short N" card on the item number, in the inventory overview and the category tables;
+  - an "N short" card on each affected category card, which opens the report filtered to that category.
+
+## Live data to add before deploying
+
+1. A `CACHE/Analytics` tab with the headers `Key | SavedAt | Sources | Value` in row 1.
+2. A `CACHE/Preferences` row: ID `InventoryShortageAlertDays`, Name `Shortage Alert Days`, Description `days ahead the inventory shortage alerts look; 0 turns them off`, Page `inventory*`, Type `integer`, Value set to the number of days (for example `60`).

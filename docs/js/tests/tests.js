@@ -32,7 +32,7 @@ import { FakeGoogleSheetsAuth, FakeGoogleSheetsService, FakeGoogleState, setFake
 import { refreshAppData } from './fakeGoogleDevTools.js';
 import { isCheckedValue } from '../data_management/utils/checkbox-values.js';
 import { useBatchEdits, useInstantEdits } from '../application/utils/cellEdits.js';
-import { CacheInvalidationBus, ApplicationUtils, ProductionUtils, triggerCachePoll, Database, EditHistoryUtils, InventoryUtils, ProposalUtils, resolveInventoryNoteMaxLength } from '../data_management/index.js';
+import { CacheInvalidationBus, ApplicationUtils, ProductionUtils, triggerCachePoll, Database, EditHistoryUtils, InventoryUtils, ProposalUtils, resolveInventoryNoteMaxLength, checkDateRollover, clearCache } from '../data_management/index.js';
 import { authState } from '../application/utils/auth.js';
 import { commitInventoryProposal } from '../application/utils/inventoryProposals.js';
 import { resolveView, resolveAction, pickView, mergeView, matchesKeyPattern, setViewWarningHandler, withRegistryDefaults } from '../application/utils/views/resolveView.js';
@@ -41,7 +41,7 @@ import { formatValue, formatText } from '../application/utils/views/fieldFormat.
 import { rowsToCards, bucketRowsToCards } from '../application/utils/views/cardsAdapter.js';
 import { applyColorRule, colorFor, rowColorFor } from '../application/utils/views/viewColor.js';
 import { containerTier, viewportTier, BREAKPOINTS } from '../application/utils/useContainerSize.js';
-import { todayISOString, searchFilter, textFiltersToSearchParams, parseSearchParameters } from '../data_management/utils/helpers.js';
+import { todayISOString, setTestToday, startOfTodayMs, resolveShortageAlertDays, shortageAlertDateFilters, searchFilter, textFiltersToSearchParams, parseSearchParameters } from '../data_management/utils/helpers.js';
 import { instantWriteEntry, identityKey, cellKey, joinKey } from '../data_management/utils/instant-write-config.js';
 import { estimateShipDate } from '../data_management/utils/ship-date.js';
 import { getReactiveStore, createAnalysisConfig } from '../application/index.js';
@@ -1496,7 +1496,7 @@ test('PREFERENCES', 'getPreferences returns an array', async () => {
 
 test('PREFERENCES', 'getPreferences returns every fixture row', async () => {
     const result = await Requests.getPreferences();
-    assertEqual(result.length, 12, 'getPreferences row count');
+    assertEqual(result.length, 13, 'getPreferences row count');
 });
 
 test('PREFERENCES', 'all rows have required fields', async () => {
@@ -3025,6 +3025,146 @@ test('INSTANT WRITE', 'sheet health (test only) reports duplicate identities, du
         assertEqual(noIdentity.issues.map(i => i.kind), ['duplicate-header'], 'a spec without identity skips identity rules');
     } finally {
         iwRestore(snap);
+    }
+});
+
+// ── Shortage alerts, persisted results, date rollover ────────────────────────
+// Today is pinned to 2025-01-01 (setTestToday) and the InventoryShortageAlertDays fixture is 120,
+// so the alerts cover shows dated 2025-01-01 through 2025-05-01. CAB-004 (10 in stock) ships 11 to
+// GEARFIRE 2025 SHOT and 11 to ATSC 2025 NAB, both 1/10/2025 to 1/31: one alert, in CABINETS,
+// minimum -12 from 2025-01-10 to 2025-01-31. getInventoryShortageAlerts is persisted to
+// CACHE/Analytics; the restore tests edit its saved row, then clear memory as a new session would.
+
+const ALERTS_KEY = 'api:getInventoryShortageAlerts:';
+const ALERTS_TODAY = '2025-01-01';
+const CAB_004_ALERT = { itemId: 'CAB-004', tabName: 'CABINETS', startDate: '2025-01-10', endDate: '2025-01-31', minQty: -12, shows: ['GEARFIRE 2025 SHOT', 'ATSC 2025 NAB'] };
+const RESTORED_MARKER = [{ ...CAB_004_ALERT, minQty: -99 }];
+let _alertSources = []; // the saved row's real source keys, read by the first PERSISTED RESULTS test
+
+// Pin today and roll the cached date over to it
+function pinToday(isoDate) {
+    setTestToday(isoDate);
+    checkDateRollover();
+}
+
+// The saved alerts row once it holds `expected` (saving follows a computation without being awaited)
+async function savedAlertsRow(expected) {
+    for (let i = 0; i < 100; i++) {
+        const row = (FakeGoogleSheetsService.mockData.CACHE.Analytics || []).find(r => r[0] === ALERTS_KEY);
+        if (row && row[3] === JSON.stringify(expected)) return row;
+        await new Promise(r => setTimeout(r, 20));
+    }
+    throw new Error(`the saved alerts row never held ${JSON.stringify(expected)}`);
+}
+
+function setSavedAlertsRow(savedAt, sources, value) {
+    const rows = FakeGoogleSheetsService.mockData.CACHE.Analytics;
+    const line = [ALERTS_KEY, savedAt, JSON.stringify(sources), JSON.stringify(value)];
+    const index = rows.findIndex(r => r[0] === ALERTS_KEY);
+    if (index === -1) rows.push(line); else rows[index] = line;
+}
+
+// A new session's first read: empty memory, so a valid saved row is restored
+async function restoreAlerts() {
+    clearCache();
+    return await Requests.getInventoryShortageAlerts();
+}
+
+async function setAlertDays(value) {
+    const prefs = (await Requests.getPreferences()).map(p => ({ ...p, value: p.id === 'InventoryShortageAlertDays' ? value : p.value }));
+    await _asUser(() => Requests.savePreferences(prefs));
+}
+
+test('SHORTAGE ALERTS', 'resolveShortageAlertDays reads the preference; missing, 0 or invalid turns alerts off', async () => {
+    const pref = (value) => [{ id: 'InventoryShortageAlertDays', value }];
+    assertEqual(resolveShortageAlertDays(pref('120')), 120, 'integer value');
+    assertEqual([null, [], pref('0'), pref('abc'), pref('-5')].map(resolveShortageAlertDays), [0, 0, 0, 0, 0], 'off');
+    assertEqual(shortageAlertDateFilters(30), [{ column: 'Date', value: 0, type: 'after' }, { column: 'Date', value: 30, type: 'before' }], 'window filters');
+});
+
+test('SHORTAGE ALERTS', 'alerts list the periods where an item runs out in the window', async () => {
+    pinToday(ALERTS_TODAY);
+    assertEqual(await Requests.getInventoryShortageAlerts(), [CAB_004_ALERT], 'CAB-004 runs short');
+});
+
+test('SHORTAGE ALERTS', 'a preference of 0 turns the alerts off, and saving it refreshes them', async () => {
+    await setAlertDays('0');
+    try {
+        assertEqual(await Requests.getInventoryShortageAlerts(), [], 'off');
+    } finally {
+        await setAlertDays('120');
+    }
+    assertEqual(await Requests.getInventoryShortageAlerts(), [CAB_004_ALERT], 'back on');
+});
+
+test('PERSISTED RESULTS', 'a computed result is saved with its value and source keys', async () => {
+    const row = await savedAlertsRow([CAB_004_ALERT]);
+    const sources = _alertSources = JSON.parse(row[2]);
+    assertContains(sources, 'app_utils:getToday:', 'the clock is a source');
+    for (const prefix of ['database:getData:"CACHE","Preferences"', 'database:getData:"INVENTORY","CABINETS"', 'database:getData:"PACK_LISTS","ATSC 2025 NAB"', 'database:getData:"PROD_SCHED","Production Schedule"']) {
+        if (!sources.some(source => source.startsWith(prefix))) throw new Error(`no source under ${prefix}`);
+    }
+    if (isNaN(new Date(row[1]).getTime())) throw new Error(`SavedAt is not a date: ${row[1]}`);
+});
+
+test('PERSISTED RESULTS', 'a new session restores a row no source has changed since', async () => {
+    setSavedAlertsRow(new Date(Date.now() + 60000).toISOString(), _alertSources, RESTORED_MARKER);
+    assertEqual(await restoreAlerts(), RESTORED_MARKER, 'restored');
+});
+
+test('PERSISTED RESULTS', 'a source stamped after the row is saved means a recompute', async () => {
+    // The preference saves above stamped CACHE/Preferences on the Caching tab
+    const stamps = await ApplicationUtils.readCacheTimestamps();
+    if (!stamps.some(s => s.key === 'database:getData:"CACHE","Preferences"')) throw new Error('precondition: no Preferences stamp');
+    setSavedAlertsRow(new Date(Date.now() - 3600000).toISOString(), _alertSources, RESTORED_MARKER);
+    assertEqual(await restoreAlerts(), [CAB_004_ALERT], 'recomputed');
+    await savedAlertsRow([CAB_004_ALERT]); // the recompute is saved again
+});
+
+test('PERSISTED RESULTS', 'a row saved before today is stale; one saved today is restored', async () => {
+    const midnight = startOfTodayMs();
+    setSavedAlertsRow(new Date(midnight - 3600000).toISOString(), ['app_utils:getToday:'], RESTORED_MARKER);
+    assertEqual(await restoreAlerts(), [CAB_004_ALERT], 'yesterday: recomputed');
+    await savedAlertsRow([CAB_004_ALERT]);
+    setSavedAlertsRow(new Date(midnight + 3600000).toISOString(), ['app_utils:getToday:'], RESTORED_MARKER);
+    assertEqual(await restoreAlerts(), RESTORED_MARKER, 'today: restored');
+});
+
+test('PERSISTED RESULTS', 'a local save invalidates a restored result through its relinked sources', async () => {
+    setSavedAlertsRow(new Date(Date.now() + 60000).toISOString(), _alertSources, RESTORED_MARKER);
+    assertEqual(await restoreAlerts(), RESTORED_MARKER, 'restored');
+    const fired = new Set();
+    const handler = (e) => fired.add(e.methodName);
+    CacheInvalidationBus.on('api', handler);
+    try {
+        await _asUser(async () => Requests.savePreferences(await Requests.getPreferences())); // round trip
+    } finally {
+        CacheInvalidationBus.off('api', handler);
+    }
+    assertContains([...fired], 'getInventoryShortageAlerts', 'restored alerts invalidated');
+    assertEqual(await Requests.getInventoryShortageAlerts(), [CAB_004_ALERT], 'recomputed after the save');
+});
+
+test('DATE ROLLOVER', 'the rollover invalidates results computed from today, once', async () => {
+    try {
+        pinToday(ALERTS_TODAY);
+        await Requests.getInventoryShortageAlerts();
+        const fired = new Set();
+        const handler = (e) => fired.add(e.methodName);
+        CacheInvalidationBus.on('api', handler);
+        try {
+            setTestToday('2025-01-02');
+            checkDateRollover();
+            assertContains([...fired], 'getInventoryShortageAlerts', 'alerts invalidated');
+            assertContains([...fired], 'getMultipleShowsItemsSummary', 'report invalidated');
+            fired.clear();
+            checkDateRollover();
+            assertEqual([...fired], [], 'no second invalidation for the same date');
+        } finally {
+            CacheInvalidationBus.off('api', handler);
+        }
+    } finally {
+        pinToday(null);
     }
 });
 

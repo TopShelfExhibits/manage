@@ -1089,7 +1089,8 @@ export class FakeGoogleSheetsService {
                 ['InventorySuppressCategoryAnalysis', 'Skip Quantity Analysis', 'these inventories are skipped when finding shortages', 'inventory*', 'json', '["FURNITURE","MONITORS","LIGHTING","ELECTRONICS","ADDITIONS"]', ''],
                 ['InventoryCustomItemNumbers', 'Allow Nonstandard Item#s', 'these inventories have nonstandard item numbers and can slow down the system', 'inventory*', 'json', '["HARDWARE"]', ''],
                 ['InventoryDescriptionOnly', 'Omit Quantity Column', 'list of inventories that omit the quantity column, added to packlists as descriptions only', 'inventory*', 'json', '["ADDITIONS"]', ''],
-                ['InventoryNoteMaxLength', 'Inventory Note Length', 'maximum characters in an inventory save note (edit history, scheduled changes, proposal commits)', 'inventory*', 'integer', '25', '']
+                ['InventoryNoteMaxLength', 'Inventory Note Length', 'maximum characters in an inventory save note (edit history, scheduled changes, proposal commits)', 'inventory*', 'integer', '25', ''],
+                ['InventoryShortageAlertDays', 'Shortage Alert Days', 'days ahead the inventory shortage alerts look; 0 turns them off', 'inventory*', 'integer', '120', '']
             ]
         }
     };

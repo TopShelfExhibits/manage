@@ -1,4 +1,4 @@
-import { wrapMethods, normalizeHeaderName, Database, InventoryUtils, PackListUtils, ProductionUtils, ApplicationUtils, EditHistoryUtils, InstantWriteUtils, ARCHIVE_TAB_NAME, ARCHIVE_HEADERS, offsetToISO, sanitizeTabName, mapWithConcurrency, ProgressBus, getRandomLoadingQuote, DEFAULT_INVENTORY_MAPPING, ProposalUtils, PROPOSALS_TAB_NAME, PROPOSAL_MAPPING, resolveInventoryNoteMaxLength } from './index.js';
+import { wrapMethods, normalizeHeaderName, Database, InventoryUtils, PackListUtils, ProductionUtils, ApplicationUtils, EditHistoryUtils, InstantWriteUtils, ARCHIVE_TAB_NAME, ARCHIVE_HEADERS, offsetToISO, resolveShortageAlertDays, shortageAlertDateFilters, sanitizeTabName, mapWithConcurrency, ProgressBus, getRandomLoadingQuote, DEFAULT_INVENTORY_MAPPING, ProposalUtils, PROPOSALS_TAB_NAME, PROPOSAL_MAPPING, resolveInventoryNoteMaxLength } from './index.js';
 import { authState } from '../application/utils/auth.js';
 import { instantWriteEntry, identityText, parseColoredName } from './utils/instant-write-config.js';
 import { columnTypesEntry } from './utils/column-types.js';
@@ -1249,6 +1249,32 @@ class Requests_uncached {
     }
 
     /**
+     * Inventory shortage alerts: the item shortage report for shows from today through the
+     * InventoryShortageAlertDays preference, cut to the periods where an item runs out
+     * (minimum quantity below 0). Persisted (CACHE/Analytics), so a session starts from the last
+     * saved result unless its sources or the date changed since.
+     * @param {Object} deps - Dependency decorator for tracking calls
+     * @returns {Promise<Array<{itemId: string, tabName: string|null, startDate: string|null,
+     *          endDate: string|null, minQty: number, shows: string[]}>>} One row per shortage
+     *          period; empty when the preference is missing or 0
+     */
+    static async getInventoryShortageAlerts(deps) {
+        const days = resolveShortageAlertDays(await deps.call(Requests.getPreferences));
+        if (!days) return [];
+        // Same arguments as the report page opened on these filters, so the two share the cache
+        const rows = await deps.call(Requests.getMultipleShowsItemsSummary, { dateFilters: shortageAlertDateFilters(days) }, {}, null, false);
+        const shortages = rows.filter(row => typeof row.minQty === 'number' && row.minQty < 0);
+        return await mapWithConcurrency(shortages, async (row) => ({
+            itemId: row.itemId,
+            tabName: await deps.call(InventoryUtils.getTabNameForItem, row.itemId),
+            startDate: row.startDate || null,
+            endDate: row.endDate || null,
+            minQty: row.minQty,
+            shows: Object.keys(row.shows || {}).filter(show => (row.shows[show] || 0) > 0)
+        }), 8);
+    }
+
+    /**
      * Resolve a packlist identifier to its actual tab name
      * Handles abbreviations, case variations, and fuzzy matching
      * @param {Object} deps - Dependency decorator for tracking calls
@@ -1774,5 +1800,6 @@ export const Requests = wrapMethods(
         'saveShowNote'
     ], // Mutation methods (and fresh reads that must not be cached)
     ['computeIdentifier'], // Infinite cache methods
-    {} // No custom cache durations needed - lock methods delegate to ApplicationUtils caching
+    {}, // No custom cache durations needed - lock methods delegate to ApplicationUtils caching
+    ['getInventoryShortageAlerts'] // Persisted methods (CACHE/Analytics)
 );

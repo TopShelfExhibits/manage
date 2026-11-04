@@ -199,6 +199,33 @@ export function offsetToISO(value, today = null) {
     return null;
 }
 
+/** Preference row: days ahead the inventory shortage alerts look (missing or 0: alerts off) */
+export const SHORTAGE_ALERT_DAYS_PREFERENCE = 'InventoryShortageAlertDays';
+
+/**
+ * Shortage alert window from preference rows ({ id, value }), e.g. Requests.getPreferences().
+ * @param {Array<{id: string, value: string}>} preferences
+ * @returns {number} Days ahead; 0 when alerts are off
+ */
+export function resolveShortageAlertDays(preferences) {
+    const row = Array.isArray(preferences) ? preferences.find(p => p?.id === SHORTAGE_ALERT_DAYS_PREFERENCE) : null;
+    const value = parseInt(row?.value, 10);
+    return Number.isInteger(value) && value > 0 ? value : 0;
+}
+
+/**
+ * Schedule date filters for the shortage alerts: shows from today through `days` ahead.
+ * The report page uses the same filters, so its link opens the alerts' report.
+ * @param {number} days
+ * @returns {Array<{column: string, value: number, type: string}>}
+ */
+export function shortageAlertDateFilters(days) {
+    return [
+        { column: 'Date', value: 0, type: 'after' },
+        { column: 'Date', value: days, type: 'before' }
+    ];
+}
+
 
 /**
  * Filters data based on search parameters.

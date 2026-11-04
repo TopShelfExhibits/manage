@@ -1,4 +1,4 @@
-import { html, Requests, TableComponent, DataView, getReactiveStore, createAnalysisConfig, NavigationRegistry, Priority, invalidateCache, authState, undoRegistry, EditHistoryUtils, todayISOString, appSettings, ProposalUtils, getInventoryNoteMaxLength } from '../../index.js';
+import { html, Requests, TableComponent, DataView, getReactiveStore, createAnalysisConfig, NavigationRegistry, Priority, invalidateCache, authState, undoRegistry, EditHistoryUtils, todayISOString, appSettings, ProposalUtils, getInventoryNoteMaxLength, getShortageAlertsStore, getShortageAlertDays, shortagesByItem, itemShortageCards } from '../../index.js';
 import { sheetLockMixin } from '../../utils/sheetLockMixin.js';
 import { ThumbnailCache } from '../../utils/thumbnailCache.js';
 import { itemImageStyle, iconLabel } from '../../utils/views/viewStyles.js';
@@ -893,10 +893,15 @@ export const InventoryTableComponent = {
             revertNote: '',
             INVENTORY_DELETED_VIEWS,
             lockNamespace: 'INVENTORY',
-            tabMetaFlags: { hideQuantity: false, hideItemNumber: false }
+            tabMetaFlags: { hideQuantity: false, hideItemNumber: false },
+            shortageAlertsStore: getShortageAlertsStore(),
+            shortageDecorationKeys: ['itemNumber']
         };
     },
     computed: {
+        shortagesByItem() {
+            return shortagesByItem(this.shortageAlertsStore?.data);
+        },
         // What each inventory key is; edits apply only while the page's edit mode is 'batch' (§4.16).
         // image holds no data: the thumbnail column (see itemImageStyle). The Edit History page adds
         // its revert and history columns, which hold no data either.
@@ -1113,6 +1118,11 @@ export const InventoryTableComponent = {
         this.$notify.clearBanners(this.containerPath);
     },
     methods: {
+        // Decorations (§4.14): a shortage warning on the item number of items that run short
+        itemDecorations(row, key) {
+            if (this.historyMode || key !== 'itemNumber') return [];
+            return itemShortageCards(this.shortagesByItem.get(row.itemNumber), getShortageAlertDays());
+        },
         onLockAcquireFailed() {
             if (this.inventoryTableStore) {
                 this.inventoryTableStore.setData(this.inventoryTableStore.originalData);
@@ -1557,6 +1567,8 @@ export const InventoryTableComponent = {
                 :rows="tableData"
                 :registry="registry"
                 :action="timelineAction"
+                :decorations="itemDecorations"
+                :decoration-keys="shortageDecorationKeys"
                 :patches="viewPatches"
                 :edit-mode="editModeName"
                 :title="inventoryName || tabTitle"
