@@ -7,7 +7,7 @@ export { EditHistoryUtils } from '../data_management/utils/metadata-utils.js';
 // Utils
 export { html } from './utils/template-helpers.js';
 export { Auth, authState, getDeviceId } from './utils/auth.js';
-export { getReactiveStore, createAnalysisConfig, findMatchingStores, clearAllReactiveStores, generateStoreKey, appSettings, runNonessentialAnalysisOnAllStores, getPreferencesStore } from './utils/reactiveStores.js';
+export { getReactiveStore, createAnalysisConfig, findMatchingStores, clearAllReactiveStores, generateStoreKey, appSettings, runNonessentialAnalysisOnAllStores, getPreferencesStore, saveDirtyStoresToUserData } from './utils/reactiveStores.js';
 export { Priority } from './utils/priorityQueue.js';
 export { undoRegistry, setTableRowSelectionState } from './utils/undoRegistry.js';
 export { getAutoColorClass, shouldAutoColor } from './utils/autoColor.js';

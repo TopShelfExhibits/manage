@@ -28,6 +28,7 @@
  */
 
 import { Requests } from '../data_management/api.js';
+import { isAppOutdated, checkAppVersion } from '../data_management/index.js';
 import { FakeGoogleSheetsAuth, setFakeDelaysEnabled } from '../google_sheets_services/FakeGoogle.js';
 import { CacheInvalidationBus, ApplicationUtils, ProductionUtils, triggerCachePoll } from '../data_management/index.js';
 
@@ -1504,6 +1505,32 @@ test('PREFERENCES', 'schedule prefs have page "schedule*"', async () => {
     for (const p of schedulePrefs) {
         if (p.page !== 'schedule*') throw new Error(`expected page "schedule*" for ${p.id}, got "${p.page}"`);
     }
+});
+
+// ── App update: an out-of-date session refuses data writes ───────────────────
+// A newer deploy is simulated by changing the version this session loaded (window.__deployedVersion),
+// so version.json no longer matches it. Expected: isAppOutdated() is true and a write is refused with
+// code APP_OUTDATED before it reaches the sheets; with the versions matching again, isAppOutdated()
+// is false.
+
+test('APP UPDATE', 'a data write is refused while a newer version is deployed', async () => {
+    const loaded = window.__deployedVersion;
+    window.__deployedVersion = 'test-older-version';
+    let code = null;
+    try {
+        await checkAppVersion();
+        assertEqual(isAppOutdated(), true, 'outdated');
+        try {
+            await Requests.saveData('CACHE', 'AppUpdateTest', [{ a: '1' }], { a: 'A' });
+        } catch (error) {
+            code = error.code;
+        }
+    } finally {
+        window.__deployedVersion = loaded;
+        await checkAppVersion();
+    }
+    assertEqual(code, 'APP_OUTDATED', 'refusal code');
+    assertEqual(isAppOutdated(), false, 'current again');
 });
 
 // ── Runner export ─────────────────────────────────────────────────────────────
