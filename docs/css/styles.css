@@ -1519,6 +1519,16 @@ select.cell-select:only-child {
 td.cell-unsaved {
     background-color: var(--color-red-bg-transparent);
 }
+/* A thumbnail covers its cell, so the unsaved tint goes over the image */
+td.cell-unsaved .item-image-container::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    background-color: var(--color-red);
+    opacity: 0.15;
+    pointer-events: none;
+}
 /* Instant write failed (the value was reverted) */
 td.cell-failed {
     outline: 2px solid var(--color-red);
