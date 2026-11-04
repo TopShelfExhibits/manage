@@ -7,7 +7,7 @@ import { NavigationRegistry } from './index.js';
 import { PacklistContent, InventoryContent, ScheduleContent, ReportsContent } from './index.js';
 import { hamburgerMenuRegistry } from './index.js';
 import { undoRegistry } from './index.js';
-import { Requests, getReactiveStore, appSettings, saveDirtyStoresToUserData } from './index.js';
+import { Requests, getReactiveStore, appSettings, saveDirtyStoresToUserData, getShortageAlertsStore, getShortageAlertDays, shortageBanner } from './index.js';
 import { BannerNotifications, NotificationBubbleOverlay, notificationBus } from './index.js';
 import { isLocalhost } from '../data_management/utils/helpers.js';
 
@@ -45,6 +45,7 @@ const App = {
             modals: [],
             currentYear: new Date().getFullYear(),
             globalLocksStore: null, // Global reactive store for ALL locks
+            shortageAlertsStore: null, // Inventory shortage alerts (app banner)
             notificationBus: notificationBus, // Reference for reactivity
             updateAvailable: false // A newer version is deployed: editing is off until a refresh (assertAppCurrent)
         };
@@ -114,6 +115,10 @@ const App = {
                 }
             ];
             
+            // Created after authentication, like the preferences store getShortageAlertDays reads
+            const shortage = this.shortageAlertsStore && shortageBanner(this.shortageAlertsStore.data, getShortageAlertDays(), this.navigateToPath);
+            if (shortage) staticBanners.push(shortage);
+
             // Combine static banners with dynamic ones from the notification bus
             const dynamicBanners = this.notificationBus.getBanners('app') || [];
             return [...staticBanners, ...dynamicBanners];
@@ -190,18 +195,7 @@ const App = {
             // Initialize dashboard registry if authenticated
             NavigationRegistry.initializeDashboard();
             
-            // Initialize global locks store
-            this.globalLocksStore = getReactiveStore(
-                Requests.getAllLocks,
-                null,
-                []
-            );
-            //console.log('[App] Initialized global locks store');
-            
-            // Watch for locks data changes
-            this.$watch(() => this.globalLocksStore?.data, (locks) => {
-                //console.log('[App] Global locks data:', locks);
-            }, { immediate: true, deep: true });
+            this.initializeGlobalStores();
             
             // Apply current URL state if user is already authenticated
             // Use resolvePathFromURL to expand short hashes since we're authenticated
@@ -235,20 +229,7 @@ const App = {
                     }
                 }
                 
-                // Initialize global locks store on login
-                if (!this.globalLocksStore) {
-                    this.globalLocksStore = getReactiveStore(
-                        Requests.getAllLocks,
-                        null,
-                        []
-                    );
-                    //console.log('[App] Initialized global locks store on login');
-                    
-                    // Watch for locks data changes
-                    this.$watch(() => this.globalLocksStore?.data, (locks) => {
-                        //console.log('[App] Global locks data:', locks);
-                    }, { immediate: true, deep: true });
-                }
+                this.initializeGlobalStores();
                 
                 // Apply current URL when user logs in — resolve short hashes now that we are authenticated
                 const currentUrl = await NavigationRegistry.urlRouter.resolvePathFromURL();
@@ -353,6 +334,11 @@ const App = {
                 .map(url => fetch(url, { cache: 'reload' })));
             await Promise.race([refetch, new Promise(resolve => setTimeout(resolve, 10000))]);
             window.location.reload();
+        },
+        // App-wide stores, created once after authentication: all locks, and the shortage alerts
+        initializeGlobalStores() {
+            if (!this.globalLocksStore) this.globalLocksStore = getReactiveStore(Requests.getAllLocks, null, []);
+            if (!this.shortageAlertsStore) this.shortageAlertsStore = getShortageAlertsStore();
         },
         toggleMenu() {
             this.isMenuOpen = !this.isMenuOpen;

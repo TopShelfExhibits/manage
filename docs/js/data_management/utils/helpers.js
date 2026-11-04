@@ -18,7 +18,7 @@ export function parseDate(val, forceLocal = true, defaultYear = null) {
             let year = mdy[3] ? Number(mdy[3]) : null;
             if (year && year < 100) year += 2000; // handle 2-digit years
             if (!year && defaultYear) year = Number(defaultYear);
-            if (!year) year = new Date().getFullYear();
+            if (!year) year = currentDate().getFullYear();
             return new Date(year, month - 1, day, 12, 0, 0, 0);
         }
         
@@ -33,11 +33,11 @@ export function parseDate(val, forceLocal = true, defaultYear = null) {
             };
             const month = monthMap[monthName];
             if (month !== undefined) {
-                const year = defaultYear ? Number(defaultYear) : new Date().getFullYear();
+                const year = defaultYear ? Number(defaultYear) : currentDate().getFullYear();
                 return new Date(year, month, day, 12, 0, 0, 0);
             }
         }
-        
+
         // Handle 'MMM-DD' or 'MMM-D' format (e.g., 'Jan-21', 'Dec-3')
         let mmd = val.match(/^([A-Za-z]{3})-(\d{1,2})$/);
         if (mmd) {
@@ -49,7 +49,7 @@ export function parseDate(val, forceLocal = true, defaultYear = null) {
             };
             const month = monthMap[monthName];
             if (month !== undefined) {
-                const year = defaultYear ? Number(defaultYear) : new Date().getFullYear();
+                const year = defaultYear ? Number(defaultYear) : currentDate().getFullYear();
                 return new Date(year, month, day, 12, 0, 0, 0);
             }
         }
@@ -123,6 +123,43 @@ export function normalizeHeaderName(headerName) {
 }
 
 /**
+ * Resolve a column-preserving mapping against a tab's actual header row.
+ *
+ * A mapping with `_preserveColumns: true` owns only its own columns, wherever they sit in the
+ * tab: writes place each mapped value under its header and leave every other column (and its
+ * formulas) untouched. `_optional` lists keys whose column may be absent; an absent optional
+ * column is neither read nor created. A missing required column is added after the last header.
+ *
+ * @param {Object} mapping - { key: header, ..., _preserveColumns: true, _optional?: string[] }
+ * @param {Array<string>} headerRow - the tab's first row
+ * @returns {{ read: Object, write: Object }}
+ *   read:  { key: header } for the columns present (plus required ones), for reading rows
+ *   write: read plus `_orderedHeaders` (the tab's headers, required ones appended) and
+ *          `_orderedKeys` (the key at each position, null for columns the mapping doesn't own)
+ */
+export function resolveSheetMapping(mapping, headerRow) {
+    const headers = (Array.isArray(headerRow) ? headerRow : []).map(normalizeHeaderName);
+    const optional = new Set(mapping._optional || []);
+    const orderedHeaders = [...headers];
+    const orderedKeys = headers.map(() => null);
+    const read = {};
+    for (const [key, header] of Object.entries(mapping)) {
+        if (key.startsWith('_')) continue;
+        const name = normalizeHeaderName(header);
+        let index = headers.indexOf(name);
+        if (index === -1) {
+            if (optional.has(key)) continue;
+            index = orderedHeaders.length;
+            orderedHeaders.push(name);
+            orderedKeys.push(null);
+        }
+        read[key] = header;
+        orderedKeys[index] = key;
+    }
+    return { read, write: { ...read, _orderedHeaders: orderedHeaders, _orderedKeys: orderedKeys } };
+}
+
+/**
  * Sanitizes a tab name by removing characters that would break Google Sheets or interface display.
  * Removes: /, \, ?, *, [, ], and other problematic characters.
  * Keeps alphanumeric, spaces, hyphens, and underscores for fuzzy matching to work.
@@ -138,12 +175,45 @@ export function sanitizeTabName(tabName) {
         .trim();                          // Remove leading/trailing whitespace
 }
 
+// ── Calendar clock ──────────────────────────────────────────────────────────
+// The one source of "now" for date logic. Every date check uses the browser's local calendar
+// (toISODateString, parseDate's local noon); to change the calendar, change it here.
+// Cached functions read today through ApplicationUtils.getToday, which is invalidated when the
+// local date rolls over, so results that depend on today refresh through the cache chain.
+let _testToday = null;
+
+/**
+ * The current moment, or local noon of the pinned test date.
+ * @returns {Date}
+ */
+export function currentDate() {
+    return _testToday ? parseDate(_testToday) : new Date();
+}
+
+/**
+ * Tests only: pin today to an ISO date (YYYY-MM-DD), or pass null to follow the real clock.
+ * @param {string|null} isoDate
+ */
+export function setTestToday(isoDate) {
+    _testToday = isoDate || null;
+}
+
 /**
  * Returns today's date as a YYYY-MM-DD string using the local calendar date.
  * @returns {string}
  */
 export function todayISOString() {
-    return toISODateString(new Date());
+    return toISODateString(currentDate());
+}
+
+/**
+ * Local midnight at the start of today.
+ * @returns {number} Milliseconds since the epoch
+ */
+export function startOfTodayMs() {
+    const d = currentDate();
+    d.setHours(0, 0, 0, 0);
+    return d.getTime();
 }
 
 /**
@@ -151,17 +221,75 @@ export function todayISOString() {
  * Returns null for anything else (undefined, non-ISO strings, etc.).
  * Single entry point for resolving date filter values from the URL / presets.
  * @param {number|string|null|undefined} value
+ * @param {string|null} [today] - ISO date the offset counts from; cached code passes
+ *        ApplicationUtils.getToday so the result is invalidated at the date rollover
  * @returns {string|null}
  */
-export function offsetToISO(value) {
+export function offsetToISO(value, today = null) {
     if (value === null || value === undefined) return null;
     if (typeof value === 'number') {
-        const d = new Date();
+        const d = today ? parseDate(today) : currentDate();
         d.setDate(d.getDate() + value);
         return toISODateString(d);
     }
     if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
     return null;
+}
+
+/** CACHE/Preferences row object key → sheet header (the one mapping, so every read shares a cache entry) */
+export const PREFERENCES_MAPPING = { id: 'ID', name: 'Name', description: 'Description', page: 'Page', type: 'Type', value: 'Value', edithistory: 'EditHistory' };
+
+/**
+ * Preference rows whose value is a JSON list of inventory tab names. They are the only source of
+ * these settings (the inventory index has no flags).
+ */
+export const INVENTORY_TAB_PREFERENCES = {
+    skipAnalysis: 'InventorySuppressCategoryAnalysis',   // left out of shortage checks, reports and alerts
+    customItemNumbers: 'InventoryCustomItemNumbers',     // item numbers that don't follow PREFIX-NUMBER
+    descriptionOnly: 'InventoryDescriptionOnly'          // no quantity or item number; packed as a description
+};
+
+/**
+ * Tab names listed by a preference row ({ id, value }), e.g. Requests.getPreferences().
+ * @param {Array<{id: string, value: string}>} preferences
+ * @param {string} id - One of INVENTORY_TAB_PREFERENCES
+ * @returns {string[]} Empty when the row is missing or its value isn't a JSON list
+ */
+export function resolveInventoryTabList(preferences, id) {
+    const row = Array.isArray(preferences) ? preferences.find(p => p?.id === id) : null;
+    try {
+        const tabs = JSON.parse(row?.value || '[]');
+        return Array.isArray(tabs) ? tabs.filter(tab => typeof tab === 'string') : [];
+    } catch {
+        return [];
+    }
+}
+
+/** Preference row: days ahead the inventory shortage alerts look (missing or 0: alerts off) */
+export const SHORTAGE_ALERT_DAYS_PREFERENCE = 'InventoryShortageAlertDays';
+
+/**
+ * Shortage alert window from preference rows ({ id, value }), e.g. Requests.getPreferences().
+ * @param {Array<{id: string, value: string}>} preferences
+ * @returns {number} Days ahead; 0 when alerts are off
+ */
+export function resolveShortageAlertDays(preferences) {
+    const row = Array.isArray(preferences) ? preferences.find(p => p?.id === SHORTAGE_ALERT_DAYS_PREFERENCE) : null;
+    const value = parseInt(row?.value, 10);
+    return Number.isInteger(value) && value > 0 ? value : 0;
+}
+
+/**
+ * Schedule date filters for the shortage alerts: shows from today through `days` ahead.
+ * The report page uses the same filters, so its link opens the alerts' report.
+ * @param {number} days
+ * @returns {Array<{column: string, value: number, type: string}>}
+ */
+export function shortageAlertDateFilters(days) {
+    return [
+        { column: 'Date', value: 0, type: 'after' },
+        { column: 'Date', value: days, type: 'before' }
+    ];
 }
 
 

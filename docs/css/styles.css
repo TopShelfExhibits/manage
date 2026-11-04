@@ -849,7 +849,9 @@ td:has(.table-wrapper) {
 td:has(button) {
     padding: var(--padding-sm);
 }
-td:has(img) {
+/* Images, and thumbnail cells with or without one (a tab without thumbnails draws an empty box) */
+td:has(img),
+td:has(.item-image-container) {
     padding: 0;
 }
 
@@ -1516,6 +1518,16 @@ select.cell-select:only-child {
    queued or in flight. Pack lists don't colour unsaved cells (see the pack list styles). */
 td.cell-unsaved {
     background-color: var(--color-red-bg-transparent);
+}
+/* A thumbnail covers its cell, so the unsaved tint goes over the image */
+td.cell-unsaved .item-image-container::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    background-color: var(--color-red);
+    opacity: 0.15;
+    pointer-events: none;
 }
 /* Instant write failed (the value was reverted) */
 td.cell-failed {

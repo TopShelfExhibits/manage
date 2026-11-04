@@ -3,6 +3,7 @@ import { useSearch, SearchBoxComponent, scrollToSearchResult, scrollToActiveResu
 import { useStickyHeader } from '../../utils/useStickyHeader.js';
 import { formatText, escapeHtml } from '../../utils/views/fieldFormat.js';
 import { matchRows } from '../../utils/views/searchMatch.js';
+import { searchTiers } from '../../utils/views/resolveView.js';
 import { ContentHeaderComponent } from './contentHeaderComponent.js';
 import { CellRenderer, DecorationCards } from './cells.js';
 import { placeDecorations } from '../../utils/views/decorations.js';
@@ -103,7 +104,7 @@ export const CalendarComponent = {
         },
         // Searched tiers: chip lines are shown; details fields (opened in the modal) are searched too
         searchTierKeys() {
-            return { shown: this.resolved?.shown || [], details: (this.resolved?.details || []).map(f => f.key) };
+            return searchTiers(this.resolved);
         },
         searchResult() {
             return matchRows(this.data || [], this.searchTierKeys, this.search.searchWords.value);

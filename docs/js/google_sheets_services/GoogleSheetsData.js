@@ -299,7 +299,7 @@ export class GoogleSheetsService {
         } else if (Array.isArray(updates) && updates.length === 0 && mapping) {
             // Empty array with mapping provided - create headers-only sheet
             const headers = mapping._orderedHeaders || Object.values(mapping).filter(v => v !== mapping._orderedHeaders);
-            values = [headers];
+            values = [mapping._orderedKeys ? headers.map((h, i) => mapping._orderedKeys[i] ? h : null) : headers];
         } else {
             throw new Error('[GoogleSheetsData.setSheetData] VALIDATION_ERROR: No valid updates provided');
         }
@@ -413,11 +413,19 @@ export class GoogleSheetsService {
     }
 
     /**
-     * Reverse transform JS objects to sheet data using mapping
+     * Reverse transform JS objects to sheet data using mapping.
+     * With `_orderedKeys` (a column-preserving mapping, see resolveSheetMapping) values are placed
+     * by position and columns the mapping doesn't own are null, which the Sheets API skips on
+     * write, leaving those cells (and their formulas) as they are.
      */
     static reverseTransformSheetData(mapping, mappedData) {
         if (!mappedData || mappedData.length === 0) return [];
-        
+        if (mapping._orderedKeys) {
+            const keys = mapping._orderedKeys;
+            const headerRow = mapping._orderedHeaders.map((h, i) => keys[i] ? h : null);
+            return [headerRow, ...mappedData.map(obj => keys.map(key => key ? (obj[key] ?? '') : null))];
+        }
+
         // Use _orderedHeaders if provided (to preserve column order), otherwise fall back to Object.values
         const headers = mapping._orderedHeaders || Object.values(mapping).filter(v => v !== mapping._orderedHeaders);
         
@@ -847,19 +855,49 @@ export class GoogleSheetsService {
 
 
     /**
+     * Find a file in a Drive folder by one of its app properties (private key/value metadata
+     * set by this app on upload).
+     * @param {string} folderId
+     * @param {string} key
+     * @param {string} value
+     * @returns {Promise<{id: string, name: string}|null>}
+     */
+    static async findDriveFileByAppProperty(folderId, key, value) {
+        try {
+            const escape = (s) => String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+            const response = await this.withExponentialBackoff(() => gapi.client.request({
+                path: 'https://www.googleapis.com/drive/v3/files',
+                method: 'GET',
+                params: {
+                    q: `'${escape(folderId)}' in parents and trashed=false and appProperties has { key='${escape(key)}' and value='${escape(value)}' }`,
+                    fields: 'files(id,name)',
+                    pageSize: 1,
+                    supportsAllDrives: true,
+                    includeItemsFromAllDrives: true
+                }
+            }));
+            return response.result?.files?.[0] || null;
+        } catch (error) {
+            console.warn('[icons] findDriveFileByAppProperty failed:', error);
+            return null;
+        }
+    }
+
+    /**
      * Upload a file to Google Drive using multipart upload
      * @param {File} file - The file object to upload
      * @param {string} fileName - Name to give the file in Drive
      * @param {string} folderId - ID of the destination folder
+     * @param {Object<string,string>} [appProperties] - Private metadata (findDriveFileByAppProperty)
      * @returns {Promise<{id: string, name: string}|null>} Uploaded file metadata or null on failure
      */
-    static async uploadDriveFile(file, fileName, folderId) {
+    static async uploadDriveFile(file, fileName, folderId, appProperties = null) {
         return await this.withExponentialBackoff(async () => {
             try {
                 const token = gapi.client.getToken();
                 if (!token || !token.access_token) throw new Error('Not authenticated');
 
-                const metadata = { name: fileName, parents: [folderId] };
+                const metadata = { name: fileName, parents: [folderId], ...(appProperties ? { appProperties } : {}) };
                 const form = new FormData();
                 form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
                 form.append('file', file);

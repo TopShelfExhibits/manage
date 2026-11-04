@@ -95,7 +95,12 @@ class CacheManager {
     // to a real backend API — server-side execution has no event loop to protect.
     static _yieldCallCount = 0;
     static _lastYieldTime = 0;
-    
+    // ── Persisted results (opt-in per method: wrapMethods persistentMethods) ──
+    // Injected by application-utils: { read(key), write(entry), readSourceTimestamps() }
+    static _persistentStore = null;
+    // Keys whose saved row was already tried this session; later misses recompute and re-save
+    static _restoreTried = new Set();
+
     /**
      * Gets a value from cache with expiration check
      * @param {string} key - Cache key
@@ -134,14 +139,16 @@ class CacheManager {
      * @param {string} key - Cache key
      * @param {*} value - Value to cache
      * @param {number} expirationMs - Expiration time in milliseconds (defaults to DEFAULT_CACHE_EXPIRATION_MS)
+     * @param {boolean} [keepEmpty] - Cache empty arrays and objects too (persisted methods: "nothing
+     *        found" is a result worth keeping)
      */
-    static set(key, value, expirationMs = DEFAULT_CACHE_EXPIRATION_MS) {
+    static set(key, value, expirationMs = DEFAULT_CACHE_EXPIRATION_MS, keepEmpty = false) {
         // Skip caching null, undefined, empty results, or booleans
         if (
             value === null ||
             value === undefined ||
-            (Array.isArray(value) && value.length === 0) ||
-            (typeof value === 'object' && value !== null && Object.keys(value).length === 0) ||
+            (!keepEmpty && Array.isArray(value) && value.length === 0) ||
+            (!keepEmpty && typeof value === 'object' && Object.keys(value).length === 0) ||
             (typeof value === 'boolean')
         ) {
             return;
@@ -225,7 +232,82 @@ class CacheManager {
         }
         CacheManager.dependencies.get(dependentKey).add(dependencyKey);
     }
-    
+
+    /**
+     * The source keys a cached result was computed from: every key reachable through the
+     * recorded dependencies that has none of its own (data reads such as database:getData,
+     * and the clock, app_utils:getToday).
+     * @param {string} key - Cache key of the result
+     * @returns {string[]}
+     */
+    static collectSourceKeys(key) {
+        const sources = new Set();
+        const seen = new Set();
+        const walk = (k) => {
+            if (seen.has(k)) return;
+            seen.add(k);
+            const deps = CacheManager.dependencies.get(k);
+            if (!deps || deps.size === 0) {
+                if (k !== key) sources.add(k);
+                return;
+            }
+            deps.forEach(walk);
+        };
+        walk(key);
+        return [...sources];
+    }
+
+    /**
+     * Save a computed result for later sessions. The row is dated by the oldest source read it
+     * used, so a change stamped on the Caching tab after that read marks the row stale.
+     * @param {string} key - Cache key
+     * @param {*} value - The result
+     * @param {number} startedAt - When the computation started (ms)
+     */
+    static async persist(key, value, startedAt) {
+        const store = CacheManager._persistentStore;
+        if (!store || networkState.isOffline) return;
+        const sources = CacheManager.collectSourceKeys(key);
+        const asOf = Math.min(startedAt, ...sources.map(s => CacheManager.filledAt.get(s) ?? startedAt));
+        try {
+            await store.write({ key, value, savedAt: new Date(asOf).toISOString(), sources });
+        } catch (err) {
+            console.warn('[cache] Failed to save result for', key, err);
+        }
+    }
+
+    /**
+     * Restore a saved result on the first miss of the session, if none of its sources has a
+     * Caching tab timestamp newer than the row. The sources are linked back as dependencies and
+     * marked filled at the row's date, so local saves and the poller invalidate the restored
+     * value exactly as if it had been computed here.
+     * @param {string} key - Cache key
+     * @returns {Promise<*>} The value, or CacheManager.CACHE_MISS
+     */
+    static async restorePersisted(key) {
+        const store = CacheManager._persistentStore;
+        if (!store || networkState.isOffline || CacheManager._restoreTried.has(key)) return CacheManager.CACHE_MISS;
+        CacheManager._restoreTried.add(key);
+        try {
+            const [row, stamps] = await Promise.all([store.read(key), store.readSourceTimestamps()]);
+            if (!row || !Array.isArray(stamps)) return CacheManager.CACHE_MISS;
+            const savedAt = new Date(row.savedAt).getTime();
+            if (isNaN(savedAt)) return CacheManager.CACHE_MISS;
+            const stale = row.sources.some(source => stamps.some(({ key: prefix, timestamp }) =>
+                source.startsWith(prefix) && new Date(timestamp).getTime() > savedAt
+            ));
+            if (stale) return CacheManager.CACHE_MISS;
+            for (const source of row.sources) {
+                CacheManager.addDependency(key, source);
+                if (!CacheManager.filledAt.has(source)) CacheManager.filledAt.set(source, savedAt);
+            }
+            return row.value;
+        } catch (err) {
+            console.warn('[cache] Failed to restore saved result for', key, err);
+            return CacheManager.CACHE_MISS;
+        }
+    }
+
     /**
      * Invalidates a cache entry and all dependent entries.
      *
@@ -430,9 +512,14 @@ class CacheManager {
      * @param {string} namespace - Cache namespace
      * @param {Array<string>} [mutationKeys] - Array of method names to skip wrapping (mutation methods)
      * @param {Array<string>} [infiniteCacheMethods] - Array of method names that should have infinite cache (no expiration)
+     * @param {Object} [customCacheDurations] - Method name → ms, null, or (args) => ms | null
+     * @param {Array<string>} [persistentMethods] - Methods whose results are saved for later sessions
+     *        (setPersistentStore). Their results must be JSON and depend only on database reads and
+     *        ApplicationUtils.getToday, since only those sources are checked when a saved row is
+     *        restored. In memory they never expire; their sources invalidate them.
      * @returns {Object} - Wrapped class with caching and dependency tracking
      */
-    static wrapMethods(targetClass, namespace, mutationKeys = [], infiniteCacheMethods = [], customCacheDurations = {}) {
+    static wrapMethods(targetClass, namespace, mutationKeys = [], infiniteCacheMethods = [], customCacheDurations = {}, persistentMethods = []) {
         const wrappedClass = {};
         wrappedClass._namespace = namespace;
         
@@ -451,6 +538,7 @@ class CacheManager {
                 return;
             }
             
+            const persistent = persistentMethods.includes(methodName);
             wrappedClass[methodName] = async function(...args) {
                 const cacheKey = CacheManager.generateCacheKey(namespace, methodName, args);
                 
@@ -481,6 +569,16 @@ class CacheManager {
                 
                 // Now execute the actual async work
                 try {
+                    if (persistent) {
+                        const restored = await CacheManager.restorePersisted(cacheKey);
+                        if (restored !== CacheManager.CACHE_MISS) {
+                            CacheManager.set(cacheKey, restored, null, true);
+                            promiseResolve(restored);
+                            return restored;
+                        }
+                    }
+                    const startedAt = Date.now();
+
                     // Create dependency decorator for this function call
                     const deps = CacheManager.createDependencyDecorator(cacheKey);
                     
@@ -496,14 +594,15 @@ class CacheManager {
                     if (customCacheDurations[methodName] !== undefined) {
                         const durValue = customCacheDurations[methodName];
                         expirationMs = typeof durValue === 'function' ? durValue(args) : durValue;
-                    } else if (infiniteCacheMethods.includes(methodName)) {
+                    } else if (persistent || infiniteCacheMethods.includes(methodName)) {
                         expirationMs = null;
                     } else {
                         expirationMs = undefined;
                     }
-                    
-                    CacheManager.set(cacheKey, result, expirationMs);
-                    
+
+                    CacheManager.set(cacheKey, result, expirationMs, persistent);
+                    if (persistent) CacheManager.persist(cacheKey, result, startedAt);
+
                     // Resolve the promise for all waiters
                     promiseResolve(result);
                     return result;
@@ -567,6 +666,8 @@ export function clearCache() {
     CacheManager.cache.clear();
     CacheManager.pendingCalls.clear();
     CacheManager.filledAt.clear();
+    // Saved results may be restored again; each is still checked against its sources
+    CacheManager._restoreTried.clear();
 }
 export { CacheInvalidationBus };
 
@@ -737,6 +838,16 @@ let _pollerIntervalMs = 60 * 1000;
 
 export function setTimestampWriter(fn) {
     CacheManager._timestampWriter = fn;
+}
+
+/**
+ * Set where persisted results are kept (see wrapMethods persistentMethods).
+ * @param {{ read: (key: string) => Promise<{value: *, savedAt: string, sources: string[]}|null>,
+ *           write: (entry: {key: string, value: *, savedAt: string, sources: string[]}) => Promise,
+ *           readSourceTimestamps: () => Promise<Array<{key: string, timestamp: string}>|null> }} store
+ */
+export function setPersistentStore(store) {
+    CacheManager._persistentStore = store;
 }
 
 // ─── App version ─────────────────────────────────────────────────────────────

@@ -1,11 +1,11 @@
-import { html, DataView, Requests, getReactiveStore, createAnalysisConfig, NavigationRegistry, ItemImageComponent, ScheduleFilterSelect, InventoryCategoryFilter, Priority, invalidateCache, toISODateString, todayISOString, offsetToISO } from '../../index.js';
+import { html, DataView, Requests, getReactiveStore, createAnalysisConfig, NavigationRegistry, THUMBNAIL_FIELD, getItemThumbnailsStore, itemThumbnailMap, withItemThumbnails, ScheduleFilterSelect, InventoryCategoryFilter, Priority, invalidateCache, toISODateString, todayISOString, offsetToISO } from '../../index.js';
 import { textFiltersToSearchParams } from '../../../data_management/utils/helpers.js';
-import { itemImageStyle } from '../../utils/views/viewStyles.js';
+import { thumbnailStyle } from '../../utils/views/viewStyles.js';
 
 // What each report key is (calendarStart/End are derived ranges on a computed copy of the rows).
-// image holds no data: the thumbnail column (see itemImageStyle).
+// thumbnail is the item's, joined by item number (itemThumbnails.js).
 const ITEM_REPORT_FIELDS = [
-    { key: 'image', label: 'IMG' },
+    THUMBNAIL_FIELD,
     { key: 'itemId', label: 'Item#', type: 'item' },
     { key: 'description', label: 'Description' },
     { key: 'startDate', label: 'Start', format: 'date', type: 'date' },
@@ -18,6 +18,9 @@ const ITEM_REPORT_FIELDS = [
     { key: 'calendarEnd', label: 'End', format: 'date', type: 'date' }
 ];
 
+// Rows show when their minimum quantity is below this; 0 shows only actual shortages
+const DEFAULT_QTY_FILTER = 0;
+
 // Item shortage report view registry (views-and-renderers-plan §4.3, §5)
 const ITEM_REPORT_VIEWS = {
     id: 'item-shortages',
@@ -27,7 +30,7 @@ const ITEM_REPORT_VIEWS = {
     // purple); Overlapping Shows is a list of show buttons (two inline, more in a modal)
     sortable: ['itemId', 'description', 'startDate', 'endDate', 'inventoryQty', 'minQty'],
     style: {
-        image: itemImageStyle('itemId'),
+        thumbnail: thumbnailStyle('itemId'),
         itemId: { cell: 'action', cellOptions: { class: 'purple' } },
         overlappingShows: { cell: 'showList', cellOptions: { max: 2, to: 'packlist/{value}' } }
     },
@@ -37,13 +40,13 @@ const ITEM_REPORT_VIEWS = {
             name: 'Report',
             icon: 'table',
             layout: 'table',
-            columns: ['image', 'itemId', 'startDate', 'endDate', 'inventoryQty', 'minQty', 'overlappingShows'],
+            columns: ['thumbnail', 'itemId', 'startDate', 'endDate', 'inventoryQty', 'minQty', 'overlappingShows'],
             hidden: ['tabName', 'calendarStart', 'calendarEnd'],
             style: {
                 minQty: { color: 'auto' },
                 overlappingShows: { columnColor: 'gray' }
             },
-            table: { sticky: { start: ['image'] }, hideRowsOnSearch: false },
+            table: { sticky: { start: ['thumbnail'] }, hideRowsOnSearch: false },
             // Printing lists every show (never the "N shows" button)
             variants: { print: { style: { overlappingShows: { cellOptions: { max: null } } } } }
         },
@@ -54,7 +57,7 @@ const ITEM_REPORT_VIEWS = {
             layout: 'calendar',
             // Item# and the shows summary ("N shows", always the modal) in the chip's end button bar
             calendar: { start: 'calendarStart', end: 'calendarEnd', chip: [['minQty', 'description']], actions: ['itemId', 'overlappingShows'] },
-            hidden: ['tabName', 'calendarStart', 'calendarEnd', 'image'],
+            hidden: ['tabName', 'calendarStart', 'calendarEnd', 'thumbnail'],
             style: { overlappingShows: { cellOptions: { max: 0 } } },
             rowColor: { field: 'minQty', rule: 'auto', fallback: 'green' }
         }
@@ -67,7 +70,7 @@ const ITEM_REPORT_VIEWS = {
  *   item# | description | startDate | endDate | Inv Qty | Min Qty | Overlapping Shows
  */
 export const InventoryItemReport = {
-    components: { DataView, ItemImageComponent, ScheduleFilterSelect, InventoryCategoryFilter },
+    components: { DataView, ScheduleFilterSelect, InventoryCategoryFilter },
     inject: ['$modal', 'appContext'],
     props: {
         containerPath: { type: String, default: '' },
@@ -82,8 +85,9 @@ export const InventoryItemReport = {
             searchParams: null,
             error: null,
             endDate: null,
-            qtyFilter: 1,
+            qtyFilter: DEFAULT_QTY_FILTER,
             hasPerformedInitialSync: false,
+            itemThumbnailsStore: getItemThumbnailsStore(),
             isPrinting: false,
             ITEM_REPORT_FIELDS,
             ITEM_REPORT_VIEWS,
@@ -99,8 +103,12 @@ export const InventoryItemReport = {
             return this.reportStore?.isAnalyzing || false;
         },
 
+        itemThumbnails() {
+            return itemThumbnailMap(this.itemThumbnailsStore?.data);
+        },
+
         tableData() {
-            const rawData = (this.reportStore?.data || [])
+            const rawData = withItemThumbnails(this.reportStore?.data || [], 'itemId', this.itemThumbnails)
                 .map(row => ({
                     ...row,
                     overlappingShows: row.shows ? Object.keys(row.shows).filter(k => (row.shows[k] || 0) > 0) : []
@@ -427,7 +435,7 @@ export const InventoryItemReport = {
                 cleanPath,
                 this.appContext?.currentPath,
                 {
-                    qtyFilter: threshold !== 1 ? threshold : undefined // undefined removes the parameter when it's the default
+                    qtyFilter: threshold !== DEFAULT_QTY_FILTER ? threshold : undefined // undefined removes the parameter when it's the default
                 }
             );
             
@@ -448,8 +456,8 @@ export const InventoryItemReport = {
                 this.appContext?.currentPath
             );
             
-            // Get qtyFilter from URL params (default to 1 if not present)
-            const thresholdFromUrl = params?.qtyFilter !== undefined ? parseInt(params.qtyFilter, 10) : 1;
+            // Get qtyFilter from URL params (default if not present)
+            const thresholdFromUrl = params?.qtyFilter !== undefined ? parseInt(params.qtyFilter, 10) : DEFAULT_QTY_FILTER;
             
             // Update threshold value
             if (!isNaN(thresholdFromUrl)) {

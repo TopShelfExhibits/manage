@@ -1,7 +1,6 @@
-import { html, TableComponent, DataView, Requests, getReactiveStore, NavigationRegistry, createAnalysisConfig, invalidateCache, Priority, tableRowSelectionState, EditHistoryUtils, authState, undoRegistry, todayISOString, getAutoColorClass } from '../../index.js';
+import { html, TableComponent, DataView, Requests, getReactiveStore, NavigationRegistry, createAnalysisConfig, invalidateCache, Priority, tableRowSelectionState, EditHistoryUtils, authState, undoRegistry, todayISOString, getAutoColorClass, getInventoryTabList, INVENTORY_TAB_PREFERENCES, THUMBNAIL_FIELD } from '../../index.js';
 import { resolveView } from '../../utils/views/resolveView.js';
-import { itemImageStyle } from '../../utils/views/viewStyles.js';
-import { ItemImageComponent } from './InventoryTable.js';
+import { thumbnailStyle } from '../../utils/views/viewStyles.js';
 import { sheetLockMixin } from '../../utils/sheetLockMixin.js';
 import { packlistIndexResolutionMixin } from '../interface/IndexResolutionModal.js';
 
@@ -187,7 +186,6 @@ export const PacklistTable = {
             PIECE_NUMBER,
             lockNamespace: 'PACK_LISTS',
             itemGroupVisibilityOverride: null,
-            descriptionOnlyTabs: [],
             scheduleAttachment: null
         };
     },
@@ -438,12 +436,6 @@ export const PacklistTable = {
         this.$notify.clearBanners(this.containerPath);
     },
     async mounted() {
-        // Load InventoryDescriptionOnly preference for use in addItemFromInventory
-        Requests.getPreferences().then(prefs => {
-            const descPref = prefs?.find(p => p.id === 'InventoryDescriptionOnly');
-            try { this.descriptionOnlyTabs = JSON.parse(descPref?.value || '[]'); } catch { this.descriptionOnlyTabs = []; }
-        }).catch(() => {});
-
         // Initialize store if tabName is available
         if (this.tabName) {
             this.initializeStore();
@@ -746,7 +738,7 @@ export const PacklistTable = {
             // position: { position: 'above'|'below', targetIndex: number } or null
             const tabName = this.tabName; // Capture for use inside modal
             const InventorySelectorModal = {
-                components: { DataView, ItemImageComponent },
+                components: { DataView },
                 props: ['onAddEmpty', 'onItemSelected', 'tabName'],
                 data() {
                     return {
@@ -757,10 +749,10 @@ export const PacklistTable = {
                     };
                 },
                 computed: {
-                    // image holds no data: the thumbnail column (see itemImageStyle)
+                    // Rows from Requests.getAllInventoryData (inventory rows carry their thumbnail)
                     fields() {
                         return [
-                            { key: 'image', label: 'IMG' },
+                            THUMBNAIL_FIELD,
                             { key: 'itemNumber', label: 'Item#', type: 'item' },
                             { key: 'description', label: 'Description' },
                             { key: 'quantity', label: 'Available' }
@@ -774,10 +766,10 @@ export const PacklistTable = {
                             theme: 'purple',
                             views: [{
                                 id: 'table', name: 'Inventory', layout: 'table',
-                                columns: ['image', 'itemNumber', 'description', 'quantity'],
+                                columns: ['thumbnail', 'itemNumber', 'description', 'quantity'],
                                 sortable: ['itemNumber', 'description', 'quantity'],
-                                style: { image: itemImageStyle('itemNumber'), itemNumber: { width: 120 }, quantity: { width: 100 } },
-                                table: { sticky: { start: ['image'] } },
+                                style: { thumbnail: thumbnailStyle('itemNumber'), itemNumber: { width: 120 }, quantity: { width: 100 } },
+                                table: { sticky: { start: ['thumbnail'] } },
                                 sort: { key: 'itemNumber', dir: 'asc' },
                                 // Clicking a row adds the item
                                 action: 'row'
@@ -904,11 +896,12 @@ export const PacklistTable = {
             
             // Populate with inventory data
             // Format: (1) ITEM# Description
-            // For prefixes with descriptionOnly, use just the description with no item# or stub
+            // Description-only tabs (InventoryDescriptionOnly preference) add just the description, no item# or stub
             const itemNumber = inventoryItem.itemNumber || '';
             const description = inventoryItem.description || '';
             const itemTab = await Requests.getTabNameForItem(itemNumber).catch(() => null);
-            const formattedDescription = (itemTab && this.descriptionOnlyTabs.includes(itemTab))
+            const descriptionOnlyTabs = getInventoryTabList(INVENTORY_TAB_PREFERENCES.descriptionOnly);
+            const formattedDescription = (itemTab && descriptionOnlyTabs.includes(itemTab))
                 ? description
                 : `(1) ${itemNumber} ${description}`;
             

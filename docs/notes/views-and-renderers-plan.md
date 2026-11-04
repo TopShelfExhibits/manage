@@ -22,7 +22,7 @@ All six phases are implemented in the working tree. The in-browser suite passes 
 
 - `cell-edit` is now `(rowIndex, columnKey, value)`; dirty state is keyed by column key.
 - Decorations take a `decorationKeys` list; a decorated key a renderer doesn't display moves to row level (chip end, card footer, details button bar), which is how calendar chips gained the transship badges (D5).
-- Fields may carry `cellOptions` (e.g. which key holds the item number for the image cell) and `format: 'multiline'`.
+- Fields may carry `cellOptions` (e.g. which key holds the item number for the thumbnail cell) and `format: 'multiline'`.
 - The calendar skips table group-master rows, so ItemReport uses one row set for both views.
 - PacklistTable resolves its views directly (no DataView), per C3.
 - The renderer contract keeps individual state props (`isLoading`, `error`, …) instead of one `state` object. Every renderer (table, calendar, cards) takes `resolved`, `data`, `action` and decorations; cards build their cards with the adapter themselves.
@@ -30,6 +30,32 @@ All six phases are implemented in the working tree. The in-browser suite passes 
 - Search highlighting and HTML escaping each have one implementation: `searchMatch.makeHighlighter` and `fieldFormat.escapeHtml`. Decoration placement lives in `views/decorations.js`.
 - Batch edits match rows to loaded rows by `rowKey` everywhere; rows added, removed or moved mark the table changed without marking cells.
 - `Requests.getInventoryHiddenSearchData` was removed (D7); category cards search the item rows.
+
+## Thumbnail column (2026-11-04)
+
+Item thumbnails are data: each inventory tab may have a `Thumbnail` column holding a JSON array of Drive file IDs (`["1AbC…"]`; [thumbnail-values.js](../js/data_management/utils/thumbnail-values.js)). The first entry is displayed; the array leaves room for several images later. This replaces the `CACHE/Thumbnails` table, the custom `image` column (`itemImageStyle`) and the image cell's own lookup.
+
+- **Optional column.** A tab without a `Thumbnail` column has no thumbnails: its rows carry no `thumbnail` key, its category page drops the column (a view patch, like description-only tabs), and its items are blank on the overview and on report pages. Matching is exact (`Thumbnail`), so an old upper-case `THUMBNAIL` column is not used.
+- **Column-preserving saves.** `DEFAULT_INVENTORY_MAPPING` is column-preserving (`_preserveColumns`, `resolveSheetMapping` in helpers.js): reads take only the columns a tab has, and saves write each mapped value under its header, read fresh from the sheet, leaving every other column and its formulas untouched (the write sends `null` for those cells, which the Sheets API skips). A missing required column is added after the last header; a missing optional one is never created. Unmapped columns still don't follow rows that move (as before).
+- **Column type.** `thumbnail` is a column type ([column-types.js](../js/data_management/utils/column-types.js)): its field (`THUMBNAIL_FIELD`) gets the `thumbnail` cell from the data, like checkbox and select, and views only place it (`thumbnailStyle(itemKey, size)`). Its values are references, not text (`isOpaqueType`): never searched, pasted or copied to the clipboard; where a value prints as text it reads "1 image".
+- **Display and editing are split.** [thumbnails.js](../js/application/components/interface/thumbnails.js): `ThumbnailImage` (display through [thumbnailCache.js](../js/application/utils/thumbnailCache.js), which only turns file IDs into images) and `ThumbnailCell`. [thumbnailModals.js](../js/application/components/interface/thumbnailModals.js): the image view (Replace, Remove) and the upload modal. The cell commits the new value like any edit, so the batch Save keeps it and edit history records it (revert included; the Edit History page shows past images). Uploads happen right away (the modal says to save); `uploadItemImage` never deletes files, names each upload uniquely, and reuses an identical image already uploaded (SHA-256 of the original in the file's `appProperties`). Unsaved uploads are left in Drive (cleanup later).
+- **Category images.** The index (`CACHE/Inventory`) may have a `Thumbnail` column: a prefix's image shows for items of thumbnail tabs that have none of their own (`Requests.getCategoryThumbnails`).
+- **Other rows.** Pages whose rows aren't inventory rows (reports, pack list summary, item timeline) join the item's thumbnail as a derived field ([itemThumbnails.js](../js/application/utils/itemThumbnails.js), `Requests.getItemThumbnails`, persisted). The timeline shows it read only. Proposals carry thumbnail changes like other fields (`PROPOSAL_FIELDS`), and scheduled saves schedule them.
+
+**Rollout.** An old session's save rewrites A–E only and its upload deletes files by name, so old code must not write once the new layout is in place:
+
+1. Deploy the update shim to live on its own first (branch `update-shim`, from `live/main`). From then on, a session whose version is behind the deployed one can't write shared data, and its banner's Refresh Now re-downloads the app's files, bypassing the browser cache.
+2. Wait until every session open before the shim has reloaded. Those sessions run the old code with no guard.
+3. Deploy this version. Sessions still on the shim go read-only right away.
+4. Insert the `Thumbnail` column at E on each inventory tab (EditHistory moves to F), then run the migration from the browser console on the live site, dry run first:
+
+```js
+const m = await import(new URL('js/data_management/migrations/thumbnail-column.js', document.baseURI));
+await m.migrateThumbnails();                  // report only
+await m.migrateThumbnails({ dryRun: false }); // fill blank Thumbnail cells from CACHE/Thumbnails
+```
+
+It fills only blank cells (safe to re-run), skips locked tabs and tabs without the column, adds a `Thumbnail` header to the index if missing, and reports conflicts and unmatched records. Afterwards delete `CACHE/Thumbnails`, the migration module, the fake `Thumbnails` tab and the two migration tests.
 
 ## Purpose
 
@@ -103,7 +129,7 @@ Every property has one home. When adding one, put it where its question is answe
 
 - A field never carries presentation. `resolveView` ignores presentation properties on fields, with a dev warning, so drift shows up on localhost.
 - A view never decides data: types, write permission and allowed values come from fields.
-- Cells that follow the data need no view setting: a `checkbox` or `select` field gets its type's cell (read-only ones render disabled), and an editable field without a cell gets the text editor. A view names a cell only for a display choice (`image`, `itemId`, the page's `slot`, `external-edit`).
+- Cells that follow the data need no view setting: a `checkbox`, `select` or `thumbnail` field gets its type's cell (read-only ones render disabled), and an editable field without a cell gets the text editor. A view names a cell only for a display choice (`itemId`, the page's `slot`, `external-edit`).
 - Presentation that comes from data at runtime (the assignee colours in a preference, a dynamic column's header) enters through the page as a view patch (§4.15) or the page's computed registry, never as field properties.
 
 ### Non-goals
@@ -290,8 +316,7 @@ Presentation properties are **not** field properties: `labelHtml`, `title`, `sor
 
 **Resolved fields.** Renderers read `resolved.fields` / `resolved.fieldMap`: each data field with the view's presentation merged in (`style` props, `sortable`, and the type's cell). Pages never build presented fields themselves.
 
-**Columns without data (custom, kept).** The ideal is that every column holds data and anything else is an action. These stay as bare fields (`key` + `label`) with their presentation in the view; no new mechanism is added for them:
-- the item thumbnail (`image`): ideally the inventory data stores an image URL and a view styles that column as a thumbnail, with editing following its data controls (see Later);
+**Columns without data (custom, kept).** The ideal is that every column holds data and anything else is an action. These stay as bare fields (`key` + `label`) with their presentation in the view; no new mechanism is added for them (item thumbnails are now data: see [Thumbnail column](#thumbnail-column-2026-11-04)):
 - the Schedule `packlist` column: ideally tables allow several row actions with their own styling (see Later).
 
 The inventory calendar button is no longer a column: it is the inventory table's row action, with a calendar header icon (`action: { to, icon, headerIcon, title }`).
@@ -665,8 +690,8 @@ This replaces the `hiddenColumns` mutation and the 100 ms restore.
 ### 4.14 Modularity: cells, decorations, slots
 
 1. **Cell registry.** A cell is the component that draws a value. Renderers read it from the resolved field (`resolvedField.cell`), which comes from the data or the view:
-   - **From the data** (no view setting): a `checkbox` field gets `checkbox`, a `select` field gets `select` (both render disabled when read-only), and an editable field without a cell gets `text`, the one text editor.
-   - **From the view** (`style[key].cell`, a display choice): `image` (item thumbnail, custom: see §4.1), `itemId`, `action` (the row's primary action as this value's button; `cellOptions.class` colours it), `showList` (a list of show identifiers as full-width buttons; past `cellOptions.max` one "N shows" button opens them in a modal; `cellOptions.to` is the show path with `{value}`), `slot`, `external-edit`. Its options are `style[key].cellOptions`, so each view sets them for its layout: the item shortage report lists two shows in the table, always uses the "N shows" button on calendar chips (`max: 0`), and lists every show when printing (`variants.print`, `max: null`).
+   - **From the data** (no view setting): a `checkbox` field gets `checkbox`, a `select` field gets `select` (both render disabled when read-only), a `thumbnail` field gets `thumbnail`, and an editable field without a cell gets `text`, the one text editor.
+   - **From the view** (`style[key].cell`, a display choice): `itemId`, `action` (the row's primary action as this value's button; `cellOptions.class` colours it), `showList` (a list of show identifiers as full-width buttons; past `cellOptions.max` one "N shows" button opens them in a modal; `cellOptions.to` is the show path with `{value}`), `slot`, `external-edit`. Its options are `style[key].cellOptions`, so each view sets them for its layout: the item shortage report lists two shows in the table, always uses the "N shows" button on calendar chips (`max: 0`), and lists every show when printing (`variants.print`, `max: null`).
    - Button lists in a cell use the shared `.cell-button-list` style (stacked, full width; left-aligned lines in print).
    - Props: `{ row, field, value, renderer, density, search }`, where `density` is `'full'` or `'compact'`. A missing compact form falls back to text.
    - The table, chips, cards **and the details grid** all use this pipeline, so a new data type is added once.
@@ -749,7 +774,7 @@ _Before Phase 2 starts_, add these rows to the live `CACHE/Preferences` sheet. A
 - **Guards:**
   - If a table in `instant` mode has no entry, or names a column that doesn't exist, its instant cells render read-only with a visible "write disabled: no row identity" hint.
   - If two loaded rows share an identity, instant cells on those rows are disabled. The write never guesses.
-- **Read path:** the page (for `columns` and the design queue preferences) and `writeCellsVerified` (for `identity` and `columns`) read the preferences through `Requests.getPreferences`, the way `InventorySuppressCategoryAnalysis` is read today ([api.js:1407](../js/data_management/api.js#L1407)).
+- **Read path:** the page (for `columns` and the design queue preferences) and `writeCellsVerified` (for `identity` and `columns`) read the preferences through `Requests.getPreferences`. Every read of `CACHE/Preferences` uses the one `PREFERENCES_MAPPING` in `helpers.js`, so they share a cache entry. The inventory tab lists (`INVENTORY_TAB_PREFERENCES`) are read with `InventoryUtils.getPreferenceTabs` in the data layer and `getInventoryTabList` in the UI.
 
 **Field data types and editability** belong to field definitions. In future, details cells get data types and editing through the same cell pipeline (§4.14).
 
@@ -904,7 +929,8 @@ Depends only on Phases 0–1.
 ### Later (not scheduled, built on this system)
 
 - Other patch sources (beyond the `DesignQueueFields` preference) and customization UI (per page).
-- Item images as data: the inventory stores each item's image URL, and the thumbnail is how a view styles a URL column (`style.cell`); editing follows that column's data controls. Replaces the custom `image` column (`itemImageStyle`) and the image cell's own lookup and `editable` option.
+- Several thumbnails per item (the cell value is already an array), and cleaning up Drive files no cell or history references (uploads made before content hashes are not deduplicated).
+- Row writes from the item timeline (its thumbnail is read only for now).
 - Several row actions per table, each with its own styling, so the Schedule `packlist` column becomes an action.
 - Instant-write checkboxes on the Schedule page itself, and a Task column that aggregates design progress (R7.1).
 - Editable details cells.

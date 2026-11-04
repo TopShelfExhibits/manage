@@ -1,4 +1,4 @@
-import { Database, EditHistoryUtils } from '../index.js';
+import { Database, EditHistoryUtils, PREFERENCES_MAPPING } from '../index.js';
 import { instantWriteEntry, isInstantColumn, joinKey, identityText, columnText, identityParts, identityKey, cellKey } from '../utils/instant-write-config.js';
 
 /**
@@ -26,7 +26,6 @@ import { instantWriteEntry, isInstantColumn, joinKey, identityText, columnText, 
  * tests/sheetHealth.js (test only) reports whether a fixture tab is in a state these writes rely on.
  */
 
-const PREFERENCES_MAPPING = { id: 'ID', name: 'Name', description: 'Description', page: 'Page', type: 'Type', value: 'Value', edithistory: 'EditHistory' };
 const SHOW_NOTES_TAB = 'ShowNotes';
 const SHOW_NOTES_HEADERS = ['Identifier', 'Note', 'EditHistory'];
 

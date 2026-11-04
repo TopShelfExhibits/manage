@@ -1,11 +1,10 @@
-import { wrapMethods, normalizeHeaderName, Database, InventoryUtils, PackListUtils, ProductionUtils, ApplicationUtils, EditHistoryUtils, InstantWriteUtils, ARCHIVE_TAB_NAME, ARCHIVE_HEADERS, todayISOString, offsetToISO, sanitizeTabName, mapWithConcurrency, ProgressBus, getRandomLoadingQuote, DEFAULT_INVENTORY_MAPPING, ProposalUtils, PROPOSALS_TAB_NAME, PROPOSAL_MAPPING, resolveInventoryNoteMaxLength } from './index.js';
+import { wrapMethods, normalizeHeaderName, Database, InventoryUtils, PackListUtils, ProductionUtils, ApplicationUtils, EditHistoryUtils, InstantWriteUtils, ARCHIVE_TAB_NAME, ARCHIVE_HEADERS, offsetToISO, resolveShortageAlertDays, shortageAlertDateFilters, PREFERENCES_MAPPING, INVENTORY_TAB_PREFERENCES, sanitizeTabName, mapWithConcurrency, ProgressBus, getRandomLoadingQuote, DEFAULT_INVENTORY_MAPPING, ProposalUtils, PROPOSALS_TAB_NAME, PROPOSAL_MAPPING, resolveInventoryNoteMaxLength, firstThumbnail } from './index.js';
 import { authState } from '../application/utils/auth.js';
 import { instantWriteEntry, identityText, parseColoredName } from './utils/instant-write-config.js';
 import { columnTypesEntry } from './utils/column-types.js';
 
 // CACHE tabs with tracked history. EditHistory is always mapped to the key 'edithistory'.
 const NOTES_MAPPING = { Path: 'Path', Note: 'Note', Color: 'Color', Size: 'Size', edithistory: 'EditHistory' };
-const PREFERENCES_MAPPING = { id: 'ID', name: 'Name', description: 'Description', page: 'Page', type: 'Type', value: 'Value', edithistory: 'EditHistory' };
 
 /**
  * CACHING ARCHITECTURE NOTES:
@@ -754,12 +753,29 @@ class Requests_uncached {
         return await deps.call(ProductionUtils.normalizeEndDate, rowData);
     }
 
-    static async getThumbnailRecord(deps, itemNumber) {
-        return await deps.call(ApplicationUtils.getThumbnailRecord, itemNumber);
+    /**
+     * Item thumbnails for pages whose rows aren't inventory rows: [{ item, file }], the displayed
+     * file ID of each item ('' when it has none) in tabs that have a Thumbnail column. Items of
+     * other tabs are absent: they have no thumbnails. A bare file ID is a valid thumbnail value
+     * (parseThumbnails), which keeps this small. Persisted (CACHE/Analytics): it reads every
+     * inventory tab.
+     * @param {Object} deps - Dependency decorator for tracking calls
+     * @returns {Promise<Array<{item: string, file: string}>>}
+     */
+    static async getItemThumbnails(deps) {
+        const rows = await deps.call(Requests.getAllInventoryData);
+        return rows
+            .filter(row => row.itemNumber && 'thumbnail' in row)
+            .map(row => ({ item: row.itemNumber, file: firstThumbnail(row.thumbnail) || '' }));
     }
 
-    static async getAllThumbnailRecords(deps) {
-        return await deps.call(ApplicationUtils.getAllThumbnailRecords);
+    /**
+     * Category images from the inventory INDEX: [{ prefix, file }] (Drive file ID).
+     * @param {Object} deps - Dependency decorator for tracking calls
+     * @returns {Promise<Array<{prefix: string, file: string}>>}
+     */
+    static async getCategoryThumbnails(deps) {
+        return await deps.call(InventoryUtils.getCategoryThumbnails);
     }
 
     /**
@@ -774,34 +790,20 @@ class Requests_uncached {
     }
 
     /**
-     * Upload a thumbnail image for an item to the Drive thumbnails folder.
-     * Replaces any existing image for that item number.
+     * Upload an item image to the Drive thumbnails folder (or reuse an identical one already
+     * there). Only uploads: the caller puts the file ID in the item's Thumbnail cell, and the
+     * table's save keeps it.
      *
      * MUTATION METHOD - Excluded from caching
      * Does NOT accept deps parameter or use deps.call()
      *
      * @param {File} file - The image file to upload
-     * @param {string} itemNumber - Item number the image belongs to
-     * @returns {Promise<{fileId: string, file: File}|null>} The new Drive file ID and the uploaded
-     *   (resized) image, or null on failure
+     * @param {string} itemNumber - Item number the image belongs to (used in the file name)
+     * @returns {Promise<{fileId: string, file: File, reused: boolean}|null>} The Drive file ID and
+     *   the uploaded (resized) image, or null on failure
      */
     static async uploadItemImage(file, itemNumber) {
         return await Database.uploadItemImage(file, itemNumber);
-    }
-
-    /**
-     * Store a thumbnail record in the Thumbnails tab.
-     * 
-     * MUTATION METHOD - Excluded from caching
-     * Does NOT accept deps parameter or use deps.call()
-     *
-     * @param {string} itemNumber - Item number
-     * @param {string} fileId - Google Drive file ID
-     * @param {string|null} blobDataUrl - Optional blob data URL
-     * @returns {Promise<void>}
-     */
-    static async storeThumbnailRecord(itemNumber, fileId, blobDataUrl) {
-        return await ApplicationUtils.storeThumbnailRecord(itemNumber, fileId, blobDataUrl);
     }
 
     /**
@@ -847,13 +849,14 @@ class Requests_uncached {
     }
 
     /**
-     * Extract hardware item information from text by checking against HARDWARE inventory
+     * Extract an item with a nonstandard item number (tabs in InventoryCustomItemNumbers) from text
      * @param {Object} deps - Dependency decorator for tracking calls
-     * @param {string} text - Text to extract hardware item information from
+     * @param {string} text - Text to extract the item from
+     * @param {string[]} [ctgFilter] - Only these tabs (case insensitive)
      * @returns {Promise<Object>} Object with {quantity: number, itemNumber: string|null, description: string}
      */
-    static async extractHardwareFromText(deps, text) {
-        return await deps.call(PackListUtils.extractHardwareFromText, text);
+    static async extractCustomItemFromText(deps, text, ctgFilter = undefined) {
+        return await deps.call(PackListUtils.extractCustomItemFromText, text, ctgFilter);
     }
 
     /**
@@ -873,14 +876,6 @@ class Requests_uncached {
         if (!itemNumber || !description) {
             return null;
         }
-        
-        // Skip alert generation for items with suppressAnalysis set
-        // const prefix = itemNumber.split('-')[0];
-        // const indexData = await deps.call(Requests.getInventoryIndexData);
-        // const isSuppressed = indexData?.some(row => row.prefix === prefix && row.metadata?.suppressAnalysis === 'true');
-        // if (isSuppressed) {
-        //     return null;
-        // }
         
         // Get comparison result from business logic layer
         const result = await deps.call(PackListUtils.checkDescriptionMatch, itemNumber, description);
@@ -1090,17 +1085,16 @@ class Requests_uncached {
             ProgressBus.off('packlist:extractItemsFromMultipleShows', _onExtractProgress);
         }
 
-        // Filter out items whose prefix has suppressAnalysis set
-        const indexData = await deps.call(InventoryUtils.getInventoryIndex);
-        const suppressedPrefixes = new Set(
-            indexData
-                .filter(row => row.metadata?.suppressAnalysis === 'true')
-                .map(row => row.prefix)
-        );
-        const itemRows = rawItemRows.filter(row => !suppressedPrefixes.has((row.itemId || '').split('-')[0]));
+        // Leave out items in tabs the InventorySuppressCategoryAnalysis preference lists
+        const skippedTabs = await deps.call(InventoryUtils.getPreferenceTabs, INVENTORY_TAB_PREFERENCES.skipAnalysis);
+        const itemTabs = skippedTabs.length
+            ? await mapWithConcurrency(rawItemRows, row => deps.call(InventoryUtils.getTabNameForItem, row.itemId), 8)
+            : [];
+        const itemRows = rawItemRows.filter((row, i) => !skippedTabs.includes(itemTabs[i]));
 
+        const today = await deps.call(ApplicationUtils.getToday);
         const dateFilters = Array.isArray(filter?.dateFilters) ? filter.dateFilters : [];
-        const getFilterDate = (column, type) => offsetToISO(dateFilters.find(f => f.column === column && f.type === type)?.value);
+        const getFilterDate = (column, type) => offsetToISO(dateFilters.find(f => f.column === column && f.type === type)?.value, today);
 
         let reportStart = getFilterDate('Date', 'after') || getFilterDate('Ship', 'after') || null;
         let reportEnd = getFilterDate('Date', 'before') || getFilterDate('Ship', 'before') || null;
@@ -1108,7 +1102,7 @@ class Requests_uncached {
         const shipDates = resolvedShows.map(show => show.shipDate).filter(Boolean).sort();
         const returnDates = resolvedShows.map(show => show.returnDate).filter(Boolean).sort();
         if (!reportStart) {
-            reportStart = shipDates[0] || todayISOString();
+            reportStart = shipDates[0] || today;
         }
         if (!reportEnd) {
             reportEnd = returnDates[returnDates.length - 1] || shipDates[shipDates.length - 1] || reportStart;
@@ -1248,6 +1242,32 @@ class Requests_uncached {
     }
 
     /**
+     * Inventory shortage alerts: the item shortage report for shows from today through the
+     * InventoryShortageAlertDays preference, cut to the periods where an item runs out
+     * (minimum quantity below 0). Persisted (CACHE/Analytics), so a session starts from the last
+     * saved result unless its sources or the date changed since.
+     * @param {Object} deps - Dependency decorator for tracking calls
+     * @returns {Promise<Array<{itemId: string, tabName: string|null, startDate: string|null,
+     *          endDate: string|null, minQty: number, shows: string[]}>>} One row per shortage
+     *          period; empty when the preference is missing or 0
+     */
+    static async getInventoryShortageAlerts(deps) {
+        const days = resolveShortageAlertDays(await deps.call(Requests.getPreferences));
+        if (!days) return [];
+        // Same arguments as the report page opened on these filters, so the two share the cache
+        const rows = await deps.call(Requests.getMultipleShowsItemsSummary, { dateFilters: shortageAlertDateFilters(days) }, {}, null, false);
+        const shortages = rows.filter(row => typeof row.minQty === 'number' && row.minQty < 0);
+        return await mapWithConcurrency(shortages, async (row) => ({
+            itemId: row.itemId,
+            tabName: await deps.call(InventoryUtils.getTabNameForItem, row.itemId),
+            startDate: row.startDate || null,
+            endDate: row.endDate || null,
+            minQty: row.minQty,
+            shows: Object.keys(row.shows || {}).filter(show => (row.shows[show] || 0) > 0)
+        }), 8);
+    }
+
+    /**
      * Resolve a packlist identifier to its actual tab name
      * Handles abbreviations, case variations, and fuzzy matching
      * @param {Object} deps - Dependency decorator for tracking calls
@@ -1340,18 +1360,15 @@ class Requests_uncached {
         
         // Skip alert generation for tabs in InventorySuppressCategoryAnalysis preference
         const tab = await deps.call(InventoryUtils.getTabNameForItem, itemNumber);
-        const prefs = await deps.call(Requests.getPreferences);
-        const suppressValue = prefs?.find(p => p.id === 'InventorySuppressCategoryAnalysis')?.value || '[]';
-        let suppressedTabs = [];
-        try { suppressedTabs = JSON.parse(suppressValue); } catch {}
-        if (tab && suppressedTabs.includes(tab)) {
+        const skippedTabs = await deps.call(InventoryUtils.getPreferenceTabs, INVENTORY_TAB_PREFERENCES.skipAnalysis);
+        if (tab && skippedTabs.includes(tab)) {
             return null;
         }
         
         try {
             // Resolve ship date so remaining quantity reflects inventory at time of packing
             const shipDate = await deps.call(ProductionUtils.getProjectShipDate, currentProjectId);
-            const referenceDate = shipDate || todayISOString();
+            const referenceDate = shipDate || await deps.call(ApplicationUtils.getToday);
 
             // Get remaining quantity from business logic layer
             const remaining = await deps.call(PackListUtils.calculateRemainingQuantity, currentProjectId, itemNumber, referenceDate);
@@ -1756,7 +1773,7 @@ export const Requests = wrapMethods(
     'api', 
     [
         'saveData', 'createNewTab', 'showTabs', 'hideTabs',
-        'saveInventoryTabData', 'savePackList', 'storeUserData', 'uploadItemImage', 'storeThumbnailRecord',
+        'saveInventoryTabData', 'savePackList', 'storeUserData', 'uploadItemImage',
         'lockSheet', 'unlockSheet', 'forceUnlockSheet',
         'checkAndApplyPendingChanges', 'savePendingChangeEntry', 'deletePendingChangeEntry',
         'ensureScheduleReferenceRows',
@@ -1773,5 +1790,6 @@ export const Requests = wrapMethods(
         'saveShowNote'
     ], // Mutation methods (and fresh reads that must not be cached)
     ['computeIdentifier'], // Infinite cache methods
-    {} // No custom cache durations needed - lock methods delegate to ApplicationUtils caching
+    {}, // No custom cache durations needed - lock methods delegate to ApplicationUtils caching
+    ['getInventoryShortageAlerts', 'getItemThumbnails'] // Persisted methods (CACHE/Analytics)
 );

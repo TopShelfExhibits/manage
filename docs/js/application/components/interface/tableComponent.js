@@ -9,6 +9,7 @@ import { RowDetailsComponent } from './rowDetailsComponent.js';
 import { CellRenderer, DecorationCards, sanitizeCellText } from './cells.js';
 import { placeDecorations } from '../../utils/views/decorations.js';
 import { useBatchEdits } from '../../utils/cellEdits.js';
+import { isOpaqueType } from '../../../data_management/utils/column-types.js';
 
 // Clicks landing on these never trigger a row action (§4.8 row-trigger guards)
 const ROW_TRIGGER_IGNORE = 'button, a, input, select, textarea, [contenteditable], .column-button, .card.clickable';
@@ -2147,8 +2148,10 @@ export const TableComponent = {
             return JSON.stringify(this.resolved?.sort || []);
         },
         // Searched tiers: shown keys (incl. stacked lines) and details keys; hidden fields are never searched
+        // Fields whose values are references, not text (thumbnails), are never searched
         searchTierKeys() {
-            return { shown: this.visibleColumns.map(c => c.key), details: this.detailsColumns.map(c => c.key) };
+            const keys = (columns) => columns.filter(c => !isOpaqueType(c.type)).map(c => c.key);
+            return { shown: keys(this.visibleColumns), details: keys(this.detailsColumns) };
         },
         // One matching pass over the rows handed to the table, with the broad-search abort (§4.5)
         searchResult() {
@@ -2295,14 +2298,14 @@ export const TableComponent = {
         visibleColumns() {
             return this.columnModel.slots.flatMap(s => s.headerLines.flat());
         },
-        // Columns to serialize when writing to the OS clipboard (visible, non-action columns)
+        // Columns to serialize when writing to the OS clipboard (visible, non-action, text columns)
         clipboardExportColumns() {
-            return this.visibleColumns.filter(col => !col.key.startsWith('_'));
+            return this.visibleColumns.filter(col => !col.key.startsWith('_') && !isOpaqueType(col.type));
         },
-        // Columns eligible to receive pasted data (visible, non-action, editable)
+        // Columns eligible to receive pasted data (visible, non-action, editable, text columns)
         pasteableColumns() {
             if (!this.isBatchEditing) return [];
-            return this.visibleColumns.filter(col => !col.key.startsWith('_') && col.editable);
+            return this.visibleColumns.filter(col => !col.key.startsWith('_') && col.editable && !isOpaqueType(col.type));
         },
         detailsColumns() {
             return this.columnModel.details;
@@ -4529,7 +4532,7 @@ export const TableComponent = {
                                         <span v-else v-html="highlightSearchText(row[column.key], column)"></span>
                                         <!-- Changed batch cell (not number): revert button; its hint shows the original over the editor -->
                                         <template v-if="column.format !== 'number' && showRevert(row, idx, column)">
-                                            <span class="column-button-hint">{{ batchEdits.originalValue(row, idx, column.key) || '(empty)' }}</span>
+                                            <span class="column-button-hint">{{ formatCellValue(batchEdits.originalValue(row, idx, column.key), column) || '(empty)' }}</span>
                                             <button
                                                 @click="revertCellToOriginal(idx, column, $event)"
                                                 title="Revert to original value"

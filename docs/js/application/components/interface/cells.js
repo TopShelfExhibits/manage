@@ -5,7 +5,7 @@ import { escapeHtml, formatText } from '../../utils/views/fieldFormat.js';
 /**
  * Cell registry (views-and-renderers-plan §4.14). A resolved field with `cell: '<name>'` renders
  * through the registry in every renderer: table cells, calendar chip lines, card lines and the
- * details grid. The cell comes from the field's type (checkbox, select) or the view's
+ * details grid. The cell comes from the field's type (checkbox, select, thumbnail) or the view's
  * style[key].cell; pages never put it on fields.
  *
  * Every cell receives the same props:
@@ -22,7 +22,7 @@ import { escapeHtml, formatText } from '../../utils/views/fieldFormat.js';
  * `field.cell = 'slot'` is not a registry entry: the renderer calls the page's #cell slot instead.
  */
 
-const cellProps = {
+export const cellProps = {
     row: { type: Object, required: true },
     field: { type: Object, required: true },
     value: { default: undefined },
@@ -49,32 +49,11 @@ export function sanitizeCellText(text) {
         .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '');
 }
 
-// ItemImageComponent lives in InventoryTable.js; load it lazily so this module never forms an
-// evaluation-time import cycle with the content components.
-const LazyItemImage = Vue.defineAsyncComponent(() =>
-    import('../content/InventoryTable.js').then(m => m.ItemImageComponent)
+// The thumbnail cell (thumbnails.js) reaches the data layer through the image cache; load it lazily
+// so this module never forms an evaluation-time import cycle with it.
+const ThumbnailCell = Vue.defineAsyncComponent(() =>
+    import('./thumbnails.js').then(m => m.ThumbnailCell)
 );
-
-const ImageCell = {
-    name: 'ImageCell',
-    props: cellProps,
-    components: { LazyItemImage },
-    computed: {
-        opts() { return this.field.cellOptions || {}; },
-        itemNumber() {
-            const key = this.opts.itemKey || this.field.key;
-            const v = this.row[key];
-            return v == null ? '' : String(v);
-        }
-    },
-    template: html`
-        <LazyItemImage
-            :itemNumber="itemNumber"
-            :imageSize="opts.size || 64"
-            :editable="!!opts.editable"
-        />
-    `
-};
 
 // Read-only value as HTML: the renderer's highlighter (which formats and escapes), else escaped text
 function readOnlyHtml(cell) {
@@ -329,7 +308,7 @@ const EditTextCell = {
 };
 
 const CELL_REGISTRY = {
-    image: { full: ImageCell, compact: null },
+    thumbnail: { full: ThumbnailCell, compact: null },
     itemId: { full: TextCell, compact: TextCell },
     action: { full: ActionCell, compact: ActionCell },
     showList: { full: ShowListCell, compact: ShowListCell },

@@ -1,13 +1,7 @@
-import { Database, ProductionUtils, PackListUtils, wrapMethods, parseDate, toISODateString, searchFilter, todayISOString, ApplicationUtils, invalidateCache, EditHistoryUtils, DEFAULT_INVENTORY_NOTE_MAX_LENGTH } from '../index.js';
+import { Database, ProductionUtils, PackListUtils, wrapMethods, PREFERENCES_MAPPING, INVENTORY_TAB_PREFERENCES, resolveInventoryTabList, parseDate, toISODateString, searchFilter, todayISOString, startOfTodayMs, offsetToISO, ApplicationUtils, invalidateCache, EditHistoryUtils, DEFAULT_INVENTORY_NOTE_MAX_LENGTH, firstThumbnail } from '../index.js';
 
 /** Normalize an identifier for loose matching (strips spaces, case, non-alphanumeric) */
 function _normalizeId(v) { return String(v || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, ''); }
-
-/** Parse a MetaData JSON string from the inventory INDEX into an object */
-function _parseMetadata(str) {
-    if (!str) return {};
-    try { return JSON.parse(str); } catch { return {}; }
-}
 
 /** Fields reconstructed for the item timeline (contract: "Reconstructing past row states") */
 const TIMELINE_FIELDS = ['itemNumber', 'quantity', 'description', 'notes'];
@@ -34,13 +28,21 @@ function _historyChangeLabels(entry, before, after) {
         });
 }
 
-/** Inventory tab row key → sheet header (the wrapped InventoryUtils does not expose static fields) */
+/**
+ * Inventory tab row key → sheet header (the wrapped InventoryUtils does not expose static fields).
+ * Column-preserving (resolveSheetMapping): saves write these columns under their headers and leave
+ * the tab's other columns alone. Thumbnail is optional: a tab without that column has no
+ * thumbnails, its rows carry no `thumbnail` key, and saves never add the column.
+ */
 export const DEFAULT_INVENTORY_MAPPING = {
     itemNumber: 'ITEM#',
     quantity: 'QTY',
     description: 'Description',
     notes: 'NOTES',
-    edithistory: 'EditHistory'
+    edithistory: 'EditHistory',
+    thumbnail: 'Thumbnail',
+    _optional: ['thumbnail'],
+    _preserveColumns: true
 };
 
 /**
@@ -53,19 +55,42 @@ class inventoryUtils_uncached {
         prefix: 'PREFIX',
         tab: 'INVENTORY',
         folder: 'FOLDER',
-        metadata: 'MetaData'
+        thumbnail: 'Thumbnail',
+        _optional: ['thumbnail'],
+        _preserveColumns: true
     };
 
     /**
-     * Fetch and parse the inventory INDEX with full metadata.
-     * Returns an array of { prefix, tab, folder, metadata } where metadata is parsed JSON.
+     * The inventory INDEX: which tab each item-number prefix belongs to.
+     * Returns an array of { prefix, tab, folder, thumbnail? }. thumbnail is the prefix's category
+     * image (a thumbnail cell value), when the index has a Thumbnail column. Per-tab settings live
+     * in preferences (INVENTORY_TAB_PREFERENCES, getPreferenceTabs), not here.
      */
     static async getInventoryIndex(deps) {
-        const rows = await deps.call(Database.getData, 'CACHE', 'Inventory', inventoryUtils_uncached.INDEX_MAPPING);
-        return rows.map(row => ({
-            ...row,
-            metadata: _parseMetadata(row.metadata)
-        }));
+        return await deps.call(Database.getData, 'CACHE', 'Inventory', inventoryUtils_uncached.INDEX_MAPPING);
+    }
+
+    /**
+     * Category images: [{ prefix, file }], the first file ID of each prefix's index Thumbnail
+     * cell. Items of that prefix without an image of their own show it (thumbnail cell fallback).
+     * @returns {Promise<Array<{prefix: string, file: string}>>}
+     */
+    static async getCategoryThumbnails(deps) {
+        const index = await deps.call(InventoryUtils.getInventoryIndex);
+        return index
+            .map(row => ({ prefix: String(row.prefix ?? '').trim(), file: firstThumbnail(row.thumbnail) }))
+            .filter(entry => entry.prefix && entry.file);
+    }
+
+    /**
+     * Tab names listed by an inventory tab preference (INVENTORY_TAB_PREFERENCES).
+     * @param {Object} deps - Dependency decorator for tracking calls
+     * @param {string} preferenceId
+     * @returns {Promise<string[]>}
+     */
+    static async getPreferenceTabs(deps, preferenceId) {
+        const prefs = await deps.call(Database.getData, 'CACHE', 'Preferences', PREFERENCES_MAPPING);
+        return resolveInventoryTabList(prefs, preferenceId);
     }
 
     static async getTabNameForItem(deps, itemName) {
@@ -86,10 +111,7 @@ class inventoryUtils_uncached {
         
         // If prefix lookup failed, check tabs listed in InventoryCustomItemNumbers preference
         if (!tab) {
-            const prefs = await deps.call(Database.getData, 'CACHE', 'Preferences', { id: 'ID', value: 'Value' });
-            const prefValue = prefs?.find(p => p.id === 'InventoryCustomItemNumbers')?.value || '[]';
-            let customTabs = [];
-            try { customTabs = JSON.parse(prefValue); } catch {}
+            const customTabs = await deps.call(InventoryUtils.getPreferenceTabs, INVENTORY_TAB_PREFERENCES.customItemNumbers);
             for (const customTab of customTabs) {
                 try {
                     const tabData = await deps.call(Database.getData, 'INVENTORY', customTab, inventoryUtils_uncached.DEFAULT_INVENTORY_MAPPING);
@@ -404,7 +426,7 @@ class inventoryUtils_uncached {
         }
 
         const rows = await Database.getData('INVENTORY', resolvedTabName, mapping);
-        const todayDeciseconds = Math.floor(new Date().setHours(0, 0, 0, 0) / 100);
+        const todayDeciseconds = Math.floor(startOfTodayMs() / 100);
         const { updatedItems, hasChanges } = EditHistoryUtils.applyPendingChangesToData(rows, todayDeciseconds);
 
         if (!hasChanges) return { applied: false };
@@ -745,7 +767,7 @@ class inventoryUtils_uncached {
         const endDate = returnDates[returnDates.length - 1] || startDate;
 
         // Get inventory qty as of the earliest ship date
-        const refDate = startDate || todayISOString();
+        const refDate = startDate || await deps.call(ApplicationUtils.getToday);
         const inventoryQty = await deps.call(PackListUtils.getItemInventoryQuantity, itemId, refDate);
 
         if (inventoryQty === null) {
@@ -772,12 +794,7 @@ class inventoryUtils_uncached {
         if (!itemId) return null;
         // getItemTimeline only includes show ship/return events when both dates are provided.
         // Use a 2-year fallback so the full demand window is always evaluated.
-        let effectiveEnd = endDate;
-        if (!effectiveEnd) {
-            const d = new Date();
-            d.setFullYear(d.getFullYear() + 2);
-            effectiveEnd = toISODateString(d);
-        }
+        const effectiveEnd = endDate || offsetToISO(730, await deps.call(ApplicationUtils.getToday));
         const events = await deps.call(InventoryUtils.getItemTimeline, itemId, startDate, effectiveEnd);
         const quantities = events.map(e => e.quantity).filter(q => q !== null && q !== undefined && !isNaN(q));
         const result = quantities.length > 0 ? Math.min(...quantities) : null;

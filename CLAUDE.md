@@ -24,7 +24,10 @@ Top Shelf Exhibits' live inventory web app. It is plain ES modules and Vue 3 (Op
 - **Caching is automatic.** `wrapMethods` caches API and abstraction methods. A cached method takes `deps` as its first parameter and calls other cached methods with `deps.call(...)`, which records the dependency chain.
 - **Mutations invalidate from the bottom.** Database mutation methods invalidate the matching `getData` caches. The invalidation cascades up the recorded chains to the API, and reactive stores reload. Don't invalidate caches by hand.
 - **Mutation methods are never cached.** They take no `deps`, don't use `deps.call`, and are listed in the exclusion list passed to `wrapMethods` at the bottom of `api.js`. A new mutation method must be added to that list.
+- **Today is a cached source.** Cached code that depends on today reads it with `deps.call(ApplicationUtils.getToday)`, never `new Date()`. The date rollover then invalidates the result. `helpers.js` (`currentDate`, `todayISOString`, `offsetToISO`) is the one source of "now", on the local calendar.
+- **Persisted results are opt-in.** A slow API method can be listed in the `persistentMethods` argument of `wrapMethods` at the bottom of `api.js`. Its result is then saved to `CACHE/Analytics` and restored by later sessions while its sources are unchanged. See [docs/notes/caching-tab-structure.md](docs/notes/caching-tab-structure.md).
 - **Helpers stay uncached.** Reusable analysis helpers live in `data_management/utils/helpers.js` (pure). They must never call cached functions, which would break the invalidation chains.
+- **Out-of-date sessions never write shared data.** Once `version.json` names a newer deploy (`isAppOutdated`, `caching.js`), the app banner turns editing off, and every Database write method starts with `await assertAppCurrent()`, which throws `APP_OUTDATED`. A new Database write method must start with it too. Only a session's own bookkeeping (user data, short links) passes `bookkeeping: true` to `setData`/`createTab`; locks, cache timestamps and persisted results write below Database and are unaffected.
 
 ## Data or view?
 

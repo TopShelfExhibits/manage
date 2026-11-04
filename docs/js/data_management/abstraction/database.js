@@ -1,5 +1,5 @@
 // Dynamic Google Sheets Service selection
-import { isLocalhost } from '../utils/helpers.js';
+import { isLocalhost, resolveSheetMapping } from '../utils/helpers.js';
 let GoogleSheetsService, GoogleSheetsAuth;
 
 if (isLocalhost()) {
@@ -16,7 +16,6 @@ if (isLocalhost()) {
 }
 
 import { wrapMethods, invalidateCache, stampDataChange, EditHistoryUtils, assertAppCurrent } from '../index.js';
-import { ApplicationUtils } from '../index.js';
 import { ARCHIVE_TAB_NAME, ARCHIVE_HEADERS } from '../utils/metadata-utils.js';
 
 class database_uncached {
@@ -25,12 +24,17 @@ class database_uncached {
      * @param {Object} deps - Dependency decorator for tracking calls
      * @param {string} tableId - Identifier for the table (INVENTORY, PACK_LISTS, etc.)
      * @param {string} tabName - Tab name or logical identifier
-     * @param {Object} [mapping] - Optional mapping for object keys to sheet headers
+     * @param {Object} [mapping] - Optional mapping for object keys to sheet headers. A
+     *   column-preserving mapping (`_preserveColumns`, see resolveSheetMapping) reads only the
+     *   columns the tab actually has (an absent optional column gives rows without that key).
      * @returns {Promise<Array<Object>>} - Array of JS objects
      */
     static async getData(deps, tableId, tabName, mapping = null) {
         // Get raw sheet data from GoogleSheetsService
         const rawData = await GoogleSheetsService.getSheetData(tableId, tabName);
+        if (mapping?._preserveColumns) {
+            mapping = resolveSheetMapping(mapping, rawData?.[0]).read;
+        }
         //console.log('[Database] Raw data from GoogleSheetsService:', rawData);
         //console.log('[Database] Mapping provided:', mapping);
         
@@ -43,7 +47,7 @@ class database_uncached {
         // If no mapping, return raw 2D array
         return rawData;
     }
-        
+
     /**
      * Gets all logical tabs for a table
      * @param {Object} deps - Dependency decorator for tracking calls
@@ -113,80 +117,57 @@ class database_uncached {
     }
 
     /**
-     * Upload an image for an item to the Drive thumbnails folder.
-     * Replaces any existing image files for that item number.
+     * Upload an item image to the Drive thumbnails folder. Only uploads: the caller puts the
+     * returned file ID in the item's Thumbnail cell, and the table's save keeps it.
+     *
+     * Files are never deleted here: edit history and unsaved edits may still point at older
+     * ones. An image already uploaded (same original bytes, matched by the sha256 app property
+     * set on upload) is reused instead of uploaded again.
      * MUTATION — not cached.
      * @param {File} file - The image file to upload
-     * @param {string} itemNumber - The item number used to name the file
+     * @param {string} itemNumber - Item number, used in the file name
      * @param {string} folderId - Google Drive folder ID for thumbnails
-     * @returns {Promise<{fileId: string, file: File}|null>} The new Drive file ID and the image
-     *   that was uploaded (already resized — lets the caller show it without downloading it back),
-     *   or null on failure
+     * @returns {Promise<{fileId: string, file: File, reused: boolean}|null>} The Drive file ID and
+     *   the image as uploaded (already resized — lets the caller show it without downloading it
+     *   back), or null on failure
      */
     static async uploadItemImage(file, itemNumber, folderId = window.ENDPOINT_IDS.THUMBNAILS) {
         await assertAppCurrent();
         const itemNumberStr = String(itemNumber).trim();
         const ext = file.type === 'image/png' ? 'png' : 'jpg';
-        const fileName = `${itemNumberStr}.${ext}`;
 
         // Resize to max 512px before uploading. If the image is already within bounds,
-        // resizedFile === file (no copy made). If larger, upload the original as a backup first.
+        // resizedFile === file (no copy made). If larger, the original is kept as a backup.
         const MAX_UPLOAD_DIM = 512;
         const resizedFile = await database_uncached._resizeImageFile(file, MAX_UPLOAD_DIM);
         const wasResized = resizedFile !== file;
 
-        // Check if this item currently has a thumbnail record that points to a prefix file
-        // If so, we need to preserve that file when uploading the item's own image
-        const currentRecord = await ApplicationUtils.getThumbnailRecord(itemNumberStr);
-        const prefixFileIdsToPreserve = new Set();
-        if (currentRecord && currentRecord.file) {
-            // Extract prefix from item number
-            const separators = /[\s\-_]+/;
-            const parts = itemNumberStr.split(separators);
-            if (parts.length >= 2 && parts[0]) {
-                const prefix = parts[0];
-                // Check if the current file belongs to the prefix (not the item itself)
-                const prefixRecord = await ApplicationUtils.getThumbnailRecord(prefix);
-                if (prefixRecord && prefixRecord.file === currentRecord.file) {
-                    // This item is using a prefix file - preserve it
-                    prefixFileIdsToPreserve.add(prefixRecord.file);
-                }
-            }
+        // Deduplicate by the original's content hash (resizing isn't byte-stable across browsers)
+        const sha256 = await database_uncached._sha256Hex(file);
+        if (sha256) {
+            const existing = await GoogleSheetsService.findDriveFileByAppProperty(folderId, 'sha256', sha256);
+            if (existing?.id) return { fileId: existing.id, file: resizedFile, reused: true };
         }
 
-        // Find any existing files for this item to delete after upload
-        const extensions = ['jpg', 'jpeg', 'png'];
-        const existingFileIds = [];
-        for (const existingExt of extensions) {
-            const existing = await GoogleSheetsService.searchDriveFileInFolder(`${itemNumberStr}.${existingExt}`, folderId);
-            if (existing && existing.id) {
-                // Don't mark prefix files for deletion
-                if (!prefixFileIdsToPreserve.has(existing.id)) {
-                    existingFileIds.push(existing.id);
-                }
-            }
-        }
-
-        // If the image was resized, save the original under <itemNumber>_ORIGINAL.<ext>
+        // A unique name per upload: older files stay valid for history and other sessions
+        const baseName = `${itemNumberStr}_${Date.now()}`;
         if (wasResized) {
-            const originalFileName = `${itemNumberStr}_ORIGINAL.${ext}`;
-            await GoogleSheetsService.uploadDriveFile(file, originalFileName, folderId)
+            await GoogleSheetsService.uploadDriveFile(file, `${baseName}_ORIGINAL.${ext}`, folderId)
                 .catch(err => console.warn('[icons] Failed to save original image backup:', err));
         }
-
-        const uploaded = await GoogleSheetsService.uploadDriveFile(resizedFile, fileName, folderId);
+        const uploaded = await GoogleSheetsService.uploadDriveFile(resizedFile, `${baseName}.${ext}`, folderId, sha256 ? { sha256 } : null);
         if (!uploaded || !uploaded.id) return null;
+        return { fileId: uploaded.id, file: resizedFile, reused: false };
+    }
 
-        // Delete old files, skipping the newly uploaded file ID and any that can't be deleted
-        // (e.g. files owned by another user — Drive returns 404 for those, handled in deleteDriveFile).
-        for (const oldId of existingFileIds) {
-            if (oldId === uploaded.id) continue;
-            await GoogleSheetsService.deleteDriveFile(oldId);
+    /** SHA-256 of a file's bytes as hex, or null where Web Crypto is unavailable. */
+    static async _sha256Hex(file) {
+        try {
+            const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer());
+            return Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('');
+        } catch {
+            return null;
         }
-
-        ApplicationUtils.storeThumbnailRecord(itemNumberStr, uploaded.id, null)
-            .catch(err => console.warn('[icons] Failed to store thumbnail record on upload:', err));
-        return { fileId: uploaded.id, file: resizedFile };
     }
 
     /**
@@ -250,7 +231,12 @@ class database_uncached {
             }
         }
 
-        const result = await GoogleSheetsService.setSheetData(tableId, tabName, updatesWithMetadata, mapping);
+        // A column-preserving mapping writes under the live sheet's headers (read fresh: a column
+        // added or moved since this tab was loaded must not be overwritten)
+        const writeMapping = mapping?._preserveColumns
+            ? resolveSheetMapping(mapping, (await GoogleSheetsService.getSheetData(tableId, tabName))?.[0]).write
+            : mapping;
+        const result = await GoogleSheetsService.setSheetData(tableId, tabName, updatesWithMetadata, writeMapping);
         
         // ═══════════════════════════════════════════════════════════════
         // CRITICAL — DO NOT REORDER THESE TWO CALLS
@@ -303,6 +289,12 @@ class database_uncached {
 
         const existingData = await GoogleSheetsService.getSheetData(tableId, tabName);
 
+        // A column-preserving mapping reads and writes only the columns it owns (resolveSheetMapping)
+        let writeMapping = mapping;
+        if (mapping?._preserveColumns) {
+            ({ read: mapping, write: writeMapping } = resolveSheetMapping(mapping, existingData?.[0]));
+        }
+
         const transformedData = mapping
             ? GoogleSheetsService.transformSheetData(existingData, mapping, tabName)
             : GoogleSheetsService.sheetArrayToObjects(existingData);
@@ -346,7 +338,7 @@ class database_uncached {
 
         // Convert back to sheet format for saving
         const updatedSheetData = mapping
-            ? GoogleSheetsService.reverseTransformSheetData(mapping, transformedData)
+            ? GoogleSheetsService.reverseTransformSheetData(writeMapping, transformedData)
             : GoogleSheetsService.objectsToSheetArray(transformedData);
 
         await GoogleSheetsService.setSheetData(tableId, tabName, updatedSheetData);

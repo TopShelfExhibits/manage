@@ -1,9 +1,9 @@
-import { html, DataView, Requests, getReactiveStore, createAnalysisConfig, NavigationRegistry, ItemImageComponent, InventoryCategoryFilter, Priority, invalidateCache, todayISOString } from '../../index.js';
-import { itemImageStyle } from '../../utils/views/viewStyles.js';
+import { html, DataView, Requests, getReactiveStore, createAnalysisConfig, NavigationRegistry, THUMBNAIL_FIELD, getItemThumbnailsStore, itemThumbnailMap, withItemThumbnails, InventoryCategoryFilter, Priority, invalidateCache, todayISOString } from '../../index.js';
+import { thumbnailStyle } from '../../utils/views/viewStyles.js';
 
-// What each summary key is. image holds no data: the thumbnail column (see itemImageStyle).
+// What each summary key is. thumbnail is the item's, joined by item number (itemThumbnails.js).
 const SUMMARY_FIELDS = [
-    { key: 'image', label: 'IMG' },
+    THUMBNAIL_FIELD,
     { key: 'itemId', label: 'Item#', type: 'item' },
     { key: 'quantity', label: 'Quantity' },
     { key: 'available', label: 'Inv. Qty.' },
@@ -21,18 +21,18 @@ const SUMMARY_VIEWS = {
         id: 'table',
         name: 'Items',
         layout: 'table',
-        columns: ['image', 'itemId', 'quantity', 'available', 'remaining', 'overlappingShows'],
+        columns: ['thumbnail', 'itemId', 'quantity', 'available', 'remaining', 'overlappingShows'],
         hidden: ['tabName'],
         sortable: ['itemId', 'quantity', 'available', 'tabName', 'remaining'],
         // Item# is the primary action's button (the item page, purple); Overlapping Shows is a list
         // of show buttons (four inline, more in a modal)
         style: {
-            image: itemImageStyle('itemId'),
+            thumbnail: thumbnailStyle('itemId'),
             itemId: { cell: 'action', cellOptions: { class: 'purple' } },
             remaining: { color: 'auto' },
             overlappingShows: { cell: 'showList', cellOptions: { max: 4 }, columnColor: 'gray' }
         },
-        table: { sticky: { start: ['image'] }, hideRowsOnSearch: false }
+        table: { sticky: { start: ['thumbnail'] }, hideRowsOnSearch: false }
     }]
 };
 
@@ -41,7 +41,7 @@ const SUMMARY_VIEWS = {
  * Shows: Item ID, Quantity, Available, Remaining, Overlapping Shows
  */
 export const PacklistItemsSummary = {
-    components: { DataView, ItemImageComponent, InventoryCategoryFilter },
+    components: { DataView, InventoryCategoryFilter },
     props: {
         projectIdentifier: { type: String, required: true },
         containerPath: { type: String, default: '' },
@@ -59,6 +59,7 @@ export const PacklistItemsSummary = {
             projectReturnDate: null,
             error: null,
             selectedCategoryFilter: null, // Filter by inventory category
+            itemThumbnailsStore: getItemThumbnailsStore(),
             NavigationRegistry, // Make NavigationRegistry available in template
             SUMMARY_FIELDS,
             SUMMARY_VIEWS
@@ -68,8 +69,11 @@ export const PacklistItemsSummary = {
         isLoading() {
             return this.itemsSummaryStore ? this.itemsSummaryStore.isLoading : false;
         },
+        itemThumbnails() {
+            return itemThumbnailMap(this.itemThumbnailsStore?.data);
+        },
         tableData() {
-            const data = this.itemsSummaryStore ? this.itemsSummaryStore.data : [];
+            const data = withItemThumbnails(this.itemsSummaryStore ? this.itemsSummaryStore.data : [], 'itemId', this.itemThumbnails);
 
             // Apply category filter if selected
             if (this.selectedCategoryFilter) {

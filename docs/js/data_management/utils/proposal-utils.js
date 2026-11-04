@@ -24,7 +24,7 @@ export const PROPOSAL_MAPPING = {
 };
 
 /** Inventory fields a proposal can change. Quantity is stored as a signed delta, others as the new value. */
-export const PROPOSAL_FIELDS = ['quantity', 'description', 'notes'];
+export const PROPOSAL_FIELDS = ['quantity', 'description', 'notes', 'thumbnail'];
 
 /** Lock namespace for editing a proposal (lock key: INVENTORY_PROPOSALS:<name>) */
 export const PROPOSAL_LOCK_NAMESPACE = 'INVENTORY_PROPOSALS';
@@ -274,13 +274,18 @@ export class ProposalUtils {
 
     /**
      * Proposal page row: the entry joined with the item's current inventory values.
-     * Description and notes hold the proposed value (the current value when unchanged).
+     * Description, notes and thumbnail hold the proposed value (the current value when unchanged).
+     * Thumbnail is present only for items whose tab has a Thumbnail column.
      */
     static toTableRow(entry, inventoryRow) {
         const change = (field) => entry.changes.find(ch => ch.n === field);
         const currentDescription = inventoryRow?.description ?? '';
         const currentNotes = inventoryRow?.notes ?? '';
+        const thumbnail = inventoryRow && 'thumbnail' in inventoryRow
+            ? { thumbnail: change('thumbnail') ? String(change('thumbnail').ne) : inventoryRow.thumbnail, currentThumbnail: inventoryRow.thumbnail }
+            : {};
         return {
+            ...thumbnail,
             category: entry.category,
             itemNumber: entry.itemNumber,
             currentQuantity: inventoryRow?.quantity ?? '',
@@ -304,6 +309,9 @@ export class ProposalUtils {
         }
         if (String(row.notes ?? '') !== String(row.currentNotes ?? '')) {
             changes.push({ n: 'notes', ne: String(row.notes ?? '') });
+        }
+        if ('thumbnail' in row && String(row.thumbnail ?? '') !== String(row.currentThumbnail ?? '')) {
+            changes.push({ n: 'thumbnail', ne: String(row.thumbnail ?? '') });
         }
         return changes;
     }

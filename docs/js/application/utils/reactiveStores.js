@@ -1,4 +1,4 @@
-import { CacheInvalidationBus, ProgressBus, Requests, authState, Auth, resolveInventoryNoteMaxLength } from '../index.js';
+import { CacheInvalidationBus, ProgressBus, Requests, authState, Auth, resolveInventoryNoteMaxLength, resolveInventoryTabList } from '../index.js';
 import { PriorityQueue, Priority } from './priorityQueue.js';
 
 // Re-export Priority for component use
@@ -2124,6 +2124,16 @@ export function getPreferencesStore() {
  */
 export function getInventoryNoteMaxLength() {
     return resolveInventoryNoteMaxLength(getPreferencesStore().data);
+}
+
+/**
+ * Tab names an inventory tab preference lists (INVENTORY_TAB_PREFERENCES; empty until loaded).
+ * Reactive: computed properties that call it update when the preference changes.
+ * @param {string} preferenceId
+ * @returns {string[]}
+ */
+export function getInventoryTabList(preferenceId) {
+    return resolveInventoryTabList(getPreferencesStore().data, preferenceId);
 }
 
 export function runNonessentialAnalysisOnAllStores() {
