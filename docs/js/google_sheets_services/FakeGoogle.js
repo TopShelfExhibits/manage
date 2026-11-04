@@ -183,7 +183,13 @@ export class FakeGoogleSheetsService {
      */
     static reverseTransformSheetData(mapping, mappedData) {
         if (!mappedData || mappedData.length === 0) return [];
-        
+        // Column-preserving mapping: values by position, null for columns it doesn't own
+        if (mapping._orderedKeys) {
+            const keys = mapping._orderedKeys;
+            const headerRow = mapping._orderedHeaders.map((h, i) => keys[i] ? h : null);
+            return [headerRow, ...mappedData.map(obj => keys.map(key => key ? (obj[key] ?? '') : null))];
+        }
+
         // Use _orderedHeaders if provided (to preserve column order), otherwise fall back to Object.values
         const headers = mapping._orderedHeaders || Object.values(mapping).filter(v => v !== mapping._orderedHeaders);
         
@@ -1324,6 +1330,23 @@ export class FakeGoogleSheetsService {
         return JSON.parse(JSON.stringify(sheetData));
     }
 
+    /**
+     * A whole-tab write as the Sheets API does it: values land from A1, null cells are skipped
+     * (the existing cell stays), cells beyond a row's written width stay, and rows below the
+     * written rows are removed.
+     */
+    static _mergeSkippingNulls(existing, values) {
+        const rows = Array.isArray(existing) ? existing : [];
+        return values.map((row, r) => {
+            const merged = Array.isArray(rows[r]) ? [...rows[r]] : [];
+            row.forEach((cell, c) => {
+                if (cell !== null) merged[c] = cell;
+            });
+            for (let c = 0; c < merged.length; c++) if (merged[c] === undefined) merged[c] = '';
+            return merged;
+        });
+    }
+
     static async setSheetData(tableId, tabName, updates, removeRowsBelow) {
         await this.delay(500 + Math.random() * 500); // Add random delay > 1s
         await FakeGoogleSheetsAuth.checkAuth();
@@ -1358,7 +1381,9 @@ export class FakeGoogleSheetsService {
                     // mapping is passed as 4th argument
                     const mapping = arguments[3];
                     const sheetData = FakeGoogleSheetsService.reverseTransformSheetData(mapping, updates);
-                    this.mockData[tableId][tabName] = sheetData;
+                    this.mockData[tableId][tabName] = mapping._orderedKeys
+                        ? this._mergeSkippingNulls(this.mockData[tableId][tabName], sheetData)
+                        : sheetData;
                     return true;
                 }
             }
@@ -1368,7 +1393,9 @@ export class FakeGoogleSheetsService {
                 const mapping = arguments[3];
                 const headers = mapping._orderedHeaders || Object.values(mapping).filter(v => v !== mapping._orderedHeaders);
                 if (!this.mockData[tableId]) this.mockData[tableId] = {};
-                this.mockData[tableId][tabName] = [headers];
+                this.mockData[tableId][tabName] = mapping._orderedKeys
+                    ? this._mergeSkippingNulls(this.mockData[tableId][tabName], [headers.map((h, i) => mapping._orderedKeys[i] ? h : null)])
+                    : [headers];
                 return true;
             }
 
@@ -1376,7 +1403,11 @@ export class FakeGoogleSheetsService {
             if (Array.isArray(updates) && updates.length > 0 && Array.isArray(updates[0])) {
                 //console.log(`FakeGoogleSheetsService: Range update with ${updates.length} rows`);
                 if (!this.mockData[tableId]) this.mockData[tableId] = {};
-                this.mockData[tableId][tabName] = updates; // Replace entire sheet with new data
+                // Replace entire sheet with new data. Like the Sheets API, null cells are skipped
+                // (column-preserving writes keep the cells they don't own).
+                this.mockData[tableId][tabName] = updates.some(row => Array.isArray(row) && row.includes(null))
+                    ? this._mergeSkippingNulls(this.mockData[tableId][tabName], updates)
+                    : updates;
                 return true;
             }
 

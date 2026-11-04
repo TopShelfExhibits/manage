@@ -299,7 +299,7 @@ export class GoogleSheetsService {
         } else if (Array.isArray(updates) && updates.length === 0 && mapping) {
             // Empty array with mapping provided - create headers-only sheet
             const headers = mapping._orderedHeaders || Object.values(mapping).filter(v => v !== mapping._orderedHeaders);
-            values = [headers];
+            values = [mapping._orderedKeys ? headers.map((h, i) => mapping._orderedKeys[i] ? h : null) : headers];
         } else {
             throw new Error('[GoogleSheetsData.setSheetData] VALIDATION_ERROR: No valid updates provided');
         }
@@ -413,11 +413,19 @@ export class GoogleSheetsService {
     }
 
     /**
-     * Reverse transform JS objects to sheet data using mapping
+     * Reverse transform JS objects to sheet data using mapping.
+     * With `_orderedKeys` (a column-preserving mapping, see resolveSheetMapping) values are placed
+     * by position and columns the mapping doesn't own are null, which the Sheets API skips on
+     * write, leaving those cells (and their formulas) as they are.
      */
     static reverseTransformSheetData(mapping, mappedData) {
         if (!mappedData || mappedData.length === 0) return [];
-        
+        if (mapping._orderedKeys) {
+            const keys = mapping._orderedKeys;
+            const headerRow = mapping._orderedHeaders.map((h, i) => keys[i] ? h : null);
+            return [headerRow, ...mappedData.map(obj => keys.map(key => key ? (obj[key] ?? '') : null))];
+        }
+
         // Use _orderedHeaders if provided (to preserve column order), otherwise fall back to Object.values
         const headers = mapping._orderedHeaders || Object.values(mapping).filter(v => v !== mapping._orderedHeaders);
         

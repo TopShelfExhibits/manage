@@ -123,6 +123,43 @@ export function normalizeHeaderName(headerName) {
 }
 
 /**
+ * Resolve a column-preserving mapping against a tab's actual header row.
+ *
+ * A mapping with `_preserveColumns: true` owns only its own columns, wherever they sit in the
+ * tab: writes place each mapped value under its header and leave every other column (and its
+ * formulas) untouched. `_optional` lists keys whose column may be absent; an absent optional
+ * column is neither read nor created. A missing required column is added after the last header.
+ *
+ * @param {Object} mapping - { key: header, ..., _preserveColumns: true, _optional?: string[] }
+ * @param {Array<string>} headerRow - the tab's first row
+ * @returns {{ read: Object, write: Object }}
+ *   read:  { key: header } for the columns present (plus required ones), for reading rows
+ *   write: read plus `_orderedHeaders` (the tab's headers, required ones appended) and
+ *          `_orderedKeys` (the key at each position, null for columns the mapping doesn't own)
+ */
+export function resolveSheetMapping(mapping, headerRow) {
+    const headers = (Array.isArray(headerRow) ? headerRow : []).map(normalizeHeaderName);
+    const optional = new Set(mapping._optional || []);
+    const orderedHeaders = [...headers];
+    const orderedKeys = headers.map(() => null);
+    const read = {};
+    for (const [key, header] of Object.entries(mapping)) {
+        if (key.startsWith('_')) continue;
+        const name = normalizeHeaderName(header);
+        let index = headers.indexOf(name);
+        if (index === -1) {
+            if (optional.has(key)) continue;
+            index = orderedHeaders.length;
+            orderedHeaders.push(name);
+            orderedKeys.push(null);
+        }
+        read[key] = header;
+        orderedKeys[index] = key;
+    }
+    return { read, write: { ...read, _orderedHeaders: orderedHeaders, _orderedKeys: orderedKeys } };
+}
+
+/**
  * Sanitizes a tab name by removing characters that would break Google Sheets or interface display.
  * Removes: /, \, ?, *, [, ], and other problematic characters.
  * Keeps alphanumeric, spaces, hyphens, and underscores for fuzzy matching to work.

@@ -1,5 +1,5 @@
 // Dynamic Google Sheets Service selection
-import { isLocalhost } from '../utils/helpers.js';
+import { isLocalhost, resolveSheetMapping } from '../utils/helpers.js';
 let GoogleSheetsService, GoogleSheetsAuth;
 
 if (isLocalhost()) {
@@ -25,12 +25,17 @@ class database_uncached {
      * @param {Object} deps - Dependency decorator for tracking calls
      * @param {string} tableId - Identifier for the table (INVENTORY, PACK_LISTS, etc.)
      * @param {string} tabName - Tab name or logical identifier
-     * @param {Object} [mapping] - Optional mapping for object keys to sheet headers
+     * @param {Object} [mapping] - Optional mapping for object keys to sheet headers. A
+     *   column-preserving mapping (`_preserveColumns`, see resolveSheetMapping) reads only the
+     *   columns the tab actually has (an absent optional column gives rows without that key).
      * @returns {Promise<Array<Object>>} - Array of JS objects
      */
     static async getData(deps, tableId, tabName, mapping = null) {
         // Get raw sheet data from GoogleSheetsService
         const rawData = await GoogleSheetsService.getSheetData(tableId, tabName);
+        if (mapping?._preserveColumns) {
+            mapping = resolveSheetMapping(mapping, rawData?.[0]).read;
+        }
         //console.log('[Database] Raw data from GoogleSheetsService:', rawData);
         //console.log('[Database] Mapping provided:', mapping);
         
@@ -43,7 +48,7 @@ class database_uncached {
         // If no mapping, return raw 2D array
         return rawData;
     }
-        
+
     /**
      * Gets all logical tabs for a table
      * @param {Object} deps - Dependency decorator for tracking calls
@@ -243,7 +248,12 @@ class database_uncached {
             }
         }
 
-        const result = await GoogleSheetsService.setSheetData(tableId, tabName, updatesWithMetadata, mapping);
+        // A column-preserving mapping writes under the live sheet's headers (read fresh: a column
+        // added or moved since this tab was loaded must not be overwritten)
+        const writeMapping = mapping?._preserveColumns
+            ? resolveSheetMapping(mapping, (await GoogleSheetsService.getSheetData(tableId, tabName))?.[0]).write
+            : mapping;
+        const result = await GoogleSheetsService.setSheetData(tableId, tabName, updatesWithMetadata, writeMapping);
         
         // ═══════════════════════════════════════════════════════════════
         // CRITICAL — DO NOT REORDER THESE TWO CALLS
@@ -295,6 +305,12 @@ class database_uncached {
 
         const existingData = await GoogleSheetsService.getSheetData(tableId, tabName);
 
+        // A column-preserving mapping reads and writes only the columns it owns (resolveSheetMapping)
+        let writeMapping = mapping;
+        if (mapping?._preserveColumns) {
+            ({ read: mapping, write: writeMapping } = resolveSheetMapping(mapping, existingData?.[0]));
+        }
+
         const transformedData = mapping
             ? GoogleSheetsService.transformSheetData(existingData, mapping, tabName)
             : GoogleSheetsService.sheetArrayToObjects(existingData);
@@ -338,7 +354,7 @@ class database_uncached {
 
         // Convert back to sheet format for saving
         const updatedSheetData = mapping
-            ? GoogleSheetsService.reverseTransformSheetData(mapping, transformedData)
+            ? GoogleSheetsService.reverseTransformSheetData(writeMapping, transformedData)
             : GoogleSheetsService.objectsToSheetArray(transformedData);
 
         await GoogleSheetsService.setSheetData(tableId, tabName, updatedSheetData);
