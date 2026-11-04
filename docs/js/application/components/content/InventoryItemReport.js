@@ -18,6 +18,9 @@ const ITEM_REPORT_FIELDS = [
     { key: 'calendarEnd', label: 'End', format: 'date', type: 'date' }
 ];
 
+// Rows show when their minimum quantity is below this; 0 shows only actual shortages
+const DEFAULT_QTY_FILTER = 0;
+
 // Item shortage report view registry (views-and-renderers-plan §4.3, §5)
 const ITEM_REPORT_VIEWS = {
     id: 'item-shortages',
@@ -82,7 +85,7 @@ export const InventoryItemReport = {
             searchParams: null,
             error: null,
             endDate: null,
-            qtyFilter: 1,
+            qtyFilter: DEFAULT_QTY_FILTER,
             hasPerformedInitialSync: false,
             isPrinting: false,
             ITEM_REPORT_FIELDS,
@@ -427,7 +430,7 @@ export const InventoryItemReport = {
                 cleanPath,
                 this.appContext?.currentPath,
                 {
-                    qtyFilter: threshold !== 1 ? threshold : undefined // undefined removes the parameter when it's the default
+                    qtyFilter: threshold !== DEFAULT_QTY_FILTER ? threshold : undefined // undefined removes the parameter when it's the default
                 }
             );
             
@@ -448,8 +451,8 @@ export const InventoryItemReport = {
                 this.appContext?.currentPath
             );
             
-            // Get qtyFilter from URL params (default to 1 if not present)
-            const thresholdFromUrl = params?.qtyFilter !== undefined ? parseInt(params.qtyFilter, 10) : 1;
+            // Get qtyFilter from URL params (default if not present)
+            const thresholdFromUrl = params?.qtyFilter !== undefined ? parseInt(params.qtyFilter, 10) : DEFAULT_QTY_FILTER;
             
             // Update threshold value
             if (!isNaN(thresholdFromUrl)) {
