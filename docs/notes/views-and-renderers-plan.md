@@ -42,7 +42,12 @@ Item thumbnails are data: each inventory tab may have a `Thumbnail` column holdi
 - **Category images.** The index (`CACHE/Inventory`) may have a `Thumbnail` column: a prefix's image shows for items of thumbnail tabs that have none of their own (`Requests.getCategoryThumbnails`).
 - **Other rows.** Pages whose rows aren't inventory rows (reports, pack list summary, item timeline) join the item's thumbnail as a derived field ([itemThumbnails.js](../js/application/utils/itemThumbnails.js), `Requests.getItemThumbnails`, persisted). The timeline shows it read only. Proposals carry thumbnail changes like other fields (`PROPOSAL_FIELDS`), and scheduled saves schedule them.
 
-**Rollout.** Deploy; once open sessions have reloaded (an old session's save rewrites A–E only and its upload deletes files by name), run the migration from the browser console on the live site, dry run first:
+**Rollout.** An old session's save rewrites A–E only and its upload deletes files by name, so old code must not write once the new layout is in place:
+
+1. Deploy the update shim to live on its own first (branch `update-shim`, from `live/main`). From then on, a session whose version is behind the deployed one can't write shared data, and its banner's Refresh Now re-downloads the app's files, bypassing the browser cache.
+2. Wait until every session open before the shim has reloaded. Those sessions run the old code with no guard.
+3. Deploy this version. Sessions still on the shim go read-only right away.
+4. Insert the `Thumbnail` column at E on each inventory tab (EditHistory moves to F), then run the migration from the browser console on the live site, dry run first:
 
 ```js
 const m = await import(new URL('js/data_management/migrations/thumbnail-column.js', document.baseURI));

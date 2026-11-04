@@ -9,7 +9,7 @@ export { THUMBNAIL_FIELD } from '../data_management/utils/thumbnail-values.js';
 // Utils
 export { html } from './utils/template-helpers.js';
 export { Auth, authState, getDeviceId } from './utils/auth.js';
-export { getReactiveStore, createAnalysisConfig, findMatchingStores, clearAllReactiveStores, generateStoreKey, appSettings, runNonessentialAnalysisOnAllStores, getPreferencesStore, getInventoryNoteMaxLength, getInventoryTabList } from './utils/reactiveStores.js';
+export { getReactiveStore, createAnalysisConfig, findMatchingStores, clearAllReactiveStores, generateStoreKey, appSettings, runNonessentialAnalysisOnAllStores, getPreferencesStore, saveDirtyStoresToUserData, getInventoryNoteMaxLength, getInventoryTabList } from './utils/reactiveStores.js';
 export { Priority } from './utils/priorityQueue.js';
 export { getShortageAlertsStore, getShortageAlertDays, shortageBanner, shortagesByItem, itemShortageCards, categoryShortageCards } from './utils/shortageAlerts.js';
 export { getItemThumbnailsStore, itemThumbnailMap, withItemThumbnails } from './utils/itemThumbnails.js';

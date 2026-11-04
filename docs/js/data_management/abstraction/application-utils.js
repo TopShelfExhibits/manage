@@ -87,7 +87,7 @@ class applicationUtils_uncached {
                 (typeof data === 'object' && !Array.isArray(data) && Object.keys(data).length === 0)) {
                 return; // Don't create tab for empty/null data
             }
-            await Database.createTab('CACHE', '_UserDataTemplate', tabName);
+            await Database.createTab('CACHE', '_UserDataTemplate', tabName, { bookkeeping: true });
         }
         
         // Unified flow: read all data, mutate, write back
@@ -108,7 +108,8 @@ class applicationUtils_uncached {
         }
         
         return await Database.setData('CACHE', tabName, existingData, { ID: 'ID', Value: 'Value' }, {
-            skipMetadata: true
+            skipMetadata: true,
+            bookkeeping: true
         });
     }
     
@@ -519,7 +520,7 @@ class applicationUtils_uncached {
                         Store: 'Store',
                         Data: 'Data',
                         Timestamp: 'Timestamp'
-                    }, { skipMetadata: true });
+                    }, { skipMetadata: true, bookkeeping: true });
                     
                     //console.log(`[ApplicationUtils.forceUnlockSheet] Backed up ${backupCount} entries, deleted ${deletedCount} entries`);
                 }
@@ -863,13 +864,13 @@ class applicationUtils_uncached {
         
         if (!linksTab) {
             // Create Links tab with headers
-            await Database.createTab('CACHE', null, 'Links');
+            await Database.createTab('CACHE', null, 'Links', { bookkeeping: true });
             await Database.setData(
                 'CACHE',
                 'Links',
                 [['Path', 'ShortCode', 'Created']],
                 null,
-                { skipMetadata: true }
+                { skipMetadata: true, bookkeeping: true }
             );
         }
         
@@ -911,7 +912,7 @@ class applicationUtils_uncached {
             Path: 'Path',
             ShortCode: 'ShortCode',
             Created: 'Created'
-        }, { skipMetadata: true });
+        }, { skipMetadata: true, bookkeeping: true });
         
         return newShortCode;
     }

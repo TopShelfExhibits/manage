@@ -850,27 +850,59 @@ export function setPersistentStore(store) {
     CacheManager._persistentStore = store;
 }
 
+// ─── App version ─────────────────────────────────────────────────────────────
+// index.html reads version.json before the modules load (window.__deployedVersion): the deploy this
+// session's code came from. Once version.json names a newer deploy, this session is out of date and
+// data writes refuse to run (assertAppCurrent), so old code never writes to sheets whose layout the
+// new version may have changed. Bookkeeping writes (locks, user data, short links, cache
+// timestamps) still run, so unsaved edits are still backed up for after the refresh.
+
+const VERSION_RECHECK_MS = 15 * 1000;   // A write re-reads version.json when the last check is older
+let _latestVersion = null;
+let _versionCheckedAt = 0;
+let _versionCheck = null;
+
+/** True once version.json names a newer deploy than the one this session loaded. */
+export function isAppOutdated() {
+    const loaded = window.__deployedVersion;
+    return !!(loaded && _latestVersion && _latestVersion !== loaded);
+}
+
 /**
- * Check for application updates by fetching the deployed version.
- * App compares against its lastKnownVersion baseline set on mount.
- * Cache-busting query param ensures version.json is always fresh from server.
+ * Read the deployed version and announce it ('versionCheckResult': { deployedVersion, outdated }).
+ * Concurrent calls share one request. A failed read (offline, no version.json) keeps the last result.
+ * @returns {Promise<void>}
  */
-async function checkAppVersion() {
-    try {
-        // Use cache-busting query param to ensure fresh version from server
-        const response = await fetch('./version.json?v=' + Date.now());
-        const versionData = await response.json();
-        const deployedVersion = versionData.version;
-        
-        // console.log('[VersionCheck] Deployed version:', deployedVersion);
-        
-        // Dispatch event with the deployed version so app can compare against its baseline
-        window.dispatchEvent(new CustomEvent('versionCheckResult', { 
-            detail: { deployedVersion } 
-        }));
-    } catch (err) {
-        console.warn('[VersionCheck] Error:', err.message);
-        // Silently ignore errors (network issues, version.json not found)
+export function checkAppVersion() {
+    _versionCheck ||= (async () => {
+        try {
+            // Cache-busting query param: always the deployed file
+            const response = await fetch('./version.json?v=' + Date.now());
+            _latestVersion = (await response.json()).version || null;
+            _versionCheckedAt = Date.now();
+            window.dispatchEvent(new CustomEvent('versionCheckResult', {
+                detail: { deployedVersion: _latestVersion, outdated: isAppOutdated() }
+            }));
+        } catch (err) {
+            console.warn('[VersionCheck] Error:', err.message);
+        } finally {
+            _versionCheck = null;
+        }
+    })();
+    return _versionCheck;
+}
+
+/**
+ * Data writes call this first. Throws (code 'APP_OUTDATED') when a newer version is deployed.
+ * Re-reads version.json when the last check is stale, so a session that slept through the poll
+ * (a closed laptop, a background tab) is caught before it writes.
+ */
+export async function assertAppCurrent() {
+    if (Date.now() - _versionCheckedAt > VERSION_RECHECK_MS) await checkAppVersion();
+    if (isAppOutdated()) {
+        const error = new Error('The app has been updated, so saving is turned off. Click Refresh Now in the banner at the top: your unsaved table edits are kept.');
+        error.code = 'APP_OUTDATED';
+        throw error;
     }
 }
 
