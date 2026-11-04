@@ -989,8 +989,9 @@ setPersistentStore({
     },
     async write({ key, value, savedAt, sources }) {
         const line = [key, savedAt, JSON.stringify(sources), JSON.stringify(value)];
-        if (line.some(cell => cell.length > SHEETS_CELL_LIMIT)) {
-            console.warn(`[Analytics] Not saved: ${key} is larger than a sheet cell allows`);
+        const oversize = line.findIndex(cell => cell.length > SHEETS_CELL_LIMIT);
+        if (oversize !== -1) {
+            console.warn(`[Analytics] Not saved: ${key} ${ANALYTICS_HEADERS[oversize]} is ${line[oversize].length} characters; a sheet cell holds ${SHEETS_CELL_LIMIT}`);
             return;
         }
         const raw = await readAnalyticsRows();
