@@ -47,6 +47,7 @@ import { estimateShipDate } from '../data_management/utils/ship-date.js';
 import { getReactiveStore, createAnalysisConfig } from '../application/index.js';
 import { checkSheetHealth } from './sheetHealth.js';
 import { guessColumnType, columnTypesEntry, columnTypeMap, columnTypeOf, isOpaqueType } from '../data_management/utils/column-types.js';
+import { migrateThumbnails } from '../data_management/migrations/thumbnail-column.js';
 import { buildScheduleFields } from '../data_management/abstraction/scheduleFields.js';
 import { withShipDate } from '../application/utils/scheduleShipping.js';
 
@@ -1108,6 +1109,9 @@ test('HARDWARE INVENTORY', 'getItemQuantitiesSummary counts HH BOLTHOG 1-4 20 x 
 //   Other tabs: a stale upper-case 'THUMBNAIL' column, which is NOT the Thumbnail column
 //   HANGING SIGNS: no NOTES column (a required column, added after the last header on save)
 //   CACHE/Inventory Thumbnail: TABLE '["file_id_table_prefix"]'; CHAIR and BX blank
+//   CACHE/Thumbnails (the old table): BX, CHAIR, CHAIR-001, CHAIR-002, TABLE, TABLE-001
+// Expected migration: FURNITURE fills TABLE-001 (2 already set); the index fills BX and CHAIR
+// (TABLE already set); no record is left unmatched.
 
 /** Run fn, then put the listed fixture tabs back and drop their cached reads. */
 async function _withRestoredTabs(tabs, fn) {
@@ -1228,6 +1232,26 @@ test('THUMBNAIL COLUMN', 'thumbnails are a column type that is never searched', 
     const resolved = resolveView(fields, { id: 't', layout: 'table', columns: ['thumbnail', 'itemNumber'] });
     assertEqual(resolved.fieldMap.get('thumbnail').cell, 'thumbnail', 'cell from the type');
     assertEqual(searchTiers(resolved).shown, ['itemNumber'], 'not searched');
+});
+
+test('THUMBNAIL COLUMN', 'migration dry run plans blank cells only', async () => {
+    const report = await migrateThumbnails();
+    const furniture = report.tabs.find(t => t.tab === 'FURNITURE');
+    assertEqual([furniture.fill, furniture.already, furniture.conflicts.length], [1, 2, 0], 'FURNITURE');
+    assertEqual([report.index.fill, report.index.already], [2, 1], 'index');
+    assertEqual(report.unmatched, [], 'every record matched');
+    assertEqual(_rawTab('INVENTORY', 'FURNITURE').find(r => r[0] === 'TABLE-001')[1], '', 'nothing written');
+});
+
+test('THUMBNAIL COLUMN', 'migration fills the item and category cells', async () => {
+    await _withRestoredTabs([['INVENTORY', 'FURNITURE'], ['CACHE', 'Inventory']], async () => {
+        await migrateThumbnails({ dryRun: false });
+        const table = (await Requests.getInventoryTabData('FURNITURE')).find(r => r.itemNumber === 'TABLE-001');
+        assertEqual(table.thumbnail, '["file_id_table_001"]', 'TABLE-001 filled');
+        const categories = (await Requests.getCategoryThumbnails()).map(c => c.prefix).sort();
+        assertEqual(categories, ['BX', 'CHAIR', 'TABLE'], 'category images');
+        assertEqual(_rawTab('INVENTORY', 'FURNITURE').find(r => r[0] === 'TABLE-001')[7], 'Legs in bag', 'other cells untouched');
+    });
 });
 
 // ── Group 26: Row-Based Transship and Date Normalization ──────────────────────
