@@ -982,6 +982,10 @@ async function readAnalyticsRows() {
 }
 
 setPersistentStore({
+    // Data reads (stamped by Database writes), and this class's own sources: the clock and the
+    // locks. Pure cached leaves such as findBestProjectIdentifierMatch carry long argument lists
+    // and can never mark a row stale
+    sourcePrefixes: ['database:', 'app_utils:'],
     async read(key) {
         const row = (await readAnalyticsRows()).slice(1).find(r => Array.isArray(r) && r[0] === key);
         if (!row || !row[1] || !row[3]) return null;
