@@ -1,7 +1,6 @@
-import { html, TableComponent, DataView, Requests, getReactiveStore, NavigationRegistry, createAnalysisConfig, invalidateCache, Priority, tableRowSelectionState, EditHistoryUtils, authState, undoRegistry, todayISOString, getAutoColorClass, getInventoryTabList, INVENTORY_TAB_PREFERENCES } from '../../index.js';
+import { html, TableComponent, DataView, Requests, getReactiveStore, NavigationRegistry, createAnalysisConfig, invalidateCache, Priority, tableRowSelectionState, EditHistoryUtils, authState, undoRegistry, todayISOString, getAutoColorClass, getInventoryTabList, INVENTORY_TAB_PREFERENCES, THUMBNAIL_FIELD } from '../../index.js';
 import { resolveView } from '../../utils/views/resolveView.js';
-import { itemImageStyle } from '../../utils/views/viewStyles.js';
-import { ItemImageComponent } from './InventoryTable.js';
+import { thumbnailStyle } from '../../utils/views/viewStyles.js';
 import { sheetLockMixin } from '../../utils/sheetLockMixin.js';
 import { packlistIndexResolutionMixin } from '../interface/IndexResolutionModal.js';
 
@@ -739,7 +738,7 @@ export const PacklistTable = {
             // position: { position: 'above'|'below', targetIndex: number } or null
             const tabName = this.tabName; // Capture for use inside modal
             const InventorySelectorModal = {
-                components: { DataView, ItemImageComponent },
+                components: { DataView },
                 props: ['onAddEmpty', 'onItemSelected', 'tabName'],
                 data() {
                     return {
@@ -750,10 +749,10 @@ export const PacklistTable = {
                     };
                 },
                 computed: {
-                    // image holds no data: the thumbnail column (see itemImageStyle)
+                    // Rows from Requests.getAllInventoryData (inventory rows carry their thumbnail)
                     fields() {
                         return [
-                            { key: 'image', label: 'IMG' },
+                            THUMBNAIL_FIELD,
                             { key: 'itemNumber', label: 'Item#', type: 'item' },
                             { key: 'description', label: 'Description' },
                             { key: 'quantity', label: 'Available' }
@@ -767,10 +766,10 @@ export const PacklistTable = {
                             theme: 'purple',
                             views: [{
                                 id: 'table', name: 'Inventory', layout: 'table',
-                                columns: ['image', 'itemNumber', 'description', 'quantity'],
+                                columns: ['thumbnail', 'itemNumber', 'description', 'quantity'],
                                 sortable: ['itemNumber', 'description', 'quantity'],
-                                style: { image: itemImageStyle('itemNumber'), itemNumber: { width: 120 }, quantity: { width: 100 } },
-                                table: { sticky: { start: ['image'] } },
+                                style: { thumbnail: thumbnailStyle('itemNumber'), itemNumber: { width: 120 }, quantity: { width: 100 } },
+                                table: { sticky: { start: ['thumbnail'] } },
                                 sort: { key: 'itemNumber', dir: 'asc' },
                                 // Clicking a row adds the item
                                 action: 'row'

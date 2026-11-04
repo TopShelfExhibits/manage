@@ -850,48 +850,6 @@ class applicationUtils_uncached {
         }
     }
 
-    // ─── Thumbnail table ─────────────────────────────────────────────────────────
-
-    /**
-     * Read one thumbnail record from the shared Thumbnails tab in the CACHE sheet.
-     * Returns { itemNumber, file, blob } or null if not found.
-     * Cached infinitely — derived from getAllThumbnailRecords, so any write to the
-     * Thumbnails tab (local or from another session) invalidates it through the dependency chain.
-     */
-    static async getThumbnailRecord(deps, itemNumber) {
-        // Serve from pending write buffer first (avoids a sheet read before the debounced flush fires)
-        if (_pendingThumbnailWrites.has(itemNumber)) {
-            const pending = _pendingThumbnailWrites.get(itemNumber);
-            return { itemNumber, ...pending };
-        }
-        const rows = await deps.call(ApplicationUtils.getAllThumbnailRecords);
-        return rows.find(r => r.itemNumber === itemNumber) || null;
-    }
-
-    /**
-     * Load the entire Thumbnails table from the CACHE sheet.
-     * Used by the shared thumbnail records store (application/utils/thumbnailCache.js).
-     * Registered as a dependent of getData('CACHE', 'Thumbnails') so that Database.setData on the
-     * tab — and the cross-session timestamp it stamps — invalidates this and reloads the store.
-     */
-    static async getAllThumbnailRecords(deps) {
-        const tab = await deps.call(Database.findTabByName, 'CACHE', 'Thumbnails');
-        if (!tab) return [];
-        return await deps.call(Database.getData, 'CACHE', 'Thumbnails', _THUMBNAILS_MAPPING);
-    }
-
-    /**
-     * Queue a thumbnail record to be written to the Thumbnails tab.
-     * Writes are batched and flushed 2 s after the last call to avoid concurrent
-     * read-modify-write races when many items are loaded simultaneously.
-     * MUTATION — not cached.
-     */
-    static async storeThumbnailRecord(itemNumber, fileId, blobDataUrl) {
-        _pendingThumbnailWrites.set(itemNumber, { file: fileId, blob: blobDataUrl });
-        clearTimeout(_thumbnailFlushTimer);
-        _thumbnailFlushTimer = setTimeout(_flushThumbnailWrites, 2000);
-    }
-
     /**
      * Get or create a short link for a given path
      * Checks if the path already has a short code, otherwise creates one
@@ -983,51 +941,11 @@ class applicationUtils_uncached {
     }
 }
 
-// ─── Thumbnail batch-write state ─────────────────────────────────────────────
-// All storeThumbnailRecord calls within any 2-second window are merged into a
-// single read-modify-write so concurrent analysis runs don't race each other.
-
-const _THUMBNAILS_MAPPING = { itemNumber: 'ItemNumber', file: 'File', blob: 'Blob' };
-const _pendingThumbnailWrites = new Map(); // itemNumber → { file, blob }
-let _thumbnailFlushTimer = null;
-
-async function _flushThumbnailWrites() {
-    _thumbnailFlushTimer = null;
-    if (_pendingThumbnailWrites.size === 0) return;
-    const pending = new Map(_pendingThumbnailWrites);
-    _pendingThumbnailWrites.clear();
-    try {
-        const allTabs = await Database.getTabs('CACHE');
-        const tabExists = allTabs.some(t => t.title === 'Thumbnails');
-        if (!tabExists) {
-            await Database.createTab('CACHE', null, 'Thumbnails');
-        }
-        const existing = tabExists
-            ? await Database.getData('CACHE', 'Thumbnails', _THUMBNAILS_MAPPING)
-            : [];
-        for (const [itemNumber, { file, blob }] of pending) {
-            const idx = existing.findIndex(r => r.itemNumber === itemNumber);
-            if (idx !== -1) {
-                existing[idx] = { itemNumber, file, blob };
-            } else {
-                existing.push({ itemNumber, file, blob });
-            }
-        }
-        // setData stamps and invalidates getData('CACHE', 'Thumbnails'). getAllThumbnailRecords and
-        // getThumbnailRecord depend on it, so this session's records store reloads and other sessions
-        // pick up the change on their next timestamp poll — no separate invalidation needed here.
-        await Database.setData('CACHE', 'Thumbnails', existing, _THUMBNAILS_MAPPING, { skipMetadata: true });
-        console.log(`[Thumbnails] Stored ${pending.size} thumbnail record(s) to CACHE sheet`);
-    } catch (err) {
-        console.warn('[Thumbnails] Failed to flush thumbnail writes:', err);
-    }
-}
-
 export const ApplicationUtils = wrapMethods(
     applicationUtils_uncached, 
     'app_utils', 
-    ['storeUserData', 'initializeDefaultSavedSearches', 'lockSheet', 'unlockSheet', 'forceUnlockSheet', 'releaseAllUserLocks', '_writeUserColumn', '_writeLockKeyRow', '_writeLockCell', '_numberToColumnLetter', '_initializeLocksSheet', 'writeCacheTimestamp', 'readCacheTimestamps', 'storeThumbnailRecord', 'getShortLink', 'expandShortLink'], // Mutation methods
-    ['getThumbnailRecord', 'expandShortLink', 'getToday'], // Infinite cache methods
+    ['storeUserData', 'initializeDefaultSavedSearches', 'lockSheet', 'unlockSheet', 'forceUnlockSheet', 'releaseAllUserLocks', '_writeUserColumn', '_writeLockKeyRow', '_writeLockCell', '_numberToColumnLetter', '_initializeLocksSheet', 'writeCacheTimestamp', 'readCacheTimestamps', 'getShortLink', 'expandShortLink'], // Mutation methods
+    ['expandShortLink', 'getToday'], // Infinite cache methods
     { 'getSheetLock': 10000, 'getLocksData': 10000 } // Custom cache durations (10 seconds for getSheetLock and getLocksData)
 );
 

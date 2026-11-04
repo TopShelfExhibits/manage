@@ -223,13 +223,16 @@ export class FakeGoogleSheetsService {
                 ['M8x20', '', '300', '', '', '', 'M8 x 20mm bolt', ''],
                 ['FOOT-L', '', '100', '', '', '', 'Large leveling foot', '']
             ],
+            // FURNITURE has a Thumbnail column (JSON arrays of Drive file IDs). TABLE-001 is left blank
+            // for the thumbnail migration to fill from CACHE/Thumbnails. 'Packing/shop notes' is a
+            // column the app doesn't map: saves must leave it alone.
             'FURNITURE': [
-                ['ITEM#', 'THUMBNAIL', 'QTY', 'EditHistory', 'MetaData', 'NOTES', 'Description', 'Packing/shop notes'],
-                ['TABLE-001', '', '2', '', '', '', 'Conference room table black 30 x 76 x 30', ''],
+                ['ITEM#', 'Thumbnail', 'QTY', 'EditHistory', 'MetaData', 'NOTES', 'Description', 'Packing/shop notes'],
+                ['TABLE-001', '', '2', '', '', '', 'Conference room table black 30 x 76 x 30', 'Legs in bag'],
                 ['TABLE-002', '', '2', '', '', '', 'Glass-top square end table w/ metal bases 18x18x16', ''],
                 ['TABLE-003', '', '2', '', '', '', 'Glass-top rectangular coffee table w/ metal bases 42x18x16', ''],
-                ['CHAIR-001', '', '20', '', '', '', 'Stack Chair ( Black & Black ) w/ Arms', ''],
-                ['CHAIR-002', '', '15', '', '', '', 'Lounge Chair (White Leather) Swivel Barrel', ''],
+                ['CHAIR-001', '["file_id_chair_001"]', '20', '', '', '', 'Stack Chair ( Black & Black ) w/ Arms', ''],
+                ['CHAIR-002', '["file_id_chair_002"]', '15', '', '', '', 'Lounge Chair (White Leather) Swivel Barrel', ''],
                 // CHAIR-003: three history entries and a future scheduled restock
                 ['CHAIR-003', '', '12', _json({
                     i: 4,
@@ -260,9 +263,11 @@ export class FakeGoogleSheetsService {
             'LIGHTBOXES': [['ITEM#', 'THUMBNAIL', 'QTY', 'EditHistory', 'MetaData', 'NOTES', 'Description', 'Packing/shop notes'],['LB-001', '', '0', '', '', '', 'Blah blah blah', '']],
             'COUNTERTOPS': [['ITEM#', 'THUMBNAIL', 'QTY', 'EditHistory', 'MetaData', 'NOTES', 'Description', 'Packing/shop notes'],['CNTR-001', '', '0', '', '', '', 'Blah blah blah', '']],
             'SHELVES': [['ITEM#', 'THUMBNAIL', 'QTY', 'EditHistory', 'MetaData', 'NOTES', 'Description', 'Packing/shop notes'],['SHLF-001', '', '0', '', '', '', 'Blah blah blah', '']],
-            // New inventory tabs for enhanced item types
+            // New inventory tabs for enhanced item types. PANELS has a Thumbnail column with no item
+            // images, so its items show the BX category image (CACHE/Inventory Thumbnail).
+            // The other tabs' 'THUMBNAIL' (upper case) is a stale column, not the Thumbnail column.
             'PANELS': [
-                ['ITEM#', 'THUMBNAIL', 'QTY', 'EditHistory', 'MetaData', 'NOTES', 'Description', 'Packing/shop notes'],
+                ['ITEM#', 'Thumbnail', 'QTY', 'EditHistory', 'MetaData', 'NOTES', 'Description', 'Packing/shop notes'],
                 // Standard rectangular panels
                 ['BX-16x39', '', '10', '', '', '', 'Standard rectangular panel 16" x 39"', 'Pack flat'],
                 ['BX-16x47', '', '8', '', '', '', 'Standard rectangular panel 16" x 47"', 'Pack flat'],
@@ -784,23 +789,25 @@ export class FakeGoogleSheetsService {
                 ['Path', 'ShortCode', 'Created'],
                 ['schedule?{"dateFilters":[{"column":"Date","value":0,"type":"after"}]}', '1', '2026-01-19T10:30:00.000Z']
             ],
+            // INDEX. Thumbnail: the category image shown for items of a prefix that have none of
+            // their own. CHAIR and BX are left blank for the thumbnail migration to fill.
             'Inventory': [
-                ['PREFIX', 'INVENTORY', 'FOLDER'],
-                ['CAB', 'CABINETS', ''],
-                ['HS', 'HANGING SIGNS', ''],
-                ['LB', 'LIGHTBOXES', ''],
-                ['CNTR', 'COUNTERTOPS', ''],
-                ['SHLF', 'SHELVES', ''],
-                ['STOOL', 'FURNITURE', ''],
-                ['CHAIR', 'FURNITURE', 'CHAIRS'],
-                ['COUCH', 'FURNITURE', ''],
-                ['TABLE', 'FURNITURE', 'TABLES'],
-                ['TTOP', 'FURNITURE', ''],
-                ['TBASE', 'FURNITURE', ''],
-                ['BX', 'PANELS', ''],
-                ['VU', 'PANELS', ''],
-                ['ADD', 'ADDITIONS', ''],
-                ['HARDWARE', 'HARDWARE', 'HARDWARE']
+                ['PREFIX', 'INVENTORY', 'FOLDER', 'Thumbnail'],
+                ['CAB', 'CABINETS', '', ''],
+                ['HS', 'HANGING SIGNS', '', ''],
+                ['LB', 'LIGHTBOXES', '', ''],
+                ['CNTR', 'COUNTERTOPS', '', ''],
+                ['SHLF', 'SHELVES', '', ''],
+                ['STOOL', 'FURNITURE', '', ''],
+                ['CHAIR', 'FURNITURE', 'CHAIRS', ''],
+                ['COUCH', 'FURNITURE', '', ''],
+                ['TABLE', 'FURNITURE', 'TABLES', '["file_id_table_prefix"]'],
+                ['TTOP', 'FURNITURE', '', ''],
+                ['TBASE', 'FURNITURE', '', ''],
+                ['BX', 'PANELS', '', ''],
+                ['VU', 'PANELS', '', ''],
+                ['ADD', 'ADDITIONS', '', ''],
+                ['HARDWARE', 'HARDWARE', 'HARDWARE', '']
             ],
             'Thumbnails': [
                 ['ItemNumber', 'File', 'Blob'],
@@ -1744,13 +1751,27 @@ export class FakeGoogleSheetsService {
         return response.ok ? await response.blob() : null;
     }
 
+    // Files uploaded this session: { id, name, folderId, appProperties }
+    static uploadedFiles = [];
+
+    /**
+     * Fake implementation of finding a Drive file by app property
+     */
+    static async findDriveFileByAppProperty(folderId, key, value) {
+        await this.delay(100);
+        const file = this.uploadedFiles.find(f => f.folderId === folderId && f.appProperties?.[key] === value);
+        return file ? { id: file.id, name: file.name } : null;
+    }
+
     /**
      * Fake implementation of Google Drive file upload
      */
-    static async uploadDriveFile(file, fileName, folderId) {
+    static async uploadDriveFile(file, fileName, folderId, appProperties = null) {
         await this.delay(300);
         console.log(`[FakeGoogle] uploadDriveFile: "${fileName}" to folder "${folderId}"`);
-        return { id: `fake_uploaded_${Date.now()}`, name: fileName };
+        const uploaded = { id: `fake_uploaded_${Date.now()}_${this.uploadedFiles.length}`, name: fileName };
+        this.uploadedFiles.push({ ...uploaded, folderId, appProperties });
+        return uploaded;
     }
 
     /**

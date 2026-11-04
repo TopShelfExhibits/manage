@@ -1,4 +1,4 @@
-import { wrapMethods, normalizeHeaderName, Database, InventoryUtils, PackListUtils, ProductionUtils, ApplicationUtils, EditHistoryUtils, InstantWriteUtils, ARCHIVE_TAB_NAME, ARCHIVE_HEADERS, offsetToISO, resolveShortageAlertDays, shortageAlertDateFilters, PREFERENCES_MAPPING, INVENTORY_TAB_PREFERENCES, sanitizeTabName, mapWithConcurrency, ProgressBus, getRandomLoadingQuote, DEFAULT_INVENTORY_MAPPING, ProposalUtils, PROPOSALS_TAB_NAME, PROPOSAL_MAPPING, resolveInventoryNoteMaxLength } from './index.js';
+import { wrapMethods, normalizeHeaderName, Database, InventoryUtils, PackListUtils, ProductionUtils, ApplicationUtils, EditHistoryUtils, InstantWriteUtils, ARCHIVE_TAB_NAME, ARCHIVE_HEADERS, offsetToISO, resolveShortageAlertDays, shortageAlertDateFilters, PREFERENCES_MAPPING, INVENTORY_TAB_PREFERENCES, sanitizeTabName, mapWithConcurrency, ProgressBus, getRandomLoadingQuote, DEFAULT_INVENTORY_MAPPING, ProposalUtils, PROPOSALS_TAB_NAME, PROPOSAL_MAPPING, resolveInventoryNoteMaxLength, firstThumbnail } from './index.js';
 import { authState } from '../application/utils/auth.js';
 import { instantWriteEntry, identityText, parseColoredName } from './utils/instant-write-config.js';
 import { columnTypesEntry } from './utils/column-types.js';
@@ -753,12 +753,29 @@ class Requests_uncached {
         return await deps.call(ProductionUtils.normalizeEndDate, rowData);
     }
 
-    static async getThumbnailRecord(deps, itemNumber) {
-        return await deps.call(ApplicationUtils.getThumbnailRecord, itemNumber);
+    /**
+     * Item thumbnails for pages whose rows aren't inventory rows: [{ item, file }], the displayed
+     * file ID of each item ('' when it has none) in tabs that have a Thumbnail column. Items of
+     * other tabs are absent: they have no thumbnails. A bare file ID is a valid thumbnail value
+     * (parseThumbnails), which keeps this small. Persisted (CACHE/Analytics): it reads every
+     * inventory tab.
+     * @param {Object} deps - Dependency decorator for tracking calls
+     * @returns {Promise<Array<{item: string, file: string}>>}
+     */
+    static async getItemThumbnails(deps) {
+        const rows = await deps.call(Requests.getAllInventoryData);
+        return rows
+            .filter(row => row.itemNumber && 'thumbnail' in row)
+            .map(row => ({ item: row.itemNumber, file: firstThumbnail(row.thumbnail) || '' }));
     }
 
-    static async getAllThumbnailRecords(deps) {
-        return await deps.call(ApplicationUtils.getAllThumbnailRecords);
+    /**
+     * Category images from the inventory INDEX: [{ prefix, file }] (Drive file ID).
+     * @param {Object} deps - Dependency decorator for tracking calls
+     * @returns {Promise<Array<{prefix: string, file: string}>>}
+     */
+    static async getCategoryThumbnails(deps) {
+        return await deps.call(InventoryUtils.getCategoryThumbnails);
     }
 
     /**
@@ -773,34 +790,20 @@ class Requests_uncached {
     }
 
     /**
-     * Upload a thumbnail image for an item to the Drive thumbnails folder.
-     * Replaces any existing image for that item number.
+     * Upload an item image to the Drive thumbnails folder (or reuse an identical one already
+     * there). Only uploads: the caller puts the file ID in the item's Thumbnail cell, and the
+     * table's save keeps it.
      *
      * MUTATION METHOD - Excluded from caching
      * Does NOT accept deps parameter or use deps.call()
      *
      * @param {File} file - The image file to upload
-     * @param {string} itemNumber - Item number the image belongs to
-     * @returns {Promise<{fileId: string, file: File}|null>} The new Drive file ID and the uploaded
-     *   (resized) image, or null on failure
+     * @param {string} itemNumber - Item number the image belongs to (used in the file name)
+     * @returns {Promise<{fileId: string, file: File, reused: boolean}|null>} The Drive file ID and
+     *   the uploaded (resized) image, or null on failure
      */
     static async uploadItemImage(file, itemNumber) {
         return await Database.uploadItemImage(file, itemNumber);
-    }
-
-    /**
-     * Store a thumbnail record in the Thumbnails tab.
-     * 
-     * MUTATION METHOD - Excluded from caching
-     * Does NOT accept deps parameter or use deps.call()
-     *
-     * @param {string} itemNumber - Item number
-     * @param {string} fileId - Google Drive file ID
-     * @param {string|null} blobDataUrl - Optional blob data URL
-     * @returns {Promise<void>}
-     */
-    static async storeThumbnailRecord(itemNumber, fileId, blobDataUrl) {
-        return await ApplicationUtils.storeThumbnailRecord(itemNumber, fileId, blobDataUrl);
     }
 
     /**
@@ -1770,7 +1773,7 @@ export const Requests = wrapMethods(
     'api', 
     [
         'saveData', 'createNewTab', 'showTabs', 'hideTabs',
-        'saveInventoryTabData', 'savePackList', 'storeUserData', 'uploadItemImage', 'storeThumbnailRecord',
+        'saveInventoryTabData', 'savePackList', 'storeUserData', 'uploadItemImage',
         'lockSheet', 'unlockSheet', 'forceUnlockSheet',
         'checkAndApplyPendingChanges', 'savePendingChangeEntry', 'deletePendingChangeEntry',
         'ensureScheduleReferenceRows',
@@ -1788,5 +1791,5 @@ export const Requests = wrapMethods(
     ], // Mutation methods (and fresh reads that must not be cached)
     ['computeIdentifier'], // Infinite cache methods
     {}, // No custom cache durations needed - lock methods delegate to ApplicationUtils caching
-    ['getInventoryShortageAlerts'] // Persisted methods (CACHE/Analytics)
+    ['getInventoryShortageAlerts', 'getItemThumbnails'] // Persisted methods (CACHE/Analytics)
 );

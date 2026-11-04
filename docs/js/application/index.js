@@ -12,6 +12,7 @@ export { Auth, authState, getDeviceId } from './utils/auth.js';
 export { getReactiveStore, createAnalysisConfig, findMatchingStores, clearAllReactiveStores, generateStoreKey, appSettings, runNonessentialAnalysisOnAllStores, getPreferencesStore, getInventoryNoteMaxLength, getInventoryTabList } from './utils/reactiveStores.js';
 export { Priority } from './utils/priorityQueue.js';
 export { getShortageAlertsStore, getShortageAlertDays, shortageBanner, shortagesByItem, itemShortageCards, categoryShortageCards } from './utils/shortageAlerts.js';
+export { getItemThumbnailsStore, itemThumbnailMap, withItemThumbnails } from './utils/itemThumbnails.js';
 export { undoRegistry, setTableRowSelectionState } from './utils/undoRegistry.js';
 export { getAutoColorClass, shouldAutoColor } from './utils/autoColor.js';
 
@@ -43,7 +44,7 @@ export { hamburgerMenuRegistry } from './utils/HamburgerMenuRegistry.js';
 export { notificationBus } from './utils/notificationBus.js';
 
 // Content components export
-export { InventoryTableComponent, ItemImageComponent } from './components/content/InventoryTable.js';
+export { InventoryTableComponent } from './components/content/InventoryTable.js';
 export { PacklistTable } from './components/content/PacklistTable.js';
 export { PacklistContent, PacklistMenuComponent } from './components/content/PacklistContent.js';
 export { InventoryContent, InventoryMenuComponent } from './components/content/InventoryContent.js';

@@ -849,7 +849,9 @@ td:has(.table-wrapper) {
 td:has(button) {
     padding: var(--padding-sm);
 }
-td:has(img) {
+/* Images, and thumbnail cells with or without one (a tab without thumbnails draws an empty box) */
+td:has(img),
+td:has(.item-image-container) {
     padding: 0;
 }
 

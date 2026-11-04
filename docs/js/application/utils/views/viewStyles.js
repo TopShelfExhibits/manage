@@ -11,18 +11,15 @@ export function iconLabel(symbol) {
 }
 
 /**
- * The item thumbnail column: an icon header and the image cell, which finds the picture by the
- * item number in `itemKey`. editable lets the cell change the picture.
- *
- * Custom for now (views-and-renderers-plan §4.14): the column holds no data and the cell looks
- * the image up itself. The ideal is an image-URL column in the inventory data that a view styles
- * as a thumbnail, with editing following that column's data controls.
+ * A thumbnail column's look: an icon header, a narrow column and the image size. The cell itself
+ * follows the field's data type ('thumbnail'), and editing follows the page's edit mode and the
+ * field's `editable`. `itemKey` names the row key holding the item number (for the category image
+ * and the upload's file name).
  */
-export function itemImageStyle(itemKey, { size = 48, editable = false } = {}) {
+export function thumbnailStyle(itemKey, size = 48) {
     return {
         width: 1,
         labelHtml: iconLabel('imagesmode'),
-        cell: 'image',
-        cellOptions: { itemKey, size, ...(editable ? { editable: true } : {}) }
+        cellOptions: { itemKey, size }
     };
 }

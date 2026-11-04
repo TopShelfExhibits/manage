@@ -1,7 +1,7 @@
-import { html, Requests, DataView, getReactiveStore, ProposalUtils, PROPOSAL_LOCK_NAMESPACE, parseDate, todayISOString, getInventoryNoteMaxLength } from '../../index.js';
+import { html, Requests, DataView, getReactiveStore, ProposalUtils, PROPOSAL_LOCK_NAMESPACE, parseDate, todayISOString, getInventoryNoteMaxLength, THUMBNAIL_FIELD } from '../../index.js';
 import { sheetLockMixin } from '../../utils/sheetLockMixin.js';
 import { getProposalsStore, reloadProposals, proposalPath, commitInventoryProposal } from '../../utils/inventoryProposals.js';
-import { itemImageStyle } from '../../utils/views/viewStyles.js';
+import { thumbnailStyle } from '../../utils/views/viewStyles.js';
 import { InventorySaveModal } from './InventoryTable.js';
 
 /**
@@ -81,10 +81,11 @@ export const InventoryProposalsGrid = {
     `
 };
 
-// What each proposal row key is (ProposalUtils.toTableRow). image, _projected and _remove hold no
-// data: the thumbnail, the projected quantity and the remove button (the page draws the last two).
+// What each proposal row key is (ProposalUtils.toTableRow). _projected and _remove hold no data:
+// the projected quantity and the remove button (the page draws both). The thumbnail is the proposed
+// image (items of tabs without a Thumbnail column have none).
 const PROPOSAL_TABLE_FIELDS = [
-    { key: 'image', label: 'I' },
+    { ...THUMBNAIL_FIELD, editable: true },
     { key: 'category', label: 'Category' },
     { key: 'itemNumber', label: 'Item#', type: 'item' },
     { key: 'currentQuantity', label: 'Current Qty' },
@@ -105,12 +106,12 @@ const PROPOSAL_TABLE_VIEWS = {
         id: 'table',
         name: 'Proposal',
         layout: 'table',
-        columns: ['image', 'category', 'itemNumber', 'currentQuantity', 'quantityChange', '_projected', 'description', 'notes', '_remove'],
+        columns: ['thumbnail', 'category', 'itemNumber', 'currentQuantity', 'quantityChange', '_projected', 'description', 'notes', '_remove'],
         details: [],
         hidden: 'rest',
         sortable: ['category', 'itemNumber', 'currentQuantity', 'quantityChange', 'description'],
         style: {
-            image: itemImageStyle('itemNumber', { size: 32 }),
+            thumbnail: thumbnailStyle('itemNumber', 32),
             category: { width: 130 },
             itemNumber: { width: 120 },
             currentQuantity: { width: 90, cell: 'slot' },
@@ -121,7 +122,7 @@ const PROPOSAL_TABLE_VIEWS = {
             notes: { color: 'differs:currentNotes:proposal-changed' },
             _remove: { width: 36, cell: 'slot' }
         },
-        table: { sticky: { start: ['image'], end: ['_remove'] } },
+        table: { sticky: { start: ['thumbnail'], end: ['_remove'] } },
         sort: { key: 'category', dir: 'asc' }
     }]
 };

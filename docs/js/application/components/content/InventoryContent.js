@@ -1,4 +1,4 @@
-import { html, InventoryTableComponent, hamburgerMenuRegistry, NavigationRegistry, Requests, DataView, DashboardToggleComponent, getReactiveStore, findMatchingStores, createAnalysisConfig, generateStoreKey, authState, invalidateCache, todayISOString, getInventoryTabList, INVENTORY_TAB_PREFERENCES, getShortageAlertsStore, getShortageAlertDays, shortagesByItem, itemShortageCards, categoryShortageCards } from '../../index.js';
+import { html, InventoryTableComponent, hamburgerMenuRegistry, NavigationRegistry, Requests, DataView, DashboardToggleComponent, getReactiveStore, findMatchingStores, createAnalysisConfig, generateStoreKey, authState, invalidateCache, todayISOString, getInventoryTabList, INVENTORY_TAB_PREFERENCES, getShortageAlertsStore, getShortageAlertDays, shortagesByItem, itemShortageCards, categoryShortageCards, THUMBNAIL_FIELD } from '../../index.js';
 import { ShowInventoryReport } from './ShowInventoryReport.js';
 import { InventoryItemReport } from './InventoryItemReport.js';
 import { InventoryItemTimeline } from './InventoryItemTimeline.js';
@@ -17,13 +17,13 @@ function parseInventoryPath(path) {
     if (segments[0] !== 'inventory') return { category: null, subRoute: null };
     return { category: segments[1] || null, subRoute: segments[2] || null };
 }
-import { itemImageStyle } from '../../utils/views/viewStyles.js';
+import { thumbnailStyle } from '../../utils/views/viewStyles.js';
 
-// What each inventory overview key is (rows from Requests.getAllInventoryData).
-// image holds no data: the thumbnail column (see itemImageStyle).
+// What each inventory overview key is (rows from Requests.getAllInventoryData). Rows of a tab
+// without a Thumbnail column have no thumbnail, so their cell is blank.
 const INVENTORY_FIELDS = [
     { key: 'tab', label: 'Category' },
-    { key: 'image', label: 'I' },
+    THUMBNAIL_FIELD,
     { key: 'itemNumber', label: 'Item#', type: 'item' },
     { key: 'quantity', label: 'Qty', format: 'number', type: 'number' },
     { key: 'description', label: 'Description' },
@@ -41,17 +41,17 @@ const INVENTORY_VIEWS = {
     theme: 'purple',
     // Shared by both views: the page draws Category (#cell); the item thumbnail
     sortable: ['tab', 'itemNumber', 'quantity', 'description'],
-    style: { tab: { cell: 'slot' }, image: itemImageStyle('itemNumber', { size: 32 }) },
+    style: { tab: { cell: 'slot' }, thumbnail: thumbnailStyle('itemNumber', 32) },
     views: [
         {
             id: 'items',
             name: 'All items',
             icon: 'table',
             layout: 'table',
-            columns: ['tab', 'image', 'itemNumber', 'quantity'],
+            columns: ['tab', 'thumbnail', 'itemNumber', 'quantity'],
             details: ['description', 'notes'],
             style: { tab: { width: 120 } },
-            table: { sticky: { start: ['image'] } },
+            table: { sticky: { start: ['thumbnail'] } },
             sort: [{ key: 'tab', dir: 'asc' }, { key: 'itemNumber', dir: 'asc' }],
             action: 'button'
         },

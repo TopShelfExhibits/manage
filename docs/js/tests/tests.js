@@ -32,10 +32,10 @@ import { FakeGoogleSheetsAuth, FakeGoogleSheetsService, FakeGoogleState, setFake
 import { refreshAppData } from './fakeGoogleDevTools.js';
 import { isCheckedValue } from '../data_management/utils/checkbox-values.js';
 import { useBatchEdits, useInstantEdits } from '../application/utils/cellEdits.js';
-import { CacheInvalidationBus, ApplicationUtils, ProductionUtils, triggerCachePoll, Database, EditHistoryUtils, InventoryUtils, ProposalUtils, resolveInventoryNoteMaxLength, checkDateRollover, clearCache } from '../data_management/index.js';
+import { CacheInvalidationBus, ApplicationUtils, ProductionUtils, triggerCachePoll, Database, EditHistoryUtils, InventoryUtils, ProposalUtils, resolveInventoryNoteMaxLength, checkDateRollover, clearCache, invalidateCache, resolveSheetMapping, parseThumbnails, replaceFirstThumbnail, removeFirstThumbnail } from '../data_management/index.js';
 import { authState } from '../application/utils/auth.js';
 import { commitInventoryProposal } from '../application/utils/inventoryProposals.js';
-import { resolveView, resolveAction, pickView, mergeView, matchesKeyPattern, setViewWarningHandler, withRegistryDefaults } from '../application/utils/views/resolveView.js';
+import { resolveView, resolveAction, pickView, mergeView, matchesKeyPattern, setViewWarningHandler, withRegistryDefaults, searchTiers } from '../application/utils/views/resolveView.js';
 import { SEARCH_LIMITS, searchWords, matchRow, matchRows, makeHighlighter } from '../application/utils/views/searchMatch.js';
 import { formatValue, formatText } from '../application/utils/views/fieldFormat.js';
 import { rowsToCards, bucketRowsToCards } from '../application/utils/views/cardsAdapter.js';
@@ -46,7 +46,7 @@ import { instantWriteEntry, identityKey, cellKey, joinKey } from '../data_manage
 import { estimateShipDate } from '../data_management/utils/ship-date.js';
 import { getReactiveStore, createAnalysisConfig } from '../application/index.js';
 import { checkSheetHealth } from './sheetHealth.js';
-import { guessColumnType, columnTypesEntry, columnTypeMap, columnTypeOf } from '../data_management/utils/column-types.js';
+import { guessColumnType, columnTypesEntry, columnTypeMap, columnTypeOf, isOpaqueType } from '../data_management/utils/column-types.js';
 import { buildScheduleFields } from '../data_management/abstraction/scheduleFields.js';
 import { withShipDate } from '../application/utils/scheduleShipping.js';
 
@@ -1099,25 +1099,135 @@ test('HARDWARE INVENTORY', 'getItemQuantitiesSummary counts HH BOLTHOG 1-4 20 x 
     assertEqual(row.quantity, 15, 'TEST 2025 ENHANCED HH BOLTHOG 1-4 20 x 2.5 quantity');
 });
 
-// ── Group 26: Thumbnail Records ───────────────────────────────────────────────
-// FakeGoogle CACHE/Thumbnails has entries for TABLE-001 (file_id_table_001) and others.
+// ── Group 26: Thumbnail Column ────────────────────────────────────────────────
+// Item thumbnails live in each inventory tab's Thumbnail column as a JSON array of Drive file IDs;
+// category images in the index's Thumbnail column. FakeGoogle fixtures:
+//   FURNITURE (Thumbnail at B): CHAIR-001 '["file_id_chair_001"]', CHAIR-002 '["file_id_chair_002"]',
+//     TABLE-001 blank; TABLE-001 'Packing/shop notes' = 'Legs in bag' (an unmapped column)
+//   PANELS (Thumbnail at B): every cell blank
+//   Other tabs: a stale upper-case 'THUMBNAIL' column, which is NOT the Thumbnail column
+//   HANGING SIGNS: no NOTES column (a required column, added after the last header on save)
+//   CACHE/Inventory Thumbnail: TABLE '["file_id_table_prefix"]'; CHAIR and BX blank
 
-test('THUMBNAIL RECORDS', 'getThumbnailRecord returns file id for TABLE-001', async () => {
-    const result = await Requests.getThumbnailRecord('TABLE-001');
-    if (!result) throw new Error('expected thumbnail record for TABLE-001, got null');
-    assertEqual(result.file, 'file_id_table_001', 'getThumbnailRecord TABLE-001 file id');
+/** Run fn, then put the listed fixture tabs back and drop their cached reads. */
+async function _withRestoredTabs(tabs, fn) {
+    const saved = tabs.map(([db, tab]) => [db, tab, JSON.parse(JSON.stringify(FakeGoogleSheetsService.mockData[db][tab]))]);
+    try {
+        return await fn();
+    } finally {
+        for (const [db, tab, rows] of saved) {
+            FakeGoogleSheetsService.mockData[db][tab] = rows;
+            invalidateCache([{ namespace: 'database', methodName: 'getData', args: [db, tab] }], true);
+        }
+    }
+}
+const _rawTab = (db, tab) => FakeGoogleSheetsService.mockData[db][tab];
+
+test('THUMBNAIL COLUMN', 'thumbnail values parse arrays, bare IDs and blanks', async () => {
+    assertEqual(parseThumbnails('["a", "b"]'), ['a', 'b'], 'JSON array');
+    assertEqual(parseThumbnails('abc'), ['abc'], 'bare file ID');
+    assertEqual(parseThumbnails(''), [], 'blank');
+    assertEqual(parseThumbnails('[broken'), [], 'invalid JSON');
+    assertEqual(replaceFirstThumbnail('["a","b"]', 'c'), '["c","b"]', 'replace keeps the others');
+    assertEqual(replaceFirstThumbnail('', 'c'), '["c"]', 'replace on blank');
+    assertEqual(removeFirstThumbnail('["a"]'), '', 'remove the only image');
+    assertEqual(removeFirstThumbnail('["a","b"]'), '["b"]', 'remove keeps the others');
 });
 
-test('THUMBNAIL RECORDS', 'getThumbnailRecord returns null for unknown item', async () => {
-    const result = await Requests.getThumbnailRecord('NONEXISTENT-999');
-    assertEqual(result, null, 'getThumbnailRecord for unknown item');
+test('THUMBNAIL COLUMN', 'a column-preserving mapping owns only its own columns', async () => {
+    const mapping = { a: 'A', b: 'B', c: 'C', t: 'T', _optional: ['t'], _preserveColumns: true };
+    const { read, write } = resolveSheetMapping(mapping, ['X', 'B', 'A']);
+    assertEqual(read, { a: 'A', b: 'B', c: 'C' }, 'read: present columns plus the required one');
+    assertEqual(write._orderedHeaders, ['X', 'B', 'A', 'C'], 'the tab order, the missing required column appended');
+    assertEqual(write._orderedKeys, [null, 'b', 'a', 'c'], 'other columns are not owned');
+    assertEqual(resolveSheetMapping(mapping, ['T', 'A']).write._orderedKeys, ['t', 'a', 'b', 'c'], 'an optional column present is owned');
 });
 
-test('THUMBNAIL RECORDS', 'getAllThumbnailRecords returns array including TABLE-001', async () => {
-    const records = await Requests.getAllThumbnailRecords();
-    if (!Array.isArray(records) || records.length === 0) throw new Error('expected non-empty thumbnail records array');
-    const entry = records.find(r => r.itemNumber === 'TABLE-001');
-    if (!entry) throw new Error('TABLE-001 not found in all thumbnail records');
+test('THUMBNAIL COLUMN', 'a tab reads its Thumbnail column; a stale THUMBNAIL column is not it', async () => {
+    const furniture = await Requests.getInventoryTabData('FURNITURE');
+    assertEqual(furniture.find(r => r.itemNumber === 'CHAIR-001').thumbnail, '["file_id_chair_001"]', 'CHAIR-001');
+    assertEqual(furniture.find(r => r.itemNumber === 'TABLE-001').thumbnail, '', 'TABLE-001 blank');
+    const lightbox = (await Requests.getInventoryTabData('LIGHTBOXES')).find(r => r.itemNumber === 'LB-001');
+    assertEqual('thumbnail' in lightbox, false, 'LB-001 has no thumbnail key');
+});
+
+test('THUMBNAIL COLUMN', 'saving writes the thumbnail in place, keeps other columns and records history', async () => {
+    await _withRestoredTabs([['INVENTORY', 'FURNITURE']], async () => {
+        const headerBefore = [..._rawTab('INVENTORY', 'FURNITURE')[0]];
+        const rows = (await Requests.getInventoryTabData('FURNITURE')).map(r => ({ ...r }));
+        rows.find(r => r.itemNumber === 'CHAIR-001').thumbnail = '["file_new"]';
+        await _asUser(() => Requests.saveInventoryTabData(rows, 'FURNITURE'));
+        const raw = _rawTab('INVENTORY', 'FURNITURE');
+        assertEqual(raw[0], headerBefore, 'header row unchanged');
+        const chair = raw.find(r => r[0] === 'CHAIR-001');
+        assertEqual(chair[1], '["file_new"]', 'new value under the Thumbnail header');
+        assertEqual(raw.find(r => r[0] === 'TABLE-001')[7], 'Legs in bag', 'unmapped column kept');
+        const saved = (await Requests.getInventoryTabData('FURNITURE')).find(r => r.itemNumber === 'CHAIR-001');
+        assertEqual(JSON.parse(saved.edithistory).h[0].c, [{ n: 'thumbnail', o: '["file_id_chair_001"]' }], 'history entry');
+    });
+});
+
+test('THUMBNAIL COLUMN', 'saving a tab without a Thumbnail column never adds one', async () => {
+    await _withRestoredTabs([['INVENTORY', 'LIGHTBOXES']], async () => {
+        const headerBefore = [..._rawTab('INVENTORY', 'LIGHTBOXES')[0]];
+        const rows = (await Requests.getInventoryTabData('LIGHTBOXES')).map(r => ({ ...r }));
+        rows[0].quantity = '3';
+        await _asUser(() => Requests.saveInventoryTabData(rows, 'LIGHTBOXES'));
+        assertEqual(_rawTab('INVENTORY', 'LIGHTBOXES')[0], headerBefore, 'header row unchanged');
+        assertEqual(_rawTab('INVENTORY', 'LIGHTBOXES')[1][2], '3', 'QTY written in place');
+    });
+});
+
+test('THUMBNAIL COLUMN', 'a missing required column is added after the last header', async () => {
+    await _withRestoredTabs([['INVENTORY', 'HANGING SIGNS']], async () => {
+        const rows = (await Requests.getInventoryTabData('HANGING SIGNS')).map(r => ({ ...r }));
+        rows[0].notes = 'hang high';
+        await _asUser(() => Requests.saveInventoryTabData(rows, 'HANGING SIGNS'));
+        const raw = _rawTab('INVENTORY', 'HANGING SIGNS');
+        assertEqual(raw[0], ['ITEM#', 'THUMBNAIL', 'QTY', 'EditHistory', 'MetaData', 'Description', 'Packing/shop notes', 'NOTES'], 'NOTES appended');
+        assertEqual(raw[1][7], 'hang high', 'note under it');
+        assertEqual(raw[1][5], 'This is a sign', 'Description kept in place');
+    });
+});
+
+test('THUMBNAIL COLUMN', 'item thumbnails list items of thumbnail tabs only', async () => {
+    const map = new Map((await Requests.getItemThumbnails()).map(e => [e.item, e.file]));
+    assertEqual(map.get('CHAIR-001'), 'file_id_chair_001', 'own image');
+    assertEqual(map.get('TABLE-001'), '', 'thumbnail tab, no image');
+    assertEqual(map.get('BX-16x39'), '', 'PANELS item');
+    assertEqual(map.has('LB-001'), false, 'tab without a Thumbnail column');
+});
+
+test('THUMBNAIL COLUMN', 'category images come from the index Thumbnail column', async () => {
+    assertEqual(await Requests.getCategoryThumbnails(), [{ prefix: 'TABLE', file: 'file_id_table_prefix' }], 'TABLE only');
+});
+
+test('THUMBNAIL COLUMN', 'proposals carry thumbnail changes like other fields', async () => {
+    const inventoryRow = { itemNumber: 'CHAIR-001', quantity: '20', description: 'Chair', notes: '', thumbnail: '["a"]' };
+    assertEqual(ProposalUtils.diffRow(inventoryRow, { ...inventoryRow, thumbnail: '["b"]' }), [{ n: 'thumbnail', ne: '["b"]' }], 'diffRow');
+    const row = ProposalUtils.toTableRow({ category: 'FURNITURE', itemNumber: 'CHAIR-001', changes: [{ n: 'thumbnail', ne: '["b"]' }] }, inventoryRow);
+    assertEqual([row.thumbnail, row.currentThumbnail], ['["b"]', '["a"]'], 'proposed and current');
+    assertEqual(ProposalUtils.changesFromTableRow(row), [{ n: 'thumbnail', ne: '["b"]' }], 'changes from the row');
+    const noColumn = ProposalUtils.toTableRow({ category: 'LIGHTBOXES', itemNumber: 'LB-001', changes: [] }, { itemNumber: 'LB-001', quantity: '0' });
+    assertEqual('thumbnail' in noColumn, false, 'no thumbnail for a tab without the column');
+});
+
+test('THUMBNAIL COLUMN', 'an identical image is uploaded once', async () => {
+    const file = () => new File([new Uint8Array([7, 7, 7, 1])], 'same.png', { type: 'image/png' });
+    const first = await Requests.uploadItemImage(file(), 'CHAIR-001');
+    const second = await Requests.uploadItemImage(file(), 'CHAIR-002');
+    assertEqual(second.fileId, first.fileId, 'same file ID');
+    assertEqual([first.reused, second.reused], [false, true], 'second upload reused');
+});
+
+test('THUMBNAIL COLUMN', 'thumbnails are a column type that is never searched', async () => {
+    assertEqual(guessColumnType('Thumbnail'), 'thumbnail', 'guessed from the name');
+    assertEqual(isOpaqueType('thumbnail'), true, 'opaque');
+    assertEqual(formatValue('["a","b"]', { format: 'thumbnail' }), '2 images', 'text form');
+    const fields = [{ key: 'thumbnail', type: 'thumbnail' }, { key: 'itemNumber' }];
+    const resolved = resolveView(fields, { id: 't', layout: 'table', columns: ['thumbnail', 'itemNumber'] });
+    assertEqual(resolved.fieldMap.get('thumbnail').cell, 'thumbnail', 'cell from the type');
+    assertEqual(searchTiers(resolved).shown, ['itemNumber'], 'not searched');
 });
 
 // ── Group 26: Row-Based Transship and Date Normalization ──────────────────────
@@ -3190,8 +3300,9 @@ test('INVENTORY TAB PREFERENCES', 'resolveInventoryTabList reads a JSON list of 
 });
 
 test('INVENTORY TAB PREFERENCES', 'the index carries no settings', async () => {
+    // thumbnail is data (the prefix's category image), not a setting
     const index = await Requests.getInventoryIndexData();
-    assertEqual(Object.keys(index[0]).sort(), ['folder', 'prefix', 'tab'], 'index row keys');
+    assertEqual(Object.keys(index[0]).sort(), ['folder', 'prefix', 'tab', 'thumbnail'], 'index row keys');
 });
 
 test('INVENTORY TAB PREFERENCES', 'a skipped tab leaves the reports, alerts and pack list checks', async () => {

@@ -1,4 +1,4 @@
-import { Database, ProductionUtils, PackListUtils, wrapMethods, PREFERENCES_MAPPING, INVENTORY_TAB_PREFERENCES, resolveInventoryTabList, parseDate, toISODateString, searchFilter, todayISOString, startOfTodayMs, offsetToISO, ApplicationUtils, invalidateCache, EditHistoryUtils, DEFAULT_INVENTORY_NOTE_MAX_LENGTH } from '../index.js';
+import { Database, ProductionUtils, PackListUtils, wrapMethods, PREFERENCES_MAPPING, INVENTORY_TAB_PREFERENCES, resolveInventoryTabList, parseDate, toISODateString, searchFilter, todayISOString, startOfTodayMs, offsetToISO, ApplicationUtils, invalidateCache, EditHistoryUtils, DEFAULT_INVENTORY_NOTE_MAX_LENGTH, firstThumbnail } from '../index.js';
 
 /** Normalize an identifier for loose matching (strips spaces, case, non-alphanumeric) */
 function _normalizeId(v) { return String(v || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, ''); }
@@ -28,13 +28,21 @@ function _historyChangeLabels(entry, before, after) {
         });
 }
 
-/** Inventory tab row key → sheet header (the wrapped InventoryUtils does not expose static fields) */
+/**
+ * Inventory tab row key → sheet header (the wrapped InventoryUtils does not expose static fields).
+ * Column-preserving (resolveSheetMapping): saves write these columns under their headers and leave
+ * the tab's other columns alone. Thumbnail is optional: a tab without that column has no
+ * thumbnails, its rows carry no `thumbnail` key, and saves never add the column.
+ */
 export const DEFAULT_INVENTORY_MAPPING = {
     itemNumber: 'ITEM#',
     quantity: 'QTY',
     description: 'Description',
     notes: 'NOTES',
-    edithistory: 'EditHistory'
+    edithistory: 'EditHistory',
+    thumbnail: 'Thumbnail',
+    _optional: ['thumbnail'],
+    _preserveColumns: true
 };
 
 /**
@@ -46,16 +54,32 @@ class inventoryUtils_uncached {
     static INDEX_MAPPING = {
         prefix: 'PREFIX',
         tab: 'INVENTORY',
-        folder: 'FOLDER'
+        folder: 'FOLDER',
+        thumbnail: 'Thumbnail',
+        _optional: ['thumbnail'],
+        _preserveColumns: true
     };
 
     /**
      * The inventory INDEX: which tab each item-number prefix belongs to.
-     * Returns an array of { prefix, tab, folder }. Per-tab settings live in preferences
-     * (INVENTORY_TAB_PREFERENCES, getPreferenceTabs), not here.
+     * Returns an array of { prefix, tab, folder, thumbnail? }. thumbnail is the prefix's category
+     * image (a thumbnail cell value), when the index has a Thumbnail column. Per-tab settings live
+     * in preferences (INVENTORY_TAB_PREFERENCES, getPreferenceTabs), not here.
      */
     static async getInventoryIndex(deps) {
         return await deps.call(Database.getData, 'CACHE', 'Inventory', inventoryUtils_uncached.INDEX_MAPPING);
+    }
+
+    /**
+     * Category images: [{ prefix, file }], the first file ID of each prefix's index Thumbnail
+     * cell. Items of that prefix without an image of their own show it (thumbnail cell fallback).
+     * @returns {Promise<Array<{prefix: string, file: string}>>}
+     */
+    static async getCategoryThumbnails(deps) {
+        const index = await deps.call(InventoryUtils.getInventoryIndex);
+        return index
+            .map(row => ({ prefix: String(row.prefix ?? '').trim(), file: firstThumbnail(row.thumbnail) }))
+            .filter(entry => entry.prefix && entry.file);
     }
 
     /**
