@@ -14,6 +14,8 @@
  *
  * Pure: no Vue, no DOM. Safe to import from tests.
  */
+import { isOpaqueType } from '../../../data_management/utils/column-types.js';
+
 // ── Dev warnings ─────────────────────────────────────────────────────────────
 
 const IS_DEV = typeof window !== 'undefined' && !!window.location && (
@@ -54,7 +56,7 @@ const LEGACY_FIELD_PROPS = Object.freeze([
 const STYLE_FIELD_PROPS = Object.freeze(['label', 'labelHtml', 'title', 'cell', 'cellOptions', 'colspan']);
 
 /** Cells that follow the data type when the view names none (read-only ones render disabled). */
-const TYPE_CELLS = Object.freeze({ checkbox: 'checkbox', select: 'select' });
+const TYPE_CELLS = Object.freeze({ checkbox: 'checkbox', select: 'select', thumbnail: 'thumbnail' });
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -450,10 +452,14 @@ export function resolveAction(actionDef, resolved, opts = {}) {
     return { kind: 'none', trigger: 'button', label: '', icon: '', headerIcon: '', title: '', to: null, run: null, disabled: null };
 }
 
-/** Search tiers for matchRow: shown and details keys (hidden fields are never searched). */
+/**
+ * Search tiers for matchRow: shown and details keys. Hidden fields are never searched, nor are
+ * fields whose values are references rather than text (isOpaqueType, e.g. thumbnails).
+ */
 export function searchTiers(resolved) {
     if (!resolved) return { shown: [], details: [] };
-    return { shown: resolved.shown, details: resolved.details.map(f => f.key) };
+    const searched = (key) => !isOpaqueType(resolved.fieldMap?.get(key)?.type);
+    return { shown: resolved.shown.filter(searched), details: resolved.details.map(f => f.key).filter(searched) };
 }
 
 /**
