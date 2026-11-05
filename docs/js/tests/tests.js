@@ -1225,6 +1225,20 @@ test('THUMBNAIL COLUMN', 'an identical image is uploaded once', async () => {
     assertEqual([first.reused, second.reused], [false, true], 'second upload reused');
 });
 
+test('THUMBNAIL COLUMN', 'uploads are resized to fit 1000 x 1000 and only that copy is uploaded', async () => {
+    const canvas = Object.assign(document.createElement('canvas'), { width: 2400, height: 1200 });
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = `rgb(${Date.now() % 255}, 80, 160)`;
+    ctx.fillRect(0, 0, 2400, 1200);
+    const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+    const before = FakeGoogleSheetsService.uploadedFiles.length;
+    const result = await Requests.uploadItemImage(new File([blob], 'big.png', { type: 'image/png' }), 'TABLE-002');
+    const bitmap = await createImageBitmap(result.file);
+    assertEqual([bitmap.width, bitmap.height], [1000, 500], 'resized');
+    const added = FakeGoogleSheetsService.uploadedFiles.slice(before);
+    assertEqual([added.length, added.some(f => f.name.includes('ORIGINAL'))], [1, false], 'one file, no original');
+});
+
 test('THUMBNAIL COLUMN', 'thumbnails are a column type that is never searched', async () => {
     assertEqual(guessColumnType('Thumbnail'), 'thumbnail', 'guessed from the name');
     assertEqual(isOpaqueType('thumbnail'), true, 'opaque');

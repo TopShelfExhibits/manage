@@ -18,6 +18,9 @@ if (isLocalhost()) {
 import { wrapMethods, invalidateCache, stampDataChange, EditHistoryUtils, assertAppCurrent } from '../index.js';
 import { ARCHIVE_TAB_NAME, ARCHIVE_HEADERS, MAX_HISTORY_ENTRIES } from '../utils/metadata-utils.js';
 
+// Uploaded item images are web-sized: within a MAX_UPLOAD_DIM × MAX_UPLOAD_DIM square
+const MAX_UPLOAD_DIM = 1000;
+
 class database_uncached {
     /**
      * Retrieves data for a table/tab and returns as array of JS objects
@@ -106,7 +109,8 @@ class database_uncached {
                 canvas.width = w;
                 canvas.height = h;
                 canvas.getContext('2d').drawImage(img, 0, 0, w, h);
-                const mimeType = file.type || 'image/jpeg';
+                // PNG keeps transparency; everything else is re-encoded as JPEG
+                const mimeType = file.type === 'image/png' ? 'image/png' : 'image/jpeg';
                 canvas.toBlob((blob) => {
                     resolve(new File([blob], file.name, { type: mimeType }));
                 }, mimeType, 0.92);
@@ -136,11 +140,8 @@ class database_uncached {
         const itemNumberStr = String(itemNumber).trim();
         const ext = file.type === 'image/png' ? 'png' : 'jpg';
 
-        // Resize to max 512px before uploading. If the image is already within bounds,
-        // resizedFile === file (no copy made). If larger, the original is kept as a backup.
-        const MAX_UPLOAD_DIM = 512;
+        // Only a web-sized copy is uploaded (within MAX_UPLOAD_DIM square); the original isn't kept
         const resizedFile = await database_uncached._resizeImageFile(file, MAX_UPLOAD_DIM);
-        const wasResized = resizedFile !== file;
 
         // Deduplicate by the original's content hash (resizing isn't byte-stable across browsers)
         const sha256 = await database_uncached._sha256Hex(file);
@@ -150,12 +151,7 @@ class database_uncached {
         }
 
         // A unique name per upload: older files stay valid for history and other sessions
-        const baseName = `${itemNumberStr}_${Date.now()}`;
-        if (wasResized) {
-            await GoogleSheetsService.uploadDriveFile(file, `${baseName}_ORIGINAL.${ext}`, folderId)
-                .catch(err => console.warn('[icons] Failed to save original image backup:', err));
-        }
-        const uploaded = await GoogleSheetsService.uploadDriveFile(resizedFile, `${baseName}.${ext}`, folderId, sha256 ? { sha256 } : null);
+        const uploaded = await GoogleSheetsService.uploadDriveFile(resizedFile, `${itemNumberStr}_${Date.now()}.${ext}`, folderId, sha256 ? { sha256 } : null);
         if (!uploaded || !uploaded.id) return null;
         return { fileId: uploaded.id, file: resizedFile, reused: false };
     }
