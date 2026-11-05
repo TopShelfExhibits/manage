@@ -33,7 +33,7 @@ import { FakeGoogleSheetsAuth, FakeGoogleSheetsService, FakeGoogleState, setFake
 import { refreshAppData } from './fakeGoogleDevTools.js';
 import { isCheckedValue } from '../data_management/utils/checkbox-values.js';
 import { useBatchEdits, useInstantEdits } from '../application/utils/cellEdits.js';
-import { CacheInvalidationBus, ApplicationUtils, ProductionUtils, triggerCachePoll, Database, EditHistoryUtils, InventoryUtils, ProposalUtils, resolveInventoryNoteMaxLength, checkDateRollover, clearCache, invalidateCache, resolveSheetMapping, parseThumbnails, parseThumbnailEntries, serializeThumbnailEntries, addThumbnails, removeThumbnailAt, setPrimaryThumbnail, setThumbnailNote, setThumbnailCrop, primaryThumbnailValue, thumbnailKey } from '../data_management/index.js';
+import { CacheInvalidationBus, ApplicationUtils, ProductionUtils, triggerCachePoll, stampDataChange, Database, EditHistoryUtils, InventoryUtils, ProposalUtils, resolveInventoryNoteMaxLength, checkDateRollover, clearCache, invalidateCache, resolveSheetMapping, parseThumbnails, parseThumbnailEntries, serializeThumbnailEntries, addThumbnails, removeThumbnailAt, setPrimaryThumbnail, setThumbnailNote, setThumbnailCrop, primaryThumbnailValue, thumbnailKey } from '../data_management/index.js';
 import { authState } from '../application/utils/auth.js';
 import { commitInventoryProposal } from '../application/utils/inventoryProposals.js';
 import { resolveView, resolveAction, pickView, mergeView, matchesKeyPattern, setViewWarningHandler, withRegistryDefaults, searchTiers } from '../application/utils/views/resolveView.js';
@@ -1725,6 +1725,386 @@ test('CACHE INVALIDATION', 'remote Caching-tab timestamp for getTabs fires getPa
         throw new Error(`poller did not invalidate getPacklists; fired: ${[...fired].join(', ')}`);
 });
 
+// ── Group: Google requests ────────────────────────────────────────────────────
+// FakeGoogle CACHE/Clients: headers Clients | Abbreviations | Notes, first row ABCAM,
+// AUSTAL USA abbreviated AUSTAL. A tab read unmapped and under two mappings is one sheet read.
+
+/** Run fn(reads) while counting sheet reads of one tab; reads() is the count so far. */
+async function _countSheetReads(db, tab, fn) {
+    const original = FakeGoogleSheetsService.getSheetData;
+    let count = 0;
+    FakeGoogleSheetsService.getSheetData = async function (tableId, range) {
+        if (tableId === db && range === tab) count++;
+        return original.call(this, tableId, range);
+    };
+    try {
+        return await fn(() => count);
+    } finally {
+        FakeGoogleSheetsService.getSheetData = original;
+    }
+}
+
+test('GOOGLE REQUESTS', 'a tab read unmapped and under two mappings is one sheet read', async () => {
+    invalidateCache([{ namespace: 'database', methodName: 'getData', args: ['CACHE', 'Clients'] }], true);
+    await _withRestoredTabs([['CACHE', 'Clients']], () => _countSheetReads('CACHE', 'Clients', async (reads) => {
+        const raw = await Database.getData('CACHE', 'Clients');
+        const names = await Database.getData('CACHE', 'Clients', { name: 'Clients' });
+        const full = await Database.getData('CACHE', 'Clients', { name: 'Clients', abbr: 'Abbreviations' });
+        assertEqual(reads(), 1, 'sheet reads');
+        assertEqual([raw[1][0], names[0].name, full.find(r => r.name === 'AUSTAL USA').abbr], ['ABCAM', 'ABCAM', 'AUSTAL'], 'values');
+    }));
+});
+
+test('GOOGLE REQUESTS', 'a mapped read sees the change after its tab is invalidated', async () => {
+    await _withRestoredTabs([['CACHE', 'Clients']], () => _countSheetReads('CACHE', 'Clients', async (reads) => {
+        await Database.getData('CACHE', 'Clients', { name: 'Clients' });
+        _rawTab('CACHE', 'Clients')[1][0] = 'ABCAM RENAMED';
+        // As a write to the tab, or the poller, invalidates it
+        invalidateCache([{ namespace: 'database', methodName: 'getData', args: ['CACHE', 'Clients'] }], true);
+        const names = await Database.getData('CACHE', 'Clients', { name: 'Clients' });
+        assertEqual([names[0].name, reads()], ['ABCAM RENAMED', 2], 'fresh value, one more read');
+    }));
+});
+
+// User data writes made at the same moment are one write of the user's tab
+// (CACHE/UserData_test_example_com), applied in call order.
+const USER_TAB = 'UserData_test_example_com';
+
+/** Run fn(writes) while counting whole-tab writes of one tab; writes() is the count so far. */
+async function _countTabWrites(db, tab, fn) {
+    const original = FakeGoogleSheetsService.setSheetData;
+    let count = 0;
+    FakeGoogleSheetsService.setSheetData = async function (tableId, range, ...rest) {
+        if (tableId === db && range === tab) count++;
+        return original.call(this, tableId, range, ...rest);
+    };
+    try {
+        return await fn(() => count);
+    } finally {
+        FakeGoogleSheetsService.setSheetData = original;
+    }
+}
+
+test('GOOGLE REQUESTS', 'user data stored at the same moment is one write, applied in order', async () => {
+    await _withRestoredTabs([['CACHE', USER_TAB]], () => _countTabWrites('CACHE', USER_TAB, async (writes) => {
+        await Promise.all([
+            Requests.storeUserData({ n: 1 }, 'test@example.com', 'batch_test_a'),
+            Requests.storeUserData({ n: 2 }, 'test@example.com', 'batch_test_b'),
+            Requests.storeUserData({ n: 3 }, 'test@example.com', 'batch_test_a'),
+            Requests.storeUserData({ n: 4 }, 'test@example.com', 'batch_test_c'),
+            Requests.storeUserData(null, 'test@example.com', 'batch_test_c')
+        ]);
+        assertEqual(writes(), 1, 'tab writes');
+        const stored = Object.fromEntries(_rawTab('CACHE', USER_TAB).filter(r => String(r[0]).startsWith('batch_test_')).map(r => [r[0], r[1]]));
+        assertEqual(stored, { batch_test_a: '{"n":3}', batch_test_b: '{"n":2}' }, 'stored rows');
+    }));
+});
+
+test('GOOGLE REQUESTS', 'user data stored while the tab is being written is kept', async () => {
+    // The first write of the tab waits until the second call has been made
+    const original = FakeGoogleSheetsService.setSheetData;
+    let release, started;
+    const gate = new Promise(resolve => release = resolve);
+    const firstStarted = new Promise(resolve => started = resolve);
+    let writes = 0;
+    FakeGoogleSheetsService.setSheetData = async function (tableId, range, ...rest) {
+        if (tableId === 'CACHE' && range === USER_TAB && writes++ === 0) {
+            started();
+            await gate;
+        }
+        return original.call(this, tableId, range, ...rest);
+    };
+    try {
+        await _withRestoredTabs([['CACHE', USER_TAB]], async () => {
+            const first = Requests.storeUserData('one', 'test@example.com', 'batch_test_a');
+            await firstStarted;
+            const second = Requests.storeUserData('two', 'test@example.com', 'batch_test_b');
+            release();
+            await Promise.all([first, second]);
+            const stored = Object.fromEntries(_rawTab('CACHE', USER_TAB).filter(r => String(r[0]).startsWith('batch_test_')).map(r => [r[0], r[1]]));
+            assertEqual([stored, writes], [{ batch_test_a: 'one', batch_test_b: 'two' }, 2], 'both rows, two writes');
+        });
+    } finally {
+        FakeGoogleSheetsService.setSheetData = original;
+    }
+});
+
+// ── Group: Spreadsheet watch ──────────────────────────────────────────────────
+// Each poll reads the spreadsheets' Drive modifiedTime (FakeGoogleSheetsService.touch is a hand
+// edit). FakeGoogle PROD_SCHED/Production Schedule row 1 is ALLEN ARMS 2025 SHOT, City
+// "Las Vegas, NV" (column 4); PACK_LISTS/ATSC 2025 NAB is read unmapped.
+
+test('SPREADSHEET WATCH', 'an unchanged schedule stays cached; a hand edit is re-read once, at the next poll', async () => {
+    await _withRestoredTabs([['PROD_SCHED', 'Production Schedule']], () => _countSheetReads('PROD_SCHED', 'Production Schedule', async (reads) => {
+        await triggerCachePoll();
+        await Database.getData('PROD_SCHED', 'Production Schedule');
+        const base = reads();
+        await triggerCachePoll();
+        await Database.getData('PROD_SCHED', 'Production Schedule');
+        assertEqual(reads(), base, 'reads while unchanged');
+
+        _rawTab('PROD_SCHED', 'Production Schedule')[1][4] = 'Reno, NV';
+        FakeGoogleSheetsService.touch('PROD_SCHED');
+        await triggerCachePoll();
+        const rows = await Database.getData('PROD_SCHED', 'Production Schedule');
+        await triggerCachePoll();
+        await Database.getData('PROD_SCHED', 'Production Schedule');
+        assertEqual([rows[1][4], reads()], ['Reno, NV', base + 1], 'edited value, one read');
+    }));
+});
+
+test('SPREADSHEET WATCH', 'a pack list change with no stamp expires its cached reads after one more poll', async () => {
+    const TAB = 'ATSC 2025 NAB';
+    await _withRestoredTabs([['PACK_LISTS', TAB]], () => _countSheetReads('PACK_LISTS', TAB, async (reads) => {
+        await triggerCachePoll();
+        await Database.getData('PACK_LISTS', TAB);
+        const base = reads();
+        const sheet = _rawTab('PACK_LISTS', TAB);
+        sheet[1][0] = `${sheet[1][0]} EDITED`;
+        // Changed long after any stamp of the table
+        const later = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+        await withFaults({ beforeModifiedTimes: () => ({ PACK_LISTS: later }) }, async () => {
+            await triggerCachePoll();
+            await Database.getData('PACK_LISTS', TAB);
+            assertEqual(reads(), base, 'still cached at the poll that saw the change');
+            await triggerCachePoll();
+        });
+        const rows = await Database.getData('PACK_LISTS', TAB);
+        assertEqual([rows[1][0], reads()], [sheet[1][0], base + 1], 'expired, then read once');
+        await triggerCachePoll(); // back to the real modifiedTime
+    }));
+});
+
+test('SPREADSHEET WATCH', 'a stamped pack list change is re-read once', async () => {
+    const TAB = 'ATSC 2025 NAB';
+    await _withRestoredTabs([['PACK_LISTS', TAB]], () => _countSheetReads('PACK_LISTS', TAB, async (reads) => {
+        await triggerCachePoll();
+        await Database.getData('PACK_LISTS', TAB);
+        const base = reads();
+        const sheet = _rawTab('PACK_LISTS', TAB);
+        sheet[1][0] = `${sheet[1][0]} STAMPED`;
+        FakeGoogleSheetsService.touch('PACK_LISTS');
+        await ApplicationUtils.writeCacheTimestamp(`database:getData:"PACK_LISTS","${TAB}"`);
+        await triggerCachePoll();
+        const rows = await Database.getData('PACK_LISTS', TAB);
+        await triggerCachePoll();
+        await Database.getData('PACK_LISTS', TAB);
+        assertEqual([rows[1][0], reads()], [sheet[1][0], base + 1], 'stamped value, one read');
+    }));
+});
+
+test('SPREADSHEET WATCH', 'the Caching tab is read only when it may hold new stamps', async () => {
+    await triggerCachePoll();
+    await _countSheetReads('CACHE', 'Caching', async (reads) => {
+        await triggerCachePoll();
+        assertEqual(reads(), 0, 'Caching reads while nothing changed');
+        FakeGoogleSheetsService.touch('CACHE');
+        await triggerCachePoll();
+        assertEqual(reads(), 1, 'Caching reads after the CACHE spreadsheet changed');
+        await withFaults({ beforeModifiedTimes: () => { throw new Error('Drive unavailable'); } }, async () => {
+            await triggerCachePoll();
+            await triggerCachePoll();
+        });
+        assertEqual(reads(), 3, 'Caching reads at every poll while Drive is unavailable');
+    });
+});
+
+// ── Group: Change stamps ──────────────────────────────────────────────────────
+// Stamps for made-up tabs ("StampTest …") are added to CACHE/Caching and left there.
+
+async function _waitFor(check, label) {
+    for (let i = 0; i < 300; i++) {
+        const value = await check();
+        if (value) return value;
+        await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    throw new Error(`timed out waiting for ${label}`);
+}
+const _stampRow = (prefix) => (_rawTab('CACHE', 'Caching') || []).find(row => row[0] === prefix);
+
+test('CHANGE STAMPS', 'a failed read of the Caching tab writes nothing; the next poll writes the stamp', async () => {
+    const prefix = 'database:getData:"CACHE","StampTest failed read"';
+    await triggerCachePoll();
+    const before = JSON.stringify(_rawTab('CACHE', 'Caching'));
+    let failed = false;
+    FakeGoogleSheetsService.faults = {
+        beforeRead: (t, range) => { if (t === 'CACHE' && range === 'Caching' && !failed) { failed = true; throw new Error('read failed'); } }
+    };
+    try {
+        stampDataChange(prefix);
+        await _waitFor(() => failed, 'the failed read');
+        await new Promise(resolve => setTimeout(resolve, 50));
+    } finally {
+        FakeGoogleSheetsService.faults = null;
+    }
+    assertEqual(JSON.stringify(_rawTab('CACHE', 'Caching')), before, 'Caching tab untouched');
+    await triggerCachePoll();
+    const row = await _waitFor(() => _stampRow(prefix), 'the retried stamp');
+    assertEqual(isNaN(new Date(row[1]).getTime()), false, 'stamp has a timestamp');
+});
+
+test('CHANGE STAMPS', 'two sessions adding new keys at the same moment each keep their row', async () => {
+    const [b, c] = ['database:getData:"CACHE","StampTest session B"', 'database:getData:"CACHE","StampTest session C"'];
+    const rowsBefore = _rawTab('CACHE', 'Caching').length;
+    const timestamp = new Date().toISOString();
+    // Both read the tab before either writes
+    await Promise.all([
+        ApplicationUtils.writeCacheTimestamps([{ prefix: b, timestamp }]),
+        ApplicationUtils.writeCacheTimestamps([{ prefix: c, timestamp }])
+    ]);
+    assertEqual([!!_stampRow(b), !!_stampRow(c), _rawTab('CACHE', 'Caching').length], [true, true, rowsBefore + 2], 'both rows added');
+});
+
+test('CHANGE STAMPS', 'stamps made while a stamp write runs go out together', async () => {
+    const prefixes = [1, 2, 3].map(n => `database:getData:"CACHE","StampTest batch ${n}"`);
+    const original = FakeGoogleSheetsService.appendSheetValues;
+    let appends = 0;
+    FakeGoogleSheetsService.appendSheetValues = async function (tableId, range, rows) {
+        if (rows.some(row => prefixes.includes(row[0]))) appends++;
+        return original.call(this, tableId, range, rows);
+    };
+    try {
+        prefixes.forEach(prefix => stampDataChange(prefix));
+        await _waitFor(() => prefixes.every(_stampRow), 'all three stamps');
+    } finally {
+        FakeGoogleSheetsService.appendSheetValues = original;
+    }
+    assertLessThan(appends, 3, 'append requests for three stamps');
+});
+
+// ── Group: Saves cache what they wrote ────────────────────────────────────────
+// A whole-tab write's response is the tab as a read returns it (FakeGoogle: the tab after the
+// write), so the save caches it instead of reading the tab again. FakeGoogle CACHE/Clients row 1
+// is ABCAM with no abbreviation.
+const CLIENTS_MAPPING = { name: 'Clients', abbr: 'Abbreviations' };
+
+test('SAVE CACHING', 'a whole-tab save caches the tab as written: no read follows, before or after the next poll', async () => {
+    await _withRestoredTabs([['CACHE', 'Clients']], () => _countSheetReads('CACHE', 'Clients', async (reads) => {
+        const rows = (await Database.getData('CACHE', 'Clients', CLIENTS_MAPPING)).map(row => ({ ...row }));
+        const base = reads();
+        rows[0].abbr = 'ABC';
+        await Database.setData('CACHE', 'Clients', rows, CLIENTS_MAPPING, { skipMetadata: true });
+        const cached = await Database.getData('CACHE', 'Clients');
+        const mapped = await Database.getData('CACHE', 'Clients', CLIENTS_MAPPING);
+        assertEqual(reads(), base, 'reads after the save');
+        assertEqual(JSON.stringify(cached), JSON.stringify(FakeGoogleSheetsService.getMockData('CACHE', 'Clients')), 'cached tab matches a fresh read');
+        assertEqual(mapped[0].abbr, 'ABC', 'mapped read from the cached tab');
+        await _waitFor(() => _stampRow('database:getData:"CACHE","Clients"'), 'the save\'s stamp');
+        await triggerCachePoll();
+        await Database.getData('CACHE', 'Clients');
+        assertEqual(reads(), base, 'reads after the poll read our own stamp');
+    }));
+});
+
+test('SAVE CACHING', 'another session\'s stamp after our save still re-reads the tab once', async () => {
+    await _withRestoredTabs([['CACHE', 'Clients']], () => _countSheetReads('CACHE', 'Clients', async (reads) => {
+        const rows = await Database.getData('CACHE', 'Clients', CLIENTS_MAPPING);
+        const savedAt = Date.now();
+        await Database.setData('CACHE', 'Clients', rows, CLIENTS_MAPPING, { skipMetadata: true });
+        const base = reads();
+        await _waitFor(() => new Date(_stampRow('database:getData:"CACHE","Clients"')?.[1]).getTime() > savedAt, 'our stamp');
+        await new Promise(resolve => setTimeout(resolve, 5)); // the other session stamps later than we did
+        _rawTab('CACHE', 'Clients')[1][0] = 'ABCAM ELSEWHERE';
+        await ApplicationUtils.writeCacheTimestamp('database:getData:"CACHE","Clients"');
+        await triggerCachePoll();
+        const after = await Database.getData('CACHE', 'Clients', CLIENTS_MAPPING);
+        assertEqual([after[0].name, reads()], ['ABCAM ELSEWHERE', base + 1], 'their value, one read');
+    }));
+});
+
+test('SAVE CACHING', 'when our stamp replaces one we never saw, the tab is re-read once', async () => {
+    const prefix = 'database:getData:"CACHE","Clients"';
+    await _withRestoredTabs([['CACHE', 'Clients']], () => _countSheetReads('CACHE', 'Clients', async (reads) => {
+        await triggerCachePoll();
+        const rows = await Database.getData('CACHE', 'Clients', CLIENTS_MAPPING);
+        // Our stamp write's read of the Caching tab waits while another session changes the tab
+        // and stamps it; our stamp then replaces theirs
+        let release, reached, held = false;
+        const gate = new Promise(resolve => release = resolve);
+        const atRead = new Promise(resolve => reached = resolve);
+        FakeGoogleSheetsService.faults = {
+            beforeRead: async (t, range) => {
+                if (held || t !== 'CACHE' || range !== 'Caching') return;
+                held = true;
+                reached();
+                await gate;
+            }
+        };
+        // Dated apart from ours (stamps are dated a second ahead)
+        const theirs = new Date(Date.now() + 500).toISOString();
+        try {
+            await Database.setData('CACHE', 'Clients', rows, CLIENTS_MAPPING, { skipMetadata: true });
+            await atRead;
+            _rawTab('CACHE', 'Clients')[1][0] = 'ABCAM ELSEWHERE';
+            const row = _stampRow(prefix);
+            if (row) row[1] = theirs; else _rawTab('CACHE', 'Caching').push([prefix, theirs]);
+        } finally {
+            FakeGoogleSheetsService.faults = null;
+            release();
+        }
+        const base = reads();
+        await _waitFor(() => _stampRow(prefix)[1] !== theirs, 'our stamp over theirs');
+        await triggerCachePoll();
+        const after = await Database.getData('CACHE', 'Clients', CLIENTS_MAPPING);
+        assertEqual([after[0].name, reads()], ['ABCAM ELSEWHERE', base + 1], 'their value, one read');
+    }));
+});
+
+test('SAVE CACHING', 'a read in flight from before a save doesn\'t overwrite the saved tab', async () => {
+    await _withRestoredTabs([['CACHE', 'Clients']], async () => {
+        const rows = (await Database.getData('CACHE', 'Clients', CLIENTS_MAPPING)).map(row => ({ ...row }));
+        invalidateCache([{ namespace: 'database', methodName: 'getData', args: ['CACHE', 'Clients'] }], true);
+        // The next read of the tab takes its data now and answers only once released
+        const original = FakeGoogleSheetsService.getSheetData;
+        let release, taken;
+        const gate = new Promise(resolve => release = resolve);
+        const read = new Promise(resolve => taken = resolve);
+        FakeGoogleSheetsService.getSheetData = async function (tableId, range) {
+            if (tableId !== 'CACHE' || range !== 'Clients') return original.call(this, tableId, range);
+            FakeGoogleSheetsService.getSheetData = original;
+            const data = await original.call(this, tableId, range);
+            taken();
+            await gate;
+            return data;
+        };
+        try {
+            const stale = Database.getData('CACHE', 'Clients');
+            await read;
+            rows[0].abbr = 'SAVED';
+            await Database.setData('CACHE', 'Clients', rows, CLIENTS_MAPPING, { skipMetadata: true });
+            release();
+            await stale;
+        } finally {
+            FakeGoogleSheetsService.getSheetData = original;
+            release();
+        }
+        const after = await Database.getData('CACHE', 'Clients', CLIENTS_MAPPING);
+        assertEqual(after[0].abbr, 'SAVED', 'the saved tab stays cached');
+    });
+});
+
+test('SAVE CACHING', 'a lock change is still confirmed by a fresh read at the next poll', async () => {
+    const user = 'stamp.tester@example.com';
+    const tab = 'StampTest lock';
+    await _withRestoredTabs([['CACHE', 'Locks']], () => _countSheetReads('CACHE', 'Locks', async (reads) => {
+        try {
+            await ApplicationUtils.lockSheet('PACK_LISTS', tab, user);
+            await ApplicationUtils.getLocksData();
+            const base = reads();
+            await _waitFor(() => {
+                const row = _stampRow('app_utils:getLocksData');
+                return row && new Date(row[1]).getTime() > Date.now();
+            }, 'the lock stamp');
+            await triggerCachePoll();
+            await ApplicationUtils.getLocksData();
+            assertEqual(reads(), base + 1, 'Locks reads after the poll read our own lock stamp');
+        } finally {
+            await ApplicationUtils.unlockSheet('PACK_LISTS', tab, user);
+        }
+    }));
+    invalidateCache([{ namespace: 'app_utils', methodName: 'getLocksData', args: [] }]);
+});
+
 // ── Group 35: Preferences ─────────────────────────────────────────────────────
 // FakeGoogle CACHE/Preferences has 13 rows, among them:
 //   4 schedule* integer prefs (offsets 14, 14, 7, 7)
@@ -3055,8 +3435,13 @@ function iwRestore(snap) {
     s.length = 0;
     snap.rows.forEach((r, i) => { r.length = 0; r.push(...snap.copies[i]); s.push(r); });
 }
+// Fault hooks play another editor on the data sheets: change stamps on the Caching tab (written in
+// the background after each data write) pass them by
+const _isStampCall = (tableId, target) => tableId === 'CACHE' &&
+    [].concat(target).every(t => String(t?.range ?? t).startsWith('Caching'));
 async function withFaults(faults, fn) {
-    FakeGoogleSheetsService.faults = faults;
+    FakeGoogleSheetsService.faults = Object.fromEntries(Object.entries(faults).map(([name, hook]) =>
+        [name, (tableId, target, ...rest) => _isStampCall(tableId, target) ? undefined : hook(tableId, target, ...rest)]));
     try { return await fn(); } finally { FakeGoogleSheetsService.faults = null; }
 }
 function iwNewRow(label) {

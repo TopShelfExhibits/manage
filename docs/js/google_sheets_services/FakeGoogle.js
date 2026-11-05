@@ -15,6 +15,8 @@ function _colToIndex(letters) {
 }
 
 let _delaysEnabled = true;
+// Drive modifiedTime per table (FakeGoogleSheetsService.getModifiedTimes)
+const _modifiedTimes = {};
 
 // Serialize an EditHistory/MetaData fixture (contract: docs/notes/metadata-implementation.md)
 const _json = (value) => JSON.stringify(value);
@@ -1189,6 +1191,8 @@ export class FakeGoogleSheetsService {
      *   beforeBatchWrite(tableId, data)         before a batchSetValues; return 'drop' to lose all of
      *                                           it, or a Set of data indices to lose just those
      *   beforeDelete(tableId, tabName, rows)    before a deleteSheetRows; return 'drop' to lose it
+     *   beforeModifiedTimes(tableIds)           before a getModifiedTimes; throw to fail it (Drive down),
+                                           or return { tableId: time } to report those times instead
      */
     static faults = null;
 
@@ -1207,6 +1211,46 @@ export class FakeGoogleSheetsService {
         const rows = [...new Set((rowNumbers || []).map(Number).filter(n => Number.isInteger(n) && n > 1))].sort((a, b) => b - a);
         if (await this._fault('beforeDelete', tableId, tabName, rows) === 'drop') return true;
         rows.forEach(n => { if (n - 1 < sheet.length) sheet.splice(n - 1, 1); });
+        return true;
+    }
+
+    /**
+     * Drive modifiedTime of each table's spreadsheet. Every write moves it on (see the write wrappers
+     * below the class); touch() is a hand edit in Sheets.
+     * @returns {Promise<Object<string, string>|null>} tableId → ISO time; null without auth
+     */
+    static async getModifiedTimes(tableIds) {
+        await this.delay(100 + Math.random() * 200);
+        if (!(await FakeGoogleSheetsAuth.checkAuth())) return null;
+        const overrides = await this._fault('beforeModifiedTimes', tableIds) || {};
+        return Object.fromEntries(tableIds.map(tableId => {
+            if (!this.ENDPOINT_IDS[tableId]) throw new Error(`[getModifiedTimes] Spreadsheet ID not found for table: ${tableId}`);
+            return [tableId, overrides[tableId] || _modifiedTimes[tableId] || new Date(0).toISOString()];
+        }));
+    }
+
+    /** Move a table's modifiedTime on, as any edit of its spreadsheet does (strictly increasing). */
+    static touch(tableId) {
+        const last = Date.parse(_modifiedTimes[tableId] || 0) || 0;
+        _modifiedTimes[tableId] = new Date(Math.max(Date.now(), last + 1)).toISOString();
+    }
+
+    /**
+     * values.append: add rows below the last non-empty row of the range's tab, as one step (two
+     * appends never land on the same row).
+     */
+    static async appendSheetValues(tableId, range, rows) {
+        await this.delay(300 + Math.random() * 300);
+        await FakeGoogleSheetsAuth.checkAuth();
+        if (!this.ENDPOINT_IDS[tableId]) throw new Error(`[appendSheetValues] Spreadsheet ID not found for table: ${tableId}`);
+        if (await this._fault('beforeWrite', tableId, range, rows) === 'drop') return true;
+        const bang = range.lastIndexOf('!');
+        const sheetName = _unquoteSheetName(bang >= 0 ? range.slice(0, bang) : range);
+        if (!this.mockData[tableId]) this.mockData[tableId] = {};
+        const sheet = this.mockData[tableId][sheetName] ||= [];
+        let last = sheet.length;
+        while (last > 0 && !(sheet[last - 1] || []).some(cell => cell !== '' && cell != null)) last--;
+        sheet.splice(last, 0, ...rows.map(row => [...row]));
         return true;
     }
 
@@ -1872,9 +1916,26 @@ const _fixtureVersion = (() => {
 const _externalChangeListeners = new Set();
 let _saveTimer = null;
 
+// Every write moves its spreadsheet's modifiedTime on once it has landed, as Drive does. A whole-tab
+// setSheetData with { returnValues: true } returns the tab as a whole-tab read now returns it.
+for (const name of ['setSheetData', 'batchSetValues', 'appendSheetValues', 'deleteSheetRows', 'hideTabs', 'showTabs', 'copySheetTab', 'createBlankTab']) {
+    const write = FakeGoogleSheetsService[name];
+    FakeGoogleSheetsService[name] = async function (tableId, ...args) {
+        const result = await write.call(this, tableId, ...args);
+        FakeGoogleSheetsService.touch(tableId);
+        const [tabName, , , options] = args;
+        if (name === 'setSheetData' && options?.returnValues && !String(tabName).includes('!')) {
+            const tab = FakeGoogleSheetsService.mockData[tableId]?.[tabName];
+            return tab ? JSON.parse(JSON.stringify(tab)) : [[]];
+        }
+        return result;
+    };
+}
+
 function _applyState(state) {
     FakeGoogleSheetsService.mockData = state.mockData;
     FakeGoogleSheetsService.mockTabs = state.mockTabs;
+    Object.keys(FakeGoogleSheetsService.ENDPOINT_IDS).forEach(tableId => FakeGoogleSheetsService.touch(tableId));
 }
 
 function _currentStateJson() {

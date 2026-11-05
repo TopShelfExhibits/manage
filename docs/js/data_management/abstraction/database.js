@@ -15,7 +15,7 @@ if (isLocalhost()) {
     ({ GoogleSheetsService, GoogleSheetsAuth } = await import('../../google_sheets_services/index.js'));
 }
 
-import { wrapMethods, invalidateCache, stampDataChange, EditHistoryUtils, assertAppCurrent } from '../index.js';
+import { wrapMethods, invalidateCache, fillCache, stampDataChange, watchSpreadsheets, EditHistoryUtils, assertAppCurrent } from '../index.js';
 import { ARCHIVE_TAB_NAME, ARCHIVE_HEADERS, MAX_HISTORY_ENTRIES } from '../utils/metadata-utils.js';
 
 // Uploaded item images are web-sized: within a MAX_UPLOAD_DIM × MAX_UPLOAD_DIM square
@@ -33,8 +33,11 @@ class database_uncached {
      * @returns {Promise<Array<Object>>} - Array of JS objects
      */
     static async getData(deps, tableId, tabName, mapping = null) {
-        // Get raw sheet data from GoogleSheetsService
-        const rawData = await GoogleSheetsService.getSheetData(tableId, tabName);
+        // One sheet read per tab: a call with a mapping argument (null included) uses the tab's
+        // unmapped read, cached under the key prefix the tab's writes and the poller invalidate
+        const rawData = arguments.length > 3
+            ? await deps.call(Database.getData, tableId, tabName)
+            : await GoogleSheetsService.getSheetData(tableId, tabName);
         if (mapping?._preserveColumns) {
             mapping = resolveSheetMapping(mapping, rawData?.[0]).read;
         }
@@ -232,38 +235,15 @@ class database_uncached {
         const writeMapping = mapping?._preserveColumns
             ? resolveSheetMapping(mapping, (await GoogleSheetsService.getSheetData(tableId, tabName))?.[0]).write
             : mapping;
-        const result = await GoogleSheetsService.setSheetData(tableId, tabName, updatesWithMetadata, writeMapping);
-        
-        // ═══════════════════════════════════════════════════════════════
-        // CRITICAL — DO NOT REORDER THESE TWO CALLS
-        //
-        // stampDataChange MUST be called before invalidateCache.
-        // stampDataChange captures `new Date().toISOString()` immediately
-        // and writes it to the CACHE/Caching tab (async, fire-and-forget).
-        // invalidateCache then clears the local in-memory cache.
-        // After both complete, the caller (store.save) issues apiCall()
-        // to repopulate the cache with entry.filled = now.
-        //
-        // Because the timestamp is captured BEFORE the cache is cleared
-        // and refilled, remoteTs < entry.filled for THIS session, so the
-        // poller correctly skips our own freshly-saved data.
-        // Other sessions still have their old entry.filled < remoteTs
-        // and are correctly invalidated on their next poll.
-        //
-        // Moving stampDataChange after invalidateCache or after the cache
-        // repopulation would break cross-session change detection.
-        // ═══════════════════════════════════════════════════════════════
-        stampDataChange(`database:getData:"${tableId}","${tabName}"`);
-        invalidateCache([
-            { namespace: 'database', methodName: 'getData', args: [tableId, tabName] }
-        ], true);
+        const tabValues = await GoogleSheetsService.setSheetData(tableId, tabName, updatesWithMetadata, writeMapping, { returnValues: true });
+        _replaceCachedTab(tableId, tabName, tabValues);
 
         // Archive only after the main write succeeded
         if (deletedRows.length > 0) {
             await _archiveDeletedRows(tableId, tabName, deletedRows, username);
         }
 
-        return result;
+        return true;
     }
 
 
@@ -337,13 +317,8 @@ class database_uncached {
             ? GoogleSheetsService.reverseTransformSheetData(writeMapping, transformedData)
             : GoogleSheetsService.objectsToSheetArray(transformedData);
 
-        await GoogleSheetsService.setSheetData(tableId, tabName, updatedSheetData);
-
-        // Invalidate related caches using prefix to handle custom mapped data
-        stampDataChange(`database:getData:"${tableId}","${tabName}"`);
-        invalidateCache([
-            { namespace: 'database', methodName: 'getData', args: [tableId, tabName] }
-        ], true);
+        const tabValues = await GoogleSheetsService.setSheetData(tableId, tabName, updatedSheetData, null, { returnValues: true });
+        _replaceCachedTab(tableId, tabName, tabValues);
 
         return true;
     }
@@ -528,13 +503,22 @@ export const Database = wrapMethods(
     database_uncached, 
     'database', 
     ['createTab', 'hideTabs', 'showTabs', 'setData', 'updateRow', 'setCellValue', 'setCellValues', 'deleteSheetRows', 'appendSheetRow', 'uploadItemImage', 'getDriveFileBlob', 'readFresh', 'readFreshRanges', 'columnLetter', 'a1Range'], // getDriveFileBlob: uncached read (callers own the Blob)
-    ['getTabs'], // Infinite cache
-    {
-        // Sheet data: infinite for INVENTORY and PACK_LISTS (cross-session poller handles freshness);
-        // 20-minute default for everything else (PROD_SCHED, CACHE, etc.)
-        'getData': (args) => (args[0] === 'INVENTORY' || args[0] === 'PACK_LISTS') ? null : undefined
-    }
+    ['getTabs', 'getData'] // Infinite cache: the poller keeps sheet data current (watchSpreadsheets below)
 );
+
+// Sheet data stays cached while its spreadsheet is unchanged (caching.js, Spreadsheet watch). Every
+// app write stamps the Caching tab with the tab it changed. The Production Schedule is also edited by
+// hand, without stamps. While Drive can't confirm a spreadsheet, its reads expire as they used to.
+watchSpreadsheets({
+    read: (tableIds) => GoogleSheetsService.getModifiedTimes(tableIds),
+    stampsTable: 'CACHE',
+    prefixes: (tableId) => [`database:getData:"${tableId}",`, `database:getTabs:"${tableId}"`],
+    tables: {
+        PROD_SCHED: { editedByHand: true, unconfirmedMs: 4 * 60 * 1000 },
+        PACK_LISTS: { unconfirmedMs: 30 * 60 * 1000 },
+        INVENTORY: {}
+    }
+});
 
 
 /**
@@ -635,6 +619,22 @@ async function _archiveDeletedRows(sourceTable, sourceTab, deletedRows, username
     } catch (error) {
         console.error('Failed to archive deleted rows:', error);
         // Don't throw - archival failure shouldn't block the main save
+    }
+}
+
+/**
+ * After a whole-tab write: stamp the change for other sessions, invalidate everything computed
+ * from the tab (the reactive stores reload), and cache the tab as the write's response gave it
+ * (exactly what a read returns now), so the reload doesn't read the tab again.
+ * @private
+ */
+function _replaceCachedTab(tableId, tabName, tabValues) {
+    stampDataChange(`database:getData:"${tableId}","${tabName}"`);
+    invalidateCache([
+        { namespace: 'database', methodName: 'getData', args: [tableId, tabName] }
+    ], true);
+    if (Array.isArray(tabValues)) {
+        fillCache({ namespace: 'database', methodName: 'getData', args: [tableId, tabName] }, tabValues);
     }
 }
 
