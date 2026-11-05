@@ -20,6 +20,9 @@
  */
 export const THUMBNAIL_FIELD = Object.freeze({ key: 'thumbnail', label: 'Thumbnail', type: 'thumbnail', format: 'thumbnail' });
 
+/** Uploaded item images are web-sized: within a MAX_UPLOAD_DIM × MAX_UPLOAD_DIM square (pixels). */
+export const MAX_UPLOAD_DIM = 1000;
+
 /** @typedef {{ x: number, y: number, w: number, h: number }} ThumbnailCrop  fractions of the file */
 /** @typedef {{ id: string, note?: string, crop?: ThumbnailCrop }} ThumbnailEntry */
 

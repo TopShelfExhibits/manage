@@ -17,9 +17,7 @@ if (isLocalhost()) {
 
 import { wrapMethods, invalidateCache, fillCache, stampDataChange, watchSpreadsheets, EditHistoryUtils, assertAppCurrent } from '../index.js';
 import { ARCHIVE_TAB_NAME, ARCHIVE_HEADERS, MAX_HISTORY_ENTRIES } from '../utils/metadata-utils.js';
-
-// Uploaded item images are web-sized: within a MAX_UPLOAD_DIM × MAX_UPLOAD_DIM square
-const MAX_UPLOAD_DIM = 1000;
+import { MAX_UPLOAD_DIM } from '../utils/thumbnail-values.js';
 
 class database_uncached {
     /**

@@ -12,7 +12,7 @@
  *
  *   Phase 1 — Reprocess originals
  *     Each _ORIGINAL backup was kept when its image exceeded the old upload cap. This phase
- *     re-uploads the original at the current 512px limit, updates every cell that referenced the
+ *     re-uploads the original at the current MAX_UPLOAD_DIM limit, updates every cell that referenced the
  *     old thumbnail, and deletes both the stale thumbnail and the _ORIGINAL. If a current-quality
  *     file with the same source bytes already exists elsewhere in the folder, that file is reused
  *     instead of uploading again (cross-item dedup).
@@ -29,10 +29,9 @@
  *     _ORIGINAL files still remaining after Phase 1 errors) is deleted.
  */
 
-import { Database, parseThumbnails, serializeThumbnails, normalizeHeaderName, isLocalhost } from '../index.js';
+import { Database, MAX_UPLOAD_DIM, parseThumbnails, serializeThumbnails, normalizeHeaderName, isLocalhost } from '../index.js';
 import { GoogleSheetsService } from '../../google_sheets_services/index.js';
 
-const MAX_UPLOAD_DIM = 512;
 const THUMBNAIL_HEADER = 'Thumbnail';
 
 // ─── Public entry point ───────────────────────────────────────────────────────
