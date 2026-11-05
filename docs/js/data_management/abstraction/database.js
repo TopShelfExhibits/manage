@@ -35,7 +35,7 @@ class database_uncached {
         // unmapped read, cached under the key prefix the tab's writes and the poller invalidate
         const rawData = arguments.length > 3
             ? await deps.call(Database.getData, tableId, tabName)
-            : await GoogleSheetsService.getSheetData(tableId, tabName);
+            : await _readTab(tableId, tabName);
         if (mapping?._preserveColumns) {
             mapping = resolveSheetMapping(mapping, rawData?.[0]).read;
         }
@@ -50,6 +50,21 @@ class database_uncached {
         }
         // If no mapping, return raw 2D array
         return rawData;
+    }
+
+    /**
+     * Start reading tabs ahead of code that reads them one at a time: the reads go out together
+     * (one request per spreadsheet, see Tab reads below) and land in each tab's own cache entry.
+     * It records no dependency: callers still read each tab through deps.call, and their first
+     * read joins the one already running. NOT cached (listed with the uncached methods below).
+     * @param {string} tableId
+     * @param {string[]} tabNames
+     */
+    static prefetch(tableId, tabNames) {
+        for (const tabName of new Set(tabNames || [])) {
+            // A failure reaches the caller's own read of the tab
+            Database.getData(tableId, tabName).catch(() => {});
+        }
     }
 
     /**
@@ -500,7 +515,7 @@ class database_uncached {
 export const Database = wrapMethods(
     database_uncached, 
     'database', 
-    ['createTab', 'hideTabs', 'showTabs', 'setData', 'updateRow', 'setCellValue', 'setCellValues', 'deleteSheetRows', 'appendSheetRow', 'uploadItemImage', 'getDriveFileBlob', 'readFresh', 'readFreshRanges', 'columnLetter', 'a1Range'], // getDriveFileBlob: uncached read (callers own the Blob)
+    ['createTab', 'hideTabs', 'showTabs', 'setData', 'updateRow', 'setCellValue', 'setCellValues', 'deleteSheetRows', 'appendSheetRow', 'uploadItemImage', 'getDriveFileBlob', 'readFresh', 'readFreshRanges', 'columnLetter', 'a1Range', 'prefetch'], // getDriveFileBlob: uncached read (callers own the Blob)
     ['getTabs', 'getData'] // Infinite cache: the poller keeps sheet data current (watchSpreadsheets below)
 );
 
@@ -617,6 +632,60 @@ async function _archiveDeletedRows(sourceTable, sourceTab, deletedRows, username
     } catch (error) {
         console.error('Failed to archive deleted rows:', error);
         // Don't throw - archival failure shouldn't block the main save
+    }
+}
+
+// ─── Tab reads ───────────────────────────────────────────────────────────────
+// getData's whole-tab read waits one turn in a queue per spreadsheet, then goes out with every
+// other tab asked for at the same moment as one values.batchGet: one read request. Each tab keeps
+// its own cache entry, pending call, dependencies and invalidation; the queue only changes how the
+// request is made. Database.prefetch fills it ahead of loops that read tabs one at a time. Fresh
+// reads (verified writes, locks, the Caching tab) don't come through here.
+const _tabReadQueues = new Map();       // tableId → [{ tabName, resolve, reject }]
+const TAB_READ_BATCH_RANGES = 40;
+const TAB_READ_BATCH_URL_CHARS = 6000;  // The ranges travel in the request URL
+
+/** Read a whole tab through its spreadsheet's queue. */
+function _readTab(tableId, tabName) {
+    return new Promise((resolve, reject) => {
+        let queue = _tabReadQueues.get(tableId);
+        if (!queue) {
+            _tabReadQueues.set(tableId, queue = []);
+            setTimeout(() => _sendTabReads(tableId), 0);
+        }
+        queue.push({ tabName, resolve, reject });
+    });
+}
+
+/** Send a spreadsheet's queued reads, in batches small enough for one request URL each. */
+function _sendTabReads(tableId) {
+    const queue = _tabReadQueues.get(tableId) || [];
+    _tabReadQueues.delete(tableId);
+    let batch = [];
+    let chars = 0;
+    for (const read of queue) {
+        const length = encodeURIComponent(read.tabName).length + '&ranges='.length;
+        if (batch.length && (batch.length >= TAB_READ_BATCH_RANGES || chars + length > TAB_READ_BATCH_URL_CHARS)) {
+            _sendTabReadBatch(tableId, batch);
+            batch = [];
+            chars = 0;
+        }
+        batch.push(read);
+        chars += length;
+    }
+    if (batch.length) _sendTabReadBatch(tableId, batch);
+}
+
+async function _sendTabReadBatch(tableId, reads) {
+    const readOne = (read) => GoogleSheetsService.getSheetData(tableId, read.tabName).then(read.resolve, read.reject);
+    if (reads.length === 1) return readOne(reads[0]);
+    try {
+        const tabs = await GoogleSheetsService.batchGetValues(tableId, reads.map(read => read.tabName));
+        reads.forEach((read, i) => read.resolve(tabs[i]));
+    } catch (err) {
+        // One bad range (a missing tab) fails the whole batch: read each, so only its own read fails
+        if (err?.status === 400 || err?.result?.error?.code === 400) reads.forEach(readOne);
+        else reads.forEach(read => read.reject(err));
     }
 }
 

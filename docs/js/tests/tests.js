@@ -2105,6 +2105,65 @@ test('SAVE CACHING', 'a lock change is still confirmed by a fresh read at the ne
     invalidateCache([{ namespace: 'app_utils', methodName: 'getLocksData', args: [] }]);
 });
 
+// ── Group: Tab reads ──────────────────────────────────────────────────────────
+// getData's whole-tab reads queue per spreadsheet and go out together as one values.batchGet.
+// clearCache empties the cache without reloading the stores, so only the test's own reads run.
+
+/** Run fn, recording each tab read request: { tableId, ranges } (a single read has one range). */
+async function _recordTabReads(fn) {
+    const S = FakeGoogleSheetsService;
+    const getSheetData = S.getSheetData, batchGetValues = S.batchGetValues;
+    const requests = [];
+    S.getSheetData = async function (tableId, range) {
+        requests.push({ tableId, ranges: [range] });
+        return getSheetData.call(this, tableId, range);
+    };
+    S.batchGetValues = async function (tableId, ranges) {
+        requests.push({ tableId, ranges: [...ranges] });
+        return Promise.all(ranges.map(range => getSheetData.call(S, tableId, range)));
+    };
+    try {
+        await fn();
+    } finally {
+        S.getSheetData = getSheetData;
+        S.batchGetValues = batchGetValues;
+    }
+    return requests;
+}
+
+test('TAB READS', 'tabs read at the same moment are one request', async () => {
+    const tabs = ['FURNITURE', 'CABINETS', 'PANELS'];
+    clearCache();
+    let results;
+    const requests = await _recordTabReads(async () => {
+        results = await Promise.all(tabs.map(tab => Database.getData('INVENTORY', tab)));
+    });
+    assertEqual(requests.filter(r => r.tableId === 'INVENTORY'), [{ tableId: 'INVENTORY', ranges: tabs }], 'one request');
+    assertEqual(JSON.stringify(results), JSON.stringify(tabs.map(tab => FakeGoogleSheetsService.getMockData('INVENTORY', tab))), 'each tab as read');
+});
+
+test('TAB READS', 'a missing tab fails only its own read', async () => {
+    clearCache();
+    const results = await withFaults({
+        beforeRead: (t, range) => {
+            if (range !== 'NO SUCH TAB') return;
+            const err = new Error('Unable to parse range: NO SUCH TAB');
+            err.status = 400;
+            throw err;
+        }
+    }, () => Promise.allSettled([Database.getData('INVENTORY', 'FURNITURE'), Database.getData('INVENTORY', 'NO SUCH TAB')]));
+    assertEqual(results.map(r => r.status), ['fulfilled', 'rejected'], 'results');
+    assertEqual(JSON.stringify(results[0].value), JSON.stringify(FakeGoogleSheetsService.getMockData('INVENTORY', 'FURNITURE')), 'the good tab');
+});
+
+test('TAB READS', 'getAllInventoryData reads every inventory tab in one request', async () => {
+    clearCache();
+    const requests = await _recordTabReads(() => Requests.getAllInventoryData());
+    const tabs = (await Requests.getAvailableTabs('INVENTORY')).map(tab => tab.title);
+    const inventory = requests.filter(r => r.tableId === 'INVENTORY');
+    assertEqual([inventory.length, [...(inventory[0]?.ranges || [])].sort()], [1, [...tabs].sort()], 'one request, every tab');
+});
+
 // ── Group 35: Preferences ─────────────────────────────────────────────────────
 // FakeGoogle CACHE/Preferences has 13 rows, among them:
 //   4 schedule* integer prefs (offsets 14, 14, 7, 7)
@@ -3779,6 +3838,25 @@ test('PERSISTED RESULTS', 'a local save invalidates a restored result through it
     }
     assertContains([...fired], 'getInventoryShortageAlerts', 'restored alerts invalidated');
     assertEqual(await Requests.getInventoryShortageAlerts(), [CAB_004_ALERT], 'recomputed after the save');
+});
+
+test('PERSISTED RESULTS', 'a stale row\'s sources are read in one request per spreadsheet', async () => {
+    const tabsByTable = {};
+    for (const source of _alertSources.filter(s => s.startsWith('database:getData:'))) {
+        const [tableId, tabName] = JSON.parse(`[${source.slice('database:getData:'.length)}]`);
+        (tabsByTable[tableId] ||= new Set()).add(tabName);
+    }
+    // Saved before today, and the clock is a source: stale
+    setSavedAlertsRow(new Date(startOfTodayMs() - 3600000).toISOString(), _alertSources, RESTORED_MARKER);
+    let alerts;
+    const requests = await _recordTabReads(async () => { alerts = await restoreAlerts(); });
+    assertEqual(alerts, [CAB_004_ALERT], 'recomputed');
+    for (const [tableId, tabs] of Object.entries(tabsByTable)) {
+        const first = requests.find(r => r.tableId === tableId && r.ranges.some(range => tabs.has(range)));
+        const missing = [...tabs].filter(tab => !first?.ranges.includes(tab));
+        assertEqual(missing, [], `${tableId} sources missing from its first request`);
+    }
+    await savedAlertsRow([CAB_004_ALERT]);
 });
 
 test('DATE ROLLOVER', 'the rollover invalidates results computed from today, once', async () => {

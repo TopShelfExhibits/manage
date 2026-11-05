@@ -294,7 +294,11 @@ class CacheManager {
             const stale = row.sources.some(source => stamps.some(({ key: prefix, timestamp }) =>
                 source.startsWith(prefix) && new Date(timestamp).getTime() > savedAt
             ));
-            if (stale) return CacheManager.CACHE_MISS;
+            if (stale) {
+                // The recompute reads these sources: start the reads together
+                store.prefetch?.(row.sources);
+                return CacheManager.CACHE_MISS;
+            }
             for (const source of row.sources) {
                 CacheManager.addDependency(key, source);
                 if (!CacheManager.filledAt.has(source)) CacheManager.filledAt.set(source, savedAt);
@@ -942,8 +946,9 @@ export function setTimestampWriter(fn) {
  * @param {{ read: (key: string) => Promise<{value: *, savedAt: string, sources: string[]}|null>,
  *           write: (entry: {key: string, value: *, savedAt: string, sources: string[]}) => Promise,
  *           readSourceTimestamps: () => Promise<Array<{key: string, timestamp: string}>|null>,
- *           sourcePrefixes?: string[] }} store - sourcePrefixes: the source keys worth saving, those
- *           a source timestamp can name (default: all)
+ *           sourcePrefixes?: string[], prefetch?: (sources: string[]) => void }} store -
+ *           sourcePrefixes: the source keys worth saving, those a source timestamp can name
+ *           (default: all); prefetch: start reading a stale row's sources before it is recomputed
  */
 export function setPersistentStore(store) {
     CacheManager._persistentStore = store;

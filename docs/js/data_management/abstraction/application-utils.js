@@ -999,6 +999,7 @@ setInterval(checkDateRollover, 60 * 1000);
 const ANALYTICS_TAB = 'Analytics';
 const ANALYTICS_HEADERS = ['Key', 'SavedAt', 'Sources', 'Value'];
 const SHEETS_CELL_LIMIT = 50000;
+const TAB_READ_PREFIX = 'database:getData:';
 
 async function readAnalyticsRows() {
     const raw = await GoogleSheetsService.getSheetData('CACHE', ANALYTICS_TAB);
@@ -1035,6 +1036,22 @@ setPersistentStore({
         const stamps = await ApplicationUtils.readCacheTimestamps();
         if (!stamps) return null;
         return [...stamps, { key: TODAY_CACHE_KEY, timestamp: new Date(startOfTodayMs()).toISOString() }];
+    },
+    // A stale row's tab reads, grouped by spreadsheet: one batched request each (Database.prefetch)
+    prefetch(sources) {
+        const tabsByTable = {};
+        for (const source of sources) {
+            if (!source.startsWith(TAB_READ_PREFIX)) continue;
+            try {
+                const [tableId, tabName] = JSON.parse(`[${source.slice(TAB_READ_PREFIX.length)}]`);
+                if (typeof tableId === 'string' && typeof tabName === 'string') {
+                    (tabsByTable[tableId] ||= []).push(tabName);
+                }
+            } catch {
+                // Not a tab read
+            }
+        }
+        for (const [tableId, tabNames] of Object.entries(tabsByTable)) Database.prefetch(tableId, tabNames);
     }
 });
 
