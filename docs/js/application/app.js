@@ -9,6 +9,7 @@ import { hamburgerMenuRegistry } from './index.js';
 import { undoRegistry } from './index.js';
 import { Requests, getReactiveStore, appSettings, saveDirtyStoresToUserData, getShortageAlertsStore, getShortageAlertDays, shortageBanner } from './index.js';
 import { BannerNotifications, NotificationBubbleOverlay, notificationBus } from './index.js';
+import { SEVERITY } from './index.js';
 import { isLocalhost } from '../data_management/utils/helpers.js';
 
 const { createApp } = Vue;
@@ -79,14 +80,14 @@ const App = {
             const staticBanners = [
                 {
                     key: 'offline',
-                    color: 'orange',
+                    severity: SEVERITY.warning,
                     message: 'No network connection. Your data is preserved. Changes cannot be saved until connectivity is restored.',
                     visible: this.isOffline,
                     dismissible: false
                 },
                 {
                     key: 'permissions',
-                    color: 'red',
+                    severity: SEVERITY.critical,
                     message: `Login Issue: ${this.permissionsWarning}`,
                     visible: !!this.permissionsWarning,
                     dismissible: false,
@@ -97,14 +98,14 @@ const App = {
                 },
                 {
                     key: 'auth-error',
-                    color: 'red',
+                    severity: SEVERITY.critical,
                     message: `Error: ${this.authError}`,
                     visible: !!this.authError && !this.isAuthenticated,
                     dismissible: false
                 },
                 {
                     key: 'update-available',
-                    color: 'orange',
+                    severity: SEVERITY.warning,
                     message: 'A new version of the app is available. Editing is turned off until you refresh.',
                     visible: this.updateAvailable,
                     dismissible: false,

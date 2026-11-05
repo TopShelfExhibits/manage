@@ -15,7 +15,9 @@ export { getShortageAlertsStore, getShortageAlertDays, shortageBanner, shortages
 export { itemVariantCards } from './utils/itemVariants.js';
 export { getItemThumbnailsStore, itemThumbnailMap, withItemThumbnails } from './utils/itemThumbnails.js';
 export { undoRegistry, setTableRowSelectionState } from './utils/undoRegistry.js';
-export { getAutoColorClass, shouldAutoColor } from './utils/autoColor.js';
+export { getAutoColorClass } from './utils/autoColor.js';
+export { SEVERITY } from '../data_management/utils/severity.js';
+export { SEVERITY_COLORS, severityColor, statusColor } from './utils/severity.js';
 
 // Navigation components
 export { BreadcrumbComponent, PrimaryNavComponent } from './components/interface/navigationComponents.js';

@@ -1,4 +1,4 @@
-import { html, Requests, TableComponent, DataView, getReactiveStore, createAnalysisConfig, NavigationRegistry, Priority, invalidateCache, authState, undoRegistry, EditHistoryUtils, todayISOString, ProposalUtils, getInventoryNoteMaxLength, getInventoryTabList, INVENTORY_TAB_PREFERENCES, getShortageAlertsStore, getShortageAlertDays, shortagesByItem, itemShortageCards, itemVariantCards, itemVariantFamilies, THUMBNAIL_FIELD } from '../../index.js';
+import { html, Requests, TableComponent, DataView, getReactiveStore, createAnalysisConfig, NavigationRegistry, Priority, invalidateCache, authState, undoRegistry, EditHistoryUtils, todayISOString, ProposalUtils, getInventoryNoteMaxLength, getInventoryTabList, INVENTORY_TAB_PREFERENCES, getShortageAlertsStore, getShortageAlertDays, shortagesByItem, itemShortageCards, itemVariantCards, itemVariantFamilies, THUMBNAIL_FIELD, SEVERITY } from '../../index.js';
 import { sheetLockMixin } from '../../utils/sheetLockMixin.js';
 import { thumbnailStyle, iconLabel } from '../../utils/views/viewStyles.js';
 import { CellRenderer } from '../interface/cells.js';
@@ -654,7 +654,6 @@ export const InventoryTableComponent = {
             return [
                 {
                     key: 'lock',
-                    color: '',
                     message: this.lockedBySelf
                         ? 'You have this table open for editing on another device.'
                         : `Locked for edit by: ${this.lockOwnerDisplay}`,
@@ -666,7 +665,7 @@ export const InventoryTableComponent = {
                 },
                 {
                     key: 'conflict',
-                    color: 'red',
+                    severity: SEVERITY.critical,
                     message: 'Another session changed this data while you have unsaved edits. Save to keep your changes or discard them.',
                     visible: this.hasExternalConflict,
                     action: {

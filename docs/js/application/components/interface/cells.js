@@ -1,6 +1,7 @@
 import { html } from '../../utils/template-helpers.js';
 import { isCheckedValue, checkboxWriteValue } from '../../../data_management/utils/checkbox-values.js';
 import { escapeHtml, formatText } from '../../utils/views/fieldFormat.js';
+import { statusColor } from '../../utils/severity.js';
 
 /**
  * Cell registry (views-and-renderers-plan §4.14). A resolved field with `cell: '<name>'` renders
@@ -383,7 +384,8 @@ export const CellRenderer = {
 };
 
 /**
- * Decoration cards (§4.14): { message (HTML), class|color, title|hoverMessage, action, disabled, button, end }.
+ * Decoration cards (§4.14): { message (HTML), severity|class, title|hoverMessage, action, disabled, button, end }.
+ * A status card sets `severity` (its colour comes from severity.js); other cards set `class`.
  * `button: true` renders a <button> (e.g. "View Packlist"); otherwise a div/span card.
  * `end: true` floats the card to the end of its cell or detail value.
  */
@@ -395,7 +397,7 @@ export const DecorationCards = {
     },
     methods: {
         cardClass(card) {
-            return ['card', card.class || card.color || '', { clickable: !!card.action && !card.disabled, 'card-end': !!card.end }];
+            return ['card', statusColor(card), { clickable: !!card.action && !card.disabled, 'card-end': !!card.end }];
         },
         activate(card) {
             if (card.action && !card.disabled) card.action();

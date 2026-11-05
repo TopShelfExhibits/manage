@@ -46,6 +46,9 @@ import { todayISOString, setTestToday, startOfTodayMs, resolveShortageAlertDays,
 import { instantWriteEntry, identityKey, cellKey, joinKey } from '../data_management/utils/instant-write-config.js';
 import { estimateShipDate } from '../data_management/utils/ship-date.js';
 import { parseA1Range, gridNeeded, clipRangeToGrid, isGridLimitError } from '../google_sheets_services/gridRanges.js';
+import { SEVERITY, remainingSeverity } from '../data_management/utils/severity.js';
+import { severityColor, statusColor } from '../application/utils/severity.js';
+import { getAutoColorClass } from '../application/utils/autoColor.js';
 import { getReactiveStore, createAnalysisConfig, itemVariantCards } from '../application/index.js';
 import { checkSheetHealth } from './sheetHealth.js';
 import { guessColumnType, columnTypesEntry, columnTypeMap, columnTypeOf, isOpaqueType } from '../data_management/utils/column-types.js';
@@ -1176,20 +1179,20 @@ test('ITEM VARIANTS', 'description matching uses the variant or base description
     const mismatch = await check('(1) CAB-005b red cabinet');
     assertEqual([mismatch?.type, mismatch?.variant, mismatch?.inventoryDescription], ['description mismatch', 'CAB-005b', 'Tall gray storage cabinet with locking doors'], 'variant mismatch keeps the variant');
     const undeclared = await check('(1) CAB-005C Tall gray storage cabinet, short top');
-    assertEqual([undeclared?.type, undeclared?.color, undeclared?.message, undeclared?.variant], ['undeclared variant', 'yellow', 'Undeclared variant of CAB-005', 'CAB-005C'], 'undeclared variant');
+    assertEqual([undeclared?.type, undeclared?.severity, undeclared?.message, undeclared?.variant], ['undeclared variant', 'attention', 'Undeclared variant of CAB-005', 'CAB-005C'], 'undeclared variant');
 });
 
 test('ITEM VARIANTS', 'variant counts are checked against this and overlapping shows', async () => {
     const level = (Description, show) => Requests.checkVariantLevel({ 'Extracted Item': Description.match(/CAB-00\d/)[0], Description }, show);
-    const pick = (alert) => alert && [alert.type, alert.color, alert.message, alert.remaining, alert.details];
+    const pick = (alert) => alert && [alert.type, alert.severity, alert.message, alert.remaining, alert.details];
     assertEqual(pick(await level('(1) CAB-005b Tall gray storage cabinet with locking doors', 'ATSC 2025 NAB')),
-        ['variant shortage', 'red', 'CAB-005b: 1 short', -1, 'CAB-005b: 1 in inventory, 2 needed by this and overlapping shows.\nATSC 2025 NAB: 1\nGEARFIRE 2025 SHOT: 1'],
+        ['variant shortage', 'critical', 'CAB-005b: 1 short', -1, 'CAB-005b: 1 in inventory, 2 needed by this and overlapping shows.\nATSC 2025 NAB: 1\nGEARFIRE 2025 SHOT: 1'],
         'ATSC CAB-005b with GEARFIRE overlapping');
     assertEqual(pick(await level('(2) CAB-005b Tall gray storage cabinet with locking doors', 'TEST 2025 ENHANCED')),
-        ['variant shortage', 'red', 'CAB-005b: 1 short', -1, 'CAB-005b: 1 in inventory, 2 needed by this and overlapping shows.\nTEST 2025 ENHANCED: 2'],
+        ['variant shortage', 'critical', 'CAB-005b: 1 short', -1, 'CAB-005b: 1 in inventory, 2 needed by this and overlapping shows.\nTEST 2025 ENHANCED: 2'],
         'TEST ENHANCED CAB-005b');
     assertEqual(pick(await level('(6) CAB-005 Tall gray storage cabinet', 'TEST 2025 ENHANCED')),
-        ['variant shortage', 'orange', 'Unmodified CAB-005: 1 short', -1, 'Unmodified CAB-005: 5 in inventory, 6 needed by this and overlapping shows.\nTEST 2025 ENHANCED: 6'],
+        ['variant shortage', 'warning', 'Unmodified CAB-005: 1 short', -1, 'Unmodified CAB-005: 5 in inventory, 6 needed by this and overlapping shows.\nTEST 2025 ENHANCED: 6'],
         'TEST ENHANCED unmodified CAB-005');
     assertEqual(await level('(1) CAB-005C Tall gray storage cabinet, short top', 'TEST 2025 ENHANCED'), null, 'undeclared variant has no count');
     assertEqual(await level('(4) CAB-004 Curved-bottom white demo counter', 'ATSC 2025 NAB'), null, 'family without declared variants');
@@ -1208,7 +1211,7 @@ test('ITEM VARIANTS', 'a family with a real variant item shows that its variants
     assertEqual([...itemVariantFamilies(['CAB-005', 'CAB-006', 'CAB-006a', 'BX-10Rx39P'])], ['CAB-006', 'BX-10Rx39'], 'families');
     const families = itemVariantFamilies(['CAB-005', 'CAB-006', 'CAB-006a']);
     const cards = itemVariantCards({ itemNumber: 'CAB-006', quantity: '4', description: 'Rolling demo cabinet\n(1) CAB-006b with shelves' }, () => {}, families);
-    assertEqual(cards.map(card => [card.message, card.class]), [['Variants off', 'red']], 'one red card');
+    assertEqual(cards.map(card => [card.message, card.severity]), [['Variants off', 'critical']], 'one critical card');
     assertEqual(itemVariantCards({ itemNumber: 'CAB-005', quantity: '6', description: CAB_005_DESCRIPTION }, () => {}, families).map(card => card.message), ['b'], 'other families unaffected');
 });
 
@@ -2231,6 +2234,36 @@ test('SAVE CACHING', 'a lock change is still confirmed by a fresh read at the ne
         }
     }));
     invalidateCache([{ namespace: 'app_utils', methodName: 'getLocksData', args: [] }]);
+});
+
+// ── Group: Severity ───────────────────────────────────────────────────────────
+// Alerts, banners and status cards carry a severity (data_management/utils/severity.js); the UI
+// gives each one colour (application/utils/severity.js). Expected colours are SEVERITY_COLORS.
+
+test('SEVERITY', 'each severity has one colour', async () => {
+    assertEqual(Object.values(SEVERITY).map(severityColor), ['red', 'orange', 'yellow', 'purple', 'white', 'blue', 'gray', 'green'], 'colours');
+    assertEqual([severityColor(''), severityColor('nonsense'), severityColor(undefined)], ['', '', ''], 'none');
+});
+
+test('SEVERITY', 'statusColor: a class wins, then the severity', async () => {
+    assertEqual(statusColor({ severity: SEVERITY.critical }), 'red', 'severity');
+    assertEqual(statusColor({ severity: SEVERITY.critical, class: 'green' }), 'green', 'explicit class');
+    assertEqual(statusColor({ color: 'blue' }), 'blue', 'older color field');
+    assertEqual([statusColor({}), statusColor(null)], ['', ''], 'plain');
+});
+
+test('SEVERITY', 'remaining quantities: one rule for alerts and cells', async () => {
+    assertEqual([-1, 0, 0.5, 1, 5, null, NaN].map(remainingSeverity), ['critical', 'warning', 'warning', '', '', '', ''], 'remainingSeverity');
+    assertEqual([-1, 0, 1].map(getAutoColorClass), ['red', 'orange', ''], 'getAutoColorClass');
+    assertEqual(applyColorRule('checked:critical', 'X'), 'red', 'a view rule may name a severity');
+    assertEqual(applyColorRule('checked:gray', 'X'), 'gray', 'or a class');
+});
+
+test('SEVERITY', 'API alerts carry a severity, not a colour', async () => {
+    const shortage = await Requests.checkInventoryLevel({ 'Extracted Item': 'CAB-004' }, 'ATSC 2025 NAB');
+    assertEqual([shortage?.type, shortage?.severity, shortage?.color], ['item shortage', 'critical', undefined], 'CAB-004 shortage');
+    const missing = await Requests.checkDescriptionMatch({ 'Extracted Item': 'CAB-005', Description: '(1) CAB-005C Tall gray storage cabinet' });
+    assertEqual([missing?.severity, missing?.color], ['attention', undefined], 'undeclared variant');
 });
 
 // ── Group: Grid ranges ────────────────────────────────────────────────────────

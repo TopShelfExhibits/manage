@@ -1,4 +1,4 @@
-import { Requests, html, hamburgerMenuRegistry, PacklistTable, DataView, NavigationRegistry, DashboardToggleComponent, getReactiveStore, findMatchingStores, createAnalysisConfig, generateStoreKey, authState, ScheduleFilterSelect, invalidateCache, Priority } from '../../index.js';
+import { Requests, html, hamburgerMenuRegistry, PacklistTable, DataView, NavigationRegistry, DashboardToggleComponent, getReactiveStore, findMatchingStores, createAnalysisConfig, generateStoreKey, authState, ScheduleFilterSelect, invalidateCache, Priority, SEVERITY } from '../../index.js';
 import { textFiltersToSearchParams } from '../../../data_management/utils/helpers.js';
 import { PacklistItemsSummary } from './PacklistItemsSummary.js';
 import { ScheduleTableComponent } from './ScheduleTable.js';
@@ -814,12 +814,12 @@ export const PacklistContent = {
                 const showIssue = attachment.showIssue;
                 if (suggestedMatch) {
                     cards.push({ message: 'Link to schedule', class: 'gray', action: () => this.openLinkToScheduleModal(row.title) });
-                    cards.push({ message: `Link: ${suggestedMatch}`, class: 'red', action: () => this.openSuggestedMatchModal(row.title, suggestedMatch) });
+                    cards.push({ message: `Link: ${suggestedMatch}`, severity: SEVERITY.critical, action: () => this.openSuggestedMatchModal(row.title, suggestedMatch) });
                 } else if (clientIssue || showIssue) {
-                    if (clientIssue) cards.push({ message: '⚠ Client missing', class: 'red', action: () => this.openPacklistIndexResolutionModal(row.title, 'client', clientIssue.rawValue) });
-                    if (showIssue) cards.push({ message: '⚠ Show missing', class: 'red', action: () => this.openPacklistIndexResolutionModal(row.title, 'show', showIssue.rawValue) });
+                    if (clientIssue) cards.push({ message: '⚠ Client missing', severity: SEVERITY.critical, action: () => this.openPacklistIndexResolutionModal(row.title, 'client', clientIssue.rawValue) });
+                    if (showIssue) cards.push({ message: '⚠ Show missing', severity: SEVERITY.critical, action: () => this.openPacklistIndexResolutionModal(row.title, 'show', showIssue.rawValue) });
                 } else {
-                    cards.push({ message: 'Link to schedule', class: 'red', action: () => this.openLinkToScheduleModal(row.title) });
+                    cards.push({ message: 'Link to schedule', severity: SEVERITY.critical, action: () => this.openLinkToScheduleModal(row.title) });
                 }
             }
             return cards;

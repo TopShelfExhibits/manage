@@ -8,6 +8,7 @@ import { ContentHeaderComponent } from './contentHeaderComponent.js';
 import { CellRenderer, DecorationCards } from './cells.js';
 import { placeDecorations } from '../../utils/views/decorations.js';
 import { colorFor, rowColorFor } from '../../utils/views/viewColor.js';
+import { statusColor } from '../../utils/severity.js';
 
 export const CalendarComponent = {
     name: 'CalendarComponent',
@@ -343,6 +344,7 @@ export const CalendarComponent = {
         this._stickyHeader?.teardown();
     },
     methods: {
+        statusColor,
         _isGroupMaster(row) {
             if (!row || !row.metadata) return false;
             try {
@@ -573,7 +575,7 @@ export const CalendarComponent = {
                                     <button
                                         v-for="(card, ci) in endCards(seg.row)"
                                         :key="ci + '-' + card.message"
-                                        :class="['card', 'hide-when-narrow', card.color || card.class, { 'clickable': card.action && !card.disabled }]"
+                                        :class="['card', 'hide-when-narrow', statusColor(card), { 'clickable': card.action && !card.disabled }]"
                                         :title="card.title || card.hoverMessage || null"
                                         :disabled="card.disabled"
                                         @click.stop="card.action && !card.disabled ? card.action() : null"

@@ -1,4 +1,4 @@
-import { html, Requests, DataView, getReactiveStore, ProposalUtils, PROPOSAL_LOCK_NAMESPACE, parseDate, todayISOString, getInventoryNoteMaxLength, THUMBNAIL_FIELD } from '../../index.js';
+import { html, Requests, DataView, getReactiveStore, ProposalUtils, PROPOSAL_LOCK_NAMESPACE, parseDate, todayISOString, getInventoryNoteMaxLength, THUMBNAIL_FIELD, SEVERITY } from '../../index.js';
 import { sheetLockMixin } from '../../utils/sheetLockMixin.js';
 import { getProposalsStore, reloadProposals, proposalPath, commitInventoryProposal } from '../../utils/inventoryProposals.js';
 import { thumbnailStyle } from '../../utils/views/viewStyles.js';
@@ -208,7 +208,6 @@ export const InventoryProposalTable = {
             return [
                 {
                     key: 'lock',
-                    color: '',
                     message: this.lockedBySelf
                         ? 'You have this proposal open for editing on another device.'
                         : `Locked for edit by: ${this.lockOwnerDisplay}`,
@@ -218,14 +217,13 @@ export const InventoryProposalTable = {
                 },
                 {
                     key: 'conflict',
-                    color: 'red',
+                    severity: SEVERITY.critical,
                     message: 'Another session changed this proposal while you have unsaved edits. Save to keep your changes or discard them.',
                     visible: !!this.tableStore?.externalConflict,
                     action: { label: 'Discard', fn: () => this.handleRefresh() }
                 },
                 {
                     key: 'committed',
-                    color: '',
                     message: `Committed by ${this.proposal?.committedBy} on ${formatDay(this.proposal?.committed)}. Committed proposals are read-only.`,
                     visible: this.isCommitted,
                     dismissible: false

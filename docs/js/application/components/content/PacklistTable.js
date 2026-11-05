@@ -1,4 +1,4 @@
-import { html, TableComponent, DataView, Requests, getReactiveStore, NavigationRegistry, createAnalysisConfig, invalidateCache, Priority, tableRowSelectionState, EditHistoryUtils, authState, undoRegistry, todayISOString, getAutoColorClass, getInventoryTabList, INVENTORY_TAB_PREFERENCES, THUMBNAIL_FIELD } from '../../index.js';
+import { html, TableComponent, DataView, Requests, getReactiveStore, NavigationRegistry, createAnalysisConfig, invalidateCache, Priority, tableRowSelectionState, EditHistoryUtils, authState, undoRegistry, todayISOString, statusColor, severityColor, SEVERITY, getInventoryTabList, INVENTORY_TAB_PREFERENCES, THUMBNAIL_FIELD } from '../../index.js';
 import { resolveView } from '../../utils/views/resolveView.js';
 import { thumbnailStyle } from '../../utils/views/viewStyles.js';
 import { escapeHtml } from '../../utils/views/fieldFormat.js';
@@ -295,13 +295,12 @@ export const PacklistTable = {
             const banners = [
                 {
                     key: 'error',
-                    color: 'red',
+                    severity: SEVERITY.critical,
                     message: `Error: ${this.error}`,
                     visible: !!this.error
                 },
                 {
                     key: 'lock',
-                    color: '',
                     message: this.lockedBySelf
                         ? 'You have this pack list open for editing on another device.'
                         : `Locked for edit by: ${this.lockOwnerDisplay}`,
@@ -313,7 +312,7 @@ export const PacklistTable = {
                 },
                 {
                     key: 'conflict',
-                    color: 'red',
+                    severity: SEVERITY.critical,
                     message: 'Another session changed this data while you have unsaved edits. Save to keep your changes or discard them.',
                     visible: this.hasExternalConflict,
                     action: {
@@ -340,7 +339,7 @@ export const PacklistTable = {
                 if (clientIssue) {
                     banners.push({
                         key: 'client-missing',
-                        color: 'red',
+                        severity: SEVERITY.critical,
                         message: 'Client missing from production schedule index',
                         visible: true,
                         dismissible: true,
@@ -354,7 +353,7 @@ export const PacklistTable = {
                 if (showIssue) {
                     banners.push({
                         key: 'show-missing',
-                        color: 'red',
+                        severity: SEVERITY.critical,
                         message: 'Show missing from production schedule index',
                         visible: true,
                         dismissible: true,
@@ -370,7 +369,7 @@ export const PacklistTable = {
                 if (suggestedMatch) {
                     banners.push({
                         key: 'suggested-match',
-                        color: 'red',
+                        severity: SEVERITY.critical,
                         message: `Possible schedule match: "${suggestedMatch}"`,
                         visible: true,
                         dismissible: true,
@@ -382,7 +381,7 @@ export const PacklistTable = {
                 } else if (!clientIssue && !showIssue) {
                     banners.push({
                         key: 'not-on-schedule',
-                        color: 'red',
+                        severity: SEVERITY.critical,
                         message: 'Packlist not found on production schedule',
                         visible: true,
                         dismissible: true
@@ -958,36 +957,13 @@ export const PacklistTable = {
 
 
         /**
-         * Get card color for an alert
-         * Prioritizes alert.color property, falls back to type-based mapping
-         * For inventory alerts, uses universal autoColor rule based on remaining quantity
-         * @param {Object|string} alert - Alert object or type string
+         * Card colour of an analysis alert: its severity's colour (application/utils/severity.js).
+         * An alert without a severity shows as critical.
+         * @param {Object} alert
          * @returns {string} Color class name for the card
          */
         getAlertColor(alert) {
-            // If alert is an object with a color property, use it
-            if (typeof alert === 'object' && alert.color) {
-                return alert.color;
-            }
-            
-            // For inventory alerts with remaining quantity, use unified autoColor rule
-            if (typeof alert === 'object' && 
-                ['item shortage', 'item warning', 'low-inventory'].includes(alert.type) && 
-                alert.remaining !== undefined && alert.remaining !== null) {
-                const autoColor = getAutoColorClass(alert.remaining);
-                if (autoColor) return autoColor;
-            }
-            
-            // Otherwise, map type to color
-            const type = typeof alert === 'object' ? alert.type : alert;
-            const colorMap = {
-                'error': 'red',
-                'description mismatch': 'yellow',
-                'warning': 'yellow',
-                'info': 'blue',
-                'success': 'green'
-            };
-            return colorMap[type] || 'red'; // Default to red if type is unknown
+            return statusColor(alert) || severityColor(SEVERITY.critical);
         },
 
         getRowGrouping(row) {

@@ -1,4 +1,4 @@
-import { Database, ApplicationUtils, offsetToISO, parseDate, toISODateString, toUSDateString, wrapMethods, searchFilter, GetTopFuzzyMatch, normalizeHeaderName, normalizeText, normalizeMatchKey } from '../index.js';
+import { Database, ApplicationUtils, offsetToISO, parseDate, toISODateString, toUSDateString, wrapMethods, searchFilter, GetTopFuzzyMatch, normalizeHeaderName, normalizeText, normalizeMatchKey, SEVERITY } from '../index.js';
 import { estimateShipDate as _calculateShipDate } from '../utils/ship-date.js'; // ship date with fallbacks
 
 /**
@@ -425,7 +425,7 @@ class productionUtils_uncached {
         const rawNorm = normalizeMatchKey(rawValue);
 
         if (!rawNorm || indexData.length === 0) {
-            return { message: '⚠', type: 'index-reference', color: 'red', clickable: true, referenceType: kind, rawValue, status: 'missing', bestMatch: null };
+            return { message: '⚠', type: 'index-reference', severity: SEVERITY.critical, clickable: true, referenceType: kind, rawValue, status: 'missing', bestMatch: null };
         }
         if (indexData.some(entry => normalizeMatchKey(entry.name) === rawNorm)) return null;
         if (indexData.some(entry => Array.isArray(entry.abbreviations) && entry.abbreviations.some(abbr => normalizeMatchKey(abbr) === rawNorm))) return null;
@@ -436,14 +436,14 @@ class productionUtils_uncached {
         } catch (e) {}
 
         if (bestMatch) {
-            return { message: bestMatch, type: 'index-reference-resolved', color: 'gray', clickable: true, referenceType: kind, rawValue, status: 'fuzzy-pass', bestMatch };
+            return { message: bestMatch, type: 'index-reference-resolved', severity: SEVERITY.neutral, clickable: true, referenceType: kind, rawValue, status: 'fuzzy-pass', bestMatch };
         }
 
         const sortedCandidates = _rankReferenceCandidates(rawValue, indexData, _guessAbbreviations(rawValue));
         const topCandidate = sortedCandidates[0];
         const status = (sortedCandidates.length > 1 && topCandidate.score - sortedCandidates[1].score < 0.15) ? 'ambiguous' : 'missing';
 
-        return { message: '⚠', type: 'index-reference', color: 'red', clickable: true, referenceType: kind, rawValue, status, bestMatch: topCandidate?.name || null };
+        return { message: '⚠', type: 'index-reference', severity: SEVERITY.critical, clickable: true, referenceType: kind, rawValue, status, bestMatch: topCandidate?.name || null };
     }
 
     /**

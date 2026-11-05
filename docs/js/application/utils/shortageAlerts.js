@@ -1,4 +1,4 @@
-import { Requests, getReactiveStore, getPreferencesStore, resolveShortageAlertDays, shortageAlertDateFilters, NavigationRegistry, Priority } from '../index.js';
+import { Requests, getReactiveStore, getPreferencesStore, resolveShortageAlertDays, shortageAlertDateFilters, NavigationRegistry, Priority, SEVERITY } from '../index.js';
 
 /**
  * Inventory shortage alerts (Requests.getInventoryShortageAlerts): the app-wide store, the app
@@ -49,7 +49,7 @@ export function shortageBanner(alerts, days, navigateToPath) {
     if (!count || !days) return null;
     return {
         key: 'inventory-shortages',
-        color: 'orange',
+        severity: SEVERITY.critical,
         message: `${itemsRunShort(count, 'inventory item')} in the next ${days} days.`,
         visible: true,
         dismissible: true,
@@ -87,7 +87,7 @@ export function itemShortageCards(periods, days) {
     });
     return [{
         message: `Short ${-lowest}`,
-        class: 'red',
+        severity: SEVERITY.critical,
         title: `Runs short in the next ${days} days:\n${lines.join('\n')}`
     }];
 }
@@ -105,7 +105,7 @@ export function categoryShortageCards(alerts, tabName, days, navigateToPath) {
     if (!count) return [];
     return [{
         message: `${count} short`,
-        class: 'red',
+        severity: SEVERITY.critical,
         title: `${itemsRunShort(count)} in the next ${days} days`,
         action: () => navigateToPath(shortageReportPath(days, tabName))
     }];

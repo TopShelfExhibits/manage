@@ -1,4 +1,4 @@
-import { html, NavigationRegistry, appSettings, runNonessentialAnalysisOnAllStores } from '../../index.js';
+import { html, NavigationRegistry, appSettings, runNonessentialAnalysisOnAllStores, SEVERITY } from '../../index.js';
 import { PriorityQueue } from '../../utils/priorityQueue.js';
 import { viewportTier } from '../../utils/useContainerSize.js';
 
@@ -144,7 +144,7 @@ export const PrimaryNavComponent = {
             if (this.onlyEssentialAnalysis) {
                 const banner = {
                     key: 'analysis-disabled',
-                    color: 'orange',
+                    severity: SEVERITY.warning,
                     message: 'Advanced analysis is disabled. Some features may not be available.',
                     visible: true,
                     dismissible: false,

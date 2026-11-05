@@ -1,4 +1,4 @@
-import { wrapMethods, normalizeHeaderName, Database, InventoryUtils, PackListUtils, ProductionUtils, ApplicationUtils, EditHistoryUtils, InstantWriteUtils, ARCHIVE_TAB_NAME, ARCHIVE_HEADERS, offsetToISO, resolveShortageAlertDays, shortageAlertDateFilters, PREFERENCES_MAPPING, INVENTORY_TAB_PREFERENCES, sanitizeTabName, mapWithConcurrency, ProgressBus, getRandomLoadingQuote, DEFAULT_INVENTORY_MAPPING, ProposalUtils, PROPOSALS_TAB_NAME, PROPOSAL_MAPPING, resolveInventoryNoteMaxLength, primaryThumbnailValue } from './index.js';
+import { wrapMethods, normalizeHeaderName, Database, InventoryUtils, PackListUtils, ProductionUtils, ApplicationUtils, EditHistoryUtils, InstantWriteUtils, ARCHIVE_TAB_NAME, ARCHIVE_HEADERS, offsetToISO, resolveShortageAlertDays, shortageAlertDateFilters, PREFERENCES_MAPPING, INVENTORY_TAB_PREFERENCES, sanitizeTabName, mapWithConcurrency, ProgressBus, getRandomLoadingQuote, DEFAULT_INVENTORY_MAPPING, ProposalUtils, PROPOSALS_TAB_NAME, PROPOSAL_MAPPING, resolveInventoryNoteMaxLength, primaryThumbnailValue, SEVERITY, remainingSeverity } from './index.js';
 import { authState } from '../application/utils/auth.js';
 import { instantWriteEntry, identityText, parseColoredName } from './utils/instant-write-config.js';
 import { columnTypesEntry } from './utils/column-types.js';
@@ -890,7 +890,7 @@ class Requests_uncached {
         if (!result.inventoryFound) {
             return {
                 type: 'item warning',
-                color: 'purple',
+                severity: SEVERITY.review,
                 clickable: true,
                 message: `No inventory description`,
                 score: 0,
@@ -902,7 +902,7 @@ class Requests_uncached {
         if (result.undeclared) {
             return {
                 type: 'undeclared variant',
-                color: 'yellow',
+                severity: SEVERITY.attention,
                 clickable: true,
                 message: `Undeclared variant of ${itemNumber}`,
                 variant: result.variant,
@@ -910,13 +910,12 @@ class Requests_uncached {
             };
         }
 
-        const color = result.score < 0.5 ? 'purple' : 'white';
 
         // Return alert if match is less than 100%
         if (result.score < 1) {
             return {
                 type: 'description mismatch',
-                color: color,
+                severity: result.score < 0.5 ? SEVERITY.review : SEVERITY.note,
                 clickable: true,
                 message: `Description mismatch`,
                 score: result.score,
@@ -960,7 +959,7 @@ class Requests_uncached {
         if (remaining < 0) {
             return {
                 type: 'variant shortage',
-                color: kind === 'variant' ? 'red' : 'orange',
+                severity: kind === 'variant' ? SEVERITY.critical : SEVERITY.warning,
                 clickable: true,
                 message: `${name}: ${-remaining} short`,
                 details,
@@ -970,7 +969,7 @@ class Requests_uncached {
         if (kind === 'variant' && remaining < 1) {
             return {
                 type: 'variant shortage',
-                color: 'orange',
+                severity: SEVERITY.warning,
                 clickable: true,
                 message: `${name}: no buffer`,
                 details,
@@ -1063,7 +1062,7 @@ class Requests_uncached {
 
         return {
             type: 'cad-source-change',
-            color: 'yellow',
+            severity: SEVERITY.attention,
             clickable: true,
             message: `changed in cad by ${mostRecent?.u || 'unknown'}`,
             cadUser: mostRecent?.u || 'unknown',
@@ -1442,7 +1441,7 @@ class Requests_uncached {
             if (remaining === null) {
                 return {
                     type: 'item not found',
-                    color: 'yellow',
+                    severity: SEVERITY.attention,
                     clickable: true,
                     message: 'Not in inventory',
                     remaining: null
@@ -1450,10 +1449,11 @@ class Requests_uncached {
             }
             
             // Build alert object based on inventory level
-            // Universal autoColor rule: < 0 → red, < 1 → orange, >= 1 → no alert
+            // The remaining-quantity rule (remainingSeverity): < 0 critical, < 1 warning
             if (remaining < 0) {
                 return {
                     type: 'item shortage',
+                    severity: remainingSeverity(remaining),
                     clickable: true,
                     message: `Shortage: ${Math.abs(remaining)} units short`,
                     remaining
@@ -1461,6 +1461,7 @@ class Requests_uncached {
             } else if (remaining < 1) {
                 return {
                     type: 'item warning',
+                    severity: remainingSeverity(remaining),
                     clickable: true,
                     message: 'No inventory buffer',
                     remaining
@@ -1468,7 +1469,7 @@ class Requests_uncached {
             } else if (remaining <= 2) {
                 return {
                     type: 'low-inventory',
-                    color: 'white',
+                    severity: SEVERITY.note,
                     clickable: true,
                     message: `Low: ${remaining} remaining`,
                     remaining

@@ -1,4 +1,4 @@
-import { parseItemVariants } from '../index.js';
+import { parseItemVariants, SEVERITY } from '../index.js';
 import { escapeHtml } from './views/fieldFormat.js';
 
 /**
@@ -20,7 +20,7 @@ export function itemVariantCards(row, openModal, families = new Set()) {
         const message = `Another item's number is ${row.itemNumber} plus a letter, so ${row.itemNumber}'s letters are item numbers, not variants. Its variant lines don't count. Rename that item, or remove the variant lines.`;
         return [{
             message: 'Variants off',
-            class: 'red',
+            severity: SEVERITY.critical,
             end: true,
             title: message,
             action: () => openModal(escapeHtml(message), `${row.itemNumber} variants`)

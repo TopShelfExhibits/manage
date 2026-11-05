@@ -1,55 +1,24 @@
+import { remainingSeverity } from '../../data_management/utils/severity.js';
+import { severityColor } from './severity.js';
+
 /**
  * Universal Auto-Color Classification System
- * 
- * Provides a single, consistent color classification rule across the entire application:
- * - value < 0  → red
- * - value < 1  → yellow
- * - value >= 1 → no color (unchanged from default)
- * 
+ *
+ * One rule for numbers across the app, the remaining-quantity severity (remainingSeverity):
+ * - value < 0  → critical (red)
+ * - value < 1  → warning (orange)
+ * - value >= 1 → no color
+ *
  * Usage:
- * 1. Tables: Set column.autoColor = true on numeric columns
- * 2. Custom cells: Use getAutoColorClass(value) in cellClass functions
- * 3. Calendar chips: Use getAutoColorClass(value) in chipColorClassProvider
+ * 1. Views: a field's colour rule 'auto' (viewColor.js)
+ * 2. Custom cells and calendar chips: getAutoColorClass(value)
  */
 
 /**
- * Get color class for any numeric value based on universal rule
- * 
+ * Color class for a numeric value by the universal rule.
  * @param {Number|null|undefined} value - The numeric value to classify
- * @returns {String} Color class name ('red', 'yellow', or empty string)
- * 
- * @example
- * // In table column definition
- * { key: 'quantity', format: 'number', autoColor: true }
- * 
- * @example
- * // In custom cellClass function
- * cellClass: (value) => getAutoColorClass(value)
- * 
- * @example
- * // In calendar chip provider
- * chipColorClassProvider() {
- *     return (row) => getAutoColorClass(row.quantity);
- * }
+ * @returns {String} Color class name ('red', 'orange', or empty string)
  */
 export function getAutoColorClass(value) {
-    // Null/undefined values get no color
-    if (value === null || value === undefined) {
-        return '';
-    }
-
-    // Apply universal rule
-    if (value < 0) return 'red';
-    if (value < 1) return 'orange';
-    return '';
-}
-
-/**
- * Check if a value should be colored (for conditional rendering)
- * 
- * @param {Number|null|undefined} value - The value to check
- * @returns {Boolean} True if value should receive a color class
- */
-export function shouldAutoColor(value) {
-    return value !== null && value !== undefined && value < 1;
+    return severityColor(remainingSeverity(value));
 }

@@ -1,4 +1,4 @@
-import { html } from '../../index.js';
+import { html, statusColor } from '../../index.js';
 
 
 /**
@@ -42,7 +42,7 @@ export const NotificationBubbleOverlay = {
                 'Notification',
                 banner.action ? banner.action.label : 'OK',
                 cancelText,
-                `reading-menu alert-modal ${banner.color}`
+                `reading-menu alert-modal ${statusColor(banner)}`
             );
         },
 
@@ -52,14 +52,15 @@ export const NotificationBubbleOverlay = {
                 return { type: 'material', symbol: 'bookmark' };
             }
             
-            // Return a symbol based on the banner color
+            // A warning sign for the critical, warning and attention colours
             const symbols = {
                 red: { type: 'emoji', symbol: '⚠' },
                 orange: { type: 'emoji', symbol: '⚠' },
                 yellow: { type: 'emoji', symbol: '⚠' }
             };
-            return symbols[banner.color] || { type: 'emoji', symbol: 'ℹ' };
-        }
+            return symbols[statusColor(banner)] || { type: 'emoji', symbol: 'ℹ' };
+        },
+        statusColor
     },
     template: html`
         <transition name="fade">
@@ -68,7 +69,7 @@ export const NotificationBubbleOverlay = {
                     v-for="banner in scrolledOutBanners"
                     :key="banner._scope + '-' + banner.key"
                     @click="showAlertDetails(banner)"
-                    :class="['button-symbol', banner.color || 'white']"
+                    :class="['button-symbol', statusColor(banner) || 'white']"
                     :title="banner.message"
                 >
                     <span v-if="getAlertSymbol(banner).type === 'material'" class="material-symbols-outlined">{{ getAlertSymbol(banner).symbol }}</span>
@@ -87,7 +88,8 @@ export const NotificationBubbleOverlay = {
  * Each banner is an object with the shape:
  *   {
  *     key:       String   — unique key used for v-for and interval tracking
- *     color:     String   — card color class ('red', 'white', 'orange', 'purple', ...)
+ *     severity:  String   — SEVERITY ('critical', 'warning', 'info', ...); its colour comes from
+ *                            application/utils/severity.js. Omit it for a plain banner.
  *     message:   String   — text to display
  *     visible:   Boolean  — whether to render this banner
  *     dismissible?: Boolean — whether the dismiss button is enabled (default true)
@@ -250,36 +252,37 @@ export const BannerNotifications = {
                     delete this._pollIntervals[key];
                 }
             }
-        }
+        },
+        statusColor
     },
     template: html`
         <div v-if="visibleBanners.length" class="banner-notifications-container">
             <transition-group name="expand">
                 <template v-for="banner in visibleBanners" :key="banner.key">
-                    <div :class="['banner-notification', 'card', banner.color]" style="display: flex; align-items: center; justify-content: space-between; gap: var(--padding-sm);">
+                    <div :class="['banner-notification', 'card', statusColor(banner)]" style="display: flex; align-items: center; justify-content: space-between; gap: var(--padding-sm);">
                         <span style="white-space: pre-wrap; overflow-wrap: break-word;">{{ banner.message }}</span>
                         <div v-if="banner.action && banner.dismissible !== false" class="button-bar">
                             <button
                                 @click="banner.action.fn()"
-                                :class="[banner.color]"
+                                :class="[statusColor(banner)]"
                             >{{ banner.action.label }}</button>
                             <button
                                 @click="dismiss(banner.key)"
                                 title="Dismiss"
-                                :class="['button-symbol', banner.color]"
+                                :class="['button-symbol', statusColor(banner)]"
                             ><span class="material-symbols-outlined">close</span></button>
                         </div>
                         <slot v-else>
                             <button
                                 v-if="banner.action"
                                 @click="banner.action.fn()"
-                                :class="[banner.color]"
+                                :class="[statusColor(banner)]"
                             >{{ banner.action.label }}</button>
                             <button
                                 v-if="banner.dismissible !== false"
                                 @click="dismiss(banner.key)"
                                 title="Dismiss"
-                                :class="['button-symbol', banner.color]"
+                                :class="['button-symbol', statusColor(banner)]"
                             ><span class="material-symbols-outlined">close</span></button>
                         </slot>
                     </div>

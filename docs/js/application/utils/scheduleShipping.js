@@ -1,4 +1,4 @@
-import { Requests, createAnalysisConfig, Priority } from '../index.js';
+import { Requests, createAnalysisConfig, Priority, SEVERITY } from '../index.js';
 import { estimateShipDate } from '../../data_management/utils/ship-date.js';
 import { toUSDateString } from '../../data_management/utils/helpers.js';
 
@@ -98,7 +98,7 @@ export function shipReturnCards(row, key, modal) {
     if (key === 'Ship' && source) {
         return [{
             message: 'TS',
-            class: 'gray',
+            severity: SEVERITY.neutral,
             title: `transship from: ${source}`,
             action: () => modal?.alert(`${showLabel(row)}\ntransships directly from:\n${source}`, 'Transshipment')
         }];
@@ -107,7 +107,7 @@ export function shipReturnCards(row, key, modal) {
     if (key === 'Recieved' && dest) {
         return [{
             message: 'TS',
-            class: 'gray',
+            severity: SEVERITY.neutral,
             title: `Items remain out until the later show ends: ${dest}`,
             action: () => modal?.alert(`${showLabel(row)}\ntransships directly to:\n${dest}`, 'Extended Return')
         }];
