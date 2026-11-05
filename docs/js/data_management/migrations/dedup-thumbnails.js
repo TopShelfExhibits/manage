@@ -27,9 +27,17 @@
  *   Phase 3 — Orphan cleanup
  *     Any Drive file in the folder that is not referenced by any Thumbnail cell (including
  *     _ORIGINAL files still remaining after Phase 1 errors) is deleted.
+ *
+ * Safeguards:
+ *   - Remapped cells keep each image's note and crop (only the file ID changes).
+ *   - A file named anywhere else is never deleted: edit history (EditHistory cells and the
+ *     _EditHistory archives), pending inventory proposals, and autosave backups (UserData tabs)
+ *     can still write it back to a cell. The report lists these as kept.
+ *   - A live run refuses to start while an inventory table or the proposals table is locked for
+ *     editing: saving those unsaved edits would write the old file IDs back.
  */
 
-import { Database, MAX_UPLOAD_DIM, parseThumbnails, serializeThumbnails, normalizeHeaderName, isLocalhost } from '../index.js';
+import { Database, ApplicationUtils, MAX_UPLOAD_DIM, ARCHIVE_TAB_NAME, PROPOSALS_TAB_NAME, PROPOSAL_LOCK_NAMESPACE, parseThumbnails, parseThumbnailEntries, serializeThumbnailEntries, normalizeHeaderName, isLocalhost } from '../index.js';
 import { GoogleSheetsService } from '../../google_sheets_services/index.js';
 
 const THUMBNAIL_HEADER = 'Thumbnail';
@@ -46,6 +54,15 @@ export async function dedupThumbnails({ dryRun = true } = {}) {
     if (!folderId) throw new Error('window.ENDPOINT_IDS.THUMBNAILS is not set');
 
     console.log(`[dedupThumbnails] ${dryRun ? 'DRY RUN — nothing written or deleted' : 'LIVE RUN'}`);
+
+    // Unsaved edits in an open table would save the old file IDs back over the remapped cells
+    const locks = await _activeEditLocks();
+    if (locks.length) {
+        const list = locks.map(lock => `${lock.spreadsheet}/${lock.tab} (${lock.user})`).join(', ');
+        if (!dryRun) throw new Error(`[dedupThumbnails] Tables are open for editing; save and close them first: ${list}`);
+        console.warn(`[dedupThumbnails] A live run would refuse to start: tables open for editing: ${list}`);
+    }
+
     console.log('[dedupThumbnails] Cataloging…');
 
     // ─── Catalog ─────────────────────────────────────────────────────────────
@@ -58,11 +75,15 @@ export async function dedupThumbnails({ dryRun = true } = {}) {
     const refs = _buildRefMap(tabData);
     console.log(`  ${refs.size} unique file IDs referenced in cells`);
 
+    // Files named outside the current Thumbnail cells (history, proposals, backups): never deleted
+    const held = _idsNamedIn(fileMap, [..._otherCellTexts(tabData), ...await _readOtherReferenceTexts()]);
+    console.log(`  ${held.size} files named in history, proposals or autosave backups`);
+
     // Accumulated remaps (old fileId → final fileId) and deletions
     const remaps = new Map();
     const toDelete = new Set();
 
-    const report = { dryRun, reprocess: [], merged: [], patched: [], orphans: [], errors: [] };
+    const report = { dryRun, reprocess: [], merged: [], patched: [], orphans: [], kept: [], errors: [] };
 
     // ─── Phase 1: reprocess _ORIGINAL pairs ──────────────────────────────────
     await _phaseReprocessOriginals({ fileMap, refs, remaps, toDelete, folderId, dryRun, report });
@@ -76,7 +97,14 @@ export async function dedupThumbnails({ dryRun = true } = {}) {
     }
 
     // ─── Phase 3: orphan cleanup ──────────────────────────────────────────────
-    await _phaseOrphanCleanup({ fileMap, refs, remaps, toDelete, dryRun, report });
+    await _phaseOrphanCleanup({ fileMap, refs, remaps, toDelete, held, dryRun, report });
+
+    // Files history, proposals or backups still name stay (their cells are remapped all the same)
+    for (const fileId of [...toDelete]) {
+        if (!held.has(fileId)) continue;
+        toDelete.delete(fileId);
+        report.kept.push({ fileId, fileName: fileMap.get(fileId)?.name || '' });
+    }
 
     // ─── Apply deletions ──────────────────────────────────────────────────────
     if (!dryRun && toDelete.size) {
@@ -240,15 +268,17 @@ async function _phaseMergeDuplicates({ fileMap, refs, remaps, toDelete, folderId
     console.log(`  ${report.merged.length} files merged, ${report.patched.length} patched with sha256`);
 }
 
-async function _phaseOrphanCleanup({ fileMap, refs, remaps, toDelete, dryRun, report }) {
+async function _phaseOrphanCleanup({ fileMap, refs, remaps, toDelete, held, dryRun, report }) {
     console.log('[dedupThumbnails] Phase 3: orphan cleanup…');
 
     // Resolve every cell reference through all accumulated remaps → the live file ID set
     const live = new Set([...refs.keys()].map(id => _resolve(id, remaps)));
 
     for (const [fileId, file] of fileMap) {
-        if (toDelete.has(fileId)) continue;
-        if (!live.has(fileId)) {
+        if (toDelete.has(fileId) || live.has(fileId)) continue;
+        if (held.has(fileId)) {
+            report.kept.push({ fileId, fileName: file.name });
+        } else {
             report.orphans.push({ fileId, fileName: file.name });
             toDelete.add(fileId);
         }
@@ -260,18 +290,19 @@ async function _phaseOrphanCleanup({ fileMap, refs, remaps, toDelete, dryRun, re
 // ─── Cell updates ─────────────────────────────────────────────────────────────
 
 /**
- * Apply accumulated remaps to every Thumbnail cell across all tabs, batched per tab.
+ * Apply accumulated remaps to every Thumbnail cell across all tabs, batched per tab. Only file IDs
+ * change: each image keeps its note and crop (crops are fractions, so they fit a re-upload).
  * Calls Database.setCellValues which stamps the data change and invalidates caches.
  */
 async function _applyRemaps(tabData, remaps) {
     for (const { table, tab, rows, thumbColIdx, thumbColNum } of tabData) {
         const cells = [];
         for (let i = 1; i < rows.length; i++) {
-            const ids = parseThumbnails(rows[i][thumbColIdx]);
-            if (!ids.length) continue;
-            const newIds = ids.map(id => _resolve(id, remaps));
-            if (newIds.some((id, j) => id !== ids[j])) {
-                cells.push({ rowNumber: i + 1, columnNumber: thumbColNum, value: serializeThumbnails(newIds) });
+            const entries = parseThumbnailEntries(rows[i][thumbColIdx]);
+            if (!entries.length) continue;
+            const remapped = entries.map(entry => ({ ...entry, id: _resolve(entry.id, remaps) }));
+            if (remapped.some((entry, j) => entry.id !== entries[j].id)) {
+                cells.push({ rowNumber: i + 1, columnNumber: thumbColNum, value: serializeThumbnailEntries(remapped) });
             }
         }
         if (cells.length) {
@@ -345,6 +376,52 @@ async function _readAllThumbnailCells() {
         if (idx !== -1) result.push({ table: 'CACHE', tab: 'Inventory', rows, thumbColIdx: idx, thumbColNum: idx + 1 });
     } catch { /* CACHE/Inventory absence is not an error */ }
     return result;
+}
+
+/** The other cells of the thumbnail tabs' rows (EditHistory records earlier thumbnail values). */
+function _otherCellTexts(tabData) {
+    return tabData.map(({ rows, thumbColIdx }) =>
+        rows.map(row => (row || []).filter((_, c) => c !== thumbColIdx).join('\t')).join('\n'));
+}
+
+/**
+ * Every other place a file ID can come back from: the _EditHistory archives (deleted rows), pending
+ * inventory proposals, and autosave backups of unsaved edits (UserData tabs).
+ * @returns {Promise<string[]>} the tabs' text
+ */
+async function _readOtherReferenceTexts() {
+    const texts = [];
+    const read = async (table, tab) => {
+        const rows = await Database.readFresh(table, tab);
+        texts.push((rows || []).map(row => (row || []).join('\t')).join('\n'));
+    };
+    const invTabs = (await Database.getTabs('INVENTORY')).map(t => t.title);
+    if (invTabs.includes(ARCHIVE_TAB_NAME)) await read('INVENTORY', ARCHIVE_TAB_NAME);
+    const cacheTabs = (await Database.getTabs('CACHE')).map(t => t.title);
+    for (const tab of cacheTabs) {
+        if (tab === ARCHIVE_TAB_NAME || tab === PROPOSALS_TAB_NAME || tab.startsWith('UserData_')) await read('CACHE', tab);
+    }
+    return texts;
+}
+
+/** The folder's file IDs that appear anywhere in the texts (IDs are tokens of 20+ ID characters). */
+function _idsNamedIn(fileMap, texts) {
+    const tokens = new Set();
+    for (const text of texts) {
+        for (const token of text.match(/[A-Za-z0-9_-]{20,}/g) || []) tokens.add(token);
+    }
+    return new Set([...fileMap.keys()].filter(id => tokens.has(id)));
+}
+
+/** Active locks on inventory tabs, CACHE/Inventory and the proposals table (open with edits). */
+async function _activeEditLocks() {
+    const { locks } = await ApplicationUtils.getLocksData();
+    return (locks || []).filter(lock => {
+        const active = lock.timestamp && lock.timestamp !== '0';
+        const editsThumbnails = lock.spreadsheet === 'INVENTORY' || lock.spreadsheet === PROPOSAL_LOCK_NAMESPACE ||
+            (lock.spreadsheet === 'CACHE' && lock.tab === 'Inventory');
+        return active && editsThumbnails;
+    });
 }
 
 /** Build fileId → [{table, tab, rowNumber, columnNumber}] reverse map. */
@@ -453,6 +530,7 @@ function _printReport(report) {
         { phase: 'Phase 2 — files merged (sha256 duplicates)',  count: report.merged.length },
         { phase: 'Phase 2 — old files patched with sha256',     count: report.patched.length },
         { phase: 'Phase 3 — orphans deleted',                   count: report.orphans.length },
+        { phase: 'Kept — named in history, proposals or backups', count: report.kept.length },
         { phase: 'Errors',                                       count: report.errors.length }
     ]);
     if (report.reprocess.length) {
@@ -466,6 +544,10 @@ function _printReport(report) {
     if (report.orphans.length) {
         console.log('Phase 3 — orphans:');
         console.table(report.orphans);
+    }
+    if (report.kept.length) {
+        console.log('Kept (still named in history, proposals or backups):');
+        console.table(report.kept);
     }
     if (report.errors.length) {
         console.warn('[dedupThumbnails] Errors:');
