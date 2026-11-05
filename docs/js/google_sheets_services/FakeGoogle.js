@@ -1674,22 +1674,22 @@ export class FakeGoogleSheetsService {
         
         // Map item numbers to file IDs and images for testing
         const mockFiles = {
-            'BX.png': { id: 'file_id_bx_prefix', image: 'assets/logobkp.png' },
-            'CHAIR.jpg': { id: 'file_id_chair_prefix', image: 'assets/logobkp.png' },
-            'CHAIR.jpeg': { id: 'file_id_chair_prefix', image: 'assets/logobkp.png' },
-            'CHAIR.png': { id: 'file_id_chair_prefix', image: 'assets/logobkp.png' },
-            'CHAIR-001.jpg': { id: 'file_id_chair_001', image: 'assets/logoWbkp.png' },
-            'CHAIR-001.jpeg': { id: 'file_id_chair_001', image: 'assets/logoWbkp.png' },
-            'CHAIR-001.png': { id: 'file_id_chair_001', image: 'assets/logoWbkp.png' },
+            'BX.png': { id: 'file_id_bx_prefix', image: 'assets/logo.png' },
+            'CHAIR.jpg': { id: 'file_id_chair_prefix', image: 'assets/logo.png' },
+            'CHAIR.jpeg': { id: 'file_id_chair_prefix', image: 'assets/logo.png' },
+            'CHAIR.png': { id: 'file_id_chair_prefix', image: 'assets/logo.png' },
+            'CHAIR-001.jpg': { id: 'file_id_chair_001', image: 'assets/logoW.png' },
+            'CHAIR-001.jpeg': { id: 'file_id_chair_001', image: 'assets/logoW.png' },
+            'CHAIR-001.png': { id: 'file_id_chair_001', image: 'assets/logoW.png' },
             'CHAIR-002.jpg': { id: 'file_id_chair_002', image: 'assets/logo2.png' },
             'CHAIR-002.jpeg': { id: 'file_id_chair_002', image: 'assets/logo2.png' },
             'CHAIR-002.png': { id: 'file_id_chair_002', image: 'assets/logo2.png' },
-            'TABLE.jpg': { id: 'file_id_table_prefix', image: 'assets/logoWbkp.png' },
-            'TABLE.jpeg': { id: 'file_id_table_prefix', image: 'assets/logoWbkp.png' },
-            'TABLE.png': { id: 'file_id_table_prefix', image: 'assets/logoWbkp.png' },
-            'TABLE-001.jpg': { id: 'file_id_table_001', image: 'assets/logobkp.png' },
-            'TABLE-001.jpeg': { id: 'file_id_table_001', image: 'assets/logobkp.png' },
-            'TABLE-001.png': { id: 'file_id_table_001', image: 'assets/logobkp.png' }
+            'TABLE.jpg': { id: 'file_id_table_prefix', image: 'assets/logoW.png' },
+            'TABLE.jpeg': { id: 'file_id_table_prefix', image: 'assets/logoW.png' },
+            'TABLE.png': { id: 'file_id_table_prefix', image: 'assets/logoW.png' },
+            'TABLE-001.jpg': { id: 'file_id_table_001', image: 'assets/logo.png' },
+            'TABLE-001.jpeg': { id: 'file_id_table_001', image: 'assets/logo.png' },
+            'TABLE-001.png': { id: 'file_id_table_001', image: 'assets/logo.png' }
         };
         
         if (mockFiles[fileName]) {
@@ -1719,12 +1719,12 @@ export class FakeGoogleSheetsService {
     static _fakeImagePath(fileId) {
         // Map predefined file IDs to test image paths
         const fileMap = {
-            'file_id_bx_prefix': 'assets/logobkp.png',
-            'file_id_chair_prefix': 'assets/logobkp.png',
-            'file_id_chair_001': 'assets/logoWbkp.png',
+            'file_id_bx_prefix': 'assets/logo.png',
+            'file_id_chair_prefix': 'assets/logo.png',
+            'file_id_chair_001': 'assets/logoW.png',
             'file_id_chair_002': 'assets/logo2.png',
-            'file_id_table_prefix': 'assets/logoWbkp.png',
-            'file_id_table_001': 'assets/logobkp.png'
+            'file_id_table_prefix': 'assets/logoW.png',
+            'file_id_table_001': 'assets/logo.png'
         };
         
         if (fileId && fileMap[fileId]) {
