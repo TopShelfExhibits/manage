@@ -15,7 +15,7 @@ if (isLocalhost()) {
     ({ GoogleSheetsService, GoogleSheetsAuth } = await import('../../google_sheets_services/index.js'));
 }
 
-import { wrapMethods, invalidateCache, stampDataChange, EditHistoryUtils, assertAppCurrent } from '../index.js';
+import { wrapMethods, invalidateCache, stampDataChange, watchSpreadsheets, EditHistoryUtils, assertAppCurrent } from '../index.js';
 import { ARCHIVE_TAB_NAME, ARCHIVE_HEADERS } from '../utils/metadata-utils.js';
 
 class database_uncached {
@@ -535,17 +535,22 @@ export const Database = wrapMethods(
     database_uncached, 
     'database', 
     ['createTab', 'hideTabs', 'showTabs', 'setData', 'updateRow', 'setCellValue', 'setCellValues', 'deleteSheetRows', 'appendSheetRow', 'uploadItemImage', 'getDriveFileBlob', 'readFresh', 'readFreshRanges', 'columnLetter', 'a1Range'], // getDriveFileBlob: uncached read (callers own the Blob)
-    ['getTabs'], // Infinite cache
-    {
-        // Sheet data. Every app write stamps the Caching tab and the poller invalidates from it, so
-        // app data stays cached until it changes. The Production Schedule is also edited by hand
-        // (no stamp): it keeps the default expiry. Pack lists expire after 30 minutes, in case a
-        // stamp was missed.
-        'getData': (args) => args[0] === 'PROD_SCHED' ? undefined
-            : args[0] === 'PACK_LISTS' ? 30 * 60 * 1000
-            : null
-    }
+    ['getTabs', 'getData'] // Infinite cache: the poller keeps sheet data current (watchSpreadsheets below)
 );
+
+// Sheet data stays cached while its spreadsheet is unchanged (caching.js, Spreadsheet watch). Every
+// app write stamps the Caching tab with the tab it changed. The Production Schedule is also edited by
+// hand, without stamps. While Drive can't confirm a spreadsheet, its reads expire as they used to.
+watchSpreadsheets({
+    read: (tableIds) => GoogleSheetsService.getModifiedTimes(tableIds),
+    stampsTable: 'CACHE',
+    prefixes: (tableId) => [`database:getData:"${tableId}",`, `database:getTabs:"${tableId}"`],
+    tables: {
+        PROD_SCHED: { editedByHand: true, unconfirmedMs: 4 * 60 * 1000 },
+        PACK_LISTS: { unconfirmedMs: 30 * 60 * 1000 },
+        INVENTORY: {}
+    }
+});
 
 
 /**

@@ -135,11 +135,26 @@ All reads and writes use `GoogleSheetsService` directly (same pattern as the `Lo
 
 Google Sheets allows 60 read and 60 write requests per minute per user, and 300 each per project.
 
-- **Polling.** Each poll is one read of this tab, every 30 s (10 s on localhost), only while the browser tab is visible. A hidden tab skips its polls, and polls once when it comes back into view.
+- **Polling.** A poll runs every 30 s (10 s on localhost), only while the browser tab is visible. A hidden tab skips its polls, and polls once when it comes back into view. Each poll first reads the Drive `modifiedTime` of the INVENTORY, PACK_LISTS, PROD_SCHED and CACHE spreadsheets, which costs Drive quota, not Sheets quota (see Spreadsheet watch). It then reads this tab only when it may hold new stamps: the CACHE spreadsheet or a watched one changed, or the last read is over 2 minutes old. While nothing changes, a poll costs no Sheets reads.
 - **Stamps.** A stamp is one read of this tab, to find its row, and one range write. A range write such as `Caching!B5:B5` is a single `values.update`. Only a whole-tab write also looks up the grid, to delete the rows below the new data.
-- **Expiry.** Sheet data stays cached until a stamp or a local write invalidates it. Two tables differ. The Production Schedule is also edited by hand, without stamps, so it expires after the default 4 minutes. Pack lists expire after 30 minutes, in case a stamp was missed. Shorter expiries on computed results cost no requests: a computed result is rebuilt from cached reads.
+- **Expiry.** Sheet data never expires. It stays cached until a stamp, a local write or the spreadsheet watch says it changed. Shorter expiries on computed results cost no requests: a computed result is rebuilt from cached reads.
 - **User data.** `storeUserData` calls made at the same moment are one read and one write of the user's tab, and writes to one tab never overlap. Autosave starts all its writes together.
 - **Prefixes.** The prefix `database:getData:"TABLE_ID","TAB_NAME"` is also the cache key of the tab's unmapped read. Every mapped read of a tab is computed from that read, so a tab costs one sheet read however many mappings read it.
+
+## Spreadsheet watch
+
+Set up at the bottom of `database.js` (`watchSpreadsheets`) and run by the poller (`caching.js`). Drive's `modifiedTime` covers a whole spreadsheet, not a tab. Each poll compares it with the value the previous poll saw, never with this computer's clock. A late `modifiedTime` only delays detection.
+
+| Table | A change means | While Drive can't confirm it |
+| --- | --- | --- |
+| PROD_SCHED | Edited by hand, without stamps: every cached read of it is invalidated, and the stores reload. | Reads older than 4 minutes expire. |
+| PACK_LISTS | The stamps name the tab. A change that no stamp of the table accounts for is checked again at the next poll. If still unaccounted for, the table's older cached reads expire (`[CacheWatch] … changed with no stamp` in the console). | Reads older than 30 minutes expire. |
+| INVENTORY | As PACK_LISTS. | Nothing expires. |
+| CACHE | Holds the stamps: a change means the Caching tab may hold new stamps. | Nothing expires. |
+
+- **Accounting for a change.** A stamp accounts for a change when its timestamp is no more than 60 seconds older than the change. This allows for other computers' clocks. A missed stamp can therefore go unnoticed when another stamped write to the same spreadsheet lands within a minute of it.
+- **Blind spots.** `modifiedTime` doesn't move when values change through `IMPORTRANGE`, a Google Form, or volatile formulas such as `NOW()`.
+- **Permissions.** Reading `modifiedTime` uses the `https://www.googleapis.com/auth/drive` scope the app already requests, through Drive API v3 `files.get`.
 
 # Analytics Tab: Persisted Results
 

@@ -1724,6 +1724,86 @@ test('GOOGLE REQUESTS', 'user data stored while the tab is being written is kept
     }
 });
 
+// ── Group: Spreadsheet watch ──────────────────────────────────────────────────
+// Each poll reads the spreadsheets' Drive modifiedTime (FakeGoogleSheetsService.touch is a hand
+// edit). FakeGoogle PROD_SCHED/Production Schedule row 1 is ALLEN ARMS 2025 SHOT, City
+// "Las Vegas, NV" (column 4); PACK_LISTS/ATSC 2025 NAB is read unmapped.
+
+test('SPREADSHEET WATCH', 'an unchanged schedule stays cached; a hand edit is re-read once, at the next poll', async () => {
+    await _withRestoredTabs([['PROD_SCHED', 'Production Schedule']], () => _countSheetReads('PROD_SCHED', 'Production Schedule', async (reads) => {
+        await triggerCachePoll();
+        await Database.getData('PROD_SCHED', 'Production Schedule');
+        const base = reads();
+        await triggerCachePoll();
+        await Database.getData('PROD_SCHED', 'Production Schedule');
+        assertEqual(reads(), base, 'reads while unchanged');
+
+        _rawTab('PROD_SCHED', 'Production Schedule')[1][4] = 'Reno, NV';
+        FakeGoogleSheetsService.touch('PROD_SCHED');
+        await triggerCachePoll();
+        const rows = await Database.getData('PROD_SCHED', 'Production Schedule');
+        await triggerCachePoll();
+        await Database.getData('PROD_SCHED', 'Production Schedule');
+        assertEqual([rows[1][4], reads()], ['Reno, NV', base + 1], 'edited value, one read');
+    }));
+});
+
+test('SPREADSHEET WATCH', 'a pack list change with no stamp expires its cached reads after one more poll', async () => {
+    const TAB = 'ATSC 2025 NAB';
+    await _withRestoredTabs([['PACK_LISTS', TAB]], () => _countSheetReads('PACK_LISTS', TAB, async (reads) => {
+        await triggerCachePoll();
+        await Database.getData('PACK_LISTS', TAB);
+        const base = reads();
+        const sheet = _rawTab('PACK_LISTS', TAB);
+        sheet[1][0] = `${sheet[1][0]} EDITED`;
+        // Changed long after any stamp of the table
+        const later = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+        await withFaults({ beforeModifiedTimes: () => ({ PACK_LISTS: later }) }, async () => {
+            await triggerCachePoll();
+            await Database.getData('PACK_LISTS', TAB);
+            assertEqual(reads(), base, 'still cached at the poll that saw the change');
+            await triggerCachePoll();
+        });
+        const rows = await Database.getData('PACK_LISTS', TAB);
+        assertEqual([rows[1][0], reads()], [sheet[1][0], base + 1], 'expired, then read once');
+        await triggerCachePoll(); // back to the real modifiedTime
+    }));
+});
+
+test('SPREADSHEET WATCH', 'a stamped pack list change is re-read once', async () => {
+    const TAB = 'ATSC 2025 NAB';
+    await _withRestoredTabs([['PACK_LISTS', TAB]], () => _countSheetReads('PACK_LISTS', TAB, async (reads) => {
+        await triggerCachePoll();
+        await Database.getData('PACK_LISTS', TAB);
+        const base = reads();
+        const sheet = _rawTab('PACK_LISTS', TAB);
+        sheet[1][0] = `${sheet[1][0]} STAMPED`;
+        FakeGoogleSheetsService.touch('PACK_LISTS');
+        await ApplicationUtils.writeCacheTimestamp(`database:getData:"PACK_LISTS","${TAB}"`);
+        await triggerCachePoll();
+        const rows = await Database.getData('PACK_LISTS', TAB);
+        await triggerCachePoll();
+        await Database.getData('PACK_LISTS', TAB);
+        assertEqual([rows[1][0], reads()], [sheet[1][0], base + 1], 'stamped value, one read');
+    }));
+});
+
+test('SPREADSHEET WATCH', 'the Caching tab is read only when it may hold new stamps', async () => {
+    await triggerCachePoll();
+    await _countSheetReads('CACHE', 'Caching', async (reads) => {
+        await triggerCachePoll();
+        assertEqual(reads(), 0, 'Caching reads while nothing changed');
+        FakeGoogleSheetsService.touch('CACHE');
+        await triggerCachePoll();
+        assertEqual(reads(), 1, 'Caching reads after the CACHE spreadsheet changed');
+        await withFaults({ beforeModifiedTimes: () => { throw new Error('Drive unavailable'); } }, async () => {
+            await triggerCachePoll();
+            await triggerCachePoll();
+        });
+        assertEqual(reads(), 3, 'Caching reads at every poll while Drive is unavailable');
+    });
+});
+
 // ── Group 35: Preferences ─────────────────────────────────────────────────────
 // FakeGoogle CACHE/Preferences has 13 rows, among them:
 //   4 schedule* integer prefs (offsets 14, 14, 7, 7)

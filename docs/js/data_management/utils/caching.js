@@ -404,6 +404,21 @@ class CacheManager {
     }
     
     /**
+     * Drop a cached value, and every cached result computed from it, without telling the reactive
+     * stores: the next read refills them, as after an expiry. Dependency records and fill times stay,
+     * so a later invalidation still reaches them.
+     * @param {string} key - Cache key
+     */
+    static expire(key, seen = new Set()) {
+        if (seen.has(key)) return;
+        seen.add(key);
+        CacheManager.cache.delete(key);
+        for (const [depKey, deps] of CacheManager.dependencies.entries()) {
+            if (deps.has(key)) CacheManager.expire(depKey, seen);
+        }
+    }
+
+    /**
      * Invalidates all cache entries that start with a given prefix.
      * For large sets of keys (>20), processes in batches with yields to prevent blocking.
      * @param {string} prefix - Cache key prefix to match
@@ -814,8 +829,10 @@ export function stopCacheCleanup() {
 //   Key                                       | Timestamp
 //   database:getData:"INVENTORY","FURNITURE"  | 2026-07-07T12:00:00Z
 //
-// This poller reads that tab every 30 s (prod) / 10 s (localhost) and
-// compares each entry's timestamp against the local in-memory cache:
+// This poller runs every 30 s (prod) / 10 s (localhost). It first reads
+// the spreadsheets' Drive modifiedTime (see Spreadsheet watch below), then
+// reads that tab when it may hold new stamps, and compares each entry's
+// timestamp against the local in-memory cache:
 //
 //   FOR INVALIDATION TO FIRE, ALL OF THE FOLLOWING MUST BE TRUE:
 //   1. A cache entry exists whose key STARTS WITH the Caching tab key.
@@ -930,52 +947,189 @@ export function startCacheTimestampPoller(readFn, intervalMs = 60 * 1000) {
     }, intervalMs);
 }
 
-async function _pollCacheTimestamps() {
-    const readFn = _pollerReadFn;
-    _lastPollAt = Date.now();
-    // Check for application updates
-    checkAppVersion();
+// ─── Spreadsheet watch ───────────────────────────────────────────────────────
+// Each poll first reads the Drive modifiedTime of every watched spreadsheet (Drive quota, not
+// Sheets), so cached sheet reads never need to expire: they stay while their spreadsheet is
+// unchanged. A table's rule (watchSpreadsheets) says what a change means:
+//   - editedByHand: the table is also edited in Sheets, without stamps. Any change invalidates every
+//     cached read of the table, so the reactive stores reload.
+//   - otherwise the Caching tab stamps name the changed tab. A change that no stamp of the table
+//     accounts for (a missed stamp) is checked again at the next poll, once stamps written with it
+//     have landed; if still unaccounted for, the table's older cached reads expire (refilled when next
+//     read, without reloading the stores).
+//   - unconfirmedMs: while Drive can't be read, cached reads of the table that no poll has confirmed
+//     for this long expire, as they did before the watch.
+// The Caching tab itself is read only when the stamps' spreadsheet or a watched one changed, or the
+// last read is older than STAMP_READ_MAX_SKIP_MS (modifiedTime can lag behind an edit).
+// modifiedTime is compared with the value the last poll saw, never with this computer's clock; only
+// "does a stamp account for this change" compares clocks, with STAMP_CLOCK_TOLERANCE_MS to spare.
+const STAMP_READ_MAX_SKIP_MS = 2 * 60 * 1000;
+const STAMP_CLOCK_TOLERANCE_MS = 60 * 1000;
+let _watch = null;
+const _watchState = {};       // tableId → { modified, confirmedAt, pending: { modifiedMs, poll } | null }
+let _pollCount = 0;
+let _stamps = [];             // The entries of the last Caching tab read
+let _stampsReadAt = 0;
+let _stampsReadModified = null; // The stamps' spreadsheet modifiedTime, seen just before that read
 
+/**
+ * Watch spreadsheets for changes (see Spreadsheet watch above).
+ * @param {{ read: (tableIds: string[]) => Promise<Object<string, string>|null>,
+ *           stampsTable: string,
+ *           prefixes: (tableId: string) => string[],
+ *           tables: Object<string, { editedByHand?: boolean, unconfirmedMs?: number }> }} watch -
+ *        read: modifiedTime per table ID; stampsTable: the table holding the Caching tab;
+ *        prefixes: the cache key prefixes of a table's reads
+ */
+export function watchSpreadsheets(watch) {
+    _watch = watch;
+}
+
+/** The modifiedTimes of the watched tables and the stamps' table, or null when they can't be read. */
+async function _readModifiedTimes() {
+    if (!_watch) return null;
     try {
-        const entries = await readFn();
-        if (entries === null) {
-            // readFn signaled auth is unavailable — pause the poller until re-auth
-            stopCacheTimestampPoller();
-            stopCacheCleanup();
-            return;
+        return await _watch.read([...Object.keys(_watch.tables), _watch.stampsTable]);
+    } catch (err) {
+        console.warn('[CacheWatch] Could not read spreadsheet modified times:', err);
+        return null;
+    }
+}
+
+function _mustReadStamps(times) {
+    if (!times || !_stampsReadAt || Date.now() - _stampsReadAt >= STAMP_READ_MAX_SKIP_MS) return true;
+    if (times[_watch.stampsTable] !== _stampsReadModified) return true;
+    return Object.keys(_watch.tables).some(tableId => times[tableId] !== _watchState[tableId]?.modified);
+}
+
+/** Cached keys of a table's reads, with when each was filled. */
+function _tableKeys(tableId) {
+    const prefixes = _watch.prefixes(tableId);
+    const keys = new Map();
+    for (const [key, entry] of CacheManager.cache.entries()) {
+        if (prefixes.some(prefix => key.startsWith(prefix))) keys.set(key, entry.filled);
+    }
+    for (const [key, filled] of CacheManager.filledAt.entries()) {
+        if (!keys.has(key) && prefixes.some(prefix => key.startsWith(prefix))) keys.set(key, filled);
+    }
+    return keys;
+}
+
+/** True when a stamp of the table is as new as the change (allowing for other computers' clocks). */
+function _stampsAccountFor(tableId, modifiedMs) {
+    const prefixes = _watch.prefixes(tableId);
+    return _stamps.some(({ key, timestamp }) =>
+        key && prefixes.some(prefix => key.startsWith(prefix)) &&
+        new Date(timestamp).getTime() >= modifiedMs - STAMP_CLOCK_TOLERANCE_MS);
+}
+
+function _applyModifiedTimes(times) {
+    const now = Date.now();
+    for (const [tableId, rule] of Object.entries(_watch.tables)) {
+        const time = times[tableId];
+        if (!time) continue;
+        const state = _watchState[tableId];
+        if (!state) {
+            // First look this session: reads made before it may predate the latest change
+            _watchState[tableId] = { modified: time, confirmedAt: now, pending: null };
+            if (rule.editedByHand) {
+                const changedMs = new Date(time).getTime();
+                for (const [key, filled] of _tableKeys(tableId)) {
+                    if (filled < changedMs + STAMP_CLOCK_TOLERANCE_MS) CacheManager.invalidate(key);
+                }
+            }
+            continue;
         }
-        if (!Array.isArray(entries) || entries.length === 0) return;
-        for (const { key, timestamp } of entries) {
-            if (!key || !timestamp) continue;
-            const remoteTs = new Date(timestamp).getTime();
-            if (isNaN(remoteTs)) continue;
-            // CRITICAL: Poller can only invalidate cache entries that exist in CacheManager.cache.
-            // If data hasn't been loaded yet (user never navigated to that page), the cache entry
-            // won't exist and invalidation is silently skipped. This is by design - no point
-            // invalidating data that hasn't been loaded.
-            let shouldInvalidate = false;
-            for (const [cacheKey, entry] of CacheManager.cache.entries()) {
-                if (cacheKey.startsWith(key) && entry.filled && remoteTs > entry.filled) {
+        state.confirmedAt = now;
+        if (state.pending && _pollCount > state.pending.poll) {
+            if (!_stampsAccountFor(tableId, state.pending.modifiedMs)) {
+                console.warn(`[CacheWatch] ${tableId} changed with no stamp: its cached reads expire`);
+                for (const [key, filled] of _tableKeys(tableId)) {
+                    // Filled no later than the poll that saw the change: it may predate it
+                    if (filled <= state.pending.seenAt) CacheManager.expire(key);
+                }
+            }
+            state.pending = null;
+        }
+        if (time === state.modified) continue;
+        state.modified = time;
+        if (rule.editedByHand) {
+            _watch.prefixes(tableId).forEach(prefix => CacheManager.invalidateByPrefix(prefix));
+        } else if (!state.pending && !_stampsAccountFor(tableId, new Date(time).getTime())) {
+            state.pending = { modifiedMs: new Date(time).getTime(), seenAt: now, poll: _pollCount };
+        }
+    }
+}
+
+function _expireUnconfirmed() {
+    if (!_watch) return;
+    const now = Date.now();
+    for (const [tableId, rule] of Object.entries(_watch.tables)) {
+        if (!rule.unconfirmedMs) continue;
+        const confirmedAt = _watchState[tableId]?.confirmedAt ?? 0;
+        for (const [key, filled] of _tableKeys(tableId)) {
+            if (now - Math.max(filled, confirmedAt) >= rule.unconfirmedMs) CacheManager.expire(key);
+        }
+    }
+}
+
+/** Invalidate the cached reads that a Caching tab stamp says changed since they were filled. */
+function _applyStamps(entries) {
+    for (const { key, timestamp } of entries) {
+        if (!key || !timestamp) continue;
+        const remoteTs = new Date(timestamp).getTime();
+        if (isNaN(remoteTs)) continue;
+        // CRITICAL: Poller can only invalidate cache entries that exist in CacheManager.cache.
+        // If data hasn't been loaded yet (user never navigated to that page), the cache entry
+        // won't exist and invalidation is silently skipped. This is by design - no point
+        // invalidating data that hasn't been loaded.
+        let shouldInvalidate = false;
+        for (const [cacheKey, entry] of CacheManager.cache.entries()) {
+            if (cacheKey.startsWith(key) && entry.filled && remoteTs > entry.filled) {
+                shouldInvalidate = true;
+                break;
+            }
+        }
+        // Fallback: if no live cache entry exists (expired and silently removed), check filledAt,
+        // which persists beyond expiry, so the poller doesn't go blind to remote changes.
+        if (!shouldInvalidate) {
+            for (const [filledKey, filledTs] of CacheManager.filledAt.entries()) {
+                if (filledKey.startsWith(key) && remoteTs > filledTs) {
                     shouldInvalidate = true;
                     break;
                 }
             }
-            // Fallback: if no live cache entry exists (TTL expired and entry was silently
-            // removed), check filledAt which persists beyond TTL expiry. This prevents the
-            // poller from going blind to external changes after the 4-minute cache TTL.
-            if (!shouldInvalidate) {
-                for (const [filledKey, filledTs] of CacheManager.filledAt.entries()) {
-                    if (filledKey.startsWith(key) && remoteTs > filledTs) {
-                        shouldInvalidate = true;
-                        break;
-                    }
-                }
-            }
-            if (shouldInvalidate) {
-                //console.log('[CacheTimestampPoller] Remote change detected for', key, '- invalidating');
-                CacheManager.invalidateByPrefix(key);
-            }
         }
+        if (shouldInvalidate) {
+            CacheManager.invalidateByPrefix(key);
+        }
+    }
+}
+
+async function _pollCacheTimestamps() {
+    const readFn = _pollerReadFn;
+    _lastPollAt = Date.now();
+    _pollCount++;
+    // Check for application updates
+    checkAppVersion();
+
+    try {
+        const times = await _readModifiedTimes();
+        if (_mustReadStamps(times)) {
+            const entries = await readFn();
+            if (entries === null) {
+                // readFn signaled auth is unavailable — pause the poller until re-auth
+                stopCacheTimestampPoller();
+                stopCacheCleanup();
+                return;
+            }
+            _stamps = Array.isArray(entries) ? entries : [];
+            _stampsReadAt = Date.now();
+            _stampsReadModified = times?.[_watch.stampsTable] ?? null;
+            _applyStamps(_stamps);
+        }
+        if (times) _applyModifiedTimes(times);
+        else _expireUnconfirmed();
     } catch (err) {
         // Handle authentication errors by stopping the poller
         // The poller will restart after successful re-authentication
@@ -1012,9 +1166,8 @@ export function restartCacheTimestampPoller() {
 }
 
 /**
- * Run the cache-timestamp poll cycle immediately (outside of the normal interval).
- * Reads the Caching tab, compares timestamps against in-memory cache entries,
- * and fires CacheInvalidationBus events for any stale entries found.
+ * Run one poll now, outside the interval: the spreadsheet watch, then the Caching tab when it may
+ * hold new stamps.
  *
  * Usage from the browser console:
  *   import('/docs/js/data_management/utils/caching.js').then(m => m.triggerCachePoll())
@@ -1026,54 +1179,5 @@ export async function triggerCachePoll() {
         console.warn('[CachePoll] No poll function configured — call startCacheTimestampPoller first.');
         return;
     }
-    try {
-        const entries = await _pollerReadFn();
-        if (entries === null) {
-            console.warn('[CachePoll] Auth unavailable, poll aborted.');
-            return;
-        }
-        if (!Array.isArray(entries) || entries.length === 0) {
-            console.log('[CachePoll] Caching tab is empty — no entries to check.');
-            return;
-        }
-        console.log(`[CachePoll] Found ${entries.length} entries in Caching tab:`, entries.map(e => e.key));
-        for (const { key, timestamp } of entries) {
-            if (!key || !timestamp) continue;
-            const remoteTs = new Date(timestamp).getTime();
-            if (isNaN(remoteTs)) continue;
-            let shouldInvalidate = false;
-            let matchedCacheKey = null;
-            for (const [cacheKey, entry] of CacheManager.cache.entries()) {
-                if (cacheKey.startsWith(key) && entry.filled && remoteTs > entry.filled) {
-                    shouldInvalidate = true;
-                    matchedCacheKey = cacheKey;
-                    break;
-                }
-            }
-            // Fallback: check filledAt when live cache entry is absent (TTL expired)
-            if (!shouldInvalidate) {
-                for (const [filledKey, filledTs] of CacheManager.filledAt.entries()) {
-                    if (filledKey.startsWith(key) && remoteTs > filledTs) {
-                        shouldInvalidate = true;
-                        matchedCacheKey = `(filledAt) ${filledKey}`;
-                        break;
-                    }
-                }
-            }
-            if (shouldInvalidate) {
-                console.log(`[CachePoll] Stale entry detected for "${key}" (matched: "${matchedCacheKey}") — invalidating.`);
-                CacheManager.invalidateByPrefix(key);
-            } else {
-                const hasEntry = [...CacheManager.cache.keys()].some(k => k.startsWith(key)) ||
-                                 [...CacheManager.filledAt.keys()].some(k => k.startsWith(key));
-                if (!hasEntry) {
-                    console.log(`[CachePoll] No cache entry found matching prefix "${key}" — nothing to invalidate.`);
-                } else {
-                    console.log(`[CachePoll] Cache for "${key}" is newer than remote timestamp — already up to date.`);
-                }
-            }
-        }
-    } catch (err) {
-        console.warn('[CachePoll] Poll failed:', err);
-    }
+    await _pollCacheTimestamps();
 }

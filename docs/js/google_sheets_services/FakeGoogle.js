@@ -15,6 +15,8 @@ function _colToIndex(letters) {
 }
 
 let _delaysEnabled = true;
+// Drive modifiedTime per table (FakeGoogleSheetsService.getModifiedTimes)
+const _modifiedTimes = {};
 
 // Serialize an EditHistory/MetaData fixture (contract: docs/notes/metadata-implementation.md)
 const _json = (value) => JSON.stringify(value);
@@ -1184,6 +1186,8 @@ export class FakeGoogleSheetsService {
      *   beforeBatchWrite(tableId, data)         before a batchSetValues; return 'drop' to lose all of
      *                                           it, or a Set of data indices to lose just those
      *   beforeDelete(tableId, tabName, rows)    before a deleteSheetRows; return 'drop' to lose it
+     *   beforeModifiedTimes(tableIds)           before a getModifiedTimes; throw to fail it (Drive down),
+                                           or return { tableId: time } to report those times instead
      */
     static faults = null;
 
@@ -1203,6 +1207,27 @@ export class FakeGoogleSheetsService {
         if (await this._fault('beforeDelete', tableId, tabName, rows) === 'drop') return true;
         rows.forEach(n => { if (n - 1 < sheet.length) sheet.splice(n - 1, 1); });
         return true;
+    }
+
+    /**
+     * Drive modifiedTime of each table's spreadsheet. Every write moves it on (see the write wrappers
+     * below the class); touch() is a hand edit in Sheets.
+     * @returns {Promise<Object<string, string>|null>} tableId → ISO time; null without auth
+     */
+    static async getModifiedTimes(tableIds) {
+        await this.delay(100 + Math.random() * 200);
+        if (!(await FakeGoogleSheetsAuth.checkAuth())) return null;
+        const overrides = await this._fault('beforeModifiedTimes', tableIds) || {};
+        return Object.fromEntries(tableIds.map(tableId => {
+            if (!this.ENDPOINT_IDS[tableId]) throw new Error(`[getModifiedTimes] Spreadsheet ID not found for table: ${tableId}`);
+            return [tableId, overrides[tableId] || _modifiedTimes[tableId] || new Date(0).toISOString()];
+        }));
+    }
+
+    /** Move a table's modifiedTime on, as any edit of its spreadsheet does (strictly increasing). */
+    static touch(tableId) {
+        const last = Date.parse(_modifiedTimes[tableId] || 0) || 0;
+        _modifiedTimes[tableId] = new Date(Math.max(Date.now(), last + 1)).toISOString();
     }
 
     /** values.batchGet: one 2D array per range, in order (each range read as getSheetData would). */
@@ -1867,9 +1892,20 @@ const _fixtureVersion = (() => {
 const _externalChangeListeners = new Set();
 let _saveTimer = null;
 
+// Every write moves its spreadsheet's modifiedTime on once it has landed, as Drive does
+for (const name of ['setSheetData', 'batchSetValues', 'deleteSheetRows', 'hideTabs', 'showTabs', 'copySheetTab', 'createBlankTab']) {
+    const write = FakeGoogleSheetsService[name];
+    FakeGoogleSheetsService[name] = async function (tableId, ...args) {
+        const result = await write.call(this, tableId, ...args);
+        FakeGoogleSheetsService.touch(tableId);
+        return result;
+    };
+}
+
 function _applyState(state) {
     FakeGoogleSheetsService.mockData = state.mockData;
     FakeGoogleSheetsService.mockTabs = state.mockTabs;
+    Object.keys(FakeGoogleSheetsService.ENDPOINT_IDS).forEach(tableId => FakeGoogleSheetsService.touch(tableId));
 }
 
 function _currentStateJson() {

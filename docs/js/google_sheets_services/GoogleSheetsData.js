@@ -744,6 +744,28 @@ export class GoogleSheetsService {
     }
 
     /**
+     * Drive modifiedTime of each table's spreadsheet (files.get: Drive quota, not Sheets). Any edit
+     * moves it on, by hand or through the API; it can lag behind the edit, and changes that come in
+     * through IMPORTRANGE or a Form don't move it.
+     * @param {string[]} tableIds
+     * @returns {Promise<Object<string, string>|null>} tableId → RFC 3339 time; null without auth
+     */
+    static async getModifiedTimes(tableIds) {
+        if (!(await GoogleSheetsAuth.checkAuth())) return null;
+        const entries = await Promise.all(tableIds.map(async (tableId) => {
+            const fileId = window.ENDPOINT_IDS[tableId];
+            if (!fileId) throw new Error(`[GoogleSheetsData.getModifiedTimes] SPREADSHEET_NOT_FOUND: Spreadsheet ID not found for table: ${tableId}`);
+            const response = await GoogleSheetsService.withExponentialBackoff(() => gapi.client.request({
+                path: `https://www.googleapis.com/drive/v3/files/${fileId}`,
+                method: 'GET',
+                params: { fields: 'modifiedTime', supportsAllDrives: true }
+            }));
+            return [tableId, response.result?.modifiedTime || null];
+        }));
+        return Object.fromEntries(entries);
+    }
+
+    /**
      * Search for a file in Google Drive by name within a specific folder
      * @param {string} fileName - Name of the file to search for
      * @param {string} folderId - ID of the folder to search in
