@@ -352,6 +352,8 @@ class Requests_uncached {
         // Get all available tabs for INVENTORY
         const tabs = await deps.call(Requests.getAvailableTabs, 'INVENTORY');
         const inventoryTabs = tabs;
+        // Every tab in one request; the loop below reads them from the cache
+        Database.prefetch('INVENTORY', inventoryTabs.map(tab => tab.title));
         
         ProgressBus.emit('api:getAllInventoryData', {
             current: 0,

@@ -1,4 +1,4 @@
-import { Database, InventoryUtils, ProductionUtils, wrapMethods, INVENTORY_TAB_PREFERENCES, GetParagraphMatchRating, parseDate, toISODateString, EditHistoryUtils, ApplicationUtils, invalidateCache, normalizeHeaderName, ProgressBus } from '../index.js';
+import { Database, InventoryUtils, ProductionUtils, wrapMethods, INVENTORY_TAB_PREFERENCES, GetParagraphMatchRating, parseDate, toISODateString, EditHistoryUtils, ApplicationUtils, invalidateCache, normalizeHeaderName, ProgressBus, mapWithConcurrency } from '../index.js';
 
 /** Normalize an identifier for loose matching (strips spaces, case, non-alphanumeric) */
 function _normalizeId(v) { return String(v || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, ''); }
@@ -326,6 +326,8 @@ class packListUtils_uncached {
         const matchingTabs = await deps.call(ProductionUtils.findAllPackListTabsForShow, projectIdentifier, validTabs);
 
         if (!matchingTabs.length) return {};
+        // The show's tabs in one request; the loop below reads them from the cache
+        Database.prefetch('PACK_LISTS', matchingTabs.map(tab => tab.title));
 
         const itemMap = {};
         for (const tab of matchingTabs) {
@@ -716,6 +718,14 @@ class packListUtils_uncached {
     static async extractItemsFromMultipleShows(deps, projectIdentifiers, ctgFilter = undefined, includeEmptyShows = true) {
         const allItemsMap = {};
         const processedShows = [];
+
+        // Every show's pack lists in one request (the shows are read one by one below). The tabs
+        // are found as extractAllItemsForShow finds them, so the lookups are shared.
+        const allTabs = await deps.call(Database.getTabs, 'PACK_LISTS');
+        const validTabs = allTabs.filter(tab => tab.title !== '_TEMPLATE' && !tab.title.startsWith('_'));
+        const showTabs = await mapWithConcurrency(projectIdentifiers, projectId =>
+            deps.call(ProductionUtils.findAllPackListTabsForShow, projectId, validTabs).catch(() => []), 8);
+        Database.prefetch('PACK_LISTS', showTabs.flat().map(tab => tab.title));
         
         // Extract items from each show
         let _showIdx = 0;

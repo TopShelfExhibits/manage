@@ -142,6 +142,8 @@ class inventoryUtils_uncached {
         };
         const refDeciseconds = referenceDate ? Math.floor(parseDate(referenceDate).getTime() / 100) : null;
         const results = [];
+        // The items' tabs in one request; the loop below reads them from the cache
+        Database.prefetch('INVENTORY', Object.keys(itemsByTab));
         for (const [tab, items] of Object.entries(itemsByTab)) {
             try {
                 let tabData = await deps.call(Database.getData, 'INVENTORY', tab, inventoryUtils_uncached.DEFAULT_INVENTORY_MAPPING);
