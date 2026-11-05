@@ -1433,37 +1433,45 @@ td.col-sticky-start, td.col-sticky-end {
     line-height: 1.3;
 }
 
-/* ── Thumbnail gallery (thumbnailModals.js); its parts sit in the modal's .content column ── */
+/* ── Thumbnail gallery (thumbnailModals.js): a tall page modal whose parts sit in its .content
+   column. The stage takes the height the other parts leave, so the image's own size never moves
+   the arrows, the details or the button bar. ── */
 
 .thumbnail-gallery-stage {
-    display: flex;
+    flex: 1 1 0;
+    min-height: 120px;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-rows: minmax(0, 1fr);
     align-items: center;
-    justify-content: center;
     gap: var(--padding-md);
 }
-.thumbnail-gallery-stage img {
-    min-width: 0;
-    max-width: 100%;
-    max-height: 60vh;
+/* The image (or the crop editor) fills the space between the arrows */
+.thumbnail-gallery-stage > :not(button) {
+    align-self: stretch;
+    width: 100%;
+    height: 100%;
+    min-height: 0;
+}
+.thumbnail-gallery-stage > img {
     object-fit: contain;
 }
-.thumbnail-gallery-caption {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: var(--padding-md);
+/* A details grid in a column takes its own height (the generic rule grows it, for rows) */
+.content > .details-grid {
+    flex: none;
 }
-.thumbnail-gallery-note {
-    margin: 0;
-    white-space: pre-wrap;
-}
-.thumbnail-gallery-note-editor {
-    width: 100%;
+.detail-item > textarea {
     box-sizing: border-box;
+    width: 100%;
+    resize: vertical;
+    font: inherit;
 }
+
 /* A row of small images (gallery strip, upload previews) */
 .thumbnail-gallery-strip {
     display: flex;
+    flex: none;
+    justify-content: safe center;
     gap: var(--padding-md);
     overflow-x: auto;
     padding: 2px;
@@ -1480,21 +1488,26 @@ td.col-sticky-start, td.col-sticky-end {
     height: 64px;
 }
 
-/* Crop editor: the whole image with a movable, resizable crop rectangle */
+/* Crop editor: the box is the largest the stage holds at the image's proportions (--crop-ratio),
+   so the crop rectangle's fractions are the image's */
 .thumbnail-crop-stage {
+    container-type: size;
     display: flex;
+    align-items: center;
     justify-content: center;
 }
 .thumbnail-crop-box {
     position: relative;
     overflow: hidden;
+    width: min(100cqw, 100cqh * var(--crop-ratio, 1));
+    height: min(100cqh, 100cqw / var(--crop-ratio, 1));
     touch-action: none;
     user-select: none;
 }
 .thumbnail-crop-box img {
     display: block;
-    max-width: 100%;
-    max-height: 60vh;
+    width: 100%;
+    height: 100%;
 }
 .thumbnail-crop-rect {
     position: absolute;

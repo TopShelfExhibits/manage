@@ -1,7 +1,7 @@
 import { html, Requests, EditHistoryUtils } from '../../index.js';
 import { ThumbnailCache, renderImage } from '../../utils/thumbnailCache.js';
 import {
-    parseThumbnailEntries, parseThumbnails, addThumbnails, removeThumbnailAt, setPrimaryThumbnail,
+    parseThumbnailEntries, serializeThumbnailEntries, parseThumbnails, addThumbnails, removeThumbnailAt, setPrimaryThumbnail,
     setThumbnailNote, setThumbnailCrop, normalizeCrop, thumbnailKey
 } from '../../../data_management/utils/thumbnail-values.js';
 import { ThumbnailImage } from './thumbnails.js';
@@ -23,21 +23,20 @@ function formatTime(deciseconds) {
 }
 
 /**
- * Crop editor: the whole image with a movable, resizable crop rectangle. Non-destructive: it only
- * produces a crop (fractions of the image, thumbnail-values.js); the file is never changed.
- * Emits apply(crop | null for the whole image) and cancel.
+ * Crop editor: the whole image with a movable, resizable crop rectangle, filling the gallery's
+ * stage. Non-destructive: it only produces a crop (fractions of the image, thumbnail-values.js);
+ * the file is never changed. The gallery's button bar drives it: crop() reads the rectangle
+ * (null for the whole image), reset() selects the whole image.
  */
 export const ThumbnailCropEditor = {
     name: 'ThumbnailCropEditor',
-    inheritAttrs: false,
     props: {
         src: { type: String, required: true },
         crop: { type: Object, default: null }
     },
-    emits: ['apply', 'cancel'],
     data() {
         const c = normalizeCrop(this.crop) || { x: 0, y: 0, w: 1, h: 1 };
-        return { rect: { ...c }, drag: null };
+        return { rect: { ...c }, drag: null, ratio: null };
     },
     computed: {
         rectStyle() {
@@ -46,6 +45,17 @@ export const ThumbnailCropEditor = {
         }
     },
     methods: {
+        // The box takes the image's proportions, so the rectangle's fractions are the image's
+        onLoad(event) {
+            const { naturalWidth, naturalHeight } = event.target;
+            if (naturalWidth && naturalHeight) this.ratio = naturalWidth / naturalHeight;
+        },
+        crop() {
+            return normalizeCrop(this.rect);
+        },
+        reset() {
+            this.rect = { x: 0, y: 0, w: 1, h: 1 };
+        },
         start(mode, event) {
             event.preventDefault();
             const box = this.$refs.box.getBoundingClientRect();
@@ -76,37 +86,28 @@ export const ThumbnailCropEditor = {
         end() {
             this.drag = null;
             window.removeEventListener('pointermove', this.move);
-        },
-        reset() {
-            this.rect = { x: 0, y: 0, w: 1, h: 1 };
         }
     },
     beforeUnmount() {
         this.end();
     },
     template: html`
-        <div class="thumbnail-crop-stage">
-            <div ref="box" class="thumbnail-crop-box">
-                <img :src="src" alt="Image to crop" draggable="false" />
+        <div class="thumbnail-crop-stage" :style="ratio ? { '--crop-ratio': ratio } : null">
+            <div ref="box" class="thumbnail-crop-box" :style="{ visibility: ratio ? 'visible' : 'hidden' }">
+                <img :src="src" alt="Image to crop" draggable="false" @load="onLoad" />
                 <div class="thumbnail-crop-rect" :style="rectStyle" @pointerdown="start('move', $event)">
                     <span v-for="corner in ['nw', 'ne', 'sw', 'se']" :key="corner" :class="['thumbnail-crop-handle', corner]" @pointerdown.stop="start(corner, $event)"></span>
                 </div>
             </div>
         </div>
-        <div class="button-bar">
-            <button class="purple" @click="$emit('apply', normalizeCrop(rect))">Apply crop</button>
-            <button @click="reset">Whole image</button>
-            <button class="gray" @click="$emit('cancel')">Cancel</button>
-        </div>
-    `,
-    setup() {
-        return { normalizeCrop };
-    }
+    `
 };
 
 /**
- * An item's image gallery: the primary image first, left and right to move between images, the
- * others in a strip along the bottom. Each image shows its note and when it entered the item's
+ * An item's image gallery (a tall page modal): the primary image first, filling the space between
+ * the left and right arrows, the strip of all images centered under it, then the image's details
+ * and note, the save reminder (only while there are unsaved changes) and the button bar at the
+ * bottom, which also drives the note and crop editors. Each image shows its note and when it entered the item's
  * edit history, and by whom (EditHistoryUtils.listItemOrigins). Only the image on screen is
  * downloaded at full size; the strip uses the cached thumbnails.
  * Editable (onChange given): Add image, Set as thumbnail, Crop image, Add note, Remove image.
@@ -143,6 +144,10 @@ export const ThumbnailGalleryModal = {
         entries() { return parseThumbnailEntries(this.current); },
         entry() { return this.entries[this.index] || null; },
         editable() { return !!this.onChange; },
+        // The gallery differs from the saved value (the table's Save keeps the changes)
+        unsaved() {
+            return serializeThumbnailEntries(this.entries) !== serializeThumbnailEntries(parseThumbnailEntries(this.saved));
+        },
         imageKey() { return this.entry ? thumbnailKey(this.entry.id, this.entry.crop) : null; },
         displayUrl() {
             const e = this.entry;
@@ -160,9 +165,9 @@ export const ThumbnailGalleryModal = {
             if (!id) return '';
             if (!this.origins.has(id)) return 'Not saved yet';
             const origin = this.origins.get(id);
-            if (!origin) return 'Added before its history was kept';
+            if (!origin) return 'Before its history was kept';
             const who = origin.u ? ` by ${origin.u}` : '';
-            return `${origin.created ? 'Added with the item' : 'Added'} ${formatTime(origin.t)}${who}`;
+            return `${formatTime(origin.t)}${who}${origin.created ? ' (with the item)' : ''}`;
         }
     },
     watch: {
@@ -266,7 +271,8 @@ export const ThumbnailGalleryModal = {
             this.mode = 'crop';
             await this.loadUncropped();
         },
-        async applyCrop(crop) {
+        async applyCrop() {
+            const crop = this.$refs.cropEditor?.crop() ?? null;
             const e = this.entry;
             this.mode = 'view';
             this.change(setThumbnailCrop(this.current, this.index, crop));
@@ -276,42 +282,15 @@ export const ThumbnailGalleryModal = {
         }
     },
     template: html`
-        <div v-if="mode !== 'crop'" class="thumbnail-gallery-stage">
-            <button class="button-symbol" :disabled="entries.length < 2" title="Previous image (←)" @click="go(-1)"><span class="material-symbols-outlined">chevron_left</span></button>
-            <img :src="displayUrl" :alt="'Image ' + (index + 1) + ' of ' + itemNumber" />
-            <button class="button-symbol" :disabled="entries.length < 2" title="Next image (→)" @click="go(1)"><span class="material-symbols-outlined">chevron_right</span></button>
+        <div class="thumbnail-gallery-stage">
+            <button class="button-symbol" :disabled="entries.length < 2 || mode !== 'view'" title="Previous image (←)" @click="go(-1)"><span class="material-symbols-outlined">chevron_left</span></button>
+            <template v-if="mode === 'crop'">
+                <ThumbnailCropEditor v-if="uncroppedUrl" ref="cropEditor" :src="uncroppedUrl" :crop="entry && entry.crop" />
+                <div v-else class="card gray">Loading the full image…</div>
+            </template>
+            <img v-else :src="displayUrl" :alt="'Image ' + (index + 1) + ' of ' + itemNumber" />
+            <button class="button-symbol" :disabled="entries.length < 2 || mode !== 'view'" title="Next image (→)" @click="go(1)"><span class="material-symbols-outlined">chevron_right</span></button>
         </div>
-        <ThumbnailCropEditor
-            v-else-if="uncroppedUrl"
-            :src="uncroppedUrl"
-            :crop="entry && entry.crop"
-            @apply="applyCrop"
-            @cancel="mode = 'view'"
-        />
-        <div v-else class="card gray">Loading the full image…</div>
-
-        <div v-if="entry" class="thumbnail-gallery-caption">
-            <span v-if="index === 0" class="card purple">Thumbnail</span>
-            <span>{{ index + 1 }} of {{ entries.length }}</span>
-            <span class="gray">{{ loading ? 'Loading…' : originText }}</span>
-        </div>
-        <p v-if="mode !== 'note' && entry && entry.note" class="thumbnail-gallery-note">{{ entry.note }}</p>
-        <template v-if="mode === 'note'">
-            <textarea v-model="noteDraft" class="thumbnail-gallery-note-editor" rows="3" placeholder="A note about this image" @keydown.esc.stop="mode = 'view'"></textarea>
-            <div class="button-bar">
-                <button class="purple" @click="saveNote">Save note</button>
-                <button class="gray" @click="mode = 'view'">Cancel</button>
-            </div>
-        </template>
-
-        <div v-if="editable && mode === 'view'" class="button-bar">
-            <button @click="addImages"><span class="material-symbols-outlined">add_photo_alternate</span> Add image</button>
-            <button :disabled="index === 0" @click="setAsThumbnail"><span class="material-symbols-outlined">star</span> Set as thumbnail</button>
-            <button :disabled="!entry" @click="editCrop"><span class="material-symbols-outlined">crop</span> Crop image</button>
-            <button :disabled="!entry" @click="editNote"><span class="material-symbols-outlined">edit_note</span> {{ entry && entry.note ? 'Edit note' : 'Add note' }}</button>
-            <button class="red" :disabled="!entry" @click="removeImage"><span class="material-symbols-outlined">delete</span> Remove image</button>
-        </div>
-        <p v-if="editable" class="red">Save the table to keep image changes on {{ itemNumber }}.</p>
 
         <div v-if="entries.length > 1" class="thumbnail-gallery-strip">
             <ThumbnailImage
@@ -325,6 +304,42 @@ export const ThumbnailGalleryModal = {
                 @click="mode === 'view' && (index = i)"
             />
         </div>
+
+        <div v-if="entry" class="details-grid">
+            <div class="detail-item">
+                <label>Image</label>
+                <span>{{ index + 1 }} of {{ entries.length }}{{ index === 0 ? ' (thumbnail)' : '' }}</span>
+            </div>
+            <div class="detail-item">
+                <label>Added</label>
+                <span>{{ loading ? 'Loading…' : originText }}</span>
+            </div>
+            <div v-if="mode === 'note' || entry.note" class="detail-item">
+                <label>Note</label>
+                <textarea v-if="mode === 'note'" v-model="noteDraft" rows="3" placeholder="A note about this image" @keydown.esc.stop="mode = 'view'"></textarea>
+                <span v-else>{{ entry.note }}</span>
+            </div>
+        </div>
+
+        <template v-if="editable">
+            <p v-if="unsaved" class="red">Save the table to keep image changes on {{ itemNumber }}.</p>
+            <div v-if="mode === 'note'" class="button-bar">
+                <button class="purple" @click="saveNote">Save note</button>
+                <button class="gray" @click="mode = 'view'">Cancel</button>
+            </div>
+            <div v-else-if="mode === 'crop'" class="button-bar">
+                <button class="purple" :disabled="!uncroppedUrl" @click="applyCrop">Apply crop</button>
+                <button :disabled="!uncroppedUrl" @click="$refs.cropEditor.reset()">Whole image</button>
+                <button class="gray" @click="mode = 'view'">Cancel</button>
+            </div>
+            <div v-else class="button-bar">
+                <button @click="addImages"><span class="material-symbols-outlined">add_photo_alternate</span> Add image</button>
+                <button :disabled="index === 0" @click="setAsThumbnail"><span class="material-symbols-outlined">star</span> Set as thumbnail</button>
+                <button :disabled="!entry" @click="editCrop"><span class="material-symbols-outlined">crop</span> Crop image</button>
+                <button :disabled="!entry" @click="editNote"><span class="material-symbols-outlined">edit_note</span> {{ entry && entry.note ? 'Edit note' : 'Add note' }}</button>
+                <button class="red" :disabled="!entry" @click="removeImage"><span class="material-symbols-outlined">delete</span> Remove image</button>
+            </div>
+        </template>
     `
 };
 
