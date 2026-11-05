@@ -1528,7 +1528,9 @@ export async function saveDirtyStoresToUserData(options = {}) {
         let cleanedCount = 0;
         let skippedCount = 0;
         
-        // Save each dirty store as a separate user data entry
+        // Save each dirty store as a separate user data entry. The writes start together, so
+        // storeUserData writes them all in one batch (one read and one write of the user tab).
+        const writes = [];
         for (const [key, store] of Object.entries(reactiveStoreRegistry)) {
             const isModified = store.isModified;
             const diff = calculateStoreDiff(store.originalData, store._data, store.analysisConfig);
@@ -1540,28 +1542,31 @@ export async function saveDirtyStoresToUserData(options = {}) {
                 // Only save if this exact state hasn't been auto-saved already
                 if (store.lastAutoSaveHash !== currentHash) {
                     // Store has changes - save the diff
-                    await Requests.storeUserData(
+                    writes.push(Requests.storeUserData(
                         { diff, timestamp: new Date().toISOString() },
                         authState.user.email,
                         key // Use the store key as the unique ID
-                    );
-                    store.autoSaved = true;
-                    store.lastAutoSaveHash = currentHash; // Record this state as saved
+                    ).then(() => {
+                        store.autoSaved = true;
+                        store.lastAutoSaveHash = currentHash; // Record this state as saved
+                    }));
                     savedCount++;
                 } else {
                     skippedCount++;
                 }
             } else if (!diff && store.autoSaved) {
                 // Store is clean but was previously auto-saved - clean up the entry
-                await Requests.storeUserData(
+                writes.push(Requests.storeUserData(
                     null, // Setting to null will delete the entry
                     authState.user.email,
                     key
-                );
-                store.autoSaved = false;
+                ).then(() => {
+                    store.autoSaved = false;
+                }));
                 cleanedCount++;
             }
         }
+        await Promise.all(writes);
         
         // if (savedCount > 0) {
         //     console.log(`[ReactiveStore AutoSave] Successfully saved ${savedCount} dirty store(s) to user data`);

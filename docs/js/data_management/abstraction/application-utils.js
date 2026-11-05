@@ -12,6 +12,10 @@ if (isLocalhost()) {
     ({ GoogleSheetsService } = await import('../../google_sheets_services/GoogleSheetsData.js'));
 }
 
+// User data writes per tab name: { entries: the batch still collecting calls (null once it is
+// written), done: the latest batch's write } (storeUserData)
+const _userDataQueues = new Map();
+
 function isActiveLockTimestamp(timestamp) {
     const ts = timestamp?.split('|')[0];
     return !!(ts && ts !== '0');
@@ -56,58 +60,67 @@ class applicationUtils_uncached {
     ];
     
     /**
-     * Store user data in a user-specific tab within the CACHE sheet
-     * @param {Object} deps - Dependency decorator for tracking calls
+     * Store user data in a user-specific tab within the CACHE sheet. Calls made at the same moment
+     * (autosave backs up every dirty store at once) are written together: one read and one write
+     * of the tab. Writes to one tab never overlap, so none undoes another.
      * @param {string} username - The username to create/find a tab for
      * @param {string} id - The ID to find/create a row for
-     * @param {Array} data - Array of data to store in the row
-     * @returns {Promise<boolean>} Success status
+     * @param {*} data - Data to store in the row (strings as they are, the rest as JSON); null deletes the row
+     * @returns {Promise<boolean|undefined>} Success status of the tab's write
      */
-    static async storeUserData(username, id, data) {
+    static storeUserData(username, id, data) {
         // Sanitize username and compose tab name consistently with getUserData
-        const sanitizedUsername = username.replace(/[^a-zA-Z0-9_-]/g, '_');
-        const tabName = `UserData_${sanitizedUsername}`;
-        
-        // Convert data to JSON string if it's not already a string
-        let serializedData;
-        if (typeof data === 'string') {
-            serializedData = data;
-        } else {
-            serializedData = JSON.stringify(data);
+        const tabName = `UserData_${username.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+        let queue = _userDataQueues.get(tabName);
+        if (!queue) _userDataQueues.set(tabName, queue = { entries: null, done: Promise.resolve() });
+        if (!queue.entries) {
+            // A new batch: it collects calls until the tab's previous write is done, plus one turn
+            const entries = queue.entries = [];
+            queue.done = queue.done
+                .catch(() => {})
+                .then(() => new Promise(resolve => setTimeout(resolve, 0)))
+                .then(() => {
+                    queue.entries = null;
+                    return applicationUtils_uncached._writeUserData(tabName, entries);
+                });
         }
+        queue.entries.push({ id, data });
+        return queue.done;
+    }
 
-        // Check if tab exists
+    /**
+     * One read-modify-write of a user data tab, applying entries in call order.
+     * @private
+     * @param {string} tabName
+     * @param {Array<{id: string, data: *}>} entries - data null deletes the row
+     */
+    static async _writeUserData(tabName, entries) {
+        const isEmpty = (data) => data === null ||
+            (Array.isArray(data) && data.length === 0) ||
+            (typeof data === 'object' && !Array.isArray(data) && Object.keys(data).length === 0);
+
+        // Only create the tab for real data
         const allTabs = await Database.getTabs('CACHE');
-        let tab = allTabs.find(t => t.title === tabName);
-        
-        // Only create tab if it doesn't exist AND we have real data to store
-        if (!tab) {
-            if (data === null || 
-                (Array.isArray(data) && data.length === 0) || 
-                (typeof data === 'object' && !Array.isArray(data) && Object.keys(data).length === 0)) {
-                return; // Don't create tab for empty/null data
-            }
+        if (!allTabs.some(t => t.title === tabName)) {
+            entries = entries.filter(entry => !isEmpty(entry.data));
+            if (!entries.length) return;
             await Database.createTab('CACHE', '_UserDataTemplate', tabName, { bookkeeping: true });
         }
-        
-        // Unified flow: read all data, mutate, write back
-        const existingData = await Database.getData('CACHE', tabName, { ID: 'ID', Value: 'Value' });
-        const rowIndex = existingData.findIndex(row => row.ID === id);
-        
-        // Apply mutation: delete, update, or insert
-        if (data === null) {
-            if (rowIndex !== -1) {
-                existingData.splice(rowIndex, 1);
+
+        // Copies: the cached rows stay as they are if the write fails
+        const rows = (await Database.getData('CACHE', tabName, { ID: 'ID', Value: 'Value' })).map(row => ({ ...row }));
+        for (const { id, data } of entries) {
+            const rowIndex = rows.findIndex(row => row.ID === id);
+            if (data === null) {
+                if (rowIndex !== -1) rows.splice(rowIndex, 1);
+                continue;
             }
-        } else {
-            if (rowIndex !== -1) {
-                existingData[rowIndex].Value = serializedData;
-            } else {
-                existingData.push({ ID: id, Value: serializedData });
-            }
+            const value = typeof data === 'string' ? data : JSON.stringify(data);
+            if (rowIndex !== -1) rows[rowIndex].Value = value;
+            else rows.push({ ID: id, Value: value });
         }
-        
-        return await Database.setData('CACHE', tabName, existingData, { ID: 'ID', Value: 'Value' }, {
+
+        return await Database.setData('CACHE', tabName, rows, { ID: 'ID', Value: 'Value' }, {
             skipMetadata: true,
             bookkeeping: true
         });
@@ -945,7 +958,7 @@ class applicationUtils_uncached {
 export const ApplicationUtils = wrapMethods(
     applicationUtils_uncached, 
     'app_utils', 
-    ['storeUserData', 'initializeDefaultSavedSearches', 'lockSheet', 'unlockSheet', 'forceUnlockSheet', 'releaseAllUserLocks', '_writeUserColumn', '_writeLockKeyRow', '_writeLockCell', '_numberToColumnLetter', '_initializeLocksSheet', 'writeCacheTimestamp', 'readCacheTimestamps', 'getShortLink', 'expandShortLink'], // Mutation methods
+    ['storeUserData', '_writeUserData', 'initializeDefaultSavedSearches', 'lockSheet', 'unlockSheet', 'forceUnlockSheet', 'releaseAllUserLocks', '_writeUserColumn', '_writeLockKeyRow', '_writeLockCell', '_numberToColumnLetter', '_initializeLocksSheet', 'writeCacheTimestamp', 'readCacheTimestamps', 'getShortLink', 'expandShortLink'], // Mutation methods
     ['expandShortLink', 'getToday'], // Infinite cache methods
     { 'getSheetLock': 10000, 'getLocksData': 10000 } // Custom cache durations (10 seconds for getSheetLock and getLocksData)
 );

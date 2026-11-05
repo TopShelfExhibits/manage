@@ -1661,6 +1661,69 @@ test('GOOGLE REQUESTS', 'a mapped read sees the change after its tab is invalida
     }));
 });
 
+// User data writes made at the same moment are one write of the user's tab
+// (CACHE/UserData_test_example_com), applied in call order.
+const USER_TAB = 'UserData_test_example_com';
+
+/** Run fn(writes) while counting whole-tab writes of one tab; writes() is the count so far. */
+async function _countTabWrites(db, tab, fn) {
+    const original = FakeGoogleSheetsService.setSheetData;
+    let count = 0;
+    FakeGoogleSheetsService.setSheetData = async function (tableId, range, ...rest) {
+        if (tableId === db && range === tab) count++;
+        return original.call(this, tableId, range, ...rest);
+    };
+    try {
+        return await fn(() => count);
+    } finally {
+        FakeGoogleSheetsService.setSheetData = original;
+    }
+}
+
+test('GOOGLE REQUESTS', 'user data stored at the same moment is one write, applied in order', async () => {
+    await _withRestoredTabs([['CACHE', USER_TAB]], () => _countTabWrites('CACHE', USER_TAB, async (writes) => {
+        await Promise.all([
+            Requests.storeUserData({ n: 1 }, 'test@example.com', 'batch_test_a'),
+            Requests.storeUserData({ n: 2 }, 'test@example.com', 'batch_test_b'),
+            Requests.storeUserData({ n: 3 }, 'test@example.com', 'batch_test_a'),
+            Requests.storeUserData({ n: 4 }, 'test@example.com', 'batch_test_c'),
+            Requests.storeUserData(null, 'test@example.com', 'batch_test_c')
+        ]);
+        assertEqual(writes(), 1, 'tab writes');
+        const stored = Object.fromEntries(_rawTab('CACHE', USER_TAB).filter(r => String(r[0]).startsWith('batch_test_')).map(r => [r[0], r[1]]));
+        assertEqual(stored, { batch_test_a: '{"n":3}', batch_test_b: '{"n":2}' }, 'stored rows');
+    }));
+});
+
+test('GOOGLE REQUESTS', 'user data stored while the tab is being written is kept', async () => {
+    // The first write of the tab waits until the second call has been made
+    const original = FakeGoogleSheetsService.setSheetData;
+    let release, started;
+    const gate = new Promise(resolve => release = resolve);
+    const firstStarted = new Promise(resolve => started = resolve);
+    let writes = 0;
+    FakeGoogleSheetsService.setSheetData = async function (tableId, range, ...rest) {
+        if (tableId === 'CACHE' && range === USER_TAB && writes++ === 0) {
+            started();
+            await gate;
+        }
+        return original.call(this, tableId, range, ...rest);
+    };
+    try {
+        await _withRestoredTabs([['CACHE', USER_TAB]], async () => {
+            const first = Requests.storeUserData('one', 'test@example.com', 'batch_test_a');
+            await firstStarted;
+            const second = Requests.storeUserData('two', 'test@example.com', 'batch_test_b');
+            release();
+            await Promise.all([first, second]);
+            const stored = Object.fromEntries(_rawTab('CACHE', USER_TAB).filter(r => String(r[0]).startsWith('batch_test_')).map(r => [r[0], r[1]]));
+            assertEqual([stored, writes], [{ batch_test_a: 'one', batch_test_b: 'two' }, 2], 'both rows, two writes');
+        });
+    } finally {
+        FakeGoogleSheetsService.setSheetData = original;
+    }
+});
+
 // ── Group 35: Preferences ─────────────────────────────────────────────────────
 // FakeGoogle CACHE/Preferences has 13 rows, among them:
 //   4 schedule* integer prefs (offsets 14, 14, 7, 7)
