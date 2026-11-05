@@ -1620,6 +1620,47 @@ test('CACHE INVALIDATION', 'remote Caching-tab timestamp for getTabs fires getPa
         throw new Error(`poller did not invalidate getPacklists; fired: ${[...fired].join(', ')}`);
 });
 
+// ── Group: Google requests ────────────────────────────────────────────────────
+// FakeGoogle CACHE/Clients: headers Clients | Abbreviations | Notes, first row ABCAM,
+// AUSTAL USA abbreviated AUSTAL. A tab read unmapped and under two mappings is one sheet read.
+
+/** Run fn(reads) while counting sheet reads of one tab; reads() is the count so far. */
+async function _countSheetReads(db, tab, fn) {
+    const original = FakeGoogleSheetsService.getSheetData;
+    let count = 0;
+    FakeGoogleSheetsService.getSheetData = async function (tableId, range) {
+        if (tableId === db && range === tab) count++;
+        return original.call(this, tableId, range);
+    };
+    try {
+        return await fn(() => count);
+    } finally {
+        FakeGoogleSheetsService.getSheetData = original;
+    }
+}
+
+test('GOOGLE REQUESTS', 'a tab read unmapped and under two mappings is one sheet read', async () => {
+    invalidateCache([{ namespace: 'database', methodName: 'getData', args: ['CACHE', 'Clients'] }], true);
+    await _withRestoredTabs([['CACHE', 'Clients']], () => _countSheetReads('CACHE', 'Clients', async (reads) => {
+        const raw = await Database.getData('CACHE', 'Clients');
+        const names = await Database.getData('CACHE', 'Clients', { name: 'Clients' });
+        const full = await Database.getData('CACHE', 'Clients', { name: 'Clients', abbr: 'Abbreviations' });
+        assertEqual(reads(), 1, 'sheet reads');
+        assertEqual([raw[1][0], names[0].name, full.find(r => r.name === 'AUSTAL USA').abbr], ['ABCAM', 'ABCAM', 'AUSTAL'], 'values');
+    }));
+});
+
+test('GOOGLE REQUESTS', 'a mapped read sees the change after its tab is invalidated', async () => {
+    await _withRestoredTabs([['CACHE', 'Clients']], () => _countSheetReads('CACHE', 'Clients', async (reads) => {
+        await Database.getData('CACHE', 'Clients', { name: 'Clients' });
+        _rawTab('CACHE', 'Clients')[1][0] = 'ABCAM RENAMED';
+        // As a write to the tab, or the poller, invalidates it
+        invalidateCache([{ namespace: 'database', methodName: 'getData', args: ['CACHE', 'Clients'] }], true);
+        const names = await Database.getData('CACHE', 'Clients', { name: 'Clients' });
+        assertEqual([names[0].name, reads()], ['ABCAM RENAMED', 2], 'fresh value, one more read');
+    }));
+});
+
 // ── Group 35: Preferences ─────────────────────────────────────────────────────
 // FakeGoogle CACHE/Preferences has 13 rows, among them:
 //   4 schedule* integer prefs (offsets 14, 14, 7, 7)

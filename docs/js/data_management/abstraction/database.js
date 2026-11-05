@@ -30,8 +30,11 @@ class database_uncached {
      * @returns {Promise<Array<Object>>} - Array of JS objects
      */
     static async getData(deps, tableId, tabName, mapping = null) {
-        // Get raw sheet data from GoogleSheetsService
-        const rawData = await GoogleSheetsService.getSheetData(tableId, tabName);
+        // One sheet read per tab: a mapped read transforms the tab's unmapped read, cached under the
+        // key prefix the tab's writes and the poller invalidate
+        const rawData = mapping
+            ? await deps.call(Database.getData, tableId, tabName)
+            : await GoogleSheetsService.getSheetData(tableId, tabName);
         if (mapping?._preserveColumns) {
             mapping = resolveSheetMapping(mapping, rawData?.[0]).read;
         }

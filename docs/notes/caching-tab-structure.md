@@ -137,6 +137,7 @@ Google Sheets allows 60 read and 60 write requests per minute per user, and 300 
 
 - **Polling.** Each poll is one read of this tab, every 30 s (10 s on localhost), only while the browser tab is visible. A hidden tab skips its polls, and polls once when it comes back into view.
 - **Stamps.** A stamp is one read of this tab, to find its row, and one range write. A range write such as `Caching!B5:B5` is a single `values.update`. Only a whole-tab write also looks up the grid, to delete the rows below the new data.
+- **Prefixes.** The prefix `database:getData:"TABLE_ID","TAB_NAME"` is also the cache key of the tab's unmapped read. Every mapped read of a tab is computed from that read, so a tab costs one sheet read however many mappings read it.
 
 # Analytics Tab: Persisted Results
 
