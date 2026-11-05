@@ -1,4 +1,4 @@
-import { html, InventoryTableComponent, hamburgerMenuRegistry, NavigationRegistry, Requests, DataView, DashboardToggleComponent, getReactiveStore, findMatchingStores, createAnalysisConfig, generateStoreKey, authState, invalidateCache, todayISOString, getInventoryTabList, INVENTORY_TAB_PREFERENCES, getShortageAlertsStore, getShortageAlertDays, shortagesByItem, itemShortageCards, categoryShortageCards, THUMBNAIL_FIELD } from '../../index.js';
+import { html, InventoryTableComponent, hamburgerMenuRegistry, NavigationRegistry, Requests, DataView, DashboardToggleComponent, getReactiveStore, findMatchingStores, createAnalysisConfig, generateStoreKey, authState, invalidateCache, todayISOString, getInventoryTabList, INVENTORY_TAB_PREFERENCES, getShortageAlertsStore, getShortageAlertDays, shortagesByItem, itemShortageCards, categoryShortageCards, itemVariantCards, THUMBNAIL_FIELD } from '../../index.js';
 import { ShowInventoryReport } from './ShowInventoryReport.js';
 import { InventoryItemReport } from './InventoryItemReport.js';
 import { InventoryItemTimeline } from './InventoryItemTimeline.js';
@@ -202,7 +202,7 @@ export const InventoryContent = {
             inventoryStore: null, // All inventory item rows (overview table and category card members)
             autoSavedCategories: new Set(), // Track which categories have auto-saved data
             shortageAlertsStore: getShortageAlertsStore(),
-            shortageDecorationKeys: ['itemNumber'],
+            itemDecorationKeys: ['itemNumber', 'description'],
             INVENTORY_FIELDS,
             INVENTORY_VIEWS,
             // Primary action: category cards → the category; overview rows → the item timeline (R3.8),
@@ -427,8 +427,10 @@ export const InventoryContent = {
             cards.push(...categoryShortageCards(this.shortageAlertsStore?.data, key, getShortageAlertDays(), this.navigateToPath));
             return cards;
         },
-        // Decorations (§4.14): a shortage warning on the item number of overview items that run short
+        // Decorations (§4.14): a shortage warning on the item number of overview items that run
+        // short, and the variants declared in the description
         itemDecorations(row, key) {
+            if (key === 'description') return itemVariantCards(row, (message, title) => this.$modal.alert(message, title));
             if (key !== 'itemNumber') return [];
             return itemShortageCards(this.shortagesByItem.get(row.itemNumber), getShortageAlertDays());
         },
@@ -568,7 +570,7 @@ export const InventoryContent = {
                 :navigate-to-path="navigateToPath"
                 :action="inventoryAction"
                 :decorations="itemDecorations"
-                :decoration-keys="shortageDecorationKeys"
+                :decoration-keys="itemDecorationKeys"
                 :bucket-keys="bucketKeys"
                 :bucket-decorations="categoryDecorations"
                 :bucket-label="formatCategoryLabel"

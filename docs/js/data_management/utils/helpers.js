@@ -648,6 +648,93 @@ class FuzzyMatcher {
 export const GetTopFuzzyMatch = FuzzyMatcher.GetTopFuzzyMatch;
 
 /**
+ * The base of an item variant: an item number ending in a digit and one letter (CAB-004b or
+ * CAB-004B → CAB-004). Null for any other item number.
+ * @param {string} itemNumber
+ * @returns {string|null}
+ */
+export function itemVariantBase(itemNumber) {
+  const match = /^(.*\d)[A-Za-z]$/.exec(String(itemNumber || ''));
+  return match ? match[1] : null;
+}
+
+/**
+ * The item number a pack list's item number counts against. A letter appended to an item
+ * number notes a variant (CAB-004b), which counts as its base item (CAB-004) when:
+ * - the variant is not an item itself,
+ * - the base is an item,
+ * - and no item is a letter variant of that base. One real variant part (CAB-004a) means the
+ *   family's letters are real item numbers, so none of them falls back.
+ * Standard item numbers only: tabs with nonstandard item numbers don't use variants.
+ * @param {string} itemNumber - The item number found in the text
+ * @param {string[]} itemNumbers - Every item number of the item's inventory tab
+ * @returns {string} The base item number, or itemNumber unchanged
+ */
+export function resolveItemVariant(itemNumber, itemNumbers) {
+  const base = itemVariantBase(itemNumber);
+  if (!base) return itemNumber;
+  const numbers = new Set(itemNumbers);
+  if (numbers.has(itemNumber) || !numbers.has(base)) return itemNumber;
+  const realVariant = itemNumbers.some(number => itemVariantBase(number) === base);
+  return realVariant ? itemNumber : base;
+}
+
+/**
+ * A variant's key: its base and lower-case letter (CAB-004B → CAB-004b), so either case of a
+ * letter names the same variant. Null for an item number that isn't variant-shaped.
+ * @param {string} itemNumber
+ * @returns {string|null}
+ */
+export function itemVariantKey(itemNumber) {
+  const base = itemVariantBase(itemNumber);
+  return base ? base + String(itemNumber).slice(-1).toLowerCase() : null;
+}
+
+/**
+ * The variants declared in an item's inventory description. A variant line names the item's
+ * own number plus one letter, with an optional count, in the pack list format:
+ *   gray cabinet
+ *   (3) CAB-004b with larger top
+ *   (1) CAB-004c with smaller top
+ * The other lines are the base description. A variant's description is the base description
+ * followed by its line's text ("gray cabinet with larger top"). The first line for a letter wins.
+ * @param {string} itemNumber - The base item number
+ * @param {string} description - The item's inventory description
+ * @returns {{ baseDescription: string, variants: Array<{key: string, itemNumber: string, letter: string, quantity: number|null, note: string, description: string}> }}
+ */
+export function parseItemVariants(itemNumber, description) {
+  const text = String(description ?? '');
+  const base = String(itemNumber ?? '').trim();
+  if (!/\d$/.test(base)) return { baseDescription: text.trim(), variants: [] };
+  const escaped = base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const variantLine = new RegExp(`^\\s*(?:\\((\\d+)\\))?\\s*${escaped}([A-Za-z])(?![0-9A-Za-z_○°])(.*)$`);
+  const baseLines = [];
+  const matches = [];
+  for (const line of text.split(/\r?\n/)) {
+    const match = variantLine.exec(line);
+    if (match) matches.push(match);
+    else baseLines.push(line);
+  }
+  const baseDescription = baseLines.join('\n').trim();
+  const flatBase = baseDescription.replace(/\s+/g, ' ');
+  const variants = [];
+  for (const [, quantity, letter, rest] of matches) {
+    const key = base + letter.toLowerCase();
+    if (variants.some(variant => variant.key === key)) continue;
+    const note = rest.trim();
+    variants.push({
+      key,
+      itemNumber: base + letter,
+      letter: letter.toLowerCase(),
+      quantity: quantity ? parseInt(quantity, 10) : null,
+      note,
+      description: [flatBase, note].filter(Boolean).join(' ')
+    });
+  }
+  return { baseDescription, variants };
+}
+
+/**
  * Simple paragraph matching function that returns a similarity score between 0 and 1
  * @param {string} text1 - First text to compare
  * @param {string} text2 - Second text to compare

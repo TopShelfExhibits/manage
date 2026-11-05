@@ -160,6 +160,15 @@ Reads and writes use `GoogleSheetsService` directly, in `application-utils.js` (
   - a "Short N" card on the item number, in the inventory overview and the category tables;
   - an "N short" card on each affected category card, which opens the report filtered to that category.
 
+## Item variants
+
+- **Matching** (`resolveItemVariant`, `helpers.js`). A standard item number plus one letter, in either case (`CAB-004b`), counts as its base item when the variant isn't an item, the base is, and no item in the tab is a letter variant of the base. Tabs with nonstandard item numbers don't use variants. Only a variant-shaped item number reads its inventory tab during extraction, so other extractions don't depend on inventory edits.
+- **Declaring** (`parseItemVariants`). The base item's inventory description declares variants on lines in the pack list format, `(3) CAB-004b with larger top`. The count is optional, and the base QTY includes the variants. A variant's description is the other lines followed by its line's text.
+- **Where variants show:**
+  - Description matching compares a variant line with its variant's description and a base line with the base description. A variant the description doesn't declare gets an "Undeclared variant" card in place of the mismatch alert.
+  - The pack list's variant check (`checkVariantLevel`) compares the demand of this and the overlapping shows with the declared count. A shortage is red. A base line whose unmodified pieces (QTY less the variant counts) run short gets a soft orange card.
+  - The inventory description cell shows a card per declared variant (`itemVariantCards`). Its hover text and modal show the variant's description.
+
 ## Live data to add before deploying
 
 1. A `CACHE/Analytics` tab with the headers `Key | SavedAt | Sources | Value` in row 1.

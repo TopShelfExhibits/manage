@@ -258,7 +258,16 @@ export class FakeGoogleSheetsService {
                 ['TTOP-001', '', '15', '', '', '', '30" white cocktail table tops-round', ''],
                 ['TBASE-001', '', '8', '', '', '', 'cocktail table bases', '']
             ],
-            'CABINETS': [['ITEM#', 'THUMBNAIL', 'QTY', 'EditHistory', 'MetaData', 'NOTES', 'Description', 'Packing/shop notes'],['CAB-004', '', '10', '', '', '', 'Curved-bottom white demo counter with 30" wide top and LED lighting. (4) standoffs on front and top. Test LED lights', '']],
+            // Item variants: CAB-005 has no real variant parts, so CAB-005b in a pack list counts as
+            // CAB-005; its description declares one CAB-005b (of its 6). CAB-006a is a real part, so
+            // no CAB-006 letter falls back to CAB-006.
+            'CABINETS': [
+                ['ITEM#', 'THUMBNAIL', 'QTY', 'EditHistory', 'MetaData', 'NOTES', 'Description', 'Packing/shop notes'],
+                ['CAB-004', '', '10', '', '', '', 'Curved-bottom white demo counter with 30" wide top and LED lighting. (4) standoffs on front and top. Test LED lights', ''],
+                ['CAB-005', '', '6', '', '', '', 'Tall gray storage cabinet\n(1) CAB-005b with locking doors', ''],
+                ['CAB-006', '', '4', '', '', '', 'Rolling demo cabinet', ''],
+                ['CAB-006a', '', '2', '', '', '', 'Rolling demo cabinet with glass doors', '']
+            ],
             'HANGING SIGNS': [['ITEM#', 'THUMBNAIL', 'QTY', 'EditHistory', 'MetaData', 'Description', 'Packing/shop notes'],['HS-001', '', '0', '', '', 'This is a sign', '']],
             'CEILING TILES': [['ITEM#', 'THUMBNAIL', 'QTY', 'EditHistory', 'MetaData', 'NOTES', 'Description', 'Packing/shop notes'],['C1', '', '0', '', '', '', 'Blah blah blah', '']],
             'CEILING TRIM': [['ITEM#', 'THUMBNAIL', 'QTY', 'EditHistory', 'MetaData', 'NOTES', 'Description', 'Packing/shop notes'],['S1', '', '0', '', '', '', 'Blah blah blah', '']],
@@ -423,7 +432,8 @@ export class FakeGoogleSheetsService {
                 ['14', 'Skid', '96', '48', '72', '800', '', '', '', '', '', ''],
                 ['', '', '', '', '', '', '', '', 'BeMatrix frames/accessories', 'Per separate pack list', '', ''],
                 ['15', 'Skid', '96', '48', '72', '800', '', '', '', '', '', ''],
-                ['', '', '', '', '', '', '', '', 'BeMatrix frames/accessories', 'Per separate pack list', '', '']
+                ['', '', '', '', '', '', '', '', 'BeMatrix frames/accessories', 'Per separate pack list', '', ''],
+                ['', '', '', '', '', '', '', '', '(1) CAB-005b Tall gray storage cabinet with locking doors', 'Item variant fixture: overlaps the other show', '', '']
             ],
             'TULIP 2025 NRF': [
                 ['Piece #', 'Type', 'L', 'W', 'H', 'Weight', 'Pack', 'Check', 'Description', 'Packing/shop notes', 'EditHistory', 'MetaData'],
@@ -562,7 +572,8 @@ export class FakeGoogleSheetsService {
                 ['', '', '', '', '', '', '', '', 'Square glass cocktail table kit', '', '', ''],
                 ['', '', '', '', '', '', '', '', '(1) laminated riser from MOJO SHOT show', '30"x30"x12"', '', ''],
                 ['', '', '', '', '', '', '', '', '(2) 55" Samsung TV screen', 'Top Shelf rentals', '', ''],
-                ['', '', '', '', '', '', '', '', 'Power cord', '', '', '']
+                ['', '', '', '', '', '', '', '', 'Power cord', '', '', ''],
+                ['', '', '', '', '', '', '', '', '(1) CAB-005b Tall gray storage cabinet with locking doors', 'Item variant fixture: overlaps the other show', '', '']
             ],
             // Test pack list with new item code formats
             'TEST 2025 ENHANCED': [
@@ -571,6 +582,12 @@ export class FakeGoogleSheetsService {
                 ['', '', '', '', '', '', '', '', '(2) TABLE-001 Conference tables', 'Standard items', '', ''],
                 ['', '', '', '', '', '', '', '', '(5) CHAIR-002 Lounge chairs', '', '', ''],
                 ['', '', '', '', '', '', '', '', 'STOOL-001 Bar stool', '', '', ''],
+                // Item variants (see CABINETS): CAB-005=9 (6 unmodified, 2 b, 1 C), CAB-006a=3, CAB-006b=1
+                ['', '', '', '', '', '', '', '', '(6) CAB-005 Tall gray storage cabinet', '', '', ''],
+                ['', '', '', '', '', '', '', '', '(2) CAB-005b Tall gray storage cabinet with locking doors', '', '', ''],
+                ['', '', '', '', '', '', '', '', '(1) CAB-005C Tall gray storage cabinet, short top', '', '', ''],
+                ['', '', '', '', '', '', '', '', '(3) CAB-006a Rolling demo cabinet with glass doors', '', '', ''],
+                ['', '', '', '', '', '', '', '', '(1) CAB-006b Rolling demo cabinet with shelves', '', '', ''],
                 ['2', 'Crate', '96', '48', '12', '200', '', '', '', '', '', ''],
                 ['', '', '', '', '', '', '', '', '(3) BX-16x39 Standard rectangular panels', 'Pack flat, protect edges', '', ''],
                 ['', '', '', '', '', '', '', '', '(2) BX-16x47 Large rectangular panels', '', '', ''],
