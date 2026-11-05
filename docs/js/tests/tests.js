@@ -28,25 +28,27 @@
  */
 
 import { Requests } from '../data_management/api.js';
+import { isAppOutdated, checkAppVersion } from '../data_management/index.js';
 import { FakeGoogleSheetsAuth, FakeGoogleSheetsService, FakeGoogleState, setFakeDelaysEnabled } from '../google_sheets_services/FakeGoogle.js';
 import { refreshAppData } from './fakeGoogleDevTools.js';
 import { isCheckedValue } from '../data_management/utils/checkbox-values.js';
 import { useBatchEdits, useInstantEdits } from '../application/utils/cellEdits.js';
-import { CacheInvalidationBus, ApplicationUtils, ProductionUtils, triggerCachePoll, Database, EditHistoryUtils, InventoryUtils, ProposalUtils, resolveInventoryNoteMaxLength } from '../data_management/index.js';
+import { CacheInvalidationBus, ApplicationUtils, ProductionUtils, triggerCachePoll, stampDataChange, Database, EditHistoryUtils, InventoryUtils, ProposalUtils, resolveInventoryNoteMaxLength, checkDateRollover, clearCache, invalidateCache, resolveSheetMapping, parseThumbnails, parseThumbnailEntries, serializeThumbnailEntries, addThumbnails, removeThumbnailAt, setPrimaryThumbnail, setThumbnailNote, setThumbnailCrop, primaryThumbnailValue, thumbnailKey } from '../data_management/index.js';
 import { authState } from '../application/utils/auth.js';
 import { commitInventoryProposal } from '../application/utils/inventoryProposals.js';
-import { resolveView, resolveAction, pickView, mergeView, matchesKeyPattern, setViewWarningHandler, withRegistryDefaults } from '../application/utils/views/resolveView.js';
+import { resolveView, resolveAction, pickView, mergeView, matchesKeyPattern, setViewWarningHandler, withRegistryDefaults, searchTiers } from '../application/utils/views/resolveView.js';
 import { SEARCH_LIMITS, searchWords, matchRow, matchRows, makeHighlighter } from '../application/utils/views/searchMatch.js';
 import { formatValue, formatText } from '../application/utils/views/fieldFormat.js';
 import { rowsToCards, bucketRowsToCards } from '../application/utils/views/cardsAdapter.js';
 import { applyColorRule, colorFor, rowColorFor } from '../application/utils/views/viewColor.js';
 import { containerTier, viewportTier, BREAKPOINTS } from '../application/utils/useContainerSize.js';
-import { todayISOString, searchFilter, textFiltersToSearchParams, parseSearchParameters } from '../data_management/utils/helpers.js';
+import { todayISOString, setTestToday, startOfTodayMs, resolveShortageAlertDays, shortageAlertDateFilters, INVENTORY_TAB_PREFERENCES, resolveInventoryTabList, searchFilter, textFiltersToSearchParams, parseSearchParameters } from '../data_management/utils/helpers.js';
 import { instantWriteEntry, identityKey, cellKey, joinKey } from '../data_management/utils/instant-write-config.js';
 import { estimateShipDate } from '../data_management/utils/ship-date.js';
 import { getReactiveStore, createAnalysisConfig } from '../application/index.js';
 import { checkSheetHealth } from './sheetHealth.js';
-import { guessColumnType, columnTypesEntry, columnTypeMap, columnTypeOf } from '../data_management/utils/column-types.js';
+import { guessColumnType, columnTypesEntry, columnTypeMap, columnTypeOf, isOpaqueType } from '../data_management/utils/column-types.js';
+import { migrateThumbnails } from '../data_management/migrations/thumbnail-column.js';
 import { buildScheduleFields } from '../data_management/abstraction/scheduleFields.js';
 import { withShipDate } from '../application/utils/scheduleShipping.js';
 
@@ -989,8 +991,8 @@ test('USER DATA', 'getUserDataByPrefix returns entry for dashboard prefix', asyn
 
 // ── Group 25: Hardware Inventory Resolution ───────────────────────────────────
 // Hardware items use non-standard item number formats that fail the prefix lookup
-// in getTabNameForItem and are resolved instead by scanning the HARDWARE tab's
-// customItemNumbers flag. Three distinct failure modes have been found historically:
+// in getTabNameForItem and are resolved instead by scanning the tabs the
+// InventoryCustomItemNumbers preference lists (HARDWARE). Three distinct failure modes have been found historically:
 //
 //   Multi-hyphen  VUE-V2C-LP / LED-EXL21-SL
 //     Standard regex extracts only the first segment (VUE-V2C); that partial ID
@@ -998,7 +1000,7 @@ test('USER DATA', 'getUserDataByPrefix returns entry for dashboard prefix', asyn
 //   Spaced-numeric  901 00 030 MKII / 615 11 01 ANO
 //     Standard regex never fires (no [A-Z]+-digits prefix); direct hardware path.
 //   Text-based  HH BOLTHOG M8 LONG / HH BOLTHOG 1-4 20 x 2.5
-//     No standard prefix match; customItemNumbers scan finds exact row.
+//     No standard prefix match; the InventoryCustomItemNumbers scan finds the exact row.
 //     HH BOLTHOG 1-4 20 x 2.5 also tests the getItemInfo hyphen-split fallback:
 //     split('-')[1] yields '4 20 x 2.5' which doesn't exist; code retries with
 //     the full original item name.
@@ -1099,25 +1101,263 @@ test('HARDWARE INVENTORY', 'getItemQuantitiesSummary counts HH BOLTHOG 1-4 20 x 
     assertEqual(row.quantity, 15, 'TEST 2025 ENHANCED HH BOLTHOG 1-4 20 x 2.5 quantity');
 });
 
-// ── Group 26: Thumbnail Records ───────────────────────────────────────────────
-// FakeGoogle CACHE/Thumbnails has entries for TABLE-001 (file_id_table_001) and others.
+// ── Group 26: Thumbnail Column ────────────────────────────────────────────────
+// Item thumbnails live in each inventory tab's Thumbnail column as a JSON array of Drive file IDs;
+// category images in the index's Thumbnail column. FakeGoogle fixtures:
+//   FURNITURE (Thumbnail at B): CHAIR-001 '["file_id_chair_001"]', CHAIR-002 '["file_id_chair_002"]',
+//     TABLE-001 blank; TABLE-001 'Packing/shop notes' = 'Legs in bag' (an unmapped column)
+//   PANELS (Thumbnail at B): every cell blank
+//   Other tabs: a stale upper-case 'THUMBNAIL' column, which is NOT the Thumbnail column
+//   HANGING SIGNS: no NOTES column (a required column, added after the last header on save)
+//   CACHE/Inventory Thumbnail: TABLE '["file_id_table_prefix"]'; CHAIR and BX blank
+//   CACHE/Thumbnails (the old table): BX, CHAIR, CHAIR-001, CHAIR-002, TABLE, TABLE-001
+// Expected migration: FURNITURE fills TABLE-001 (2 already set); the index fills BX and CHAIR
+// (TABLE already set); no record is left unmatched.
 
-test('THUMBNAIL RECORDS', 'getThumbnailRecord returns file id for TABLE-001', async () => {
-    const result = await Requests.getThumbnailRecord('TABLE-001');
-    if (!result) throw new Error('expected thumbnail record for TABLE-001, got null');
-    assertEqual(result.file, 'file_id_table_001', 'getThumbnailRecord TABLE-001 file id');
+/** Run fn, then put the listed fixture tabs back and drop their cached reads. */
+async function _withRestoredTabs(tabs, fn) {
+    const saved = tabs.map(([db, tab]) => [db, tab, JSON.parse(JSON.stringify(FakeGoogleSheetsService.mockData[db][tab]))]);
+    try {
+        return await fn();
+    } finally {
+        for (const [db, tab, rows] of saved) {
+            FakeGoogleSheetsService.mockData[db][tab] = rows;
+            invalidateCache([{ namespace: 'database', methodName: 'getData', args: [db, tab] }], true);
+        }
+    }
+}
+const _rawTab = (db, tab) => FakeGoogleSheetsService.mockData[db][tab];
+
+test('THUMBNAIL COLUMN', 'thumbnail values parse arrays, bare IDs and blanks', async () => {
+    assertEqual(parseThumbnails('["a", "b"]'), ['a', 'b'], 'JSON array');
+    assertEqual(parseThumbnails('abc'), ['abc'], 'bare file ID');
+    assertEqual(parseThumbnails(''), [], 'blank');
+    assertEqual(parseThumbnails('[broken'), [], 'invalid JSON');
+    assertEqual(parseThumbnails('["a", {"id": "b", "note": "x"}]'), ['a', 'b'], 'objects give their file ID');
 });
 
-test('THUMBNAIL RECORDS', 'getThumbnailRecord returns null for unknown item', async () => {
-    const result = await Requests.getThumbnailRecord('NONEXISTENT-999');
-    assertEqual(result, null, 'getThumbnailRecord for unknown item');
+test('THUMBNAIL COLUMN', 'a column-preserving mapping owns only its own columns', async () => {
+    const mapping = { a: 'A', b: 'B', c: 'C', t: 'T', _optional: ['t'], _preserveColumns: true };
+    const { read, write } = resolveSheetMapping(mapping, ['X', 'B', 'A']);
+    assertEqual(read, { a: 'A', b: 'B', c: 'C' }, 'read: present columns plus the required one');
+    assertEqual(write._orderedHeaders, ['X', 'B', 'A', 'C'], 'the tab order, the missing required column appended');
+    assertEqual(write._orderedKeys, [null, 'b', 'a', 'c'], 'other columns are not owned');
+    assertEqual(resolveSheetMapping(mapping, ['T', 'A']).write._orderedKeys, ['t', 'a', 'b', 'c'], 'an optional column present is owned');
 });
 
-test('THUMBNAIL RECORDS', 'getAllThumbnailRecords returns array including TABLE-001', async () => {
-    const records = await Requests.getAllThumbnailRecords();
-    if (!Array.isArray(records) || records.length === 0) throw new Error('expected non-empty thumbnail records array');
-    const entry = records.find(r => r.itemNumber === 'TABLE-001');
-    if (!entry) throw new Error('TABLE-001 not found in all thumbnail records');
+test('THUMBNAIL COLUMN', 'a tab reads its Thumbnail column; a stale THUMBNAIL column is not it', async () => {
+    const furniture = await Requests.getInventoryTabData('FURNITURE');
+    assertEqual(furniture.find(r => r.itemNumber === 'CHAIR-001').thumbnail, '["file_id_chair_001"]', 'CHAIR-001');
+    assertEqual(furniture.find(r => r.itemNumber === 'TABLE-001').thumbnail, '', 'TABLE-001 blank');
+    const lightbox = (await Requests.getInventoryTabData('LIGHTBOXES')).find(r => r.itemNumber === 'LB-001');
+    assertEqual('thumbnail' in lightbox, false, 'LB-001 has no thumbnail key');
+});
+
+test('THUMBNAIL COLUMN', 'saving writes the thumbnail in place, keeps other columns and records history', async () => {
+    await _withRestoredTabs([['INVENTORY', 'FURNITURE']], async () => {
+        const headerBefore = [..._rawTab('INVENTORY', 'FURNITURE')[0]];
+        const rows = (await Requests.getInventoryTabData('FURNITURE')).map(r => ({ ...r }));
+        rows.find(r => r.itemNumber === 'CHAIR-001').thumbnail = '["file_new"]';
+        await _asUser(() => Requests.saveInventoryTabData(rows, 'FURNITURE'));
+        const raw = _rawTab('INVENTORY', 'FURNITURE');
+        assertEqual(raw[0], headerBefore, 'header row unchanged');
+        const chair = raw.find(r => r[0] === 'CHAIR-001');
+        assertEqual(chair[1], '["file_new"]', 'new value under the Thumbnail header');
+        assertEqual(raw.find(r => r[0] === 'TABLE-001')[7], 'Legs in bag', 'unmapped column kept');
+        const saved = (await Requests.getInventoryTabData('FURNITURE')).find(r => r.itemNumber === 'CHAIR-001');
+        assertEqual(JSON.parse(saved.edithistory).h[0].c, [{ n: 'thumbnail', o: '["file_id_chair_001"]' }], 'history entry');
+    });
+});
+
+test('THUMBNAIL COLUMN', 'saving a tab without a Thumbnail column never adds one', async () => {
+    await _withRestoredTabs([['INVENTORY', 'LIGHTBOXES']], async () => {
+        const headerBefore = [..._rawTab('INVENTORY', 'LIGHTBOXES')[0]];
+        const rows = (await Requests.getInventoryTabData('LIGHTBOXES')).map(r => ({ ...r }));
+        rows[0].quantity = '3';
+        await _asUser(() => Requests.saveInventoryTabData(rows, 'LIGHTBOXES'));
+        assertEqual(_rawTab('INVENTORY', 'LIGHTBOXES')[0], headerBefore, 'header row unchanged');
+        assertEqual(_rawTab('INVENTORY', 'LIGHTBOXES')[1][2], '3', 'QTY written in place');
+    });
+});
+
+test('THUMBNAIL COLUMN', 'a missing required column is added after the last header', async () => {
+    await _withRestoredTabs([['INVENTORY', 'HANGING SIGNS']], async () => {
+        const rows = (await Requests.getInventoryTabData('HANGING SIGNS')).map(r => ({ ...r }));
+        rows[0].notes = 'hang high';
+        await _asUser(() => Requests.saveInventoryTabData(rows, 'HANGING SIGNS'));
+        const raw = _rawTab('INVENTORY', 'HANGING SIGNS');
+        assertEqual(raw[0], ['ITEM#', 'THUMBNAIL', 'QTY', 'EditHistory', 'MetaData', 'Description', 'Packing/shop notes', 'NOTES'], 'NOTES appended');
+        assertEqual(raw[1][7], 'hang high', 'note under it');
+        assertEqual(raw[1][5], 'This is a sign', 'Description kept in place');
+    });
+});
+
+test('THUMBNAIL COLUMN', 'item thumbnails list items of thumbnail tabs only', async () => {
+    const map = new Map((await Requests.getItemThumbnails()).map(e => [e.item, e.thumbnail]));
+    assertEqual(map.get('CHAIR-001'), '["file_id_chair_001"]', 'own image');
+    assertEqual(map.get('CHAIR-002'), '["file_id_chair_002"]', 'only the primary image');
+    assertEqual(map.get('TABLE-001'), '', 'thumbnail tab, no image');
+    assertEqual(map.get('BX-16x39'), '', 'PANELS item');
+    assertEqual(map.has('LB-001'), false, 'tab without a Thumbnail column');
+});
+
+test('THUMBNAIL COLUMN', 'category images come from the index Thumbnail column', async () => {
+    assertEqual(await Requests.getCategoryThumbnails(), [{ prefix: 'TABLE', thumbnail: '["file_id_table_prefix"]' }], 'TABLE only');
+});
+
+test('THUMBNAIL COLUMN', 'proposals carry thumbnail changes like other fields', async () => {
+    const inventoryRow = { itemNumber: 'CHAIR-001', quantity: '20', description: 'Chair', notes: '', thumbnail: '["a"]' };
+    assertEqual(ProposalUtils.diffRow(inventoryRow, { ...inventoryRow, thumbnail: '["b"]' }), [{ n: 'thumbnail', ne: '["b"]' }], 'diffRow');
+    const row = ProposalUtils.toTableRow({ category: 'FURNITURE', itemNumber: 'CHAIR-001', changes: [{ n: 'thumbnail', ne: '["b"]' }] }, inventoryRow);
+    assertEqual([row.thumbnail, row.currentThumbnail], ['["b"]', '["a"]'], 'proposed and current');
+    assertEqual(ProposalUtils.changesFromTableRow(row), [{ n: 'thumbnail', ne: '["b"]' }], 'changes from the row');
+    const noColumn = ProposalUtils.toTableRow({ category: 'LIGHTBOXES', itemNumber: 'LB-001', changes: [] }, { itemNumber: 'LB-001', quantity: '0' });
+    assertEqual('thumbnail' in noColumn, false, 'no thumbnail for a tab without the column');
+});
+
+test('THUMBNAIL COLUMN', 'an identical image is uploaded once', async () => {
+    const file = () => new File([new Uint8Array([7, 7, 7, 1])], 'same.png', { type: 'image/png' });
+    const first = await Requests.uploadItemImage(file(), 'CHAIR-001');
+    const second = await Requests.uploadItemImage(file(), 'CHAIR-002');
+    assertEqual(second.fileId, first.fileId, 'same file ID');
+    assertEqual([first.reused, second.reused], [false, true], 'second upload reused');
+});
+
+test('THUMBNAIL COLUMN', 'uploads are resized to fit 1000 x 1000 and only that copy is uploaded', async () => {
+    const canvas = Object.assign(document.createElement('canvas'), { width: 2400, height: 1200 });
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = `rgb(${Date.now() % 255}, 80, 160)`;
+    ctx.fillRect(0, 0, 2400, 1200);
+    const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+    const before = FakeGoogleSheetsService.uploadedFiles.length;
+    const result = await Requests.uploadItemImage(new File([blob], 'big.png', { type: 'image/png' }), 'TABLE-002');
+    const bitmap = await createImageBitmap(result.file);
+    assertEqual([bitmap.width, bitmap.height], [1000, 500], 'resized');
+    const added = FakeGoogleSheetsService.uploadedFiles.slice(before);
+    assertEqual([added.length, added.some(f => f.name.includes('ORIGINAL'))], [1, false], 'one file, no original');
+});
+
+test('THUMBNAIL COLUMN', 'thumbnails are a column type that is never searched', async () => {
+    assertEqual(guessColumnType('Thumbnail'), 'thumbnail', 'guessed from the name');
+    assertEqual(isOpaqueType('thumbnail'), true, 'opaque');
+    assertEqual(formatValue('["a","b"]', { format: 'thumbnail' }), '2 images', 'text form');
+    const fields = [{ key: 'thumbnail', type: 'thumbnail' }, { key: 'itemNumber' }];
+    const resolved = resolveView(fields, { id: 't', layout: 'table', columns: ['thumbnail', 'itemNumber'] });
+    assertEqual(resolved.fieldMap.get('thumbnail').cell, 'thumbnail', 'cell from the type');
+    assertEqual(searchTiers(resolved).shown, ['itemNumber'], 'not searched');
+});
+
+test('THUMBNAIL COLUMN', 'migration dry run plans blank cells only', async () => {
+    const report = await migrateThumbnails();
+    const furniture = report.tabs.find(t => t.tab === 'FURNITURE');
+    assertEqual([furniture.fill, furniture.already, furniture.conflicts.length], [1, 2, 0], 'FURNITURE');
+    assertEqual([report.index.fill, report.index.already], [2, 1], 'index');
+    assertEqual(report.unmatched, [], 'every record matched');
+    assertEqual(_rawTab('INVENTORY', 'FURNITURE').find(r => r[0] === 'TABLE-001')[1], '', 'nothing written');
+});
+
+test('THUMBNAIL COLUMN', 'migration fills the item and category cells', async () => {
+    await _withRestoredTabs([['INVENTORY', 'FURNITURE'], ['CACHE', 'Inventory']], async () => {
+        await migrateThumbnails({ dryRun: false });
+        const table = (await Requests.getInventoryTabData('FURNITURE')).find(r => r.itemNumber === 'TABLE-001');
+        assertEqual(table.thumbnail, '["file_id_table_001"]', 'TABLE-001 filled');
+        const categories = (await Requests.getCategoryThumbnails()).map(c => c.prefix).sort();
+        assertEqual(categories, ['BX', 'CHAIR', 'TABLE'], 'category images');
+        assertEqual(_rawTab('INVENTORY', 'FURNITURE').find(r => r[0] === 'TABLE-001')[7], 'Legs in bag', 'other cells untouched');
+    });
+});
+
+// ── Group 26b: New-Row History and List Origins ──────────────────────────────
+// A new row's first save always records a creation marker (c: []), also when it arrives carrying
+// history (pasted, moved in) or is saved without a user or by a scheduled save.
+// EditHistoryUtils.listItemOrigins finds when each item of a list field (a thumbnail gallery)
+// entered the history. The marker tests use a scratch PACK_LISTS tab (_MARKER_TEST) and the
+// FURNITURE fixture (restored afterwards).
+
+test('NEW ROW HISTORY', 'history gives when and by whom each image was added', async () => {
+    const h = [
+        { u: 'sam', t: 300, c: [{ n: 'thumbnail', o: '["a","b"]' }] },
+        { u: 'dan', t: 200, c: [{ n: 'quantity', o: '1' }] },
+        { u: 'kim', t: 100, c: [{ n: 'thumbnail', o: '["a"]' }] },
+        { u: 'lee', t: 50, c: [] }
+    ];
+    const origins = EditHistoryUtils.listItemOrigins(_eh({ i: 1, h }), 'thumbnail', '["a","b","c"]', parseThumbnails);
+    assertEqual(Object.fromEntries(origins), {
+        a: { u: 'lee', t: 50, created: true },
+        b: { u: 'kim', t: 100, created: false },
+        c: { u: 'sam', t: 300, created: false }
+    }, 'each image');
+    const capped = EditHistoryUtils.listItemOrigins(_eh({ i: 1, h: h.slice(0, 3) }), 'thumbnail', '["a","b","c"]', parseThumbnails);
+    assertEqual(capped.get('a'), null, 'before the recorded history');
+    const carried = EditHistoryUtils.listItemOrigins(_eh({ i: 1, h: [{ u: 'mover', t: 400, c: [] }, { u: 'kim', t: 100, c: [{ n: 'thumbnail', o: '' }] }] }), 'thumbnail', '["a"]', parseThumbnails);
+    assertEqual(carried.get('a'), { u: 'kim', t: 100, created: false }, 'history carried in below a creation marker wins');
+});
+
+const _MARKER_TAB = '_MARKER_TEST';
+const _markerRead = async () => (await Database.getData('PACK_LISTS', _MARKER_TAB, _HISTORY_MAPPING)).map(r => ({ ...r }));
+
+test('NEW ROW HISTORY', "a new row's first save always records a creation marker", async () => {
+    await Database.setData('PACK_LISTS', _MARKER_TAB, [_row('A', '1')], _HISTORY_MAPPING, { skipMetadata: true });
+    const rows = await _markerRead();
+    const pasted = { name: 'X', qty: '2', edithistory: _eh({ h: [{ u: 'old', t: 5, c: [{ n: 'qty', o: '1' }] }] }) };
+    const moved = { name: 'Y', qty: '3', edithistory: _eh({ i: 99, h: [{ u: 'old', t: 6, c: [] }] }) };
+    await Database.setData('PACK_LISTS', _MARKER_TAB, [...rows, pasted, moved], _HISTORY_MAPPING, { username: 'test@example.com', source: 'web' });
+    const saved = await _markerRead();
+    const x = _parsed(saved[1]);
+    assertEqual([x.i > 0, x.h.map(e => [e.u, e.c])], [true, [['test', []], ['old', [{ n: 'qty', o: '1' }]]]], 'pasted row: marker above its carried history');
+    const y = _parsed(saved[2]);
+    assertEqual([y.i, y.h.map(e => [e.u, e.c])], [99, [['test', []], ['old', []]]], 'moved row keeps its identity, gains a marker');
+    await Database.setData('PACK_LISTS', _MARKER_TAB, [...saved, _row('Z', '4')], _HISTORY_MAPPING, { source: 'web' });
+    assertEqual(_parsed((await _markerRead())[3]).h.map(e => e.u), ['unknown'], 'a save without a user still marks creation');
+});
+
+test('NEW ROW HISTORY', 'a scheduled save gives a new row its identity and creation marker', async () => {
+    await _withRestoredTabs([['INVENTORY', 'FURNITURE']], async () => {
+        const rows = (await Requests.getInventoryTabData('FURNITURE')).map(r => ({ ...r }));
+        rows.push({ itemNumber: 'STOOL-009', quantity: '4', description: 'Folding stool', notes: '', thumbnail: '["file_new"]', edithistory: '' });
+        await _asUser(() => Requests.saveInventoryTabData(rows, 'FURNITURE', undefined, undefined, undefined, { scheduledDate: '2099-01-01', note: 'arrives' }));
+        const saved = await Requests.getInventoryTabData('FURNITURE');
+        const eh = _parsed(saved.find(r => r.itemNumber === 'STOOL-009'));
+        const highest = Math.max(...saved.filter(r => r.itemNumber !== 'STOOL-009').map(r => _parsed(r).i || 0));
+        assertEqual([eh.i, eh.h.map(e => [e.u, e.c]), eh.p.length], [highest + 1, [['test', []]], 1], 'next identity, marker and the pending change');
+    });
+});
+
+// ── Group 26c: Thumbnail Gallery ──────────────────────────────────────────────
+// A thumbnail cell is a gallery: images as file IDs, or { id, note, crop } objects; the first is the
+// primary (the icon). When each image entered the item's history comes from its EditHistory
+// (EditHistoryUtils.listItemOrigins). FakeGoogle: FURNITURE CHAIR-002 holds
+// ['file_id_chair_002', { id: 'file_id_chair_001', note: 'Side view', crop: { x: 0.25, y: 0, w: 0.5, h: 1 } }]
+// and one history entry: sam (t 17912947200) changed thumbnail from '["file_id_chair_002"]'.
+
+test('THUMBNAIL GALLERY', 'images with notes and crops parse and write compactly', async () => {
+    assertEqual(parseThumbnailEntries('["a", {"id": "b", "note": " n ", "crop": {"x": 0, "y": 0, "w": 1, "h": 1}}]'),
+        [{ id: 'a' }, { id: 'b', note: 'n' }], 'note trimmed, whole-image crop dropped');
+    assertEqual(serializeThumbnailEntries([{ id: 'a' }, { id: 'b', note: 'n' }]), '["a",{"id":"b","note":"n"}]', 'plain images stay bare IDs');
+    assertEqual(primaryThumbnailValue('[{"id":"a","note":"n","crop":{"x":0.1,"y":0,"w":0.5,"h":1}},"b"]'),
+        '[{"id":"a","crop":{"x":0.1,"y":0,"w":0.5,"h":1}}]', 'icon: primary file and crop, no note');
+    assertEqual(thumbnailKey('a', { x: 0.1, y: 0.2, w: 0.5, h: 0.5 }), 'a#0.1,0.2,0.5,0.5', 'cache key with crop');
+    assertEqual(thumbnailKey('a', null), 'a', 'cache key without crop');
+});
+
+test('THUMBNAIL GALLERY', 'gallery edits add, remove, reorder, note and crop', async () => {
+    assertEqual(addThumbnails('["a"]', ['b', 'a']), '["a","b"]', 'add at the end, no duplicates');
+    assertEqual(addThumbnails('', ['a', 'b']), '["a","b"]', 'first added becomes the primary');
+    assertEqual(removeThumbnailAt('["a","b","c"]', 1), '["a","c"]', 'remove');
+    assertEqual(setPrimaryThumbnail('["a","b","c"]', 2), '["c","a","b"]', 'set as thumbnail moves it first');
+    const noted = setThumbnailNote('["a"]', 0, 'front');
+    assertEqual(noted, '[{"id":"a","note":"front"}]', 'note');
+    assertEqual(setThumbnailNote(noted, 0, ''), '["a"]', 'blank note clears it');
+    assertEqual(setThumbnailCrop('["a"]', 0, { x: 0.1, y: 0.2, w: 0.5, h: 0.5 }), '[{"id":"a","crop":{"x":0.1,"y":0.2,"w":0.5,"h":0.5}}]', 'crop');
+    assertEqual(setThumbnailCrop('[{"id":"a","crop":{"x":0.1,"y":0.2,"w":0.5,"h":0.5}}]', 0, null), '["a"]', 'crop cleared');
+});
+
+test('THUMBNAIL GALLERY', 'the CHAIR-002 gallery reads its images, note, crop and origins', async () => {
+    const row = (await Requests.getInventoryTabData('FURNITURE')).find(r => r.itemNumber === 'CHAIR-002');
+    assertEqual(parseThumbnailEntries(row.thumbnail), [{ id: 'file_id_chair_002' }, { id: 'file_id_chair_001', note: 'Side view', crop: { x: 0.25, y: 0, w: 0.5, h: 1 } }], 'entries');
+    const origins = EditHistoryUtils.listItemOrigins(row.edithistory, 'thumbnail', row.thumbnail, parseThumbnails);
+    assertEqual(origins.get('file_id_chair_001'), { u: 'sam', t: 17912947200, created: false }, 'added by sam');
+    assertEqual(origins.get('file_id_chair_002'), null, 'primary predates the history');
 });
 
 // ── Group 26: Row-Based Transship and Date Normalization ──────────────────────
@@ -1248,25 +1488,26 @@ test('LOCK WRAPPERS', 'getInventoryLock returns null for unlocked category', asy
     assertEqual(result, null, 'FURNITURE has no lock in FakeGoogle');
 });
 
-// ── Group 30: Hardware Extraction ─────────────────────────────────────────────
-// extractHardwareFromText scans the HARDWARE tab for matching item numbers using
-// pattern matching against non-standard item codes. FakeGoogle HARDWARE tab has
+// ── Group 30: Nonstandard Item Number Extraction ──────────────────────────────
+// extractCustomItemFromText scans the tabs listed in InventoryCustomItemNumbers (HARDWARE
+// in FakeGoogle) for matching item numbers using pattern matching against non-standard
+// item codes. FakeGoogle HARDWARE tab has
 // '901 00 030 MKII' and 'HH BOLTHOG M8 LONG' as known fixtures.
 
 test('HARDWARE EXTRACTION', '901 00 030 MKII extracted with correct quantity', async () => {
-    const result = await Requests.extractHardwareFromText('(10) 901 00 030 MKII Mounting brackets');
-    assertEqual(result.quantity, 10, 'extractHardwareFromText quantity');
-    assertEqual(result.itemNumber, '901 00 030 MKII', 'extractHardwareFromText itemNumber');
+    const result = await Requests.extractCustomItemFromText('(10) 901 00 030 MKII Mounting brackets');
+    assertEqual(result.quantity, 10, 'extractCustomItemFromText quantity');
+    assertEqual(result.itemNumber, '901 00 030 MKII', 'extractCustomItemFromText itemNumber');
 });
 
 test('HARDWARE EXTRACTION', 'HH BOLTHOG M8 LONG extracted with correct quantity', async () => {
-    const result = await Requests.extractHardwareFromText('(3) HH BOLTHOG M8 LONG Long bolts');
+    const result = await Requests.extractCustomItemFromText('(3) HH BOLTHOG M8 LONG Long bolts');
     assertEqual(result.quantity, 3, 'HH BOLTHOG M8 LONG quantity');
     assertEqual(result.itemNumber, 'HH BOLTHOG M8 LONG', 'HH BOLTHOG M8 LONG itemNumber');
 });
 
 test('HARDWARE EXTRACTION', 'text with no hardware returns null itemNumber', async () => {
-    const result = await Requests.extractHardwareFromText('plain text no hardware here');
+    const result = await Requests.extractCustomItemFromText('plain text no hardware here');
     assertEqual(result.itemNumber, null, 'no hardware match returns null itemNumber');
 });
 
@@ -1292,17 +1533,17 @@ test('DESCRIPTION MATCH', 'unrelated description returns non-null alert', async 
 });
 
 // ── Group 32: Inventory Level Check ──────────────────────────────────────────
-// checkInventoryLevel returns null for suppressed items and an alert for shortages.
+// checkInventoryLevel returns null for items in skipped tabs and an alert for shortages.
 // FURNITURE is in InventorySuppressCategoryAnalysis preference; TABLE-001 maps to FURNITURE.
 // CAB-004 during ATSC 2025 NAB window: 10 in stock, 22 needed (11 ATSC + 11 GEARFIRE same day).
 
-test('INVENTORY LEVEL CHECK', 'suppressed item prefix returns null', async () => {
-    // TABLE prefix has suppressAnalysis=true in FakeGoogle Inventory index
+test('INVENTORY LEVEL CHECK', 'item in a skipped tab returns null', async () => {
+    // TABLE-001 is in FURNITURE, which InventorySuppressCategoryAnalysis lists
     const result = await Requests.checkInventoryLevel(
         { 'Extracted Item': 'TABLE-001' },
         'CHAINCO 2026 SPRING EXPO'
     );
-    assertEqual(result, null, 'TABLE-001 (suppressAnalysis=true) must return null');
+    assertEqual(result, null, 'TABLE-001 (FURNITURE skipped) must return null');
 });
 
 test('INVENTORY LEVEL CHECK', 'oversold CAB-004 during ATSC NAB returns shortage alert', async () => {
@@ -1484,10 +1725,450 @@ test('CACHE INVALIDATION', 'remote Caching-tab timestamp for getTabs fires getPa
         throw new Error(`poller did not invalidate getPacklists; fired: ${[...fired].join(', ')}`);
 });
 
+// ── Group: Google requests ────────────────────────────────────────────────────
+// FakeGoogle CACHE/Clients: headers Clients | Abbreviations | Notes, first row ABCAM,
+// AUSTAL USA abbreviated AUSTAL. A tab read unmapped and under two mappings is one sheet read.
+
+/** Run fn(reads) while counting sheet reads of one tab; reads() is the count so far. */
+async function _countSheetReads(db, tab, fn) {
+    const original = FakeGoogleSheetsService.getSheetData;
+    let count = 0;
+    FakeGoogleSheetsService.getSheetData = async function (tableId, range) {
+        if (tableId === db && range === tab) count++;
+        return original.call(this, tableId, range);
+    };
+    try {
+        return await fn(() => count);
+    } finally {
+        FakeGoogleSheetsService.getSheetData = original;
+    }
+}
+
+test('GOOGLE REQUESTS', 'a tab read unmapped and under two mappings is one sheet read', async () => {
+    invalidateCache([{ namespace: 'database', methodName: 'getData', args: ['CACHE', 'Clients'] }], true);
+    await _withRestoredTabs([['CACHE', 'Clients']], () => _countSheetReads('CACHE', 'Clients', async (reads) => {
+        const raw = await Database.getData('CACHE', 'Clients');
+        const names = await Database.getData('CACHE', 'Clients', { name: 'Clients' });
+        const full = await Database.getData('CACHE', 'Clients', { name: 'Clients', abbr: 'Abbreviations' });
+        assertEqual(reads(), 1, 'sheet reads');
+        assertEqual([raw[1][0], names[0].name, full.find(r => r.name === 'AUSTAL USA').abbr], ['ABCAM', 'ABCAM', 'AUSTAL'], 'values');
+    }));
+});
+
+test('GOOGLE REQUESTS', 'a mapped read sees the change after its tab is invalidated', async () => {
+    await _withRestoredTabs([['CACHE', 'Clients']], () => _countSheetReads('CACHE', 'Clients', async (reads) => {
+        await Database.getData('CACHE', 'Clients', { name: 'Clients' });
+        _rawTab('CACHE', 'Clients')[1][0] = 'ABCAM RENAMED';
+        // As a write to the tab, or the poller, invalidates it
+        invalidateCache([{ namespace: 'database', methodName: 'getData', args: ['CACHE', 'Clients'] }], true);
+        const names = await Database.getData('CACHE', 'Clients', { name: 'Clients' });
+        assertEqual([names[0].name, reads()], ['ABCAM RENAMED', 2], 'fresh value, one more read');
+    }));
+});
+
+// User data writes made at the same moment are one write of the user's tab
+// (CACHE/UserData_test_example_com), applied in call order.
+const USER_TAB = 'UserData_test_example_com';
+
+/** Run fn(writes) while counting whole-tab writes of one tab; writes() is the count so far. */
+async function _countTabWrites(db, tab, fn) {
+    const original = FakeGoogleSheetsService.setSheetData;
+    let count = 0;
+    FakeGoogleSheetsService.setSheetData = async function (tableId, range, ...rest) {
+        if (tableId === db && range === tab) count++;
+        return original.call(this, tableId, range, ...rest);
+    };
+    try {
+        return await fn(() => count);
+    } finally {
+        FakeGoogleSheetsService.setSheetData = original;
+    }
+}
+
+test('GOOGLE REQUESTS', 'user data stored at the same moment is one write, applied in order', async () => {
+    await _withRestoredTabs([['CACHE', USER_TAB]], () => _countTabWrites('CACHE', USER_TAB, async (writes) => {
+        await Promise.all([
+            Requests.storeUserData({ n: 1 }, 'test@example.com', 'batch_test_a'),
+            Requests.storeUserData({ n: 2 }, 'test@example.com', 'batch_test_b'),
+            Requests.storeUserData({ n: 3 }, 'test@example.com', 'batch_test_a'),
+            Requests.storeUserData({ n: 4 }, 'test@example.com', 'batch_test_c'),
+            Requests.storeUserData(null, 'test@example.com', 'batch_test_c')
+        ]);
+        assertEqual(writes(), 1, 'tab writes');
+        const stored = Object.fromEntries(_rawTab('CACHE', USER_TAB).filter(r => String(r[0]).startsWith('batch_test_')).map(r => [r[0], r[1]]));
+        assertEqual(stored, { batch_test_a: '{"n":3}', batch_test_b: '{"n":2}' }, 'stored rows');
+    }));
+});
+
+test('GOOGLE REQUESTS', 'user data stored while the tab is being written is kept', async () => {
+    // The first write of the tab waits until the second call has been made
+    const original = FakeGoogleSheetsService.setSheetData;
+    let release, started;
+    const gate = new Promise(resolve => release = resolve);
+    const firstStarted = new Promise(resolve => started = resolve);
+    let writes = 0;
+    FakeGoogleSheetsService.setSheetData = async function (tableId, range, ...rest) {
+        if (tableId === 'CACHE' && range === USER_TAB && writes++ === 0) {
+            started();
+            await gate;
+        }
+        return original.call(this, tableId, range, ...rest);
+    };
+    try {
+        await _withRestoredTabs([['CACHE', USER_TAB]], async () => {
+            const first = Requests.storeUserData('one', 'test@example.com', 'batch_test_a');
+            await firstStarted;
+            const second = Requests.storeUserData('two', 'test@example.com', 'batch_test_b');
+            release();
+            await Promise.all([first, second]);
+            const stored = Object.fromEntries(_rawTab('CACHE', USER_TAB).filter(r => String(r[0]).startsWith('batch_test_')).map(r => [r[0], r[1]]));
+            assertEqual([stored, writes], [{ batch_test_a: 'one', batch_test_b: 'two' }, 2], 'both rows, two writes');
+        });
+    } finally {
+        FakeGoogleSheetsService.setSheetData = original;
+    }
+});
+
+// ── Group: Spreadsheet watch ──────────────────────────────────────────────────
+// Each poll reads the spreadsheets' Drive modifiedTime (FakeGoogleSheetsService.touch is a hand
+// edit). FakeGoogle PROD_SCHED/Production Schedule row 1 is ALLEN ARMS 2025 SHOT, City
+// "Las Vegas, NV" (column 4); PACK_LISTS/ATSC 2025 NAB is read unmapped.
+
+test('SPREADSHEET WATCH', 'an unchanged schedule stays cached; a hand edit is re-read once, at the next poll', async () => {
+    await _withRestoredTabs([['PROD_SCHED', 'Production Schedule']], () => _countSheetReads('PROD_SCHED', 'Production Schedule', async (reads) => {
+        await triggerCachePoll();
+        await Database.getData('PROD_SCHED', 'Production Schedule');
+        const base = reads();
+        await triggerCachePoll();
+        await Database.getData('PROD_SCHED', 'Production Schedule');
+        assertEqual(reads(), base, 'reads while unchanged');
+
+        _rawTab('PROD_SCHED', 'Production Schedule')[1][4] = 'Reno, NV';
+        FakeGoogleSheetsService.touch('PROD_SCHED');
+        await triggerCachePoll();
+        const rows = await Database.getData('PROD_SCHED', 'Production Schedule');
+        await triggerCachePoll();
+        await Database.getData('PROD_SCHED', 'Production Schedule');
+        assertEqual([rows[1][4], reads()], ['Reno, NV', base + 1], 'edited value, one read');
+    }));
+});
+
+test('SPREADSHEET WATCH', 'a pack list change with no stamp expires its cached reads after one more poll', async () => {
+    const TAB = 'ATSC 2025 NAB';
+    await _withRestoredTabs([['PACK_LISTS', TAB]], () => _countSheetReads('PACK_LISTS', TAB, async (reads) => {
+        await triggerCachePoll();
+        await Database.getData('PACK_LISTS', TAB);
+        const base = reads();
+        const sheet = _rawTab('PACK_LISTS', TAB);
+        sheet[1][0] = `${sheet[1][0]} EDITED`;
+        // Changed long after any stamp of the table
+        const later = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+        await withFaults({ beforeModifiedTimes: () => ({ PACK_LISTS: later }) }, async () => {
+            await triggerCachePoll();
+            await Database.getData('PACK_LISTS', TAB);
+            assertEqual(reads(), base, 'still cached at the poll that saw the change');
+            await triggerCachePoll();
+        });
+        const rows = await Database.getData('PACK_LISTS', TAB);
+        assertEqual([rows[1][0], reads()], [sheet[1][0], base + 1], 'expired, then read once');
+        await triggerCachePoll(); // back to the real modifiedTime
+    }));
+});
+
+test('SPREADSHEET WATCH', 'a stamped pack list change is re-read once', async () => {
+    const TAB = 'ATSC 2025 NAB';
+    await _withRestoredTabs([['PACK_LISTS', TAB]], () => _countSheetReads('PACK_LISTS', TAB, async (reads) => {
+        await triggerCachePoll();
+        await Database.getData('PACK_LISTS', TAB);
+        const base = reads();
+        const sheet = _rawTab('PACK_LISTS', TAB);
+        sheet[1][0] = `${sheet[1][0]} STAMPED`;
+        FakeGoogleSheetsService.touch('PACK_LISTS');
+        await ApplicationUtils.writeCacheTimestamp(`database:getData:"PACK_LISTS","${TAB}"`);
+        await triggerCachePoll();
+        const rows = await Database.getData('PACK_LISTS', TAB);
+        await triggerCachePoll();
+        await Database.getData('PACK_LISTS', TAB);
+        assertEqual([rows[1][0], reads()], [sheet[1][0], base + 1], 'stamped value, one read');
+    }));
+});
+
+test('SPREADSHEET WATCH', 'the Caching tab is read only when it may hold new stamps', async () => {
+    await triggerCachePoll();
+    await _countSheetReads('CACHE', 'Caching', async (reads) => {
+        await triggerCachePoll();
+        assertEqual(reads(), 0, 'Caching reads while nothing changed');
+        FakeGoogleSheetsService.touch('CACHE');
+        await triggerCachePoll();
+        assertEqual(reads(), 1, 'Caching reads after the CACHE spreadsheet changed');
+        await withFaults({ beforeModifiedTimes: () => { throw new Error('Drive unavailable'); } }, async () => {
+            await triggerCachePoll();
+            await triggerCachePoll();
+        });
+        assertEqual(reads(), 3, 'Caching reads at every poll while Drive is unavailable');
+    });
+});
+
+// ── Group: Change stamps ──────────────────────────────────────────────────────
+// Stamps for made-up tabs ("StampTest …") are added to CACHE/Caching and left there.
+
+async function _waitFor(check, label) {
+    for (let i = 0; i < 300; i++) {
+        const value = await check();
+        if (value) return value;
+        await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    throw new Error(`timed out waiting for ${label}`);
+}
+const _stampRow = (prefix) => (_rawTab('CACHE', 'Caching') || []).find(row => row[0] === prefix);
+
+test('CHANGE STAMPS', 'a failed read of the Caching tab writes nothing; the next poll writes the stamp', async () => {
+    const prefix = 'database:getData:"CACHE","StampTest failed read"';
+    await triggerCachePoll();
+    const before = JSON.stringify(_rawTab('CACHE', 'Caching'));
+    let failed = false;
+    FakeGoogleSheetsService.faults = {
+        beforeRead: (t, range) => { if (t === 'CACHE' && range === 'Caching' && !failed) { failed = true; throw new Error('read failed'); } }
+    };
+    try {
+        stampDataChange(prefix);
+        await _waitFor(() => failed, 'the failed read');
+        await new Promise(resolve => setTimeout(resolve, 50));
+    } finally {
+        FakeGoogleSheetsService.faults = null;
+    }
+    assertEqual(JSON.stringify(_rawTab('CACHE', 'Caching')), before, 'Caching tab untouched');
+    await triggerCachePoll();
+    const row = await _waitFor(() => _stampRow(prefix), 'the retried stamp');
+    assertEqual(isNaN(new Date(row[1]).getTime()), false, 'stamp has a timestamp');
+});
+
+test('CHANGE STAMPS', 'two sessions adding new keys at the same moment each keep their row', async () => {
+    const [b, c] = ['database:getData:"CACHE","StampTest session B"', 'database:getData:"CACHE","StampTest session C"'];
+    const rowsBefore = _rawTab('CACHE', 'Caching').length;
+    const timestamp = new Date().toISOString();
+    // Both read the tab before either writes
+    await Promise.all([
+        ApplicationUtils.writeCacheTimestamps([{ prefix: b, timestamp }]),
+        ApplicationUtils.writeCacheTimestamps([{ prefix: c, timestamp }])
+    ]);
+    assertEqual([!!_stampRow(b), !!_stampRow(c), _rawTab('CACHE', 'Caching').length], [true, true, rowsBefore + 2], 'both rows added');
+});
+
+test('CHANGE STAMPS', 'stamps made while a stamp write runs go out together', async () => {
+    const prefixes = [1, 2, 3].map(n => `database:getData:"CACHE","StampTest batch ${n}"`);
+    const original = FakeGoogleSheetsService.appendSheetValues;
+    let appends = 0;
+    FakeGoogleSheetsService.appendSheetValues = async function (tableId, range, rows) {
+        if (rows.some(row => prefixes.includes(row[0]))) appends++;
+        return original.call(this, tableId, range, rows);
+    };
+    try {
+        prefixes.forEach(prefix => stampDataChange(prefix));
+        await _waitFor(() => prefixes.every(_stampRow), 'all three stamps');
+    } finally {
+        FakeGoogleSheetsService.appendSheetValues = original;
+    }
+    assertLessThan(appends, 3, 'append requests for three stamps');
+});
+
+// ── Group: Saves cache what they wrote ────────────────────────────────────────
+// A whole-tab write's response is the tab as a read returns it (FakeGoogle: the tab after the
+// write), so the save caches it instead of reading the tab again. FakeGoogle CACHE/Clients row 1
+// is ABCAM with no abbreviation.
+const CLIENTS_MAPPING = { name: 'Clients', abbr: 'Abbreviations' };
+
+test('SAVE CACHING', 'a whole-tab save caches the tab as written: no read follows, before or after the next poll', async () => {
+    await _withRestoredTabs([['CACHE', 'Clients']], () => _countSheetReads('CACHE', 'Clients', async (reads) => {
+        const rows = (await Database.getData('CACHE', 'Clients', CLIENTS_MAPPING)).map(row => ({ ...row }));
+        const base = reads();
+        rows[0].abbr = 'ABC';
+        await Database.setData('CACHE', 'Clients', rows, CLIENTS_MAPPING, { skipMetadata: true });
+        const cached = await Database.getData('CACHE', 'Clients');
+        const mapped = await Database.getData('CACHE', 'Clients', CLIENTS_MAPPING);
+        assertEqual(reads(), base, 'reads after the save');
+        assertEqual(JSON.stringify(cached), JSON.stringify(FakeGoogleSheetsService.getMockData('CACHE', 'Clients')), 'cached tab matches a fresh read');
+        assertEqual(mapped[0].abbr, 'ABC', 'mapped read from the cached tab');
+        await _waitFor(() => _stampRow('database:getData:"CACHE","Clients"'), 'the save\'s stamp');
+        await triggerCachePoll();
+        await Database.getData('CACHE', 'Clients');
+        assertEqual(reads(), base, 'reads after the poll read our own stamp');
+    }));
+});
+
+test('SAVE CACHING', 'another session\'s stamp after our save still re-reads the tab once', async () => {
+    await _withRestoredTabs([['CACHE', 'Clients']], () => _countSheetReads('CACHE', 'Clients', async (reads) => {
+        const rows = await Database.getData('CACHE', 'Clients', CLIENTS_MAPPING);
+        const savedAt = Date.now();
+        await Database.setData('CACHE', 'Clients', rows, CLIENTS_MAPPING, { skipMetadata: true });
+        const base = reads();
+        await _waitFor(() => new Date(_stampRow('database:getData:"CACHE","Clients"')?.[1]).getTime() > savedAt, 'our stamp');
+        await new Promise(resolve => setTimeout(resolve, 5)); // the other session stamps later than we did
+        _rawTab('CACHE', 'Clients')[1][0] = 'ABCAM ELSEWHERE';
+        await ApplicationUtils.writeCacheTimestamp('database:getData:"CACHE","Clients"');
+        await triggerCachePoll();
+        const after = await Database.getData('CACHE', 'Clients', CLIENTS_MAPPING);
+        assertEqual([after[0].name, reads()], ['ABCAM ELSEWHERE', base + 1], 'their value, one read');
+    }));
+});
+
+test('SAVE CACHING', 'when our stamp replaces one we never saw, the tab is re-read once', async () => {
+    const prefix = 'database:getData:"CACHE","Clients"';
+    await _withRestoredTabs([['CACHE', 'Clients']], () => _countSheetReads('CACHE', 'Clients', async (reads) => {
+        await triggerCachePoll();
+        const rows = await Database.getData('CACHE', 'Clients', CLIENTS_MAPPING);
+        // Our stamp write's read of the Caching tab waits while another session changes the tab
+        // and stamps it; our stamp then replaces theirs
+        let release, reached, held = false;
+        const gate = new Promise(resolve => release = resolve);
+        const atRead = new Promise(resolve => reached = resolve);
+        FakeGoogleSheetsService.faults = {
+            beforeRead: async (t, range) => {
+                if (held || t !== 'CACHE' || range !== 'Caching') return;
+                held = true;
+                reached();
+                await gate;
+            }
+        };
+        // Dated apart from ours (stamps are dated a second ahead)
+        const theirs = new Date(Date.now() + 500).toISOString();
+        try {
+            await Database.setData('CACHE', 'Clients', rows, CLIENTS_MAPPING, { skipMetadata: true });
+            await atRead;
+            _rawTab('CACHE', 'Clients')[1][0] = 'ABCAM ELSEWHERE';
+            const row = _stampRow(prefix);
+            if (row) row[1] = theirs; else _rawTab('CACHE', 'Caching').push([prefix, theirs]);
+        } finally {
+            FakeGoogleSheetsService.faults = null;
+            release();
+        }
+        const base = reads();
+        await _waitFor(() => _stampRow(prefix)[1] !== theirs, 'our stamp over theirs');
+        await triggerCachePoll();
+        const after = await Database.getData('CACHE', 'Clients', CLIENTS_MAPPING);
+        assertEqual([after[0].name, reads()], ['ABCAM ELSEWHERE', base + 1], 'their value, one read');
+    }));
+});
+
+test('SAVE CACHING', 'a read in flight from before a save doesn\'t overwrite the saved tab', async () => {
+    await _withRestoredTabs([['CACHE', 'Clients']], async () => {
+        const rows = (await Database.getData('CACHE', 'Clients', CLIENTS_MAPPING)).map(row => ({ ...row }));
+        invalidateCache([{ namespace: 'database', methodName: 'getData', args: ['CACHE', 'Clients'] }], true);
+        // The next read of the tab takes its data now and answers only once released
+        const original = FakeGoogleSheetsService.getSheetData;
+        let release, taken;
+        const gate = new Promise(resolve => release = resolve);
+        const read = new Promise(resolve => taken = resolve);
+        FakeGoogleSheetsService.getSheetData = async function (tableId, range) {
+            if (tableId !== 'CACHE' || range !== 'Clients') return original.call(this, tableId, range);
+            FakeGoogleSheetsService.getSheetData = original;
+            const data = await original.call(this, tableId, range);
+            taken();
+            await gate;
+            return data;
+        };
+        try {
+            const stale = Database.getData('CACHE', 'Clients');
+            await read;
+            rows[0].abbr = 'SAVED';
+            await Database.setData('CACHE', 'Clients', rows, CLIENTS_MAPPING, { skipMetadata: true });
+            release();
+            await stale;
+        } finally {
+            FakeGoogleSheetsService.getSheetData = original;
+            release();
+        }
+        const after = await Database.getData('CACHE', 'Clients', CLIENTS_MAPPING);
+        assertEqual(after[0].abbr, 'SAVED', 'the saved tab stays cached');
+    });
+});
+
+test('SAVE CACHING', 'a lock change is still confirmed by a fresh read at the next poll', async () => {
+    const user = 'stamp.tester@example.com';
+    const tab = 'StampTest lock';
+    await _withRestoredTabs([['CACHE', 'Locks']], () => _countSheetReads('CACHE', 'Locks', async (reads) => {
+        try {
+            await ApplicationUtils.lockSheet('PACK_LISTS', tab, user);
+            await ApplicationUtils.getLocksData();
+            const base = reads();
+            await _waitFor(() => {
+                const row = _stampRow('app_utils:getLocksData');
+                return row && new Date(row[1]).getTime() > Date.now();
+            }, 'the lock stamp');
+            await triggerCachePoll();
+            await ApplicationUtils.getLocksData();
+            assertEqual(reads(), base + 1, 'Locks reads after the poll read our own lock stamp');
+        } finally {
+            await ApplicationUtils.unlockSheet('PACK_LISTS', tab, user);
+        }
+    }));
+    invalidateCache([{ namespace: 'app_utils', methodName: 'getLocksData', args: [] }]);
+});
+
+// ── Group: Tab reads ──────────────────────────────────────────────────────────
+// getData's whole-tab reads queue per spreadsheet and go out together as one values.batchGet.
+// clearCache empties the cache without reloading the stores, so only the test's own reads run.
+
+/** Run fn, recording each tab read request: { tableId, ranges } (a single read has one range). */
+async function _recordTabReads(fn) {
+    const S = FakeGoogleSheetsService;
+    const getSheetData = S.getSheetData, batchGetValues = S.batchGetValues;
+    const requests = [];
+    S.getSheetData = async function (tableId, range) {
+        requests.push({ tableId, ranges: [range] });
+        return getSheetData.call(this, tableId, range);
+    };
+    S.batchGetValues = async function (tableId, ranges) {
+        requests.push({ tableId, ranges: [...ranges] });
+        return Promise.all(ranges.map(range => getSheetData.call(S, tableId, range)));
+    };
+    try {
+        await fn();
+    } finally {
+        S.getSheetData = getSheetData;
+        S.batchGetValues = batchGetValues;
+    }
+    return requests;
+}
+
+test('TAB READS', 'tabs read at the same moment are one request', async () => {
+    const tabs = ['FURNITURE', 'CABINETS', 'PANELS'];
+    clearCache();
+    let results;
+    const requests = await _recordTabReads(async () => {
+        results = await Promise.all(tabs.map(tab => Database.getData('INVENTORY', tab)));
+    });
+    assertEqual(requests.filter(r => r.tableId === 'INVENTORY'), [{ tableId: 'INVENTORY', ranges: tabs }], 'one request');
+    assertEqual(JSON.stringify(results), JSON.stringify(tabs.map(tab => FakeGoogleSheetsService.getMockData('INVENTORY', tab))), 'each tab as read');
+});
+
+test('TAB READS', 'a missing tab fails only its own read', async () => {
+    clearCache();
+    const results = await withFaults({
+        beforeRead: (t, range) => {
+            if (range !== 'NO SUCH TAB') return;
+            const err = new Error('Unable to parse range: NO SUCH TAB');
+            err.status = 400;
+            throw err;
+        }
+    }, () => Promise.allSettled([Database.getData('INVENTORY', 'FURNITURE'), Database.getData('INVENTORY', 'NO SUCH TAB')]));
+    assertEqual(results.map(r => r.status), ['fulfilled', 'rejected'], 'results');
+    assertEqual(JSON.stringify(results[0].value), JSON.stringify(FakeGoogleSheetsService.getMockData('INVENTORY', 'FURNITURE')), 'the good tab');
+});
+
+test('TAB READS', 'getAllInventoryData reads every inventory tab in one request', async () => {
+    clearCache();
+    const requests = await _recordTabReads(() => Requests.getAllInventoryData());
+    const tabs = (await Requests.getAvailableTabs('INVENTORY')).map(tab => tab.title);
+    const inventory = requests.filter(r => r.tableId === 'INVENTORY');
+    assertEqual([inventory.length, [...(inventory[0]?.ranges || [])].sort()], [1, [...tabs].sort()], 'one request, every tab');
+});
+
 // ── Group 35: Preferences ─────────────────────────────────────────────────────
-// FakeGoogle CACHE/Preferences has 7 rows:
+// FakeGoogle CACHE/Preferences has 13 rows, among them:
 //   4 schedule* integer prefs (offsets 14, 14, 7, 7)
-//   3 inventory* json prefs   (suppress, customItemNumbers, descriptionOnly)
+//   3 inventory* json tab lists (InventorySuppressCategoryAnalysis, InventoryCustomItemNumbers,
+//     InventoryDescriptionOnly), the only source of those settings
 
 test('PREFERENCES', 'getPreferences returns an array', async () => {
     const result = await Requests.getPreferences();
@@ -1496,7 +2177,7 @@ test('PREFERENCES', 'getPreferences returns an array', async () => {
 
 test('PREFERENCES', 'getPreferences returns every fixture row', async () => {
     const result = await Requests.getPreferences();
-    assertEqual(result.length, 12, 'getPreferences row count');
+    assertEqual(result.length, 13, 'getPreferences row count');
 });
 
 test('PREFERENCES', 'all rows have required fields', async () => {
@@ -2813,8 +3494,13 @@ function iwRestore(snap) {
     s.length = 0;
     snap.rows.forEach((r, i) => { r.length = 0; r.push(...snap.copies[i]); s.push(r); });
 }
+// Fault hooks play another editor on the data sheets: change stamps on the Caching tab (written in
+// the background after each data write) pass them by
+const _isStampCall = (tableId, target) => tableId === 'CACHE' &&
+    [].concat(target).every(t => String(t?.range ?? t).startsWith('Caching'));
 async function withFaults(faults, fn) {
-    FakeGoogleSheetsService.faults = faults;
+    FakeGoogleSheetsService.faults = Object.fromEntries(Object.entries(faults).map(([name, hook]) =>
+        [name, (tableId, target, ...rest) => _isStampCall(tableId, target) ? undefined : hook(tableId, target, ...rest)]));
     try { return await fn(); } finally { FakeGoogleSheetsService.faults = null; }
 }
 function iwNewRow(label) {
@@ -3119,6 +3805,263 @@ test('TARGETED ANALYSIS', 'a key no row produced re-runs nothing', async () => {
     invalidateCache([{ namespace: 'api', methodName: '__taAnalyze', args: ['zulu'] }]);
     await new Promise(r => setTimeout(r, 500));
     assertEqual({ ...taCalls }, {}, 'no calls');
+});
+
+// ── Shortage alerts, persisted results, date rollover ────────────────────────
+// Today is pinned to 2025-01-01 (setTestToday) and the InventoryShortageAlertDays fixture is 120,
+// so the alerts cover shows dated 2025-01-01 through 2025-05-01. CAB-004 (10 in stock) ships 11 to
+// GEARFIRE 2025 SHOT and 11 to ATSC 2025 NAB, both 1/10/2025 to 1/31: one alert, in CABINETS,
+// minimum -12 from 2025-01-10 to 2025-01-31. getInventoryShortageAlerts is persisted to
+// CACHE/Analytics; the restore tests edit its saved row, then clear memory as a new session would.
+
+const ALERTS_KEY = 'api:getInventoryShortageAlerts:';
+const ALERTS_TODAY = '2025-01-01';
+const CAB_004_ALERT = { itemId: 'CAB-004', tabName: 'CABINETS', startDate: '2025-01-10', endDate: '2025-01-31', minQty: -12, shows: ['GEARFIRE 2025 SHOT', 'ATSC 2025 NAB'] };
+const RESTORED_MARKER = [{ ...CAB_004_ALERT, minQty: -99 }];
+let _alertSources = []; // the saved row's real source keys, read by the first PERSISTED RESULTS test
+
+// Pin today and roll the cached date over to it
+function pinToday(isoDate) {
+    setTestToday(isoDate);
+    checkDateRollover();
+}
+
+// The saved alerts row once it holds `expected` (saving follows a computation without being awaited)
+async function savedAlertsRow(expected) {
+    for (let i = 0; i < 100; i++) {
+        const row = (FakeGoogleSheetsService.mockData.CACHE.Analytics || []).find(r => r[0] === ALERTS_KEY);
+        if (row && row[3] === JSON.stringify(expected)) return row;
+        await new Promise(r => setTimeout(r, 20));
+    }
+    throw new Error(`the saved alerts row never held ${JSON.stringify(expected)}`);
+}
+
+function setSavedAlertsRow(savedAt, sources, value) {
+    const rows = FakeGoogleSheetsService.mockData.CACHE.Analytics;
+    const line = [ALERTS_KEY, savedAt, JSON.stringify(sources), JSON.stringify(value)];
+    const index = rows.findIndex(r => r[0] === ALERTS_KEY);
+    if (index === -1) rows.push(line); else rows[index] = line;
+}
+
+// A new session's first read: empty memory, so a valid saved row is restored
+async function restoreAlerts() {
+    clearCache();
+    return await Requests.getInventoryShortageAlerts();
+}
+
+async function setPreference(id, value) {
+    const prefs = (await Requests.getPreferences()).map(p => ({ ...p, value: p.id === id ? value : p.value }));
+    await _asUser(() => Requests.savePreferences(prefs));
+}
+
+const setAlertDays = (value) => setPreference('InventoryShortageAlertDays', value);
+
+test('SHORTAGE ALERTS', 'resolveShortageAlertDays reads the preference; missing, 0 or invalid turns alerts off', async () => {
+    const pref = (value) => [{ id: 'InventoryShortageAlertDays', value }];
+    assertEqual(resolveShortageAlertDays(pref('120')), 120, 'integer value');
+    assertEqual([null, [], pref('0'), pref('abc'), pref('-5')].map(resolveShortageAlertDays), [0, 0, 0, 0, 0], 'off');
+    assertEqual(shortageAlertDateFilters(30), [{ column: 'Date', value: 0, type: 'after' }, { column: 'Date', value: 30, type: 'before' }], 'window filters');
+});
+
+test('SHORTAGE ALERTS', 'alerts list the periods where an item runs out in the window', async () => {
+    pinToday(ALERTS_TODAY);
+    assertEqual(await Requests.getInventoryShortageAlerts(), [CAB_004_ALERT], 'CAB-004 runs short');
+});
+
+test('SHORTAGE ALERTS', 'a preference of 0 turns the alerts off, and saving it refreshes them', async () => {
+    await setAlertDays('0');
+    try {
+        assertEqual(await Requests.getInventoryShortageAlerts(), [], 'off');
+    } finally {
+        await setAlertDays('120');
+    }
+    assertEqual(await Requests.getInventoryShortageAlerts(), [CAB_004_ALERT], 'back on');
+});
+
+test('PERSISTED RESULTS', 'a computed result is saved with its value and source keys', async () => {
+    const row = await savedAlertsRow([CAB_004_ALERT]);
+    const sources = _alertSources = JSON.parse(row[2]);
+    assertContains(sources, 'app_utils:getToday:', 'the clock is a source');
+    for (const prefix of ['database:getData:"CACHE","Preferences"', 'database:getData:"INVENTORY","CABINETS"', 'database:getData:"PACK_LISTS","ATSC 2025 NAB"', 'database:getData:"PROD_SCHED","Production Schedule"']) {
+        if (!sources.some(source => source.startsWith(prefix))) throw new Error(`no source under ${prefix}`);
+    }
+    if (isNaN(new Date(row[1]).getTime())) throw new Error(`SavedAt is not a date: ${row[1]}`);
+});
+
+test('PERSISTED RESULTS', 'only data reads and app_utils sources are saved, not pure cached leaves', async () => {
+    // findBestProjectIdentifierMatch keys embed every show name; saving them overflowed the cell
+    const sources = JSON.parse((await savedAlertsRow([CAB_004_ALERT]))[2]);
+    const other = sources.filter(source => !source.startsWith('database:') && !source.startsWith('app_utils:'));
+    assertEqual(other, [], 'no other sources');
+});
+
+test('PERSISTED RESULTS', 'a new session restores a row no source has changed since', async () => {
+    setSavedAlertsRow(new Date(Date.now() + 60000).toISOString(), _alertSources, RESTORED_MARKER);
+    assertEqual(await restoreAlerts(), RESTORED_MARKER, 'restored');
+});
+
+test('PERSISTED RESULTS', 'a source stamped after the row is saved means a recompute', async () => {
+    // The preference saves above stamped CACHE/Preferences on the Caching tab
+    const stamps = await ApplicationUtils.readCacheTimestamps();
+    if (!stamps.some(s => s.key === 'database:getData:"CACHE","Preferences"')) throw new Error('precondition: no Preferences stamp');
+    setSavedAlertsRow(new Date(Date.now() - 3600000).toISOString(), _alertSources, RESTORED_MARKER);
+    assertEqual(await restoreAlerts(), [CAB_004_ALERT], 'recomputed');
+    await savedAlertsRow([CAB_004_ALERT]); // the recompute is saved again
+});
+
+test('PERSISTED RESULTS', 'a row saved before today is stale; one saved today is restored', async () => {
+    const midnight = startOfTodayMs();
+    setSavedAlertsRow(new Date(midnight - 3600000).toISOString(), ['app_utils:getToday:'], RESTORED_MARKER);
+    assertEqual(await restoreAlerts(), [CAB_004_ALERT], 'yesterday: recomputed');
+    await savedAlertsRow([CAB_004_ALERT]);
+    setSavedAlertsRow(new Date(midnight + 3600000).toISOString(), ['app_utils:getToday:'], RESTORED_MARKER);
+    assertEqual(await restoreAlerts(), RESTORED_MARKER, 'today: restored');
+});
+
+test('PERSISTED RESULTS', 'a local save invalidates a restored result through its relinked sources', async () => {
+    setSavedAlertsRow(new Date(Date.now() + 60000).toISOString(), _alertSources, RESTORED_MARKER);
+    assertEqual(await restoreAlerts(), RESTORED_MARKER, 'restored');
+    const fired = new Set();
+    const handler = (e) => fired.add(e.methodName);
+    CacheInvalidationBus.on('api', handler);
+    try {
+        await _asUser(async () => Requests.savePreferences(await Requests.getPreferences())); // round trip
+    } finally {
+        CacheInvalidationBus.off('api', handler);
+    }
+    assertContains([...fired], 'getInventoryShortageAlerts', 'restored alerts invalidated');
+    assertEqual(await Requests.getInventoryShortageAlerts(), [CAB_004_ALERT], 'recomputed after the save');
+});
+
+test('PERSISTED RESULTS', 'a stale row\'s sources are read in one request per spreadsheet', async () => {
+    const tabsByTable = {};
+    for (const source of _alertSources.filter(s => s.startsWith('database:getData:'))) {
+        const [tableId, tabName] = JSON.parse(`[${source.slice('database:getData:'.length)}]`);
+        (tabsByTable[tableId] ||= new Set()).add(tabName);
+    }
+    // Saved before today, and the clock is a source: stale
+    setSavedAlertsRow(new Date(startOfTodayMs() - 3600000).toISOString(), _alertSources, RESTORED_MARKER);
+    let alerts;
+    const requests = await _recordTabReads(async () => { alerts = await restoreAlerts(); });
+    assertEqual(alerts, [CAB_004_ALERT], 'recomputed');
+    for (const [tableId, tabs] of Object.entries(tabsByTable)) {
+        const first = requests.find(r => r.tableId === tableId && r.ranges.some(range => tabs.has(range)));
+        const missing = [...tabs].filter(tab => !first?.ranges.includes(tab));
+        assertEqual(missing, [], `${tableId} sources missing from its first request`);
+    }
+    await savedAlertsRow([CAB_004_ALERT]);
+});
+
+test('DATE ROLLOVER', 'the rollover invalidates results computed from today, once', async () => {
+    try {
+        pinToday(ALERTS_TODAY);
+        await Requests.getInventoryShortageAlerts();
+        const fired = new Set();
+        const handler = (e) => fired.add(e.methodName);
+        CacheInvalidationBus.on('api', handler);
+        try {
+            setTestToday('2025-01-02');
+            checkDateRollover();
+            assertContains([...fired], 'getInventoryShortageAlerts', 'alerts invalidated');
+            assertContains([...fired], 'getMultipleShowsItemsSummary', 'report invalidated');
+            fired.clear();
+            checkDateRollover();
+            assertEqual([...fired], [], 'no second invalidation for the same date');
+        } finally {
+            CacheInvalidationBus.off('api', handler);
+        }
+    } finally {
+        pinToday(null);
+    }
+});
+
+// ── Inventory tab preferences: the only source of per-tab inventory settings ──
+// InventorySuppressCategoryAnalysis, InventoryCustomItemNumbers and InventoryDescriptionOnly list
+// tab names; the inventory index has no flags. Fixture values: skip FURNITURE, MONITORS, LIGHTING,
+// ELECTRONICS, ADDITIONS; custom item numbers HARDWARE; description only ADDITIONS.
+// With today pinned to 2025-01-01, the 120-day report holds CAB-004 (CABINETS, runs short during
+// ATSC 2025 NAB; see SHORTAGE ALERTS) and CHAIR-WHITE (FURNITURE, skipped by the fixture list).
+
+const SKIP_TABS = '["FURNITURE","MONITORS","LIGHTING","ELECTRONICS","ADDITIONS"]';
+
+test('INVENTORY TAB PREFERENCES', 'resolveInventoryTabList reads a JSON list of tab names', async () => {
+    const id = INVENTORY_TAB_PREFERENCES.descriptionOnly;
+    const pref = (value) => [{ id, value }];
+    assertEqual(resolveInventoryTabList(pref('["ADDITIONS","SIGNS"]'), id), ['ADDITIONS', 'SIGNS'], 'list');
+    assertEqual([null, [], pref(''), pref('not json'), pref('{"a":1}')].map(p => resolveInventoryTabList(p, id)), [[], [], [], [], []], 'missing or invalid');
+    assertEqual(await InventoryUtils.getPreferenceTabs(INVENTORY_TAB_PREFERENCES.skipAnalysis), JSON.parse(SKIP_TABS), 'fixture skip list');
+});
+
+test('INVENTORY TAB PREFERENCES', 'the index carries no settings', async () => {
+    // thumbnail is data (the prefix's category image), not a setting
+    const index = await Requests.getInventoryIndexData();
+    assertEqual(Object.keys(index[0]).sort(), ['folder', 'prefix', 'tab', 'thumbnail'], 'index row keys');
+});
+
+test('INVENTORY TAB PREFERENCES', 'a skipped tab leaves the reports, alerts and pack list checks', async () => {
+    const reportItems = async () => (await Requests.getMultipleShowsItemsSummary({ dateFilters: shortageAlertDateFilters(120) }, {}, null, false)).map(row => row.itemId);
+    try {
+        pinToday(ALERTS_TODAY);
+        const before = await reportItems();
+        assertContains(before, 'CAB-004', 'fixture list: CABINETS reported');
+        assertNotContains(before, 'CHAIR-WHITE', 'fixture list: FURNITURE skipped');
+        await setPreference(INVENTORY_TAB_PREFERENCES.skipAnalysis, '["CABINETS"]');
+        assertEqual(await reportItems(), ['CHAIR-WHITE'], 'report: CABINETS skipped, FURNITURE back');
+        assertEqual(await Requests.getInventoryShortageAlerts(), [], 'alerts skip CABINETS');
+        assertEqual(await Requests.checkInventoryLevel({ 'Extracted Item': 'CAB-004' }, 'ATSC 2025 NAB'), null, 'pack list check skips CABINETS');
+    } finally {
+        await setPreference(INVENTORY_TAB_PREFERENCES.skipAnalysis, SKIP_TABS);
+        pinToday(null);
+    }
+});
+
+test('INVENTORY TAB PREFERENCES', 'every tab listed for custom item numbers is scanned', async () => {
+    const text = '(2) CAB-004 Curved-bottom counters';
+    const hardware = '(10) 901 00 030 MKII brackets';
+    assertEqual((await Requests.extractCustomItemFromText(text)).itemNumber, null, 'CABINETS not listed');
+    await setPreference(INVENTORY_TAB_PREFERENCES.customItemNumbers, '["HARDWARE","CABINETS"]');
+    try {
+        const found = await Requests.extractCustomItemFromText(text);
+        assertEqual([found.itemNumber, found.quantity], ['CAB-004', 2], 'CABINETS scanned');
+        assertEqual((await Requests.extractCustomItemFromText(text, ['HARDWARE'])).itemNumber, null, 'category filter respected');
+        assertEqual((await Requests.extractCustomItemFromText(hardware)).itemNumber, '901 00 030 MKII', 'HARDWARE still scanned');
+    } finally {
+        await setPreference(INVENTORY_TAB_PREFERENCES.customItemNumbers, '["HARDWARE"]');
+    }
+    await setPreference(INVENTORY_TAB_PREFERENCES.customItemNumbers, '[]');
+    try {
+        assertEqual(await Requests.getTabNameForItem('VUE-V2C-LP'), null, 'no tabs listed: hardware item numbers no longer resolve');
+        assertEqual((await Requests.extractCustomItemFromText(hardware)).itemNumber, null, 'no tabs listed: nothing scanned');
+    } finally {
+        await setPreference(INVENTORY_TAB_PREFERENCES.customItemNumbers, '["HARDWARE"]');
+    }
+    assertEqual(await Requests.getTabNameForItem('VUE-V2C-LP'), 'HARDWARE', 'restored');
+});
+
+// ── App update: an out-of-date session refuses data writes ───────────────────
+// A newer deploy is simulated by changing the version this session loaded (window.__deployedVersion),
+// so version.json no longer matches it. Expected: isAppOutdated() is true and a write is refused with
+// code APP_OUTDATED before it reaches the sheets; with the versions matching again, isAppOutdated()
+// is false.
+
+test('APP UPDATE', 'a data write is refused while a newer version is deployed', async () => {
+    const loaded = window.__deployedVersion;
+    window.__deployedVersion = 'test-older-version';
+    let code = null;
+    try {
+        await checkAppVersion();
+        assertEqual(isAppOutdated(), true, 'outdated');
+        try {
+            await Requests.saveData('CACHE', 'AppUpdateTest', [{ a: '1' }], { a: 'A' });
+        } catch (error) {
+            code = error.code;
+        }
+    } finally {
+        window.__deployedVersion = loaded;
+        await checkAppVersion();
+    }
+    assertEqual(code, 'APP_OUTDATED', 'refusal code');
+    assertEqual(isAppOutdated(), false, 'current again');
 });
 
 // ── Runner export ─────────────────────────────────────────────────────────────

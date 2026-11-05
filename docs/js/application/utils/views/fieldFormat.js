@@ -5,6 +5,7 @@
  * Pure: no Vue, no DOM. Safe to import from tests.
  */
 import { parseDate, toUSDateString } from '../../../data_management/utils/helpers.js';
+import { parseThumbnails } from '../../../data_management/utils/thumbnail-values.js';
 
 /**
  * Format a raw value for display according to its field definition.
@@ -33,6 +34,11 @@ export function formatValue(value, field) {
             return parseFloat(value).toLocaleString();
         case 'percentage':
             return `${parseFloat(value).toFixed(1)}%`;
+        case 'thumbnail': {
+            // File IDs mean nothing as text; where a value prints as text, say how many images
+            const count = parseThumbnails(value).length;
+            return count ? `${count} ${count === 1 ? 'image' : 'images'}` : '';
+        }
         case 'multiline':
             // Text with line breaks: <br> tags become newlines (renderers escape, then break lines)
             return String(value).replace(/<br\s*\/?>/gi, '\n');

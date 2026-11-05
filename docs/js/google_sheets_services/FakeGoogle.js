@@ -15,6 +15,8 @@ function _colToIndex(letters) {
 }
 
 let _delaysEnabled = true;
+// Drive modifiedTime per table (FakeGoogleSheetsService.getModifiedTimes)
+const _modifiedTimes = {};
 
 // Serialize an EditHistory/MetaData fixture (contract: docs/notes/metadata-implementation.md)
 const _json = (value) => JSON.stringify(value);
@@ -183,7 +185,13 @@ export class FakeGoogleSheetsService {
      */
     static reverseTransformSheetData(mapping, mappedData) {
         if (!mappedData || mappedData.length === 0) return [];
-        
+        // Column-preserving mapping: values by position, null for columns it doesn't own
+        if (mapping._orderedKeys) {
+            const keys = mapping._orderedKeys;
+            const headerRow = mapping._orderedHeaders.map((h, i) => keys[i] ? h : null);
+            return [headerRow, ...mappedData.map(obj => keys.map(key => key ? (obj[key] ?? '') : null))];
+        }
+
         // Use _orderedHeaders if provided (to preserve column order), otherwise fall back to Object.values
         const headers = mapping._orderedHeaders || Object.values(mapping).filter(v => v !== mapping._orderedHeaders);
         
@@ -217,13 +225,21 @@ export class FakeGoogleSheetsService {
                 ['M8x20', '', '300', '', '', '', 'M8 x 20mm bolt', ''],
                 ['FOOT-L', '', '100', '', '', '', 'Large leveling foot', '']
             ],
+            // FURNITURE has a Thumbnail column (image galleries, thumbnail-values.js). TABLE-001 is left blank
+            // for the thumbnail migration to fill from CACHE/Thumbnails. 'Packing/shop notes' is a
+            // column the app doesn't map: saves must leave it alone.
             'FURNITURE': [
-                ['ITEM#', 'THUMBNAIL', 'QTY', 'EditHistory', 'MetaData', 'NOTES', 'Description', 'Packing/shop notes'],
-                ['TABLE-001', '', '2', '', '', '', 'Conference room table black 30 x 76 x 30', ''],
+                ['ITEM#', 'Thumbnail', 'QTY', 'EditHistory', 'MetaData', 'NOTES', 'Description', 'Packing/shop notes'],
+                ['TABLE-001', '', '2', '', '', '', 'Conference room table black 30 x 76 x 30', 'Legs in bag'],
                 ['TABLE-002', '', '2', '', '', '', 'Glass-top square end table w/ metal bases 18x18x16', ''],
                 ['TABLE-003', '', '2', '', '', '', 'Glass-top rectangular coffee table w/ metal bases 42x18x16', ''],
-                ['CHAIR-001', '', '20', '', '', '', 'Stack Chair ( Black & Black ) w/ Arms', ''],
-                ['CHAIR-002', '', '15', '', '', '', 'Lounge Chair (White Leather) Swivel Barrel', ''],
+                ['CHAIR-001', '["file_id_chair_001"]', '20', '', '', '', 'Stack Chair ( Black & Black ) w/ Arms', ''],
+                // CHAIR-002: a gallery of two images; the second has a note and a crop, and its
+                // history shows sam adding it
+                ['CHAIR-002', _json(['file_id_chair_002', { id: 'file_id_chair_001', note: 'Side view', crop: { x: 0.25, y: 0, w: 0.5, h: 1 } }]), '15', _json({
+                    i: 6,
+                    h: [{ u: 'sam', t: 17912947200, c: [{ n: 'thumbnail', o: '["file_id_chair_002"]' }] }]
+                }), '', '', 'Lounge Chair (White Leather) Swivel Barrel', ''],
                 // CHAIR-003: three history entries and a future scheduled restock
                 ['CHAIR-003', '', '12', _json({
                     i: 4,
@@ -254,9 +270,11 @@ export class FakeGoogleSheetsService {
             'LIGHTBOXES': [['ITEM#', 'THUMBNAIL', 'QTY', 'EditHistory', 'MetaData', 'NOTES', 'Description', 'Packing/shop notes'],['LB-001', '', '0', '', '', '', 'Blah blah blah', '']],
             'COUNTERTOPS': [['ITEM#', 'THUMBNAIL', 'QTY', 'EditHistory', 'MetaData', 'NOTES', 'Description', 'Packing/shop notes'],['CNTR-001', '', '0', '', '', '', 'Blah blah blah', '']],
             'SHELVES': [['ITEM#', 'THUMBNAIL', 'QTY', 'EditHistory', 'MetaData', 'NOTES', 'Description', 'Packing/shop notes'],['SHLF-001', '', '0', '', '', '', 'Blah blah blah', '']],
-            // New inventory tabs for enhanced item types
+            // New inventory tabs for enhanced item types. PANELS has a Thumbnail column with no item
+            // images, so its items show the BX category image (CACHE/Inventory Thumbnail).
+            // The other tabs' 'THUMBNAIL' (upper case) is a stale column, not the Thumbnail column.
             'PANELS': [
-                ['ITEM#', 'THUMBNAIL', 'QTY', 'EditHistory', 'MetaData', 'NOTES', 'Description', 'Packing/shop notes'],
+                ['ITEM#', 'Thumbnail', 'QTY', 'EditHistory', 'MetaData', 'NOTES', 'Description', 'Packing/shop notes'],
                 // Standard rectangular panels
                 ['BX-16x39', '', '10', '', '', '', 'Standard rectangular panel 16" x 39"', 'Pack flat'],
                 ['BX-16x47', '', '8', '', '', '', 'Standard rectangular panel 16" x 47"', 'Pack flat'],
@@ -737,6 +755,10 @@ export class FakeGoogleSheetsService {
             'Caching': [
                 ['Key', 'Timestamp']
             ],
+            // Persisted analytics (caching.js persistentMethods): one row per saved result
+            'Analytics': [
+                ['Key', 'SavedAt', 'Sources', 'Value']
+            ],
             'Locks': [
                 ['Lock Key', 'locked.user@example.com', 'another.user@example.com'], // Row 0: Headers with users
                 ['PACK_LISTS:ATSC 2025 NAB', '2026-01-19T10:30:00.000Z', '0'], // Row 1+: Lock key rows with timestamps
@@ -774,23 +796,25 @@ export class FakeGoogleSheetsService {
                 ['Path', 'ShortCode', 'Created'],
                 ['schedule?{"dateFilters":[{"column":"Date","value":0,"type":"after"}]}', '1', '2026-01-19T10:30:00.000Z']
             ],
+            // INDEX. Thumbnail: the category image shown for items of a prefix that have none of
+            // their own. CHAIR and BX are left blank for the thumbnail migration to fill.
             'Inventory': [
-                ['PREFIX', 'INVENTORY', 'FOLDER', 'MetaData'],
+                ['PREFIX', 'INVENTORY', 'FOLDER', 'Thumbnail'],
                 ['CAB', 'CABINETS', '', ''],
                 ['HS', 'HANGING SIGNS', '', ''],
                 ['LB', 'LIGHTBOXES', '', ''],
                 ['CNTR', 'COUNTERTOPS', '', ''],
                 ['SHLF', 'SHELVES', '', ''],
-                ['STOOL', 'FURNITURE', '', '{"suppressAnalysis":"true"}'],
-                ['CHAIR', 'FURNITURE', 'CHAIRS', '{"suppressAnalysis":"true"}'],
-                ['COUCH', 'FURNITURE', '', '{"suppressAnalysis":"true"}'],
-                ['TABLE', 'FURNITURE', 'TABLES', '{"suppressAnalysis":"true"}'],
-                ['TTOP', 'FURNITURE', '', '{"suppressAnalysis":"true"}'],
-                ['TBASE', 'FURNITURE', '', '{"suppressAnalysis":"true"}'],
+                ['STOOL', 'FURNITURE', '', ''],
+                ['CHAIR', 'FURNITURE', 'CHAIRS', ''],
+                ['COUCH', 'FURNITURE', '', ''],
+                ['TABLE', 'FURNITURE', 'TABLES', '["file_id_table_prefix"]'],
+                ['TTOP', 'FURNITURE', '', ''],
+                ['TBASE', 'FURNITURE', '', ''],
                 ['BX', 'PANELS', '', ''],
                 ['VU', 'PANELS', '', ''],
-                ['ADD', 'ADDITIONS', '', '{"suppressAnalysis":"true","descriptionOnly":"true"}'],
-                ['HARDWARE', 'HARDWARE', 'HARDWARE', '{"customItemNumbers":"true"}']
+                ['ADD', 'ADDITIONS', '', ''],
+                ['HARDWARE', 'HARDWARE', 'HARDWARE', '']
             ],
             'Thumbnails': [
                 ['ItemNumber', 'File', 'Blob'],
@@ -1085,7 +1109,8 @@ export class FakeGoogleSheetsService {
                 ['InventorySuppressCategoryAnalysis', 'Skip Quantity Analysis', 'these inventories are skipped when finding shortages', 'inventory*', 'json', '["FURNITURE","MONITORS","LIGHTING","ELECTRONICS","ADDITIONS"]', ''],
                 ['InventoryCustomItemNumbers', 'Allow Nonstandard Item#s', 'these inventories have nonstandard item numbers and can slow down the system', 'inventory*', 'json', '["HARDWARE"]', ''],
                 ['InventoryDescriptionOnly', 'Omit Quantity Column', 'list of inventories that omit the quantity column, added to packlists as descriptions only', 'inventory*', 'json', '["ADDITIONS"]', ''],
-                ['InventoryNoteMaxLength', 'Inventory Note Length', 'maximum characters in an inventory save note (edit history, scheduled changes, proposal commits)', 'inventory*', 'integer', '25', '']
+                ['InventoryNoteMaxLength', 'Inventory Note Length', 'maximum characters in an inventory save note (edit history, scheduled changes, proposal commits)', 'inventory*', 'integer', '25', ''],
+                ['InventoryShortageAlertDays', 'Shortage Alert Days', 'days ahead the inventory shortage alerts look; 0 turns them off', 'inventory*', 'integer', '120', '']
             ]
         }
     };
@@ -1141,7 +1166,8 @@ export class FakeGoogleSheetsService {
             { title: 'NameOverrides', sheetId: 8 },
             { title: 'ScheduleOverrides', sheetId: 9 },
             { title: 'Preferences', sheetId: 10 },
-            { title: 'InventoryProposals', sheetId: 11 }
+            { title: 'InventoryProposals', sheetId: 11 },
+            { title: 'Analytics', sheetId: 12 }
         ]
     };
 
@@ -1165,6 +1191,8 @@ export class FakeGoogleSheetsService {
      *   beforeBatchWrite(tableId, data)         before a batchSetValues; return 'drop' to lose all of
      *                                           it, or a Set of data indices to lose just those
      *   beforeDelete(tableId, tabName, rows)    before a deleteSheetRows; return 'drop' to lose it
+     *   beforeModifiedTimes(tableIds)           before a getModifiedTimes; throw to fail it (Drive down),
+                                           or return { tableId: time } to report those times instead
      */
     static faults = null;
 
@@ -1183,6 +1211,46 @@ export class FakeGoogleSheetsService {
         const rows = [...new Set((rowNumbers || []).map(Number).filter(n => Number.isInteger(n) && n > 1))].sort((a, b) => b - a);
         if (await this._fault('beforeDelete', tableId, tabName, rows) === 'drop') return true;
         rows.forEach(n => { if (n - 1 < sheet.length) sheet.splice(n - 1, 1); });
+        return true;
+    }
+
+    /**
+     * Drive modifiedTime of each table's spreadsheet. Every write moves it on (see the write wrappers
+     * below the class); touch() is a hand edit in Sheets.
+     * @returns {Promise<Object<string, string>|null>} tableId → ISO time; null without auth
+     */
+    static async getModifiedTimes(tableIds) {
+        await this.delay(100 + Math.random() * 200);
+        if (!(await FakeGoogleSheetsAuth.checkAuth())) return null;
+        const overrides = await this._fault('beforeModifiedTimes', tableIds) || {};
+        return Object.fromEntries(tableIds.map(tableId => {
+            if (!this.ENDPOINT_IDS[tableId]) throw new Error(`[getModifiedTimes] Spreadsheet ID not found for table: ${tableId}`);
+            return [tableId, overrides[tableId] || _modifiedTimes[tableId] || new Date(0).toISOString()];
+        }));
+    }
+
+    /** Move a table's modifiedTime on, as any edit of its spreadsheet does (strictly increasing). */
+    static touch(tableId) {
+        const last = Date.parse(_modifiedTimes[tableId] || 0) || 0;
+        _modifiedTimes[tableId] = new Date(Math.max(Date.now(), last + 1)).toISOString();
+    }
+
+    /**
+     * values.append: add rows below the last non-empty row of the range's tab, as one step (two
+     * appends never land on the same row).
+     */
+    static async appendSheetValues(tableId, range, rows) {
+        await this.delay(300 + Math.random() * 300);
+        await FakeGoogleSheetsAuth.checkAuth();
+        if (!this.ENDPOINT_IDS[tableId]) throw new Error(`[appendSheetValues] Spreadsheet ID not found for table: ${tableId}`);
+        if (await this._fault('beforeWrite', tableId, range, rows) === 'drop') return true;
+        const bang = range.lastIndexOf('!');
+        const sheetName = _unquoteSheetName(bang >= 0 ? range.slice(0, bang) : range);
+        if (!this.mockData[tableId]) this.mockData[tableId] = {};
+        const sheet = this.mockData[tableId][sheetName] ||= [];
+        let last = sheet.length;
+        while (last > 0 && !(sheet[last - 1] || []).some(cell => cell !== '' && cell != null)) last--;
+        sheet.splice(last, 0, ...rows.map(row => [...row]));
         return true;
     }
 
@@ -1318,6 +1386,23 @@ export class FakeGoogleSheetsService {
         return JSON.parse(JSON.stringify(sheetData));
     }
 
+    /**
+     * A whole-tab write as the Sheets API does it: values land from A1, null cells are skipped
+     * (the existing cell stays), cells beyond a row's written width stay, and rows below the
+     * written rows are removed.
+     */
+    static _mergeSkippingNulls(existing, values) {
+        const rows = Array.isArray(existing) ? existing : [];
+        return values.map((row, r) => {
+            const merged = Array.isArray(rows[r]) ? [...rows[r]] : [];
+            row.forEach((cell, c) => {
+                if (cell !== null) merged[c] = cell;
+            });
+            for (let c = 0; c < merged.length; c++) if (merged[c] === undefined) merged[c] = '';
+            return merged;
+        });
+    }
+
     static async setSheetData(tableId, tabName, updates, removeRowsBelow) {
         await this.delay(500 + Math.random() * 500); // Add random delay > 1s
         await FakeGoogleSheetsAuth.checkAuth();
@@ -1352,7 +1437,9 @@ export class FakeGoogleSheetsService {
                     // mapping is passed as 4th argument
                     const mapping = arguments[3];
                     const sheetData = FakeGoogleSheetsService.reverseTransformSheetData(mapping, updates);
-                    this.mockData[tableId][tabName] = sheetData;
+                    this.mockData[tableId][tabName] = mapping._orderedKeys
+                        ? this._mergeSkippingNulls(this.mockData[tableId][tabName], sheetData)
+                        : sheetData;
                     return true;
                 }
             }
@@ -1362,7 +1449,9 @@ export class FakeGoogleSheetsService {
                 const mapping = arguments[3];
                 const headers = mapping._orderedHeaders || Object.values(mapping).filter(v => v !== mapping._orderedHeaders);
                 if (!this.mockData[tableId]) this.mockData[tableId] = {};
-                this.mockData[tableId][tabName] = [headers];
+                this.mockData[tableId][tabName] = mapping._orderedKeys
+                    ? this._mergeSkippingNulls(this.mockData[tableId][tabName], [headers.map((h, i) => mapping._orderedKeys[i] ? h : null)])
+                    : [headers];
                 return true;
             }
 
@@ -1370,7 +1459,11 @@ export class FakeGoogleSheetsService {
             if (Array.isArray(updates) && updates.length > 0 && Array.isArray(updates[0])) {
                 //console.log(`FakeGoogleSheetsService: Range update with ${updates.length} rows`);
                 if (!this.mockData[tableId]) this.mockData[tableId] = {};
-                this.mockData[tableId][tabName] = updates; // Replace entire sheet with new data
+                // Replace entire sheet with new data. Like the Sheets API, null cells are skipped
+                // (column-preserving writes keep the cells they don't own).
+                this.mockData[tableId][tabName] = updates.some(row => Array.isArray(row) && row.includes(null))
+                    ? this._mergeSkippingNulls(this.mockData[tableId][tabName], updates)
+                    : updates;
                 return true;
             }
 
@@ -1630,22 +1723,22 @@ export class FakeGoogleSheetsService {
         
         // Map item numbers to file IDs and images for testing
         const mockFiles = {
-            'BX.png': { id: 'file_id_bx_prefix', image: 'assets/logobkp.png' },
-            'CHAIR.jpg': { id: 'file_id_chair_prefix', image: 'assets/logobkp.png' },
-            'CHAIR.jpeg': { id: 'file_id_chair_prefix', image: 'assets/logobkp.png' },
-            'CHAIR.png': { id: 'file_id_chair_prefix', image: 'assets/logobkp.png' },
-            'CHAIR-001.jpg': { id: 'file_id_chair_001', image: 'assets/logoWbkp.png' },
-            'CHAIR-001.jpeg': { id: 'file_id_chair_001', image: 'assets/logoWbkp.png' },
-            'CHAIR-001.png': { id: 'file_id_chair_001', image: 'assets/logoWbkp.png' },
+            'BX.png': { id: 'file_id_bx_prefix', image: 'assets/logo.png' },
+            'CHAIR.jpg': { id: 'file_id_chair_prefix', image: 'assets/logo.png' },
+            'CHAIR.jpeg': { id: 'file_id_chair_prefix', image: 'assets/logo.png' },
+            'CHAIR.png': { id: 'file_id_chair_prefix', image: 'assets/logo.png' },
+            'CHAIR-001.jpg': { id: 'file_id_chair_001', image: 'assets/logoW.png' },
+            'CHAIR-001.jpeg': { id: 'file_id_chair_001', image: 'assets/logoW.png' },
+            'CHAIR-001.png': { id: 'file_id_chair_001', image: 'assets/logoW.png' },
             'CHAIR-002.jpg': { id: 'file_id_chair_002', image: 'assets/logo2.png' },
             'CHAIR-002.jpeg': { id: 'file_id_chair_002', image: 'assets/logo2.png' },
             'CHAIR-002.png': { id: 'file_id_chair_002', image: 'assets/logo2.png' },
-            'TABLE.jpg': { id: 'file_id_table_prefix', image: 'assets/logoWbkp.png' },
-            'TABLE.jpeg': { id: 'file_id_table_prefix', image: 'assets/logoWbkp.png' },
-            'TABLE.png': { id: 'file_id_table_prefix', image: 'assets/logoWbkp.png' },
-            'TABLE-001.jpg': { id: 'file_id_table_001', image: 'assets/logobkp.png' },
-            'TABLE-001.jpeg': { id: 'file_id_table_001', image: 'assets/logobkp.png' },
-            'TABLE-001.png': { id: 'file_id_table_001', image: 'assets/logobkp.png' }
+            'TABLE.jpg': { id: 'file_id_table_prefix', image: 'assets/logoW.png' },
+            'TABLE.jpeg': { id: 'file_id_table_prefix', image: 'assets/logoW.png' },
+            'TABLE.png': { id: 'file_id_table_prefix', image: 'assets/logoW.png' },
+            'TABLE-001.jpg': { id: 'file_id_table_001', image: 'assets/logo.png' },
+            'TABLE-001.jpeg': { id: 'file_id_table_001', image: 'assets/logo.png' },
+            'TABLE-001.png': { id: 'file_id_table_001', image: 'assets/logo.png' }
         };
         
         if (mockFiles[fileName]) {
@@ -1675,12 +1768,12 @@ export class FakeGoogleSheetsService {
     static _fakeImagePath(fileId) {
         // Map predefined file IDs to test image paths
         const fileMap = {
-            'file_id_bx_prefix': 'assets/logobkp.png',
-            'file_id_chair_prefix': 'assets/logobkp.png',
-            'file_id_chair_001': 'assets/logoWbkp.png',
+            'file_id_bx_prefix': 'assets/logo.png',
+            'file_id_chair_prefix': 'assets/logo.png',
+            'file_id_chair_001': 'assets/logoW.png',
             'file_id_chair_002': 'assets/logo2.png',
-            'file_id_table_prefix': 'assets/logoWbkp.png',
-            'file_id_table_001': 'assets/logobkp.png'
+            'file_id_table_prefix': 'assets/logoW.png',
+            'file_id_table_001': 'assets/logo.png'
         };
         
         if (fileId && fileMap[fileId]) {
@@ -1707,13 +1800,27 @@ export class FakeGoogleSheetsService {
         return response.ok ? await response.blob() : null;
     }
 
+    // Files uploaded this session: { id, name, folderId, appProperties }
+    static uploadedFiles = [];
+
+    /**
+     * Fake implementation of finding a Drive file by app property
+     */
+    static async findDriveFileByAppProperty(folderId, key, value) {
+        await this.delay(100);
+        const file = this.uploadedFiles.find(f => f.folderId === folderId && f.appProperties?.[key] === value);
+        return file ? { id: file.id, name: file.name } : null;
+    }
+
     /**
      * Fake implementation of Google Drive file upload
      */
-    static async uploadDriveFile(file, fileName, folderId) {
+    static async uploadDriveFile(file, fileName, folderId, appProperties = null) {
         await this.delay(300);
         console.log(`[FakeGoogle] uploadDriveFile: "${fileName}" to folder "${folderId}"`);
-        return { id: `fake_uploaded_${Date.now()}`, name: fileName };
+        const uploaded = { id: `fake_uploaded_${Date.now()}_${this.uploadedFiles.length}`, name: fileName };
+        this.uploadedFiles.push({ ...uploaded, folderId, appProperties });
+        return uploaded;
     }
 
     /**
@@ -1809,9 +1916,26 @@ const _fixtureVersion = (() => {
 const _externalChangeListeners = new Set();
 let _saveTimer = null;
 
+// Every write moves its spreadsheet's modifiedTime on once it has landed, as Drive does. A whole-tab
+// setSheetData with { returnValues: true } returns the tab as a whole-tab read now returns it.
+for (const name of ['setSheetData', 'batchSetValues', 'appendSheetValues', 'deleteSheetRows', 'hideTabs', 'showTabs', 'copySheetTab', 'createBlankTab']) {
+    const write = FakeGoogleSheetsService[name];
+    FakeGoogleSheetsService[name] = async function (tableId, ...args) {
+        const result = await write.call(this, tableId, ...args);
+        FakeGoogleSheetsService.touch(tableId);
+        const [tabName, , , options] = args;
+        if (name === 'setSheetData' && options?.returnValues && !String(tabName).includes('!')) {
+            const tab = FakeGoogleSheetsService.mockData[tableId]?.[tabName];
+            return tab ? JSON.parse(JSON.stringify(tab)) : [[]];
+        }
+        return result;
+    };
+}
+
 function _applyState(state) {
     FakeGoogleSheetsService.mockData = state.mockData;
     FakeGoogleSheetsService.mockTabs = state.mockTabs;
+    Object.keys(FakeGoogleSheetsService.ENDPOINT_IDS).forEach(tableId => FakeGoogleSheetsService.touch(tableId));
 }
 
 function _currentStateJson() {

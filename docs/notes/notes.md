@@ -76,13 +76,12 @@ Ongoing User Conversations:
 
 **chores**
 
-- [ ] fix cards-grid sort by in small views
-- [ ] we need to unify api functions to reduce the number of wrappers, create generic passthrough functions and use in reactiveStores
-- [ ] move complex api logic into the most relevant abstraction area
-- [ ] ! bring more clarity to the advanced filter, and potentially unify with api filtering. (fix the weird options available in views that don't support them)
-- [ ] ! "views" for tables and reports allowing column customization
-- [ ] basic schedule table needs to have return and show date columns visible
-- [ ] basic schedule table needs to allow wide table
+- [ ] fix cards-grid sort by in small views: small headers cause the text to be truncated because the label is too long to view in this context. Either icons, or narrow text without "sort by" prefix"
+- [ ] we need to unify api functions to reduce the number of thin wrappers, create generic passthrough functions and use in reactiveStores
+- [ ] move complex api logic into the most relevant abstraction area, leaving the api as clean as possible so it can be turned into a real api eventually.
+- [ ] **design better display tools** for details areas
+- [ ] build user customization interface for views that allows easy moving, stacking, showing, widening, etc.
+- [x] basic schedule table needs to have return and show date columns visible
 - [ ] test no internet mode
 - [ ] I have not tested what happens if two users simultaniously trigger inventory upcoming change resolution
       reports column headers percentage based and dynamically abbreviate
@@ -93,28 +92,30 @@ Ongoing User Conversations:
 
 **problems**
 
-- [ ] things like CNTR-008l and CNTR-008r don't get inventoried correctly, because only the unified "CNTR-008" exists in inventory. Do we need a "sub-parts" system?
-- [ ] inventory tabs still lose dirty state during the process of making modifications which is disorienting.
-- [ ] Search needs to stay in a logical way, not on every navigation. Maybe give search boxes "findId"s that allow syncing/clearing of search across nav
+- [x] inventory tabs still lose dirty state during the process of making modifications which is disorienting.
+- [ ] **Search needs to stay in a logical way**, not on every navigation. Maybe give search boxes "findId"s that allow syncing/clearing of search across nav
 - [ ] AUTH def still automatically auths and needs to be revamped. We need to remove the auto auth and ensure the "expired" modal always shows
-- [ ] some odd thumbnail behavior...... mostly not loading in right away
+- [x] some odd thumbnail behavior...... mostly not loading in right away
 - [ ] dashboard slows down css animations, implying too many listeners
-- [ ] ! mobile view some things don't show well (arrows, button sizes for transshipments)
+- [ ] ! in mobile view some things don't show well because it's narrow (arrows, button sizes for transshipments) ideally we would have icon substitutions or narrow text when necessary on a case by case basis, or automaticaly based on a hierarchy if a button bar overflows.
 - [ ] some sticky headers too high on mobile after page switch, dashboard nav issue
-- [ ] thumbnails slow on chromium
+- [ ] thumbnails are still slow on chromium. Sometimes takes a second to start loading, and a full inventory page can take a while to load thumbs for.
 - [ ] autosave backup is currently broken, probably because of failure to identify user tab or backup entries correctly
-- [ ] packlist print from dashboard will not print correctly if not on packlist page first
-- [ ] it's possible for multiple api requests to be reporting progress simultaniously and do odd things to api progress tracking
-- [ ] some clicks doubleclick (opening sched details for the first time, some other things that I can't remember)
+- [ ] packlist print from dashboard will not print correctly if not on packlist page first because navigation doesn't complete before the print command locks the interface
+- [ ] it's possible for multiple api requests to be reporting progress simultaniously and do odd things to api progress tracking. We need some way to tie the bar to one message channel.
+- [ ] some clicks doubleclick (opening sched details for the first time, some other things that I can't remember) this might be a latency issue, or a click handling issue, or a click action swap timing issue
+- [ ] opening details pane and other clicks can reset scrolltop?
 - [ ] refreshing packlists leaves undo history in odd state.
+- [ ] things like CNTR-008l and CNTR-008r don't get inventoried correctly, because only the unified "CNTR-008" exists in inventory. Do we need a "sub-parts" system?
 
 **Application tasks**
 
 inventory updates
 
 - [ ] add "substitutions" system to allow automatically recommended substitutions during shortage calculation (useful for multiple types of L-plates or cabinetry)
-- [ ] run configured upcoming inventory shortage report automatically on main inventory page and show warnings in items and categories
-- [ ] dims at the beginning of item descriptions for all items
+- [x] **run configured upcoming inventory shortage report automatically** on main inventory page and show warnings in items and categories (InventoryShortageAlertDays preference; see caching-tab-structure.md)
+- [ ] We should add dimension columns where appropriate to inventory tables, and allow concatenation of columns for description pulls.
+- [ ] do we need an inventory filter version of the advanced filter? Augmentation of the category filter?
 - [?] ensure inventory table generation is unified so changes propegate throughout components and reports correctly
 - [ ] add all FURNITURE, LIGHTING, Puck hardware
       allow attaching a change dates to a project??? for instance, if we are selling a chair to a client, or if a chair broke at a show, or we are aquiring a chair for a show
@@ -126,24 +127,28 @@ inventory updates
 Architecture Improvements
 
 - [x] !!! better "Find..." tools for nonfiltered searching with up/down navigation and a "selected" found item index, probably just a numberbox attached to the find box and some javascript to autoset this by nearest match or something, and url searchterm updating perhaps
-- [ ] make dashboard more usable: single screen page layout, allow sub-scrolling, configurable button areas, mobile dashboard auto-swap with buttons instead
+- [x] save deleted information in a special table for recovery if necessary
+- [ ] **make dashboard more usable**: single screen page layout, allow sub-scrolling, configurable button areas, mobile dashboard auto-swap with buttons instead
 - [ ] dashboard option to add special container that allows navigation and starts with a global nav menu
 - [ ] hide/show alerts area (show alerts in nav when hidden?) instead of default banner, and move floating alert button into navigation bar next to dot menu OR next to hamburger menu on mobile?
-- [ ] !!! history and last edit viewing tools: Provide tools to revert changes from history (steal from inventory upcoming changes ui), and tools to revert based on source,history modification utility for viewing changes over time and changing their values if necessary? Inventory specific future changes updating?
+- [x] !!! history and last edit viewing tools: Provide tools to revert changes from history (steal from inventory upcoming changes ui), and tools to revert based on source,history modification utility for viewing changes over time and changing their values if necessary?
+- [ ] !!! history tools for packlist tables
+- [ ] Do we need an inventory specific future changes update utility?
+- [ ] ShowNotes edithistory seems unused, and showNotes are deleted when cleared. What should we be doing here? Is this an ephemeral field? Should we have a table entirely for ephemeral checklist fields?
 - [ ] ! test and validate offline mode
 - [ ] charts?
-      allow auto-caching of analytics data
-      save deleted information in a special table for recovery if necessary
+- [x] **allow auto-caching of analytics data.** Mark some caches to be dumped to tables with their expiry data. Allow table checks when loading app and load from table if it exists to skip recompute. (wrapMethods persistentMethods → CACHE/Analytics)
+- [ ] Create some metric to track how often a certain cache is used and how often it refreshes, and if it is used often and refreshes less than once per hour, dump to a table with expiry data.
       allow analysis to intelligently slow or pause itself and notify user for slow connection states.
       improve dashboard endpoints to allow multiple cards with different view parameters?
 
 show management system
 
-- [ ] !!!!! run configured upcoming inventory shortage report automatically on schedule page and show warnings in items and categories: This needs to not explode computers. May need analysis caching first.
-- [ ] !!!! add "views" system to show different columns and layouts for different purposes
-- [ ] !!! design queue and updating logic <- views system to support this as a schedule view
+- [ ] !!!!! **run configured upcoming inventory shortage report automatically** on schedule page and show warnings in items and categories: This needs to not explode computers. May need analysis caching first.
+- [x] !!!! add "views" system to show different columns and layouts for different purposes
+- [x] !!! design queue and updating logic <- views system to support this as a schedule view
 - [ ] !! alert me about projects that don't yet have files attached to them
-- [ ] advanced search add and configure boolean flag columns (shown as checkboxes) and filter option
+- [x] advanced search add and configure boolean flag columns (shown as checkboxes) and filter option
 - [ ] calendar view improvements: allow views showing ship/return, maybe allow schedule overlays on other pages for context
 - [ ] alerts for new construction?
       add workzone info to table???

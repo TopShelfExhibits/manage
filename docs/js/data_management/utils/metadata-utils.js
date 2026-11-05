@@ -521,7 +521,8 @@ export class EditHistoryUtils {
      * Returned rows, newest first:
      *   - 'current':  the row's values, paired with h[0] (the change that produced them)
      *   - 'change':   state after h[k], paired with h[k]
-     *   - 'created':  the change row whose entry is a creation marker (c: []) — always last
+     *   - 'created':  the change row whose entry is a creation marker (c: []) — last, unless the
+     *                 row arrived carrying older history (moved or pasted in), which follows it
      *   - 'earliest': oldest known state when history does not reach creation (entry: null)
      *
      * Pass the SAVED row (not one with unsaved edits), or every reconstructed state shifts.
@@ -558,6 +559,43 @@ export class EditHistoryUtils {
             states.push({ kind: 'earliest', state: { ...state }, entry: null, changed: new Set() });
         }
         return states;
+    }
+
+    /**
+     * When each item of a list field (e.g. the images of a thumbnail cell) entered the history.
+     * For every item in the saved value: the newest change that added it, else the creation marker
+     * the history reaches with it present (the row was created, or arrived, with it), else null
+     * (it predates the recorded history: legacy rows, or history capped at MAX_HISTORY_ENTRIES).
+     * An older change found below a creation marker wins over it (history carried in with a row).
+     * @param {string|Object} edithistory - The row's EditHistory
+     * @param {string} field - Row key of the list field
+     * @param {*} savedValue - The field's SAVED value (the state after h[0]; never unsaved edits)
+     * @param {(value: *) => string[]} toItems - Parse a stored value into item keys
+     * @returns {Map<string, {u: string, t: number, created: boolean}|null>} for each saved item
+     */
+    static listItemOrigins(edithistory, field, savedValue, toItems) {
+        const entries = this.parseEditHistory(edithistory)?.h;
+        let after = new Set(toItems(savedValue));
+        const origins = new Map([...after].map(key => [key, null]));
+        const settled = new Set();
+        for (const entry of Array.isArray(entries) ? entries : []) {
+            const changes = Array.isArray(entry?.c) ? entry.c : [];
+            const change = changes.find(ch => ch?.n === field);
+            if (change) {
+                const before = new Set(toItems(change.o ?? ''));
+                for (const key of after) {
+                    if (before.has(key) || !origins.has(key) || settled.has(key)) continue;
+                    origins.set(key, { u: entry.u || '', t: entry.t, created: false });
+                    settled.add(key);
+                }
+                after = before;
+            } else if (changes.length === 0) {
+                for (const key of after) {
+                    if (origins.has(key) && !settled.has(key)) origins.set(key, { u: entry.u || '', t: entry.t, created: true });
+                }
+            }
+        }
+        return origins;
     }
 
     // -------------------------------------------------------------------------

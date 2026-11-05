@@ -1,13 +1,13 @@
-import { html, DataView, Requests, getReactiveStore, createAnalysisConfig, NavigationRegistry, ItemImageComponent, ScheduleFilterSelect, InventoryCategoryFilter, Priority, invalidateCache, toISODateString, todayISOString, offsetToISO, getAutoColorClass } from '../../index.js';
+import { html, DataView, Requests, getReactiveStore, createAnalysisConfig, NavigationRegistry, THUMBNAIL_FIELD, getItemThumbnailsStore, itemThumbnailMap, withItemThumbnails, ScheduleFilterSelect, InventoryCategoryFilter, Priority, invalidateCache, toISODateString, todayISOString, offsetToISO, getAutoColorClass } from '../../index.js';
 import { textFiltersToSearchParams } from '../../../data_management/utils/helpers.js';
-import { itemImageStyle } from '../../utils/views/viewStyles.js';
+import { thumbnailStyle } from '../../utils/views/viewStyles.js';
 
 /**
  * Component for displaying inventory report across multiple shows
  * Shows: Item ID, Inventory Qty, quantities for each show, Remaining
  */
 export const ShowInventoryReport = {
-    components: { DataView, ItemImageComponent, ScheduleFilterSelect, InventoryCategoryFilter },
+    components: { DataView, ScheduleFilterSelect, InventoryCategoryFilter },
     inject: ['$modal', 'appContext'],
     props: {
         containerPath: { type: String, default: 'reports/show-usage' },
@@ -22,6 +22,7 @@ export const ShowInventoryReport = {
             searchFilter: null, // Schedule filter parameters
             searchParams: null, // Text search parameters
             includeEmptyShows: true, // Include shows with no packlist or no matching items
+            itemThumbnailsStore: getItemThumbnailsStore(),
             error: null,
             NavigationRegistry // Make NavigationRegistry available in template
         };
@@ -43,10 +44,10 @@ export const ShowInventoryReport = {
         },
 
         // What each report key is; show columns are dynamic (show_<identifier>), named by the
-        // show identifier. image holds no data: the thumbnail column (see itemImageStyle).
+        // show identifier. thumbnail is the item's, joined by item number (itemThumbnails.js).
         reportFields() {
             const fields = [
-                { key: 'image', label: 'IMG' },
+                THUMBNAIL_FIELD,
                 { key: 'itemId', label: 'Item#', type: 'item' },
                 { key: 'description', label: 'Item Description', type: 'item' },
                 { key: 'available', label: 'Inv Qty.' },
@@ -78,19 +79,19 @@ export const ShowInventoryReport = {
                     id: 'table',
                     name: 'Show Usage',
                     layout: 'table',
-                    columns: ['image', 'itemId', 'available', 'minQty', 'show_*'],
+                    columns: ['thumbnail', 'itemId', 'available', 'minQty', 'show_*'],
                     details: ['description'],
                     hidden: ['tabName'],
                     sortable: ['itemId', 'description', 'available', 'minQty', 'show_*'],
                     // The page draws Item# and each show's quantity (#cell)
                     style: {
-                        image: itemImageStyle('itemId'),
+                        thumbnail: thumbnailStyle('itemId'),
                         itemId: { cell: 'slot' },
                         minQty: { color: 'auto' },
                         'show_*': { width: 1, font: 'narrow', columnColor: 'striped gray', cell: 'slot' },
                         ...this.showHeaderStyles
                     },
-                    table: { sticky: { start: ['image'] }, hideRowsOnSearch: false }
+                    table: { sticky: { start: ['thumbnail'] }, hideRowsOnSearch: false }
                 }]
             };
         },
@@ -107,8 +108,12 @@ export const ShowInventoryReport = {
             return this.reportStore?.isAnalyzing || false;
         },
 
+        itemThumbnails() {
+            return itemThumbnailMap(this.itemThumbnailsStore?.data);
+        },
+
         tableData() {
-            const data = this.reportStore?.data || [];
+            const data = withItemThumbnails(this.reportStore?.data || [], 'itemId', this.itemThumbnails);
             // Enhance each row with computed remaining value and flattened show data for sorting
             return data.map(row => {
                 const enhancedRow = {

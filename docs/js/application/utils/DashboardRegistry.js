@@ -157,7 +157,10 @@ export const DashboardRegistry = Vue.reactive({
                 : this.store.data[index].path;
             
             //console.log('[DashboardRegistry] Updating path from:', oldPath, 'to:', newPathWithParams);
-            
+            // Containers report their path as they load: an unchanged path is no save (each save
+            // writes the user data tab)
+            if (oldPath === newPathWithParams) return;
+
             if (typeof this.store.data[index] === 'string') {
                 this.store.data[index] = newPathWithParams;
             } else {

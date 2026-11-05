@@ -7,7 +7,7 @@ import { NavigationRegistry } from './index.js';
 import { PacklistContent, InventoryContent, ScheduleContent, ReportsContent } from './index.js';
 import { hamburgerMenuRegistry } from './index.js';
 import { undoRegistry } from './index.js';
-import { Requests, getReactiveStore, appSettings } from './index.js';
+import { Requests, getReactiveStore, appSettings, saveDirtyStoresToUserData, getShortageAlertsStore, getShortageAlertDays, shortageBanner } from './index.js';
 import { BannerNotifications, NotificationBubbleOverlay, notificationBus } from './index.js';
 import { isLocalhost } from '../data_management/utils/helpers.js';
 
@@ -45,9 +45,9 @@ const App = {
             modals: [],
             currentYear: new Date().getFullYear(),
             globalLocksStore: null, // Global reactive store for ALL locks
+            shortageAlertsStore: null, // Inventory shortage alerts (app banner)
             notificationBus: notificationBus, // Reference for reactivity
-            updateAvailable: false, // Banner shows when deployed version differs from current
-            lastKnownVersion: null // Version at time of app mount (session-scoped, no localStorage needed)
+            updateAvailable: false // A newer version is deployed: editing is off until a refresh (assertAppCurrent)
         };
     },
     computed: {
@@ -105,16 +105,20 @@ const App = {
                 {
                     key: 'update-available',
                     color: 'orange',
-                    message: 'Updates available! Please refresh to get the latest version. \nIf this banner persists after refreshing, try clearing your browser cache.',
+                    message: 'A new version of the app is available. Editing is turned off until you refresh.',
                     visible: this.updateAvailable,
-                    dismissible: true,
+                    dismissible: false,
                     action: {
                         label: 'Refresh Now',
-                        fn: () => window.location.reload()
+                        fn: () => this.refreshToLatest()
                     }
                 }
             ];
             
+            // Created after authentication, like the preferences store getShortageAlertDays reads
+            const shortage = this.shortageAlertsStore && shortageBanner(this.shortageAlertsStore.data, getShortageAlertDays(), this.navigateToPath);
+            if (shortage) staticBanners.push(shortage);
+
             // Combine static banners with dynamic ones from the notification bus
             const dynamicBanners = this.notificationBus.getBanners('app') || [];
             return [...staticBanners, ...dynamicBanners];
@@ -179,44 +183,9 @@ const App = {
         // Add keyboard shortcuts for undo/redo
         document.addEventListener('keydown', this.handleGlobalKeyDown);
         
-        // Initialize version detection
-        // window.__deployedVersion is set by the version.json fetch in index.html header
-        const initializeVersionDetection = async () => {
-            // Wait for deployed version to be fetched (max 2 seconds)
-            let deployedVersion = window.__deployedVersion;
-            let attempts = 0;
-            while (!deployedVersion && attempts < 20) {
-                await new Promise(resolve => setTimeout(resolve, 100));
-                deployedVersion = window.__deployedVersion;
-                attempts++;
-            }
-            
-            if (!deployedVersion) {
-                console.warn('[App] Deployed version not available, skipping version detection');
-                return;
-            }
-            
-            // Store the deployed version as the baseline for this session
-            // No update on first load (versions always match initially)
-            this.lastKnownVersion = deployedVersion;
-            this.updateAvailable = false;
-            // console.log('[App] Version baseline set:', deployedVersion);
-        };
-        
-        await initializeVersionDetection();
-        
-        // Listen for version check results from the cache poller
+        // A newer deploy turns editing off (data writes refuse: assertAppCurrent) until a refresh
         window.addEventListener('versionCheckResult', (event) => {
-            const { deployedVersion } = event.detail;
-            if (this.lastKnownVersion && deployedVersion !== this.lastKnownVersion) {
-                // Update detected mid-session
-                // console.log('[App] Update detected - new version available');
-                this.updateAvailable = true;
-            } else if (this.updateAvailable && deployedVersion === this.lastKnownVersion) {
-                // Versions now match (user refreshed after update)
-                // console.log('[App] Versions now match, hiding banner');
-                this.updateAvailable = false;
-            }
+            this.updateAvailable = event.detail.outdated;
         });
 
         // Pass the reactive modals array to modalManager for all modal operations
@@ -226,18 +195,7 @@ const App = {
             // Initialize dashboard registry if authenticated
             NavigationRegistry.initializeDashboard();
             
-            // Initialize global locks store
-            this.globalLocksStore = getReactiveStore(
-                Requests.getAllLocks,
-                null,
-                []
-            );
-            //console.log('[App] Initialized global locks store');
-            
-            // Watch for locks data changes
-            this.$watch(() => this.globalLocksStore?.data, (locks) => {
-                //console.log('[App] Global locks data:', locks);
-            }, { immediate: true, deep: true });
+            this.initializeGlobalStores();
             
             // Apply current URL state if user is already authenticated
             // Use resolvePathFromURL to expand short hashes since we're authenticated
@@ -271,20 +229,7 @@ const App = {
                     }
                 }
                 
-                // Initialize global locks store on login
-                if (!this.globalLocksStore) {
-                    this.globalLocksStore = getReactiveStore(
-                        Requests.getAllLocks,
-                        null,
-                        []
-                    );
-                    //console.log('[App] Initialized global locks store on login');
-                    
-                    // Watch for locks data changes
-                    this.$watch(() => this.globalLocksStore?.data, (locks) => {
-                        //console.log('[App] Global locks data:', locks);
-                    }, { immediate: true, deep: true });
-                }
+                this.initializeGlobalStores();
                 
                 // Apply current URL when user logs in — resolve short hashes now that we are authenticated
                 const currentUrl = await NavigationRegistry.urlRouter.resolvePathFromURL();
@@ -371,6 +316,30 @@ const App = {
         NavigationRegistry.dashboardRegistry.saveNow();
     },
     methods: {
+        /**
+         * Refresh onto the deployed version. Backs up unsaved edits (restored after the reload),
+         * then re-downloads every file this page loaded, bypassing the browser cache: a plain
+         * reload reuses cached modules for up to 10 minutes after a deploy (GitHub Pages max-age).
+         */
+        async refreshToLatest() {
+            try {
+                await saveDirtyStoresToUserData();
+            } catch (error) {
+                console.warn('[App] Backing up unsaved edits before the refresh failed:', error);
+            }
+            const files = performance.getEntriesByType('resource')
+                .map(entry => entry.name)
+                .filter(url => url.startsWith(location.origin) && /\.(js|css|html)(\?|$)/.test(url));
+            const refetch = Promise.allSettled([location.href.split('#')[0], ...new Set(files)]
+                .map(url => fetch(url, { cache: 'reload' })));
+            await Promise.race([refetch, new Promise(resolve => setTimeout(resolve, 10000))]);
+            window.location.reload();
+        },
+        // App-wide stores, created once after authentication: all locks, and the shortage alerts
+        initializeGlobalStores() {
+            if (!this.globalLocksStore) this.globalLocksStore = getReactiveStore(Requests.getAllLocks, null, []);
+            if (!this.shortageAlertsStore) this.shortageAlertsStore = getShortageAlertsStore();
+        },
         toggleMenu() {
             this.isMenuOpen = !this.isMenuOpen;
         },

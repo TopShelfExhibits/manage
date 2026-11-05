@@ -1,4 +1,5 @@
-import { html, Requests, NavigationRegistry, DataView, ScheduleFilterSelect, getReactiveStore, toISODateString, todayISOString, offsetToISO, ItemImageComponent } from '../../index.js';
+import { html, Requests, NavigationRegistry, DataView, ScheduleFilterSelect, getReactiveStore, toISODateString, todayISOString, offsetToISO, THUMBNAIL_FIELD, getItemThumbnailsStore, itemThumbnailMap } from '../../index.js';
+import { CellRenderer } from '../interface/cells.js';
 import { useSearch } from '../../utils/useSearch.js';
 import { valueMatchesAny } from '../../utils/views/searchMatch.js';
 
@@ -62,7 +63,7 @@ const TIMELINE_VIEWS = {
  *   endDate    YYYY-MM-DD
  */
 export const InventoryItemTimeline = {
-    components: { DataView, ScheduleFilterSelect, ItemImageComponent },
+    components: { DataView, ScheduleFilterSelect, CellRenderer },
     inject: ['$modal', 'appContext'],
     props: {
         containerPath: { type: String, default: '' },
@@ -91,11 +92,21 @@ export const InventoryItemTimeline = {
             filterStartDate: null,
             filterEndDate: null,
             resolvedItemId: null,
+            itemThumbnailsStore: getItemThumbnailsStore(),
+            // The item's thumbnail, read only here (it is edited on its category page)
+            thumbnailField: { ...THUMBNAIL_FIELD, cell: 'thumbnail', cellOptions: { itemKey: 'itemNumber', size: 96 } },
             TIMELINE_FIELDS,
             TIMELINE_VIEWS
         };
     },
     computed: {
+        // The item as a row for the thumbnail cell (no thumbnail field when its tab has none)
+        thumbnailRow() {
+            const map = itemThumbnailMap(this.itemThumbnailsStore?.data);
+            const row = { itemNumber: this.resolvedItemId };
+            if (map.has(this.resolvedItemId)) row.thumbnail = map.get(this.resolvedItemId);
+            return row;
+        },
         timelineStore() {
             if (!this.resolvedItemId) return null;
             const effectiveStart = this.startDate || this.filterStartDate;
@@ -221,11 +232,7 @@ export const InventoryItemTimeline = {
         <div v-else>
             <div v-if="resolvedItemId" style="margin-bottom: var(--padding-md);">
                 <div style="display: flex; gap: var(--padding-md); align-items: flex-start;">
-                    <ItemImageComponent
-                        :itemNumber="resolvedItemId"
-                        :imageSize="96"
-                        :editable="true"
-                    />
+                    <CellRenderer :row="thumbnailRow" :field="thumbnailField" renderer="details" />
                     <div class="details-grid" style="--details-grid-min-column-width: 300px;">
                         <div class="detail-item">
                             <label>Item#:</label>

@@ -849,7 +849,9 @@ td:has(.table-wrapper) {
 td:has(button) {
     padding: var(--padding-sm);
 }
-td:has(img) {
+/* Images, and thumbnail cells with or without one (a tab without thumbnails draws an empty box) */
+td:has(img),
+td:has(.item-image-container) {
     padding: 0;
 }
 
@@ -1417,6 +1419,115 @@ td.col-sticky-start, td.col-sticky-end {
     opacity: 1;
 }
 
+/* An item with several images: the count in the icon's corner */
+.item-image-count {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    z-index: 2;
+    padding: 0 4px;
+    border-radius: var(--radius-sm);
+    background-color: var(--color-purple);
+    color: var(--color-text-inverted);
+    font-size: 0.7rem;
+    line-height: 1.3;
+}
+
+/* ── Thumbnail gallery (thumbnailModals.js): a tall page modal whose parts sit in its .content
+   column. The stage takes the height the other parts leave, so the image's own size never moves
+   the arrows, the details or the button bar. ── */
+
+.thumbnail-gallery-stage {
+    flex: 1 1 0;
+    min-height: 120px;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-rows: minmax(0, 1fr);
+    align-items: center;
+    gap: var(--padding-md);
+}
+/* The image (or the crop editor) fills the space between the arrows */
+.thumbnail-gallery-stage > :not(button) {
+    align-self: stretch;
+    width: 100%;
+    height: 100%;
+    min-height: 0;
+}
+.thumbnail-gallery-stage > img {
+    object-fit: contain;
+}
+/* A details grid in a column takes its own height (the generic rule grows it, for rows) */
+.content > .details-grid {
+    flex: none;
+}
+.detail-item > textarea {
+    box-sizing: border-box;
+    width: 100%;
+    resize: vertical;
+    font: inherit;
+}
+
+/* A row of small images (gallery strip, upload previews) */
+.thumbnail-gallery-strip {
+    display: flex;
+    flex: none;
+    justify-content: safe center;
+    gap: var(--padding-md);
+    overflow-x: auto;
+    padding: 2px;
+}
+.thumbnail-gallery-strip .item-image-container {
+    flex: none;
+    cursor: pointer;
+}
+.thumbnail-gallery-strip .item-image-container.selected {
+    outline: 2px solid var(--color-purple);
+}
+.thumbnail-upload-preview {
+    width: 64px;
+    height: 64px;
+}
+
+/* Crop editor: the box is the largest the stage holds at the image's proportions (--crop-ratio),
+   so the crop rectangle's fractions are the image's */
+.thumbnail-crop-stage {
+    container-type: size;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.thumbnail-crop-box {
+    position: relative;
+    overflow: hidden;
+    width: min(100cqw, 100cqh * var(--crop-ratio, 1));
+    height: min(100cqh, 100cqw / var(--crop-ratio, 1));
+    touch-action: none;
+    user-select: none;
+}
+.thumbnail-crop-box img {
+    display: block;
+    width: 100%;
+    height: 100%;
+}
+.thumbnail-crop-rect {
+    position: absolute;
+    box-sizing: border-box;
+    border: 2px solid var(--color-purple);
+    box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.6);
+    cursor: move;
+}
+.thumbnail-crop-handle {
+    position: absolute;
+    width: 14px;
+    height: 14px;
+    background-color: var(--color-text-inverted);
+    border: 1px solid var(--color-purple);
+}
+.thumbnail-crop-handle.nw { left: -7px; top: -7px; cursor: nwse-resize; }
+.thumbnail-crop-handle.ne { right: -7px; top: -7px; cursor: nesw-resize; }
+.thumbnail-crop-handle.sw { left: -7px; bottom: -7px; cursor: nesw-resize; }
+.thumbnail-crop-handle.se { right: -7px; bottom: -7px; cursor: nwse-resize; }
+
 /* ── Editable cells (batch and instant edit modes) ── */
 
 /* Text editor (contenteditable text cell) and number input */
@@ -1516,6 +1627,16 @@ select.cell-select:only-child {
    queued or in flight. Pack lists don't colour unsaved cells (see the pack list styles). */
 td.cell-unsaved {
     background-color: var(--color-red-bg-transparent);
+}
+/* A thumbnail covers its cell, so the unsaved tint goes over the image */
+td.cell-unsaved .item-image-container::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    background-color: var(--color-red);
+    opacity: 0.15;
+    pointer-events: none;
 }
 /* Instant write failed (the value was reverted) */
 td.cell-failed {

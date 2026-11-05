@@ -1,4 +1,4 @@
-import { Database, parseDate, toISODateString, toUSDateString, wrapMethods, searchFilter, GetTopFuzzyMatch, normalizeHeaderName, normalizeText, normalizeMatchKey } from '../index.js';
+import { Database, ApplicationUtils, offsetToISO, parseDate, toISODateString, toUSDateString, wrapMethods, searchFilter, GetTopFuzzyMatch, normalizeHeaderName, normalizeText, normalizeMatchKey } from '../index.js';
 import { estimateShipDate as _calculateShipDate } from '../utils/ship-date.js'; // ship date with fallbacks
 
 /**
@@ -149,10 +149,9 @@ class productionUtils_uncached {
         const resolveFilterValue = async (filter, data) => {
             const value = filter.value;
             
-            // If it's a number, treat as offset from today
+            // If it's a number, treat as a day offset from today (local noon, like the row dates)
             if (typeof value === 'number') {
-                const today = new Date();
-                return new Date(today.getTime() + value * 86400000);
+                return parseDate(offsetToISO(value, await deps.call(ApplicationUtils.getToday)));
             }
             
             // If it looks like a date string (YYYY-MM-DD), parse it

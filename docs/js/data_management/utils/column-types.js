@@ -12,13 +12,23 @@
  * - select: "options" names an option list. The component that shows the column supplies its
  *   lists by name (the design queue takes DesignQueueAssignees from preferences).
  * - Which columns a table may write is separate: the InstantWriteTables preference.
+ * - thumbnail: a JSON array of Drive file IDs (thumbnail-values.js). Its values are references,
+ *   not text: they are never searched, pasted or copied out as text (isOpaqueType).
  * - Column names match as instant writes do (columnText: spacing and case ignored).
  *
  * Requests.getColumnTypes(database, tab) is the one cached read; this module is pure.
  */
 import { columnText } from './instant-write-config.js';
 
-export const COLUMN_TYPES = Object.freeze(['text', 'checkbox', 'select', 'date', 'number', 'currency']);
+export const COLUMN_TYPES = Object.freeze(['text', 'checkbox', 'select', 'date', 'number', 'currency', 'thumbnail']);
+
+/** Types whose values are references rather than text: not searched, pasted or exported as text. */
+const OPAQUE_TYPES = Object.freeze(['thumbnail']);
+
+/** @param {string} type @returns {boolean} */
+export function isOpaqueType(type) {
+    return OPAQUE_TYPES.includes(type);
+}
 
 const DATE_WORDS = ['date', 'start', 'end', 'ship', 'due', 'deadline', 'created', 'updated', 'modified', 'time', 'return'];
 const NUMBER_WORDS = ['qty', 'quantity'];
@@ -27,6 +37,7 @@ const CURRENCY_WORDS = ['price', 'cost', 'amount', 'fee', 'rate', 'budget', 'exp
 /** The type of an undeclared column, from its name: date, number, currency, else text. */
 export function guessColumnType(name) {
     const n = String(name ?? '').toLowerCase();
+    if (n.includes('thumbnail')) return 'thumbnail';
     if (DATE_WORDS.some(w => n.includes(w))) return 'date';
     if (NUMBER_WORDS.some(w => n.includes(w)) || /^\d+$/.test(n)) return 'number';
     if (CURRENCY_WORDS.some(w => n.includes(w))) return 'currency';
@@ -69,6 +80,7 @@ export function fieldTypeProps({ type, options } = {}) {
         case 'number': return { type: 'number', format: 'number' };
         case 'currency': return { format: 'currency' };
         case 'checkbox': return { type: 'checkbox' };
+        case 'thumbnail': return { type: 'thumbnail', format: 'thumbnail' };
         // The field names its list (optionList); the page that shows it supplies field.options
         case 'select': return { type: 'select', ...(options ? { optionList: options } : {}) };
         default: return {};

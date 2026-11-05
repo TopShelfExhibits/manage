@@ -1,8 +1,9 @@
 import { Database, wrapMethods, invalidateCache, stampDataChange, normalizeHeaderName } from '../index.js';
-import { setTimestampWriter, startCacheTimestampPoller, startCacheCleanup } from '../utils/caching.js';
+import { setTimestampWriter, setPersistentStore, startCacheTimestampPoller, startCacheCleanup } from '../utils/caching.js';
+import { networkState } from '../utils/networkState.js';
 
 // Dynamically import GoogleSheetsAuth based on environment
-import { isLocalhost } from '../utils/helpers.js';
+import { isLocalhost, todayISOString, startOfTodayMs } from '../utils/helpers.js';
 let GoogleSheetsAuth, GoogleSheetsService;
 if (isLocalhost()) {
     ({ GoogleSheetsAuth, GoogleSheetsService } = await import('../../google_sheets_services/FakeGoogle.js'));
@@ -10,6 +11,10 @@ if (isLocalhost()) {
     ({ GoogleSheetsAuth } = await import('../../google_sheets_services/GoogleSheetsAuth.js'));
     ({ GoogleSheetsService } = await import('../../google_sheets_services/GoogleSheetsData.js'));
 }
+
+// User data writes per tab name: { entries: the batch still collecting calls (null once it is
+// written), done: the latest batch's write } (storeUserData)
+const _userDataQueues = new Map();
 
 function isActiveLockTimestamp(timestamp) {
     const ts = timestamp?.split('|')[0];
@@ -55,59 +60,69 @@ class applicationUtils_uncached {
     ];
     
     /**
-     * Store user data in a user-specific tab within the CACHE sheet
-     * @param {Object} deps - Dependency decorator for tracking calls
+     * Store user data in a user-specific tab within the CACHE sheet. Calls made at the same moment
+     * (autosave backs up every dirty store at once) are written together: one read and one write
+     * of the tab. Writes to one tab never overlap, so none undoes another.
      * @param {string} username - The username to create/find a tab for
      * @param {string} id - The ID to find/create a row for
-     * @param {Array} data - Array of data to store in the row
-     * @returns {Promise<boolean>} Success status
+     * @param {*} data - Data to store in the row (strings as they are, the rest as JSON); null deletes the row
+     * @returns {Promise<boolean|undefined>} Success status of the tab's write
      */
-    static async storeUserData(username, id, data) {
+    static storeUserData(username, id, data) {
         // Sanitize username and compose tab name consistently with getUserData
-        const sanitizedUsername = username.replace(/[^a-zA-Z0-9_-]/g, '_');
-        const tabName = `UserData_${sanitizedUsername}`;
-        
-        // Convert data to JSON string if it's not already a string
-        let serializedData;
-        if (typeof data === 'string') {
-            serializedData = data;
-        } else {
-            serializedData = JSON.stringify(data);
+        const tabName = `UserData_${username.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+        let queue = _userDataQueues.get(tabName);
+        if (!queue) _userDataQueues.set(tabName, queue = { entries: null, done: Promise.resolve() });
+        if (!queue.entries) {
+            // A new batch: it collects calls until the tab's previous write is done, plus one turn
+            const entries = queue.entries = [];
+            queue.done = queue.done
+                .catch(() => {})
+                .then(() => new Promise(resolve => setTimeout(resolve, 0)))
+                .then(() => {
+                    queue.entries = null;
+                    return applicationUtils_uncached._writeUserData(tabName, entries);
+                });
+        }
+        queue.entries.push({ id, data });
+        return queue.done;
+    }
+
+    /**
+     * One read-modify-write of a user data tab, applying entries in call order.
+     * @private
+     * @param {string} tabName
+     * @param {Array<{id: string, data: *}>} entries - data null deletes the row
+     */
+    static async _writeUserData(tabName, entries) {
+        const isEmpty = (data) => data === null ||
+            (Array.isArray(data) && data.length === 0) ||
+            (typeof data === 'object' && !Array.isArray(data) && Object.keys(data).length === 0);
+
+        // Only create the tab for real data
+        const allTabs = await Database.getTabs('CACHE');
+        if (!allTabs.some(t => t.title === tabName)) {
+            entries = entries.filter(entry => !isEmpty(entry.data));
+            if (!entries.length) return;
+            await Database.createTab('CACHE', '_UserDataTemplate', tabName, { bookkeeping: true });
         }
 
-        // Check if tab exists
-        const allTabs = await Database.getTabs('CACHE');
-        let tab = allTabs.find(t => t.title === tabName);
-        
-        // Only create tab if it doesn't exist AND we have real data to store
-        if (!tab) {
-            if (data === null || 
-                (Array.isArray(data) && data.length === 0) || 
-                (typeof data === 'object' && !Array.isArray(data) && Object.keys(data).length === 0)) {
-                return; // Don't create tab for empty/null data
+        // Copies: the cached rows stay as they are if the write fails
+        const rows = (await Database.getData('CACHE', tabName, { ID: 'ID', Value: 'Value' })).map(row => ({ ...row }));
+        for (const { id, data } of entries) {
+            const rowIndex = rows.findIndex(row => row.ID === id);
+            if (data === null) {
+                if (rowIndex !== -1) rows.splice(rowIndex, 1);
+                continue;
             }
-            await Database.createTab('CACHE', '_UserDataTemplate', tabName);
+            const value = typeof data === 'string' ? data : JSON.stringify(data);
+            if (rowIndex !== -1) rows[rowIndex].Value = value;
+            else rows.push({ ID: id, Value: value });
         }
-        
-        // Unified flow: read all data, mutate, write back
-        const existingData = await Database.getData('CACHE', tabName, { ID: 'ID', Value: 'Value' });
-        const rowIndex = existingData.findIndex(row => row.ID === id);
-        
-        // Apply mutation: delete, update, or insert
-        if (data === null) {
-            if (rowIndex !== -1) {
-                existingData.splice(rowIndex, 1);
-            }
-        } else {
-            if (rowIndex !== -1) {
-                existingData[rowIndex].Value = serializedData;
-            } else {
-                existingData.push({ ID: id, Value: serializedData });
-            }
-        }
-        
-        return await Database.setData('CACHE', tabName, existingData, { ID: 'ID', Value: 'Value' }, {
-            skipMetadata: true
+
+        return await Database.setData('CACHE', tabName, rows, { ID: 'ID', Value: 'Value' }, {
+            skipMetadata: true,
+            bookkeeping: true
         });
     }
     
@@ -518,7 +533,7 @@ class applicationUtils_uncached {
                         Store: 'Store',
                         Data: 'Data',
                         Timestamp: 'Timestamp'
-                    }, { skipMetadata: true });
+                    }, { skipMetadata: true, bookkeeping: true });
                     
                     //console.log(`[ApplicationUtils.forceUnlockSheet] Backed up ${backupCount} entries, deleted ${deletedCount} entries`);
                 }
@@ -771,36 +786,59 @@ class applicationUtils_uncached {
     }
 
     /**
-     * Write a timestamp to the CACHE/Caching tab for external cache invalidation signaling.
-     * Used by Database.setData after mutations to notify other sessions.
-     * 
-     * @param {string} prefix - Cache key prefix (e.g., 'database:getData:"INVENTORY","FURNITURE"')
+     * Today's date (YYYY-MM-DD, local calendar). Cached functions whose results depend on today
+     * read it through deps.call, so the date rollover (checkDateRollover) invalidates them and
+     * their reactive stores reload.
+     * @param {Object} deps - Dependency decorator for tracking calls
+     * @returns {Promise<string>}
      */
-    static async writeCacheTimestamp(prefix) {
-        try {
-            // Add 1 second to ensure timestamp is definitely newer than any cache entry filled during this method call.
-            // This prevents race conditions where async operations (getSheetData, analysis pipelines) might refill
-            // cache after we capture Date.now() but before the poll compares timestamps.
-            // In production, this means external changes are detected within 1 second of being written.
-            const timestamp = new Date(Date.now() + 1000).toISOString();
-            const rawData = await GoogleSheetsService.getSheetData('CACHE', 'Caching').catch(() => null);
-            if (!rawData || rawData.length === 0) {
-                await GoogleSheetsService.setSheetData('CACHE', 'Caching', [['Key', 'Timestamp'], [prefix, timestamp]], null);
-                return;
-            }
-            const rows = rawData.slice(1);
+    static async getToday(deps) {
+        _servedToday = todayISOString();
+        return _servedToday;
+    }
+
+    /**
+     * Write change stamps to the CACHE/Caching tab, for other sessions' pollers (caching.js
+     * stampDataChange queues them and retries a failed write). One read of the tab, then one
+     * write for the keys it already has and one atomic append for new keys, so two sessions
+     * adding new keys at once never write the same row. A failed read writes nothing.
+     * @param {Array<{prefix: string, timestamp: string}>} stamps - prefix: a cache key prefix such as
+     *   'database:getData:"INVENTORY","FURNITURE"'
+     * @returns {Promise<Object<string, string>>} prefix → the timestamp its row held before this
+     *   write, for the stamps that updated an existing row
+     */
+    static async writeCacheTimestamps(stamps) {
+        const rawData = await GoogleSheetsService.getSheetData('CACHE', 'Caching');
+        const empty = !Array.isArray(rawData) || !rawData.length || !(rawData[0] || []).length;
+        if (empty) {
+            // A tab that really is empty: its header first (a range write, so nothing is truncated)
+            await GoogleSheetsService.setSheetData('CACHE', 'Caching!A1:B1', [['Key', 'Timestamp']], null);
+        }
+        const rows = empty ? [] : rawData.slice(1);
+        const updates = [];
+        const appends = [];
+        const replaced = {};
+        for (const { prefix, timestamp } of stamps) {
             const rowIndex = rows.findIndex(row => Array.isArray(row) && row[0] === prefix);
             if (rowIndex !== -1) {
-                const sheetRow = rowIndex + 2;
-                await GoogleSheetsService.setSheetData('CACHE', `Caching!B${sheetRow}:B${sheetRow}`, [[timestamp]], null);
+                updates.push({ range: `Caching!B${rowIndex + 2}:B${rowIndex + 2}`, values: [[timestamp]] });
+                replaced[prefix] = rows[rowIndex][1] || '';
             } else {
-                const newRowNumber = rows.length + 2;
-                await GoogleSheetsService.setSheetData('CACHE', `Caching!A${newRowNumber}:B${newRowNumber}`, [[prefix, timestamp]], null);
+                appends.push([prefix, timestamp]);
             }
-        } catch (err) {
-            console.warn('[writeCacheTimestamp] Failed to write cache timestamp:', err);
-            throw err;
         }
+        await GoogleSheetsService.batchSetValues('CACHE', updates, { raw: true });
+        await GoogleSheetsService.appendSheetValues('CACHE', 'Caching!A:B', appends);
+        return replaced;
+    }
+
+    /**
+     * Write one change stamp now, dated a second ahead (as stampDataChange dates them). For tests
+     * and the console helper, which simulate another session's write.
+     * @param {string} prefix - Cache key prefix
+     */
+    static async writeCacheTimestamp(prefix) {
+        await ApplicationUtils.writeCacheTimestamps([{ prefix, timestamp: new Date(Date.now() + 1000).toISOString() }]);
     }
 
     /**
@@ -837,48 +875,6 @@ class applicationUtils_uncached {
         }
     }
 
-    // ─── Thumbnail table ─────────────────────────────────────────────────────────
-
-    /**
-     * Read one thumbnail record from the shared Thumbnails tab in the CACHE sheet.
-     * Returns { itemNumber, file, blob } or null if not found.
-     * Cached infinitely — derived from getAllThumbnailRecords, so any write to the
-     * Thumbnails tab (local or from another session) invalidates it through the dependency chain.
-     */
-    static async getThumbnailRecord(deps, itemNumber) {
-        // Serve from pending write buffer first (avoids a sheet read before the debounced flush fires)
-        if (_pendingThumbnailWrites.has(itemNumber)) {
-            const pending = _pendingThumbnailWrites.get(itemNumber);
-            return { itemNumber, ...pending };
-        }
-        const rows = await deps.call(ApplicationUtils.getAllThumbnailRecords);
-        return rows.find(r => r.itemNumber === itemNumber) || null;
-    }
-
-    /**
-     * Load the entire Thumbnails table from the CACHE sheet.
-     * Used by the shared thumbnail records store (application/utils/thumbnailCache.js).
-     * Registered as a dependent of getData('CACHE', 'Thumbnails') so that Database.setData on the
-     * tab — and the cross-session timestamp it stamps — invalidates this and reloads the store.
-     */
-    static async getAllThumbnailRecords(deps) {
-        const tab = await deps.call(Database.findTabByName, 'CACHE', 'Thumbnails');
-        if (!tab) return [];
-        return await deps.call(Database.getData, 'CACHE', 'Thumbnails', _THUMBNAILS_MAPPING);
-    }
-
-    /**
-     * Queue a thumbnail record to be written to the Thumbnails tab.
-     * Writes are batched and flushed 2 s after the last call to avoid concurrent
-     * read-modify-write races when many items are loaded simultaneously.
-     * MUTATION — not cached.
-     */
-    static async storeThumbnailRecord(itemNumber, fileId, blobDataUrl) {
-        _pendingThumbnailWrites.set(itemNumber, { file: fileId, blob: blobDataUrl });
-        clearTimeout(_thumbnailFlushTimer);
-        _thumbnailFlushTimer = setTimeout(_flushThumbnailWrites, 2000);
-    }
-
     /**
      * Get or create a short link for a given path
      * Checks if the path already has a short code, otherwise creates one
@@ -892,13 +888,13 @@ class applicationUtils_uncached {
         
         if (!linksTab) {
             // Create Links tab with headers
-            await Database.createTab('CACHE', null, 'Links');
+            await Database.createTab('CACHE', null, 'Links', { bookkeeping: true });
             await Database.setData(
                 'CACHE',
                 'Links',
                 [['Path', 'ShortCode', 'Created']],
                 null,
-                { skipMetadata: true }
+                { skipMetadata: true, bookkeeping: true }
             );
         }
         
@@ -940,7 +936,7 @@ class applicationUtils_uncached {
             Path: 'Path',
             ShortCode: 'ShortCode',
             Created: 'Created'
-        }, { skipMetadata: true });
+        }, { skipMetadata: true, bookkeeping: true });
         
         return newShortCode;
     }
@@ -970,55 +966,96 @@ class applicationUtils_uncached {
     }
 }
 
-// ─── Thumbnail batch-write state ─────────────────────────────────────────────
-// All storeThumbnailRecord calls within any 2-second window are merged into a
-// single read-modify-write so concurrent analysis runs don't race each other.
-
-const _THUMBNAILS_MAPPING = { itemNumber: 'ItemNumber', file: 'File', blob: 'Blob' };
-const _pendingThumbnailWrites = new Map(); // itemNumber → { file, blob }
-let _thumbnailFlushTimer = null;
-
-async function _flushThumbnailWrites() {
-    _thumbnailFlushTimer = null;
-    if (_pendingThumbnailWrites.size === 0) return;
-    const pending = new Map(_pendingThumbnailWrites);
-    _pendingThumbnailWrites.clear();
-    try {
-        const allTabs = await Database.getTabs('CACHE');
-        const tabExists = allTabs.some(t => t.title === 'Thumbnails');
-        if (!tabExists) {
-            await Database.createTab('CACHE', null, 'Thumbnails');
-        }
-        const existing = tabExists
-            ? await Database.getData('CACHE', 'Thumbnails', _THUMBNAILS_MAPPING)
-            : [];
-        for (const [itemNumber, { file, blob }] of pending) {
-            const idx = existing.findIndex(r => r.itemNumber === itemNumber);
-            if (idx !== -1) {
-                existing[idx] = { itemNumber, file, blob };
-            } else {
-                existing.push({ itemNumber, file, blob });
-            }
-        }
-        // setData stamps and invalidates getData('CACHE', 'Thumbnails'). getAllThumbnailRecords and
-        // getThumbnailRecord depend on it, so this session's records store reloads and other sessions
-        // pick up the change on their next timestamp poll — no separate invalidation needed here.
-        await Database.setData('CACHE', 'Thumbnails', existing, _THUMBNAILS_MAPPING, { skipMetadata: true });
-        console.log(`[Thumbnails] Stored ${pending.size} thumbnail record(s) to CACHE sheet`);
-    } catch (err) {
-        console.warn('[Thumbnails] Failed to flush thumbnail writes:', err);
-    }
-}
-
 export const ApplicationUtils = wrapMethods(
     applicationUtils_uncached, 
     'app_utils', 
-    ['storeUserData', 'initializeDefaultSavedSearches', 'lockSheet', 'unlockSheet', 'forceUnlockSheet', 'releaseAllUserLocks', '_writeUserColumn', '_writeLockKeyRow', '_writeLockCell', '_numberToColumnLetter', '_initializeLocksSheet', 'writeCacheTimestamp', 'readCacheTimestamps', 'storeThumbnailRecord', 'getShortLink', 'expandShortLink'], // Mutation methods
-    ['getThumbnailRecord', 'expandShortLink'], // Infinite cache methods
+    ['storeUserData', '_writeUserData', 'initializeDefaultSavedSearches', 'lockSheet', 'unlockSheet', 'forceUnlockSheet', 'releaseAllUserLocks', '_writeUserColumn', '_writeLockKeyRow', '_writeLockCell', '_numberToColumnLetter', '_initializeLocksSheet', 'writeCacheTimestamps', 'writeCacheTimestamp', 'readCacheTimestamps', 'getShortLink', 'expandShortLink'], // Mutation methods
+    ['expandShortLink', 'getToday'], // Infinite cache methods
     { 'getSheetLock': 10000, 'getLocksData': 10000 } // Custom cache durations (10 seconds for getSheetLock and getLocksData)
 );
 
-setTimestampWriter((prefix) => ApplicationUtils.writeCacheTimestamp(prefix));
+// ─── Date rollover ───────────────────────────────────────────────────────────
+// The date getToday last returned; null when nothing has read it since the last rollover.
+let _servedToday = null;
+const TODAY_CACHE_KEY = 'app_utils:getToday:';
+
+/**
+ * Invalidate getToday, and everything computed from it, once the local date differs from the one
+ * it served. Checked every minute: a timer set for midnight fires late after the computer sleeps.
+ * While offline, invalidation is skipped and retried on a later check.
+ */
+export function checkDateRollover() {
+    if (!_servedToday || todayISOString() === _servedToday || networkState.isOffline) return;
+    _servedToday = null;
+    invalidateCache([{ namespace: 'app_utils', methodName: 'getToday', args: [] }]);
+}
+setInterval(checkDateRollover, 60 * 1000);
+
+// ─── Persisted analytics (CACHE/Analytics) ──────────────────────────────────
+// One row per persisted result (caching.js, wrapMethods persistentMethods):
+//   Key | SavedAt | Sources | Value
+// Read and written directly, like the Caching tab, so saving a result never invalidates cached
+// reads. Validity is checked against the Caching tab timestamps, plus local midnight for getToday.
+const ANALYTICS_TAB = 'Analytics';
+const ANALYTICS_HEADERS = ['Key', 'SavedAt', 'Sources', 'Value'];
+const SHEETS_CELL_LIMIT = 50000;
+const TAB_READ_PREFIX = 'database:getData:';
+
+async function readAnalyticsRows() {
+    const raw = await GoogleSheetsService.getSheetData('CACHE', ANALYTICS_TAB);
+    return Array.isArray(raw) ? raw : [];
+}
+
+setPersistentStore({
+    // Data reads (stamped by Database writes), and this class's own sources: the clock and the
+    // locks. Pure cached leaves such as findBestProjectIdentifierMatch carry long argument lists
+    // and can never mark a row stale
+    sourcePrefixes: ['database:', 'app_utils:'],
+    async read(key) {
+        const row = (await readAnalyticsRows()).slice(1).find(r => Array.isArray(r) && r[0] === key);
+        if (!row || !row[1] || !row[3]) return null;
+        return { savedAt: row[1], sources: JSON.parse(row[2] || '[]'), value: JSON.parse(row[3]) };
+    },
+    async write({ key, value, savedAt, sources }) {
+        const line = [key, savedAt, JSON.stringify(sources), JSON.stringify(value)];
+        const oversize = line.findIndex(cell => cell.length > SHEETS_CELL_LIMIT);
+        if (oversize !== -1) {
+            console.warn(`[Analytics] Not saved: ${key} ${ANALYTICS_HEADERS[oversize]} is ${line[oversize].length} characters; a sheet cell holds ${SHEETS_CELL_LIMIT}`);
+            return;
+        }
+        const raw = await readAnalyticsRows();
+        if (!raw.length || !raw[0]?.length) {
+            await GoogleSheetsService.setSheetData('CACHE', ANALYTICS_TAB, [ANALYTICS_HEADERS, line], null);
+            return;
+        }
+        const rowIndex = raw.slice(1).findIndex(r => Array.isArray(r) && r[0] === key);
+        const sheetRow = rowIndex === -1 ? raw.length + 1 : rowIndex + 2;
+        await GoogleSheetsService.setSheetData('CACHE', `${ANALYTICS_TAB}!A${sheetRow}:D${sheetRow}`, [line], null);
+    },
+    async readSourceTimestamps() {
+        const stamps = await ApplicationUtils.readCacheTimestamps();
+        if (!stamps) return null;
+        return [...stamps, { key: TODAY_CACHE_KEY, timestamp: new Date(startOfTodayMs()).toISOString() }];
+    },
+    // A stale row's tab reads, grouped by spreadsheet: one batched request each (Database.prefetch)
+    prefetch(sources) {
+        const tabsByTable = {};
+        for (const source of sources) {
+            if (!source.startsWith(TAB_READ_PREFIX)) continue;
+            try {
+                const [tableId, tabName] = JSON.parse(`[${source.slice(TAB_READ_PREFIX.length)}]`);
+                if (typeof tableId === 'string' && typeof tabName === 'string') {
+                    (tabsByTable[tableId] ||= []).push(tabName);
+                }
+            } catch {
+                // Not a tab read
+            }
+        }
+        for (const [tableId, tabNames] of Object.entries(tabsByTable)) Database.prefetch(tableId, tabNames);
+    }
+});
+
+setTimestampWriter((stamps) => ApplicationUtils.writeCacheTimestamps(stamps));
 startCacheTimestampPoller(() => ApplicationUtils.readCacheTimestamps(), isLocalhost() ? 10_000 : 30_000);
 startCacheCleanup(2 * 60 * 1000); // Clean up expired cache entries every 2 minutes
 

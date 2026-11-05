@@ -1,4 +1,4 @@
-import { html, InventoryTableComponent, hamburgerMenuRegistry, NavigationRegistry, Requests, DataView, DashboardToggleComponent, getReactiveStore, findMatchingStores, createAnalysisConfig, generateStoreKey, authState, invalidateCache, todayISOString } from '../../index.js';
+import { html, InventoryTableComponent, hamburgerMenuRegistry, NavigationRegistry, Requests, DataView, DashboardToggleComponent, getReactiveStore, findMatchingStores, createAnalysisConfig, generateStoreKey, authState, invalidateCache, todayISOString, getInventoryTabList, INVENTORY_TAB_PREFERENCES, getShortageAlertsStore, getShortageAlertDays, shortagesByItem, itemShortageCards, categoryShortageCards, THUMBNAIL_FIELD } from '../../index.js';
 import { ShowInventoryReport } from './ShowInventoryReport.js';
 import { InventoryItemReport } from './InventoryItemReport.js';
 import { InventoryItemTimeline } from './InventoryItemTimeline.js';
@@ -17,13 +17,13 @@ function parseInventoryPath(path) {
     if (segments[0] !== 'inventory') return { category: null, subRoute: null };
     return { category: segments[1] || null, subRoute: segments[2] || null };
 }
-import { itemImageStyle } from '../../utils/views/viewStyles.js';
+import { thumbnailStyle } from '../../utils/views/viewStyles.js';
 
-// What each inventory overview key is (rows from Requests.getAllInventoryData).
-// image holds no data: the thumbnail column (see itemImageStyle).
+// What each inventory overview key is (rows from Requests.getAllInventoryData). Rows of a tab
+// without a Thumbnail column have no thumbnail, so their cell is blank.
 const INVENTORY_FIELDS = [
     { key: 'tab', label: 'Category' },
-    { key: 'image', label: 'I' },
+    THUMBNAIL_FIELD,
     { key: 'itemNumber', label: 'Item#', type: 'item' },
     { key: 'quantity', label: 'Qty', format: 'number', type: 'number' },
     { key: 'description', label: 'Description' },
@@ -41,17 +41,17 @@ const INVENTORY_VIEWS = {
     theme: 'purple',
     // Shared by both views: the page draws Category (#cell); the item thumbnail
     sortable: ['tab', 'itemNumber', 'quantity', 'description'],
-    style: { tab: { cell: 'slot' }, image: itemImageStyle('itemNumber', { size: 32 }) },
+    style: { tab: { cell: 'slot' }, thumbnail: thumbnailStyle('itemNumber', 32) },
     views: [
         {
             id: 'items',
             name: 'All items',
             icon: 'table',
             layout: 'table',
-            columns: ['tab', 'image', 'itemNumber', 'quantity'],
+            columns: ['tab', 'thumbnail', 'itemNumber', 'quantity'],
             details: ['description', 'notes'],
             style: { tab: { width: 120 } },
-            table: { sticky: { start: ['image'] } },
+            table: { sticky: { start: ['thumbnail'] } },
             sort: [{ key: 'tab', dir: 'asc' }, { key: 'itemNumber', dir: 'asc' }],
             action: 'button'
         },
@@ -200,8 +200,9 @@ export const InventoryContent = {
         return {
             categoriesStore: null, // Reactive store for inventory categories (lock analysis)
             inventoryStore: null, // All inventory item rows (overview table and category card members)
-            suppressedTabs: new Set(), // Description-only tabs hidden from the overview table
             autoSavedCategories: new Set(), // Track which categories have auto-saved data
+            shortageAlertsStore: getShortageAlertsStore(),
+            shortageDecorationKeys: ['itemNumber'],
             INVENTORY_FIELDS,
             INVENTORY_VIEWS,
             // Primary action: category cards → the category; overview rows → the item timeline (R3.8),
@@ -241,12 +242,19 @@ export const InventoryContent = {
         bucketKeys() {
             return this.categoryList.map(c => c.originalTitle);
         },
+        shortagesByItem() {
+            return shortagesByItem(this.shortageAlertsStore?.data);
+        },
         allItemRows() {
             return this.inventoryStore?.data || [];
         },
+        // Description-only tabs (InventoryDescriptionOnly preference), hidden from the overview table
+        descriptionOnlyTabs() {
+            return getInventoryTabList(INVENTORY_TAB_PREFERENCES.descriptionOnly);
+        },
         overviewRows() {
-            if (!this.suppressedTabs.size) return this.allItemRows;
-            return this.allItemRows.filter(item => !this.suppressedTabs.has(item.tab));
+            if (!this.descriptionOnlyTabs.length) return this.allItemRows;
+            return this.allItemRows.filter(item => !this.descriptionOnlyTabs.includes(item.tab));
         },
         // The page owns its data: category cards bucket every item; the overview hides description-only tabs
         inventoryRows() {
@@ -416,7 +424,13 @@ export const InventoryContent = {
                 cards.push({ status: true, message: 'Unsaved changes' });
             }
             if (unsaved) cards.push({ message: 'Save', class: 'green', action: () => this.saveCategory(key) });
+            cards.push(...categoryShortageCards(this.shortageAlertsStore?.data, key, getShortageAlertDays(), this.navigateToPath));
             return cards;
+        },
+        // Decorations (§4.14): a shortage warning on the item number of overview items that run short
+        itemDecorations(row, key) {
+            if (key !== 'itemNumber') return [];
+            return itemShortageCards(this.shortagesByItem.get(row.itemNumber), getShortageAlertDays());
         },
         categoryAppData(key) {
             return this.categoryList.find(c => c.originalTitle === key)?.AppData;
@@ -427,13 +441,6 @@ export const InventoryContent = {
             this.navigateToPath(NavigationRegistry.buildPath(`inventory/${String(row.tab).toLowerCase()}`, { searchTerm: currentParams.searchTerm }));
         },
         initializeInventoryStore() {
-            // Hide tabs whose prefixes are all description-only from the overview table
-            Requests.getPreferences().then(prefs => {
-                const descPref = prefs?.find(p => p.id === 'InventoryDescriptionOnly');
-                let descOnlyTabs = [];
-                try { descOnlyTabs = JSON.parse(descPref?.value || '[]'); } catch {}
-                this.suppressedTabs = new Set(descOnlyTabs);
-            }).catch(() => {});
             // All inventory rows (pending changes applied as of today); autoLoad
             this.inventoryStore = getReactiveStore(Requests.getAllInventoryData, null, [todayISOString()]);
         },
@@ -560,6 +567,8 @@ export const InventoryContent = {
                 :container-path="containerPath"
                 :navigate-to-path="navigateToPath"
                 :action="inventoryAction"
+                :decorations="itemDecorations"
+                :decoration-keys="shortageDecorationKeys"
                 :bucket-keys="bucketKeys"
                 :bucket-decorations="categoryDecorations"
                 :bucket-label="formatCategoryLabel"

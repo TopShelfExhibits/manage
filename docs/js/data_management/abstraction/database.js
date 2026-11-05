@@ -1,5 +1,5 @@
 // Dynamic Google Sheets Service selection
-import { isLocalhost } from '../utils/helpers.js';
+import { isLocalhost, resolveSheetMapping } from '../utils/helpers.js';
 let GoogleSheetsService, GoogleSheetsAuth;
 
 if (isLocalhost()) {
@@ -15,9 +15,9 @@ if (isLocalhost()) {
     ({ GoogleSheetsService, GoogleSheetsAuth } = await import('../../google_sheets_services/index.js'));
 }
 
-import { wrapMethods, invalidateCache, stampDataChange, EditHistoryUtils } from '../index.js';
-import { ApplicationUtils } from '../index.js';
-import { ARCHIVE_TAB_NAME, ARCHIVE_HEADERS } from '../utils/metadata-utils.js';
+import { wrapMethods, invalidateCache, fillCache, stampDataChange, watchSpreadsheets, EditHistoryUtils, assertAppCurrent } from '../index.js';
+import { ARCHIVE_TAB_NAME, ARCHIVE_HEADERS, MAX_HISTORY_ENTRIES } from '../utils/metadata-utils.js';
+import { MAX_UPLOAD_DIM } from '../utils/thumbnail-values.js';
 
 class database_uncached {
     /**
@@ -25,12 +25,20 @@ class database_uncached {
      * @param {Object} deps - Dependency decorator for tracking calls
      * @param {string} tableId - Identifier for the table (INVENTORY, PACK_LISTS, etc.)
      * @param {string} tabName - Tab name or logical identifier
-     * @param {Object} [mapping] - Optional mapping for object keys to sheet headers
+     * @param {Object} [mapping] - Optional mapping for object keys to sheet headers. A
+     *   column-preserving mapping (`_preserveColumns`, see resolveSheetMapping) reads only the
+     *   columns the tab actually has (an absent optional column gives rows without that key).
      * @returns {Promise<Array<Object>>} - Array of JS objects
      */
     static async getData(deps, tableId, tabName, mapping = null) {
-        // Get raw sheet data from GoogleSheetsService
-        const rawData = await GoogleSheetsService.getSheetData(tableId, tabName);
+        // One sheet read per tab: a call with a mapping argument (null included) uses the tab's
+        // unmapped read, cached under the key prefix the tab's writes and the poller invalidate
+        const rawData = arguments.length > 3
+            ? await deps.call(Database.getData, tableId, tabName)
+            : await _readTab(tableId, tabName);
+        if (mapping?._preserveColumns) {
+            mapping = resolveSheetMapping(mapping, rawData?.[0]).read;
+        }
         //console.log('[Database] Raw data from GoogleSheetsService:', rawData);
         //console.log('[Database] Mapping provided:', mapping);
         
@@ -43,7 +51,22 @@ class database_uncached {
         // If no mapping, return raw 2D array
         return rawData;
     }
-        
+
+    /**
+     * Start reading tabs ahead of code that reads them one at a time: the reads go out together
+     * (one request per spreadsheet, see Tab reads below) and land in each tab's own cache entry.
+     * It records no dependency: callers still read each tab through deps.call, and their first
+     * read joins the one already running. NOT cached (listed with the uncached methods below).
+     * @param {string} tableId
+     * @param {string[]} tabNames
+     */
+    static prefetch(tableId, tabNames) {
+        for (const tabName of new Set(tabNames || [])) {
+            // A failure reaches the caller's own read of the tab
+            Database.getData(tableId, tabName).catch(() => {});
+        }
+    }
+
     /**
      * Gets all logical tabs for a table
      * @param {Object} deps - Dependency decorator for tracking calls
@@ -102,7 +125,8 @@ class database_uncached {
                 canvas.width = w;
                 canvas.height = h;
                 canvas.getContext('2d').drawImage(img, 0, 0, w, h);
-                const mimeType = file.type || 'image/jpeg';
+                // PNG keeps transparency; everything else is re-encoded as JPEG
+                const mimeType = file.type === 'image/png' ? 'image/png' : 'image/jpeg';
                 canvas.toBlob((blob) => {
                     resolve(new File([blob], file.name, { type: mimeType }));
                 }, mimeType, 0.92);
@@ -113,79 +137,49 @@ class database_uncached {
     }
 
     /**
-     * Upload an image for an item to the Drive thumbnails folder.
-     * Replaces any existing image files for that item number.
+     * Upload an item image to the Drive thumbnails folder. Only uploads: the caller puts the
+     * returned file ID in the item's Thumbnail cell, and the table's save keeps it.
+     *
+     * Files are never deleted here: edit history and unsaved edits may still point at older
+     * ones. An image already uploaded (same original bytes, matched by the sha256 app property
+     * set on upload) is reused instead of uploaded again.
      * MUTATION — not cached.
      * @param {File} file - The image file to upload
-     * @param {string} itemNumber - The item number used to name the file
+     * @param {string} itemNumber - Item number, used in the file name
      * @param {string} folderId - Google Drive folder ID for thumbnails
-     * @returns {Promise<{fileId: string, file: File}|null>} The new Drive file ID and the image
-     *   that was uploaded (already resized — lets the caller show it without downloading it back),
-     *   or null on failure
+     * @returns {Promise<{fileId: string, file: File, reused: boolean}|null>} The Drive file ID and
+     *   the image as uploaded (already resized — lets the caller show it without downloading it
+     *   back), or null on failure
      */
     static async uploadItemImage(file, itemNumber, folderId = window.ENDPOINT_IDS.THUMBNAILS) {
+        await assertAppCurrent();
         const itemNumberStr = String(itemNumber).trim();
         const ext = file.type === 'image/png' ? 'png' : 'jpg';
-        const fileName = `${itemNumberStr}.${ext}`;
 
-        // Resize to max 512px before uploading. If the image is already within bounds,
-        // resizedFile === file (no copy made). If larger, upload the original as a backup first.
-        const MAX_UPLOAD_DIM = 512;
+        // Only a web-sized copy is uploaded (within MAX_UPLOAD_DIM square); the original isn't kept
         const resizedFile = await database_uncached._resizeImageFile(file, MAX_UPLOAD_DIM);
-        const wasResized = resizedFile !== file;
 
-        // Check if this item currently has a thumbnail record that points to a prefix file
-        // If so, we need to preserve that file when uploading the item's own image
-        const currentRecord = await ApplicationUtils.getThumbnailRecord(itemNumberStr);
-        const prefixFileIdsToPreserve = new Set();
-        if (currentRecord && currentRecord.file) {
-            // Extract prefix from item number
-            const separators = /[\s\-_]+/;
-            const parts = itemNumberStr.split(separators);
-            if (parts.length >= 2 && parts[0]) {
-                const prefix = parts[0];
-                // Check if the current file belongs to the prefix (not the item itself)
-                const prefixRecord = await ApplicationUtils.getThumbnailRecord(prefix);
-                if (prefixRecord && prefixRecord.file === currentRecord.file) {
-                    // This item is using a prefix file - preserve it
-                    prefixFileIdsToPreserve.add(prefixRecord.file);
-                }
-            }
+        // Deduplicate by the original's content hash (resizing isn't byte-stable across browsers)
+        const sha256 = await database_uncached._sha256Hex(file);
+        if (sha256) {
+            const existing = await GoogleSheetsService.findDriveFileByAppProperty(folderId, 'sha256', sha256);
+            if (existing?.id) return { fileId: existing.id, file: resizedFile, reused: true };
         }
 
-        // Find any existing files for this item to delete after upload
-        const extensions = ['jpg', 'jpeg', 'png'];
-        const existingFileIds = [];
-        for (const existingExt of extensions) {
-            const existing = await GoogleSheetsService.searchDriveFileInFolder(`${itemNumberStr}.${existingExt}`, folderId);
-            if (existing && existing.id) {
-                // Don't mark prefix files for deletion
-                if (!prefixFileIdsToPreserve.has(existing.id)) {
-                    existingFileIds.push(existing.id);
-                }
-            }
-        }
-
-        // If the image was resized, save the original under <itemNumber>_ORIGINAL.<ext>
-        if (wasResized) {
-            const originalFileName = `${itemNumberStr}_ORIGINAL.${ext}`;
-            await GoogleSheetsService.uploadDriveFile(file, originalFileName, folderId)
-                .catch(err => console.warn('[icons] Failed to save original image backup:', err));
-        }
-
-        const uploaded = await GoogleSheetsService.uploadDriveFile(resizedFile, fileName, folderId);
+        // A unique name per upload: older files stay valid for history and other sessions
+        const uploaded = await GoogleSheetsService.uploadDriveFile(resizedFile, `${itemNumberStr}_${Date.now()}.${ext}`, folderId, sha256 ? { sha256 } : null);
         if (!uploaded || !uploaded.id) return null;
+        return { fileId: uploaded.id, file: resizedFile, reused: false };
+    }
 
-        // Delete old files, skipping the newly uploaded file ID and any that can't be deleted
-        // (e.g. files owned by another user — Drive returns 404 for those, handled in deleteDriveFile).
-        for (const oldId of existingFileIds) {
-            if (oldId === uploaded.id) continue;
-            await GoogleSheetsService.deleteDriveFile(oldId);
+    /** SHA-256 of a file's bytes as hex, or null where Web Crypto is unavailable. */
+    static async _sha256Hex(file) {
+        try {
+            const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer());
+            return Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('');
+        } catch {
+            return null;
         }
-
-        ApplicationUtils.storeThumbnailRecord(itemNumberStr, uploaded.id, null)
-            .catch(err => console.warn('[icons] Failed to store thumbnail record on upload:', err));
-        return { fileId: uploaded.id, file: resizedFile };
     }
 
     /**
@@ -201,6 +195,9 @@ class database_uncached {
     }
 
     /* MUTATION FUNCTIONS */
+    // Every write (uploadItemImage too) starts with assertAppCurrent(): a session running an
+    // out-of-date version (a newer deploy is live) never writes shared data. Only the session's own
+    // bookkeeping (user data, short links) passes `bookkeeping: true` to setData and createTab.
 
 
     /**
@@ -211,12 +208,15 @@ class database_uncached {
      * @param {Array<Object>} updates - Array of JS objects to save
      * @param {Object} [mapping] - Optional mapping for object keys to sheet headers
      * @param {Object} [options] - Optional parameters for edithistory tracking
+     * @param {boolean} [options.bookkeeping] - The session's own bookkeeping (user data, short links):
+     *   allowed while the app is out of date (assertAppCurrent)
      * @param {string} [options.username] - Username making the change
      * @param {boolean} [options.skipMetadata] - Skip edithistory generation (caller manages EditHistory itself)
      * @param {string} [options.source] - Source for history entries ('web' | 'cad', or an inventory note)
      * @returns {Promise<boolean>} - Success status
      */
     static async setData(tableId, tabName, updates, mapping = null, options = {}) {
+        if (!options.bookkeeping) await assertAppCurrent();
         const {
             username = null,
             skipMetadata = false,
@@ -243,38 +243,20 @@ class database_uncached {
             }
         }
 
-        const result = await GoogleSheetsService.setSheetData(tableId, tabName, updatesWithMetadata, mapping);
-        
-        // ═══════════════════════════════════════════════════════════════
-        // CRITICAL — DO NOT REORDER THESE TWO CALLS
-        //
-        // stampDataChange MUST be called before invalidateCache.
-        // stampDataChange captures `new Date().toISOString()` immediately
-        // and writes it to the CACHE/Caching tab (async, fire-and-forget).
-        // invalidateCache then clears the local in-memory cache.
-        // After both complete, the caller (store.save) issues apiCall()
-        // to repopulate the cache with entry.filled = now.
-        //
-        // Because the timestamp is captured BEFORE the cache is cleared
-        // and refilled, remoteTs < entry.filled for THIS session, so the
-        // poller correctly skips our own freshly-saved data.
-        // Other sessions still have their old entry.filled < remoteTs
-        // and are correctly invalidated on their next poll.
-        //
-        // Moving stampDataChange after invalidateCache or after the cache
-        // repopulation would break cross-session change detection.
-        // ═══════════════════════════════════════════════════════════════
-        stampDataChange(`database:getData:"${tableId}","${tabName}"`);
-        invalidateCache([
-            { namespace: 'database', methodName: 'getData', args: [tableId, tabName] }
-        ], true);
+        // A column-preserving mapping writes under the live sheet's headers (read fresh: a column
+        // added or moved since this tab was loaded must not be overwritten)
+        const writeMapping = mapping?._preserveColumns
+            ? resolveSheetMapping(mapping, (await GoogleSheetsService.getSheetData(tableId, tabName))?.[0]).write
+            : mapping;
+        const tabValues = await GoogleSheetsService.setSheetData(tableId, tabName, updatesWithMetadata, writeMapping, { returnValues: true });
+        _replaceCachedTab(tableId, tabName, tabValues);
 
         // Archive only after the main write succeeded
         if (deletedRows.length > 0) {
             await _archiveDeletedRows(tableId, tabName, deletedRows, username);
         }
 
-        return result;
+        return true;
     }
 
 
@@ -291,9 +273,16 @@ class database_uncached {
      * @returns {Promise<boolean>} - Success status
      */
     static async updateRow(tableId, tabName, update, mapping = null, options = {}) {
+        await assertAppCurrent();
           const { username = null, source = 'web' } = options;
 
         const existingData = await GoogleSheetsService.getSheetData(tableId, tabName);
+
+        // A column-preserving mapping reads and writes only the columns it owns (resolveSheetMapping)
+        let writeMapping = mapping;
+        if (mapping?._preserveColumns) {
+            ({ read: mapping, write: writeMapping } = resolveSheetMapping(mapping, existingData?.[0]));
+        }
 
         const transformedData = mapping
             ? GoogleSheetsService.transformSheetData(existingData, mapping, tabName)
@@ -338,16 +327,11 @@ class database_uncached {
 
         // Convert back to sheet format for saving
         const updatedSheetData = mapping
-            ? GoogleSheetsService.reverseTransformSheetData(mapping, transformedData)
+            ? GoogleSheetsService.reverseTransformSheetData(writeMapping, transformedData)
             : GoogleSheetsService.objectsToSheetArray(transformedData);
 
-        await GoogleSheetsService.setSheetData(tableId, tabName, updatedSheetData);
-
-        // Invalidate related caches using prefix to handle custom mapped data
-        stampDataChange(`database:getData:"${tableId}","${tabName}"`);
-        invalidateCache([
-            { namespace: 'database', methodName: 'getData', args: [tableId, tabName] }
-        ], true);
+        const tabValues = await GoogleSheetsService.setSheetData(tableId, tabName, updatedSheetData, null, { returnValues: true });
+        _replaceCachedTab(tableId, tabName, tabValues);
 
         return true;
     }
@@ -393,6 +377,7 @@ class database_uncached {
      * @returns {Promise<boolean>}
      */
     static async setCellValues(tableId, tabName, cells) {
+        await assertAppCurrent();
         if (!cells || !cells.length) return true;
         const data = cells.map(c => {
             const col = _numberToColumnLetter(c.columnNumber);
@@ -419,6 +404,7 @@ class database_uncached {
      * @returns {Promise<boolean>}
      */
     static async setCellValue(tableId, tabName, rowNumber, columnNumber, value) {
+        await assertAppCurrent();
         const colLetter = _numberToColumnLetter(columnNumber);
         const range = Database.a1Range(tabName, `${colLetter}${rowNumber}:${colLetter}${rowNumber}`);
 
@@ -441,6 +427,7 @@ class database_uncached {
      * @returns {Promise<boolean>}
      */
     static async deleteSheetRows(tableId, tabName, rowNumbers) {
+        await assertAppCurrent();
         if (!rowNumbers || !rowNumbers.length) return true;
         await GoogleSheetsService.deleteSheetRows(tableId, tabName, rowNumbers);
 
@@ -460,6 +447,7 @@ class database_uncached {
      * @returns {Promise<number>} 1-based row number that was appended
      */
     static async appendSheetRow(tableId, tabName, values) {
+        await assertAppCurrent();
         const rawData = await GoogleSheetsService.getSheetData(tableId, tabName);
         const nextRow = (Array.isArray(rawData) ? rawData.length : 0) + 1;
         const endCol = _numberToColumnLetter(Math.max(values.length, 1));
@@ -482,6 +470,7 @@ class database_uncached {
      * @param {Array<{title: string, sheetId: number}>} tabs - Tabs to hide
      */
     static async hideTabs(tableId, tabs) {
+        await assertAppCurrent();
         await GoogleSheetsService.hideTabs(tableId, tabs);
     }
     
@@ -492,6 +481,7 @@ class database_uncached {
      * @param {Array<{title: string, sheetId: number}>} tabs - Tabs to show
      */
     static async showTabs(tableId, tabs) {
+        await assertAppCurrent();
         await GoogleSheetsService.showTabs(tableId, tabs);
     }
     
@@ -501,9 +491,11 @@ class database_uncached {
      * @param {string} tableId - Identifier for the table
      * @param {{title: string, sheetId: number}|null} templateTab - Template tab to copy (null for blank tab)
      * @param {string} newTabName - Name for the new tab
+     * @param {{bookkeeping?: boolean}} [options] - bookkeeping: as in setData
      * @returns {Promise<void>}
      */
-    static async createTab(tableId, templateTab, newTabName) {
+    static async createTab(tableId, templateTab, newTabName, options = {}) {
+        if (!options.bookkeeping) await assertAppCurrent();
         if (templateTab && templateTab.sheetId) {
             await GoogleSheetsService.copySheetTab(tableId, templateTab, newTabName);
         } else {
@@ -523,14 +515,23 @@ class database_uncached {
 export const Database = wrapMethods(
     database_uncached, 
     'database', 
-    ['createTab', 'hideTabs', 'showTabs', 'setData', 'updateRow', 'setCellValue', 'setCellValues', 'deleteSheetRows', 'appendSheetRow', 'uploadItemImage', 'getDriveFileBlob', 'readFresh', 'readFreshRanges', 'columnLetter', 'a1Range'], // getDriveFileBlob: uncached read (callers own the Blob)
-    ['getTabs'], // Infinite cache
-    {
-        // Sheet data: infinite for INVENTORY and PACK_LISTS (cross-session poller handles freshness);
-        // 20-minute default for everything else (PROD_SCHED, CACHE, etc.)
-        'getData': (args) => (args[0] === 'INVENTORY' || args[0] === 'PACK_LISTS') ? null : undefined
-    }
+    ['createTab', 'hideTabs', 'showTabs', 'setData', 'updateRow', 'setCellValue', 'setCellValues', 'deleteSheetRows', 'appendSheetRow', 'uploadItemImage', 'getDriveFileBlob', 'readFresh', 'readFreshRanges', 'columnLetter', 'a1Range', 'prefetch'], // getDriveFileBlob: uncached read (callers own the Blob)
+    ['getTabs', 'getData'] // Infinite cache: the poller keeps sheet data current (watchSpreadsheets below)
 );
+
+// Sheet data stays cached while its spreadsheet is unchanged (caching.js, Spreadsheet watch). Every
+// app write stamps the Caching tab with the tab it changed. The Production Schedule is also edited by
+// hand, without stamps. While Drive can't confirm a spreadsheet, its reads expire as they used to.
+watchSpreadsheets({
+    read: (tableIds) => GoogleSheetsService.getModifiedTimes(tableIds),
+    stampsTable: 'CACHE',
+    prefixes: (tableId) => [`database:getData:"${tableId}",`, `database:getTabs:"${tableId}"`],
+    tables: {
+        PROD_SCHED: { editedByHand: true, unconfirmedMs: 4 * 60 * 1000 },
+        PACK_LISTS: { unconfirmedMs: 30 * 60 * 1000 },
+        INVENTORY: {}
+    }
+});
 
 
 /**
@@ -544,7 +545,8 @@ function _addMetadataToRows(originalRows, updatedRows, username, source = 'web')
     const originals = Array.isArray(originalRows) ? originalRows : [];
     const { matchOf, duplicates, deleted } = EditHistoryUtils.matchRows(originals, updatedRows);
     let nextIndex = EditHistoryUtils.nextRowIndex([originals, updatedRows]);
-    const creationHistory = () => username ? [EditHistoryUtils.createEditHistoryEntry(username, [], source)] : [];
+    // Saves without a user still record the marker (its user reads 'unknown')
+    const creationEntry = () => EditHistoryUtils.createEditHistoryEntry(username, [], source);
 
     const rows = updatedRows.map((updatedRow, u) => {
         const o = matchOf[u];
@@ -570,18 +572,18 @@ function _addMetadataToRows(originalRows, updatedRows, username, source = 'web')
 
         if (duplicates.has(u)) {
             // Copy of another row: new identity, history restarts (copied h and p are dropped)
-            return { ...updatedRow, edithistory: JSON.stringify({ i: nextIndex++, h: creationHistory() }) };
+            return { ...updatedRow, edithistory: JSON.stringify({ i: nextIndex++, h: [creationEntry()] }) };
         }
 
+        // New row: its first save here always records a creation marker (who brought it into this
+        // tab, and when), also when it arrives carrying history from elsewhere (moved or pasted
+        // in), whose entries stay below the marker. An identity not stored in this tab is kept.
         const edithistory = { ...(EditHistoryUtils.parseEditHistory(updatedRow.edithistory) || {}) };
-        if (EditHistoryUtils.getRowIndex(edithistory) !== null) {
-            // Carries an identity not stored in this tab (moved in from elsewhere): keep as-is
-            return updatedRow;
+        if (EditHistoryUtils.getRowIndex(edithistory) === null) {
+            edithistory.i = nextIndex++;
         }
-        edithistory.i = nextIndex++;
-        if (!Array.isArray(edithistory.h) || edithistory.h.length === 0) {
-            edithistory.h = creationHistory();
-        }
+        const carried = Array.isArray(edithistory.h) ? edithistory.h : [];
+        edithistory.h = [creationEntry(), ...carried].slice(0, MAX_HISTORY_ENTRIES);
         return { ...updatedRow, edithistory: JSON.stringify(edithistory) };
     });
 
@@ -630,6 +632,76 @@ async function _archiveDeletedRows(sourceTable, sourceTab, deletedRows, username
     } catch (error) {
         console.error('Failed to archive deleted rows:', error);
         // Don't throw - archival failure shouldn't block the main save
+    }
+}
+
+// ─── Tab reads ───────────────────────────────────────────────────────────────
+// getData's whole-tab read waits one turn in a queue per spreadsheet, then goes out with every
+// other tab asked for at the same moment as one values.batchGet: one read request. Each tab keeps
+// its own cache entry, pending call, dependencies and invalidation; the queue only changes how the
+// request is made. Database.prefetch fills it ahead of loops that read tabs one at a time. Fresh
+// reads (verified writes, locks, the Caching tab) don't come through here.
+const _tabReadQueues = new Map();       // tableId → [{ tabName, resolve, reject }]
+const TAB_READ_BATCH_RANGES = 40;
+const TAB_READ_BATCH_URL_CHARS = 6000;  // The ranges travel in the request URL
+
+/** Read a whole tab through its spreadsheet's queue. */
+function _readTab(tableId, tabName) {
+    return new Promise((resolve, reject) => {
+        let queue = _tabReadQueues.get(tableId);
+        if (!queue) {
+            _tabReadQueues.set(tableId, queue = []);
+            setTimeout(() => _sendTabReads(tableId), 0);
+        }
+        queue.push({ tabName, resolve, reject });
+    });
+}
+
+/** Send a spreadsheet's queued reads, in batches small enough for one request URL each. */
+function _sendTabReads(tableId) {
+    const queue = _tabReadQueues.get(tableId) || [];
+    _tabReadQueues.delete(tableId);
+    let batch = [];
+    let chars = 0;
+    for (const read of queue) {
+        const length = encodeURIComponent(read.tabName).length + '&ranges='.length;
+        if (batch.length && (batch.length >= TAB_READ_BATCH_RANGES || chars + length > TAB_READ_BATCH_URL_CHARS)) {
+            _sendTabReadBatch(tableId, batch);
+            batch = [];
+            chars = 0;
+        }
+        batch.push(read);
+        chars += length;
+    }
+    if (batch.length) _sendTabReadBatch(tableId, batch);
+}
+
+async function _sendTabReadBatch(tableId, reads) {
+    const readOne = (read) => GoogleSheetsService.getSheetData(tableId, read.tabName).then(read.resolve, read.reject);
+    if (reads.length === 1) return readOne(reads[0]);
+    try {
+        const tabs = await GoogleSheetsService.batchGetValues(tableId, reads.map(read => read.tabName));
+        reads.forEach((read, i) => read.resolve(tabs[i]));
+    } catch (err) {
+        // One bad range (a missing tab) fails the whole batch: read each, so only its own read fails
+        if (err?.status === 400 || err?.result?.error?.code === 400) reads.forEach(readOne);
+        else reads.forEach(read => read.reject(err));
+    }
+}
+
+/**
+ * After a whole-tab write: stamp the change for other sessions, invalidate everything computed
+ * from the tab (the reactive stores reload), and cache the tab as the write's response gave it
+ * (exactly what a read returns now), so the reload doesn't read the tab again.
+ * @private
+ */
+function _replaceCachedTab(tableId, tabName, tabValues) {
+    stampDataChange(`database:getData:"${tableId}","${tabName}"`);
+    invalidateCache([
+        { namespace: 'database', methodName: 'getData', args: [tableId, tabName] }
+    ], true);
+    if (Array.isArray(tabValues)) {
+        fillCache({ namespace: 'database', methodName: 'getData', args: [tableId, tabName] }, tabValues);
     }
 }
 
