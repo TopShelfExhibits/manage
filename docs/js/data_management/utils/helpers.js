@@ -647,6 +647,9 @@ class FuzzyMatcher {
 }
 export const GetTopFuzzyMatch = FuzzyMatcher.GetTopFuzzyMatch;
 
+/** A character of a standard item number after its prefix, as a regex class (BX-3Rx8_45°, BX-○39). */
+export const ITEM_NUMBER_CHAR = '[0-9A-Za-z_○°]';
+
 /**
  * The base of an item variant: an item number ending in a digit and one letter (CAB-004b or
  * CAB-004B → CAB-004). Null for any other item number.
@@ -675,8 +678,17 @@ export function resolveItemVariant(itemNumber, itemNumbers) {
   if (!base) return itemNumber;
   const numbers = new Set(itemNumbers);
   if (numbers.has(itemNumber) || !numbers.has(base)) return itemNumber;
-  const realVariant = itemNumbers.some(number => itemVariantBase(number) === base);
-  return realVariant ? itemNumber : base;
+  return itemVariantFamilies(itemNumbers).has(base) ? itemNumber : base;
+}
+
+/**
+ * The bases that have a real letter variant among these item numbers (CAB-004a → CAB-004). Letters
+ * of these families are item numbers, not variants.
+ * @param {string[]} itemNumbers
+ * @returns {Set<string>}
+ */
+export function itemVariantFamilies(itemNumbers) {
+  return new Set(itemNumbers.map(itemVariantBase).filter(Boolean));
 }
 
 /**
@@ -707,7 +719,7 @@ export function parseItemVariants(itemNumber, description) {
   const base = String(itemNumber ?? '').trim();
   if (!/\d$/.test(base)) return { baseDescription: text.trim(), variants: [] };
   const escaped = base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const variantLine = new RegExp(`^\\s*(?:\\((\\d+)\\))?\\s*${escaped}([A-Za-z])(?![0-9A-Za-z_○°])(.*)$`);
+  const variantLine = new RegExp(`^\\s*(?:\\((\\d+)\\))?\\s*${escaped}([A-Za-z])(?!${ITEM_NUMBER_CHAR})(.*)$`);
   const baseLines = [];
   const matches = [];
   for (const line of text.split(/\r?\n/)) {

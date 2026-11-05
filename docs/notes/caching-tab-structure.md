@@ -166,8 +166,8 @@ Reads and writes use `GoogleSheetsService` directly, in `application-utils.js` (
 - **Declaring** (`parseItemVariants`). The base item's inventory description declares variants on lines in the pack list format, `(3) CAB-004b with larger top`. The count is optional, and the base QTY includes the variants. A variant's description is the other lines followed by its line's text.
 - **Where variants show:**
   - Description matching compares a variant line with its variant's description and a base line with the base description. A variant the description doesn't declare gets an "Undeclared variant" card in place of the mismatch alert.
-  - The pack list's variant check (`checkVariantLevel`) compares the demand of this and the overlapping shows with the declared count. A shortage is red. A base line whose unmodified pieces (QTY less the variant counts) run short gets a soft orange card.
-  - The inventory description cell shows a card per declared variant (`itemVariantCards`). Its hover text and modal show the variant's description.
+  - The pack list's variant check (`checkVariantLevel`) compares the demand of this and the overlapping shows with the declared count. Counts and QTY are read as of the show's ship date. A shortage is red. A base line whose unmodified pieces (QTY less the variant counts) run short gets a soft orange card.
+  - The inventory description cell shows a card per declared variant (`itemVariantCards`). Its hover text and modal show the variant's description. A family with a real letter variant item (`itemVariantFamilies`) gets one red "Variants off" card instead, since its variant lines don't count.
 
 ## Live data to add before deploying
 
