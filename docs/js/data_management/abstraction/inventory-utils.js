@@ -1,4 +1,4 @@
-import { Database, ProductionUtils, PackListUtils, wrapMethods, PREFERENCES_MAPPING, INVENTORY_TAB_PREFERENCES, resolveInventoryTabList, parseDate, toISODateString, searchFilter, todayISOString, startOfTodayMs, offsetToISO, ApplicationUtils, invalidateCache, EditHistoryUtils, DEFAULT_INVENTORY_NOTE_MAX_LENGTH, firstThumbnail } from '../index.js';
+import { Database, ProductionUtils, PackListUtils, wrapMethods, PREFERENCES_MAPPING, INVENTORY_TAB_PREFERENCES, resolveInventoryTabList, parseDate, toISODateString, searchFilter, todayISOString, startOfTodayMs, offsetToISO, ApplicationUtils, invalidateCache, EditHistoryUtils, DEFAULT_INVENTORY_NOTE_MAX_LENGTH, firstThumbnail, MAX_HISTORY_ENTRIES } from '../index.js';
 
 /** Normalize an identifier for loose matching (strips spaces, case, non-alphanumeric) */
 function _normalizeId(v) { return String(v || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, ''); }
@@ -281,10 +281,21 @@ class inventoryUtils_uncached {
                 return bare;
             };
 
+            // A new row's first save records its identity and a creation marker, as a normal
+            // save does (Database.setData), since this write skips the history step
+            let nextIndex = EditHistoryUtils.nextRowIndex([existingData, mappedData]);
+            const newRowHistory = (item) => {
+                const edithistory = { ...(EditHistoryUtils.parseEditHistory(item.edithistory) || {}) };
+                if (EditHistoryUtils.getRowIndex(edithistory) === null) edithistory.i = nextIndex++;
+                const carried = Array.isArray(edithistory.h) ? edithistory.h : [];
+                edithistory.h = [EditHistoryUtils.createEditHistoryEntry(username, [], note || null), ...carried].slice(0, MAX_HISTORY_ENTRIES);
+                return JSON.stringify(edithistory);
+            };
+
             const updatedRows = (Array.isArray(mappedData) ? mappedData : Array.from(mappedData)).map(item => {
                 const existingItem = existingData.find(row => row.itemNumber === item.itemNumber);
                 // Use existing row as base, or a bare new row for new items
-                const baseItem = existingItem || buildBareRow(item);
+                const baseItem = existingItem || { ...buildBareRow(item), edithistory: newRowHistory(item) };
 
                 const changes = [];
                 for (const key of Object.keys(item)) {

@@ -16,7 +16,7 @@ if (isLocalhost()) {
 }
 
 import { wrapMethods, invalidateCache, stampDataChange, EditHistoryUtils, assertAppCurrent } from '../index.js';
-import { ARCHIVE_TAB_NAME, ARCHIVE_HEADERS } from '../utils/metadata-utils.js';
+import { ARCHIVE_TAB_NAME, ARCHIVE_HEADERS, MAX_HISTORY_ENTRIES } from '../utils/metadata-utils.js';
 
 class database_uncached {
     /**
@@ -552,7 +552,8 @@ function _addMetadataToRows(originalRows, updatedRows, username, source = 'web')
     const originals = Array.isArray(originalRows) ? originalRows : [];
     const { matchOf, duplicates, deleted } = EditHistoryUtils.matchRows(originals, updatedRows);
     let nextIndex = EditHistoryUtils.nextRowIndex([originals, updatedRows]);
-    const creationHistory = () => username ? [EditHistoryUtils.createEditHistoryEntry(username, [], source)] : [];
+    // Saves without a user still record the marker (its user reads 'unknown')
+    const creationEntry = () => EditHistoryUtils.createEditHistoryEntry(username, [], source);
 
     const rows = updatedRows.map((updatedRow, u) => {
         const o = matchOf[u];
@@ -578,18 +579,18 @@ function _addMetadataToRows(originalRows, updatedRows, username, source = 'web')
 
         if (duplicates.has(u)) {
             // Copy of another row: new identity, history restarts (copied h and p are dropped)
-            return { ...updatedRow, edithistory: JSON.stringify({ i: nextIndex++, h: creationHistory() }) };
+            return { ...updatedRow, edithistory: JSON.stringify({ i: nextIndex++, h: [creationEntry()] }) };
         }
 
+        // New row: its first save here always records a creation marker (who brought it into this
+        // tab, and when), also when it arrives carrying history from elsewhere (moved or pasted
+        // in), whose entries stay below the marker. An identity not stored in this tab is kept.
         const edithistory = { ...(EditHistoryUtils.parseEditHistory(updatedRow.edithistory) || {}) };
-        if (EditHistoryUtils.getRowIndex(edithistory) !== null) {
-            // Carries an identity not stored in this tab (moved in from elsewhere): keep as-is
-            return updatedRow;
+        if (EditHistoryUtils.getRowIndex(edithistory) === null) {
+            edithistory.i = nextIndex++;
         }
-        edithistory.i = nextIndex++;
-        if (!Array.isArray(edithistory.h) || edithistory.h.length === 0) {
-            edithistory.h = creationHistory();
-        }
+        const carried = Array.isArray(edithistory.h) ? edithistory.h : [];
+        edithistory.h = [creationEntry(), ...carried].slice(0, MAX_HISTORY_ENTRIES);
         return { ...updatedRow, edithistory: JSON.stringify(edithistory) };
     });
 

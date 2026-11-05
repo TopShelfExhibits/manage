@@ -110,7 +110,7 @@ To diff a save, each incoming row is matched to its stored row:
    - first by identical content (all fields except `edithistory`/`AppData`), nearest position wins;
    - then within the gap between the nearest matched neighbors, by most equal non-empty fields; if nothing is similar but the gap has equal counts on both sides, by order within the gap.
    This fallback only runs on a row's first touch; afterwards every row has `i`.
-4. **Unmatched incoming row** → new row. Without prior history: `h` gets a creation marker (`c: []`) and a new `i`. With prior history but no `i` (unmatched legacy row): keeps `h`, gains `i`. With an `i` not present in the tab (moved in from elsewhere): kept as-is.
+4. **Unmatched incoming row** → new row. Its first save always records a creation marker (`c: []`) at the front of `h`: who brought the row into this tab, and when (`u` is `unknown` for a save without a user). Without prior history: `h` is just the marker, and the row gets a new `i`. With prior history (a pasted legacy row, or a row moved in from another tab): the carried entries stay below the marker (capped as usual); a row without `i` gains one, and an `i` not present in the tab is kept. A scheduled (future-dated) save does the same for its new rows.
 5. **Unmatched stored row** → deleted; archived (see Archive Table).
 
 Business keys never participate in matching.
@@ -147,7 +147,9 @@ Each `h[k]` entry stores the metadata of change *k* (`u`, `t`, `s`) and the **ol
 1. Start from the row's **saved** values (never from unsaved edits).
 2. State after `h[0]` = the saved values.
 3. For *k* = 1, 2, …: state after `h[k]` = state after `h[k-1]` with every `o` in `h[k-1].c` applied. Keep one running copy, because `c` lists only changed fields.
-4. If the oldest entry is a creation marker (`c: []`), its state is the row as created. Otherwise, applying the oldest entry's `o` values gives the earliest known state (history may have been capped).
+4. If the oldest entry is a creation marker (`c: []`), its state is the row as created. Otherwise, applying the oldest entry's `o` values gives the earliest known state (history may have been capped). A creation marker above older entries marks when a row arrived carrying history from elsewhere.
+
+`EditHistoryUtils.listItemOrigins` reads the same entries for a list field (e.g. a thumbnail gallery): for each item in the saved value, the newest change that added it, else the creation marker the history reaches with it present, else unknown.
 5. Ignore `c` items without `n` (planned move records) and the `p` array.
 
 Applied scheduled entries are read like any other entry, using `t`.

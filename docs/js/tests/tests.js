@@ -1255,6 +1255,62 @@ test('THUMBNAIL COLUMN', 'migration fills the item and category cells', async ()
     });
 });
 
+// ── Group 26b: New-Row History and List Origins ──────────────────────────────
+// A new row's first save always records a creation marker (c: []), also when it arrives carrying
+// history (pasted, moved in) or is saved without a user or by a scheduled save.
+// EditHistoryUtils.listItemOrigins finds when each item of a list field (a thumbnail gallery)
+// entered the history. The marker tests use a scratch PACK_LISTS tab (_MARKER_TEST) and the
+// FURNITURE fixture (restored afterwards).
+
+test('NEW ROW HISTORY', 'history gives when and by whom each image was added', async () => {
+    const h = [
+        { u: 'sam', t: 300, c: [{ n: 'thumbnail', o: '["a","b"]' }] },
+        { u: 'dan', t: 200, c: [{ n: 'quantity', o: '1' }] },
+        { u: 'kim', t: 100, c: [{ n: 'thumbnail', o: '["a"]' }] },
+        { u: 'lee', t: 50, c: [] }
+    ];
+    const origins = EditHistoryUtils.listItemOrigins(_eh({ i: 1, h }), 'thumbnail', '["a","b","c"]', parseThumbnails);
+    assertEqual(Object.fromEntries(origins), {
+        a: { u: 'lee', t: 50, created: true },
+        b: { u: 'kim', t: 100, created: false },
+        c: { u: 'sam', t: 300, created: false }
+    }, 'each image');
+    const capped = EditHistoryUtils.listItemOrigins(_eh({ i: 1, h: h.slice(0, 3) }), 'thumbnail', '["a","b","c"]', parseThumbnails);
+    assertEqual(capped.get('a'), null, 'before the recorded history');
+    const carried = EditHistoryUtils.listItemOrigins(_eh({ i: 1, h: [{ u: 'mover', t: 400, c: [] }, { u: 'kim', t: 100, c: [{ n: 'thumbnail', o: '' }] }] }), 'thumbnail', '["a"]', parseThumbnails);
+    assertEqual(carried.get('a'), { u: 'kim', t: 100, created: false }, 'history carried in below a creation marker wins');
+});
+
+const _MARKER_TAB = '_MARKER_TEST';
+const _markerRead = async () => (await Database.getData('PACK_LISTS', _MARKER_TAB, _HISTORY_MAPPING)).map(r => ({ ...r }));
+
+test('NEW ROW HISTORY', "a new row's first save always records a creation marker", async () => {
+    await Database.setData('PACK_LISTS', _MARKER_TAB, [_row('A', '1')], _HISTORY_MAPPING, { skipMetadata: true });
+    const rows = await _markerRead();
+    const pasted = { name: 'X', qty: '2', edithistory: _eh({ h: [{ u: 'old', t: 5, c: [{ n: 'qty', o: '1' }] }] }) };
+    const moved = { name: 'Y', qty: '3', edithistory: _eh({ i: 99, h: [{ u: 'old', t: 6, c: [] }] }) };
+    await Database.setData('PACK_LISTS', _MARKER_TAB, [...rows, pasted, moved], _HISTORY_MAPPING, { username: 'test@example.com', source: 'web' });
+    const saved = await _markerRead();
+    const x = _parsed(saved[1]);
+    assertEqual([x.i > 0, x.h.map(e => [e.u, e.c])], [true, [['test', []], ['old', [{ n: 'qty', o: '1' }]]]], 'pasted row: marker above its carried history');
+    const y = _parsed(saved[2]);
+    assertEqual([y.i, y.h.map(e => [e.u, e.c])], [99, [['test', []], ['old', []]]], 'moved row keeps its identity, gains a marker');
+    await Database.setData('PACK_LISTS', _MARKER_TAB, [...saved, _row('Z', '4')], _HISTORY_MAPPING, { source: 'web' });
+    assertEqual(_parsed((await _markerRead())[3]).h.map(e => e.u), ['unknown'], 'a save without a user still marks creation');
+});
+
+test('NEW ROW HISTORY', 'a scheduled save gives a new row its identity and creation marker', async () => {
+    await _withRestoredTabs([['INVENTORY', 'FURNITURE']], async () => {
+        const rows = (await Requests.getInventoryTabData('FURNITURE')).map(r => ({ ...r }));
+        rows.push({ itemNumber: 'STOOL-009', quantity: '4', description: 'Folding stool', notes: '', thumbnail: '["file_new"]', edithistory: '' });
+        await _asUser(() => Requests.saveInventoryTabData(rows, 'FURNITURE', undefined, undefined, undefined, { scheduledDate: '2099-01-01', note: 'arrives' }));
+        const saved = await Requests.getInventoryTabData('FURNITURE');
+        const eh = _parsed(saved.find(r => r.itemNumber === 'STOOL-009'));
+        const highest = Math.max(...saved.filter(r => r.itemNumber !== 'STOOL-009').map(r => _parsed(r).i || 0));
+        assertEqual([eh.i, eh.h.map(e => [e.u, e.c]), eh.p.length], [highest + 1, [['test', []]], 1], 'next identity, marker and the pending change');
+    });
+});
+
 // ── Group 26: Row-Based Transship and Date Normalization ──────────────────────
 // getTransshipSourceForScheduleRow / getTransshipDestinationsForScheduleRow accept
 // a schedule row object instead of a canonical identifier. guessShipDate,
