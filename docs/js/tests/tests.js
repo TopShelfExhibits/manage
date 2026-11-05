@@ -1197,7 +1197,7 @@ test('ITEM VARIANTS', 'variant counts are checked against this and overlapping s
 test('ITEM VARIANTS', 'inventory description cards show each declared variant', async () => {
     const opened = [];
     const cards = itemVariantCards({ itemNumber: 'CAB-005', quantity: '6', description: CAB_005_DESCRIPTION }, (message, title) => opened.push([message, title]));
-    assertEqual(cards.map(({ action, ...card }) => card), [{ message: 'b · 1', class: 'gray', title: 'CAB-005b (1 of 6): Tall gray storage cabinet with locking doors' }], 'one card');
+    assertEqual(cards.map(({ action, ...card }) => card), [{ message: 'b', class: 'purple', end: true, title: 'CAB-005b (1 of 6): Tall gray storage cabinet with locking doors' }], 'one card');
     cards[0].action();
     assertEqual(opened, [['Tall gray storage cabinet with locking doors', 'CAB-005b (1 of 6)']], 'card opens the variant');
     assertEqual(itemVariantCards({ itemNumber: 'CAB-004', quantity: '10', description: 'Counter' }, () => {}), [], 'no variants, no cards');
