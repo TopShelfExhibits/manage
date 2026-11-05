@@ -162,7 +162,7 @@ Reads and writes use `GoogleSheetsService` directly, in `application-utils.js` (
 
 ## Item variants
 
-- **Matching** (`resolveItemVariant`, `helpers.js`). A standard item number plus one letter, in either case (`CAB-004b`), counts as its base item when the variant isn't an item, the base is, and no item in the tab is a letter variant of the base. Tabs with nonstandard item numbers don't use variants. Only a variant-shaped item number reads its inventory tab during extraction, so other extractions don't depend on inventory edits.
+- **Matching** (`resolveItemVariant`, `helpers.js`). A standard item number plus one letter, in either case (`CAB-004b`), counts as its base item when the variant isn't an item, the base is, and no item in the tab is a letter variant of the base. Tabs with nonstandard item numbers (InventoryCustomItemNumbers) don't use variants: their item numbers match only whole, longest first, so `X-1b` matches neither `X-1` nor a later row. Only a variant-shaped item number reads its inventory tab during extraction, so other extractions don't depend on inventory edits.
 - **Declaring** (`parseItemVariants`). The base item's inventory description declares variants on lines in the pack list format, `(3) CAB-004b with larger top`. The count is optional, and the base QTY includes the variants. A variant's description is the other lines followed by its line's text.
 - **Where variants show:**
   - Description matching compares a variant line with its variant's description and a base line with the base description. A variant the description doesn't declare gets an "Undeclared variant" card in place of the mismatch alert.

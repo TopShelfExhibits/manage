@@ -131,13 +131,18 @@ class packListUtils_uncached {
                 }
             }
 
+            // Longest first, so a shorter item number never claims a longer one (X-1 in X-1b). The
+            // sort is stable: item numbers of the same length keep preference order.
+            customItemNumbers.sort((a, b) => b.length - a.length);
+
             // Check text for each item number with pattern: (qty) itemNumber
             for (const itemNum of customItemNumbers) {
                 // Escape special regex characters in item number
                 const escapedItemNum = itemNum.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                
-                // Create regex pattern: optional (qty) followed by the item number
-                const pattern = new RegExp(`(?:\\(([0-9]+)\\))?\\s*${escapedItemNum}`, 'i');
+
+                // Create regex pattern: optional (qty) followed by the whole item number, not part
+                // of a longer word (so custom tabs have no item variants: X-1b doesn't match X-1)
+                const pattern = new RegExp(`(?:\\(([0-9]+)\\))?\\s*(?<![0-9A-Za-z_○°])${escapedItemNum}(?![0-9A-Za-z_○°])`, 'i');
                 const match = text.match(pattern);
                 
                 if (match) {

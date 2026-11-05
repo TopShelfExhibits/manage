@@ -3942,6 +3942,27 @@ test('INVENTORY TAB PREFERENCES', 'every tab listed for custom item numbers is s
     assertEqual(await Requests.getTabNameForItem('VUE-V2C-LP'), 'HARDWARE', 'restored');
 });
 
+// Custom item numbers match whole item numbers only, longest first, so custom tabs have no
+// item variants. With CABINETS listed, its rows CAB-006 and CAB-006a are custom item numbers:
+// CAB-006a once matched CAB-006, the earlier row; CAB-006b and CAB-005b matched their bases.
+test('INVENTORY TAB PREFERENCES', 'custom item numbers match whole item numbers only', async () => {
+    const custom = async (text) => {
+        const found = await Requests.extractCustomItemFromText(text);
+        return [found.itemNumber, found.quantity];
+    };
+    assertEqual(await custom('(3) VUE-V2C-LP, spare'), ['VUE-V2C-LP', 3], 'followed by punctuation');
+    assertEqual(await custom('(3) VUE-V2C-LPb connectors'), [null, 1], 'a letter appended is not the item');
+    await setPreference(INVENTORY_TAB_PREFERENCES.customItemNumbers, '["HARDWARE","CABINETS"]');
+    try {
+        assertEqual(await custom('(3) CAB-006a Rolling demo cabinet'), ['CAB-006a', 3], 'longer item number wins');
+        assertEqual(await custom('(1) CAB-006b Rolling demo cabinet'), [null, 1], 'no variant fallback');
+        assertEqual(await Requests.extractItemNumber('(2) CAB-005b Tall gray storage cabinet'), null, 'extraction: no variants in custom tabs');
+        assertEqual(await Requests.extractItemNumber('(3) CAB-006a Rolling demo cabinet'), 'CAB-006a', 'extraction: whole item number');
+    } finally {
+        await setPreference(INVENTORY_TAB_PREFERENCES.customItemNumbers, '["HARDWARE"]');
+    }
+});
+
 // ── App update: an out-of-date session refuses data writes ───────────────────
 // A newer deploy is simulated by changing the version this session loaded (window.__deployedVersion),
 // so version.json no longer matches it. Expected: isAppOutdated() is true and a write is refused with
