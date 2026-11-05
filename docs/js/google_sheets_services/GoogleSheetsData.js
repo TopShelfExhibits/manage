@@ -339,6 +339,10 @@ export class GoogleSheetsService {
                 throw error;
             }
         }
+        // A range write ("Tab!A5:B5") leaves the rest of the tab as it is: nothing to truncate, and
+        // the lookup below would cost a read request
+        if (range.includes('!')) return true;
+
         // Truncate any rows below the new data
         // Get current sheet row count
         const sheetInfo = await GoogleSheetsService.withExponentialBackoff(() =>

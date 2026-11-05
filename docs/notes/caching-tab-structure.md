@@ -136,6 +136,7 @@ All reads and writes use `GoogleSheetsService` directly (same pattern as the `Lo
 Google Sheets allows 60 read and 60 write requests per minute per user, and 300 each per project.
 
 - **Polling.** Each poll is one read of this tab, every 30 s (10 s on localhost), only while the browser tab is visible. A hidden tab skips its polls, and polls once when it comes back into view.
+- **Stamps.** A stamp is one read of this tab, to find its row, and one range write. A range write such as `Caching!B5:B5` is a single `values.update`. Only a whole-tab write also looks up the grid, to delete the rows below the new data.
 
 # Analytics Tab: Persisted Results
 
