@@ -227,9 +227,10 @@ export class GoogleSheetsService {
      * Only the given ranges change; nothing is truncated.
      * @param {string} tableId
      * @param {Array<{ range: string, values: Array<Array<string>> }>} data
+     * @param {{raw?: boolean}} [options] - raw: store the strings as they are (valueInputOption RAW)
      * @returns {Promise<boolean>}
      */
-    static async batchSetValues(tableId, data) {
+    static async batchSetValues(tableId, data, options = {}) {
         if (!(await GoogleSheetsAuth.checkAuth())) GoogleSheetsService._throwAuthError();
         const spreadsheetId = window.ENDPOINT_IDS[tableId];
         if (!spreadsheetId) throw new Error(`[GoogleSheetsData.batchSetValues] SPREADSHEET_NOT_FOUND: Spreadsheet ID not found for table: ${tableId}`);
@@ -237,7 +238,33 @@ export class GoogleSheetsService {
         await GoogleSheetsService.withExponentialBackoff(() =>
             gapi.client.sheets.spreadsheets.values.batchUpdate({
                 spreadsheetId,
-                resource: { valueInputOption: 'USER_ENTERED', data }
+                resource: { valueInputOption: options.raw ? 'RAW' : 'USER_ENTERED', data }
+            })
+        );
+        return true;
+    }
+
+    /**
+     * values.append: add rows below the last row of the table in the range ("Caching!A:B"), as
+     * one request. Two sessions appending at once each get their own rows (no row is computed
+     * from an earlier read). Strings are stored as they are (RAW).
+     * @param {string} tableId
+     * @param {string} range - A1 range of the table's columns
+     * @param {Array<Array<string>>} rows
+     * @returns {Promise<boolean>}
+     */
+    static async appendSheetValues(tableId, range, rows) {
+        if (!(await GoogleSheetsAuth.checkAuth())) GoogleSheetsService._throwAuthError();
+        const spreadsheetId = window.ENDPOINT_IDS[tableId];
+        if (!spreadsheetId) throw new Error(`[GoogleSheetsData.appendSheetValues] SPREADSHEET_NOT_FOUND: Spreadsheet ID not found for table: ${tableId}`);
+        if (!rows || !rows.length) return true;
+        await GoogleSheetsService.withExponentialBackoff(() =>
+            gapi.client.sheets.spreadsheets.values.append({
+                spreadsheetId,
+                range,
+                valueInputOption: 'RAW',
+                insertDataOption: 'INSERT_ROWS',
+                resource: { values: rows }
             })
         );
         return true;
@@ -276,9 +303,12 @@ export class GoogleSheetsService {
      * @param {string} tabName
      * @param {Array<Object>} updates - Array of JS objects to save
      * @param {Object} [mapping] - Optional mapping for object keys to sheet headers
-     * @returns {Promise<boolean>}
+     * @param {{returnValues?: boolean}} [options] - returnValues (whole-tab writes): return the tab
+     *   as a read would return it right after the write, taken from the write's own response
+     *   (includeValuesInResponse: formatted values, formulas computed), instead of true
+     * @returns {Promise<boolean|Array<Array<string>>>}
      */
-    static async setSheetData(tableId, tabName, updates, mapping = null) {
+    static async setSheetData(tableId, tabName, updates, mapping = null, options = {}) {
         if (!(await GoogleSheetsAuth.checkAuth())) GoogleSheetsService._throwAuthError();
         const spreadsheetId = window.ENDPOINT_IDS[tableId];
         if (!spreadsheetId) throw new Error(`[GoogleSheetsData.setSheetData] SPREADSHEET_NOT_FOUND: Spreadsheet ID not found for table: ${tableId}`);
@@ -305,14 +335,18 @@ export class GoogleSheetsService {
         }
         // Setup range
         const range = `${tabName}`;
-        
+        // The requested range is the whole tab: the response holds every value in it
+        const includeValuesInResponse = !!options.returnValues && !range.includes('!');
+        let response;
+
         // Write new data with automatic grid expansion on error
         try {
-            await GoogleSheetsService.withExponentialBackoff(() =>
+            response = await GoogleSheetsService.withExponentialBackoff(() =>
                 gapi.client.sheets.spreadsheets.values.update({
                     spreadsheetId,
                     range,
                     valueInputOption: 'USER_ENTERED',
+                    includeValuesInResponse,
                     resource: { values }
                 })
             );
@@ -326,11 +360,12 @@ export class GoogleSheetsService {
                 await this._ensureSheetSize(spreadsheetId, range, null, null);
                 
                 // Retry the write operation
-                await GoogleSheetsService.withExponentialBackoff(() =>
+                response = await GoogleSheetsService.withExponentialBackoff(() =>
                     gapi.client.sheets.spreadsheets.values.update({
                         spreadsheetId,
                         range,
                         valueInputOption: 'USER_ENTERED',
+                        includeValuesInResponse,
                         resource: { values }
                     })
                 );
@@ -376,7 +411,16 @@ export class GoogleSheetsService {
                 );
             }
         }
-        return true;
+        if (!includeValuesInResponse) return true;
+        // The rows below the written ones were just deleted. A read omits trailing empty cells and
+        // rows, and returns [[]] for an empty tab.
+        const tab = (response?.result?.updatedData?.values || []).slice(0, values.length).map(row => {
+            const cells = Array.isArray(row) ? row.map(cell => cell ?? '') : [];
+            while (cells.length && cells[cells.length - 1] === '') cells.pop();
+            return cells;
+        });
+        while (tab.length && !tab[tab.length - 1].length) tab.pop();
+        return tab.length ? tab : [[]];
     }
     /**
      * Transform raw sheet data to JS objects using mapping

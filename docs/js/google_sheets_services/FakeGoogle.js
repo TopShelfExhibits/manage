@@ -1230,6 +1230,25 @@ export class FakeGoogleSheetsService {
         _modifiedTimes[tableId] = new Date(Math.max(Date.now(), last + 1)).toISOString();
     }
 
+    /**
+     * values.append: add rows below the last non-empty row of the range's tab, as one step (two
+     * appends never land on the same row).
+     */
+    static async appendSheetValues(tableId, range, rows) {
+        await this.delay(300 + Math.random() * 300);
+        await FakeGoogleSheetsAuth.checkAuth();
+        if (!this.ENDPOINT_IDS[tableId]) throw new Error(`[appendSheetValues] Spreadsheet ID not found for table: ${tableId}`);
+        if (await this._fault('beforeWrite', tableId, range, rows) === 'drop') return true;
+        const bang = range.lastIndexOf('!');
+        const sheetName = _unquoteSheetName(bang >= 0 ? range.slice(0, bang) : range);
+        if (!this.mockData[tableId]) this.mockData[tableId] = {};
+        const sheet = this.mockData[tableId][sheetName] ||= [];
+        let last = sheet.length;
+        while (last > 0 && !(sheet[last - 1] || []).some(cell => cell !== '' && cell != null)) last--;
+        sheet.splice(last, 0, ...rows.map(row => [...row]));
+        return true;
+    }
+
     /** values.batchGet: one 2D array per range, in order (each range read as getSheetData would). */
     static async batchGetValues(tableId, ranges) {
         return await Promise.all((ranges || []).map(range => this.getSheetData(tableId, range)));
@@ -1892,12 +1911,18 @@ const _fixtureVersion = (() => {
 const _externalChangeListeners = new Set();
 let _saveTimer = null;
 
-// Every write moves its spreadsheet's modifiedTime on once it has landed, as Drive does
-for (const name of ['setSheetData', 'batchSetValues', 'deleteSheetRows', 'hideTabs', 'showTabs', 'copySheetTab', 'createBlankTab']) {
+// Every write moves its spreadsheet's modifiedTime on once it has landed, as Drive does. A whole-tab
+// setSheetData with { returnValues: true } returns the tab as a whole-tab read now returns it.
+for (const name of ['setSheetData', 'batchSetValues', 'appendSheetValues', 'deleteSheetRows', 'hideTabs', 'showTabs', 'copySheetTab', 'createBlankTab']) {
     const write = FakeGoogleSheetsService[name];
     FakeGoogleSheetsService[name] = async function (tableId, ...args) {
         const result = await write.call(this, tableId, ...args);
         FakeGoogleSheetsService.touch(tableId);
+        const [tabName, , , options] = args;
+        if (name === 'setSheetData' && options?.returnValues && !String(tabName).includes('!')) {
+            const tab = FakeGoogleSheetsService.mockData[tableId]?.[tabName];
+            return tab ? JSON.parse(JSON.stringify(tab)) : [[]];
+        }
         return result;
     };
 }

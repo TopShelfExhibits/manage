@@ -77,55 +77,17 @@ This entry is written when `createTab` is called. Other sessions whose poller de
 
 ISO 8601 string from `new Date().toISOString()`. Example: `2026-05-14T18:30:00.000Z`
 
-## Row number arithmetic
-
-`rawData` returned by `getSheetData` is a 2D array where index 0 is the header row.
-
-- `rows = rawData.slice(1)` — 0-indexed array of data rows
-- **Update existing row**: `sheetRow = rowIndex + 2` (+1 to convert to 1-indexed, +1 to skip header)
-- **Append new row**: `newRowNumber = rows.length + 2` (next 0-indexed position is `rows.length`, same +2 offset)
-
 ## Write rules
 
-**Sheet missing or empty** (`rawData` is null/empty):
+`stampDataChange(prefix)` (`caching.js`) queues a stamp, dated a second ahead. `ApplicationUtils.writeCacheTimestamps` writes the queue in batches, one batch at a time:
 
-```js
-setSheetData(
-  "CACHE",
-  "Caching",
-  [
-    ["Key", "Timestamp"],
-    [prefix, timestamp],
-  ],
-  null,
-);
-```
+1. **Read the tab.** If the read fails, nothing is written. The stamps stay queued, and the next poll retries them. A tab is treated as empty only when a successful read finds it empty: then the header goes into `Caching!A1:B1`, a range write that truncates nothing.
+2. **Update keys the tab has.** Each key's first row gets its column B in one `values.batchUpdate` (RAW, so the strings are stored as they are).
+3. **Append new keys.** One `values.append` on `Caching!A:B` (RAW, INSERT_ROWS). Sheets places the rows, so two sessions adding new keys at once each get their own row. Duplicate rows of a key are harmless: the poller reads every row, and writers update the first.
 
-**Update existing key** (key found at `rowIndex` in `rows`):
+**This session's own stamps.** The poller skips a `database:` stamp it reads back when the row still holds this session's own timestamp. The session's write already replaced its copy (whole-tab writes) or invalidated it (range writes), so a re-read would be wasted. Last write wins on a row. If a stamp write replaces a value other than the one this session last read or wrote there, another session's stamp was lost. The stamp then stops counting as this session's own, and the poll re-reads the data once. Lock stamps (`app_utils:getLocksData`) are never skipped: locks are always confirmed by a fresh read.
 
-```js
-setSheetData(
-  "CACHE",
-  `Caching!B${rowIndex + 2}:B${rowIndex + 2}`,
-  [[timestamp]],
-  null,
-);
-```
-
-Writes only column B — the key in column A is not touched.
-
-**Append new key** (key not found):
-
-```js
-setSheetData(
-  "CACHE",
-  `Caching!A${rows.length + 2}:B${rows.length + 2}`,
-  [[prefix, timestamp]],
-  null,
-);
-```
-
-Writes both columns A and B of the next empty row.
+**External apps** write the data first, then the stamp: update the key's row, or append a row when the key is new.
 
 ## Access method
 
@@ -136,7 +98,8 @@ All reads and writes use `GoogleSheetsService` directly (same pattern as the `Lo
 Google Sheets allows 60 read and 60 write requests per minute per user, and 300 each per project.
 
 - **Polling.** A poll runs every 30 s (10 s on localhost), only while the browser tab is visible. A hidden tab skips its polls, and polls once when it comes back into view. Each poll first reads the Drive `modifiedTime` of the INVENTORY, PACK_LISTS, PROD_SCHED and CACHE spreadsheets, which costs Drive quota, not Sheets quota (see Spreadsheet watch). It then reads this tab only when it may hold new stamps: the CACHE spreadsheet or a watched one changed, or the last read is over 2 minutes old. While nothing changes, a poll costs no Sheets reads.
-- **Stamps.** A stamp is one read of this tab, to find its row, and one range write. A range write such as `Caching!B5:B5` is a single `values.update`. Only a whole-tab write also looks up the grid, to delete the rows below the new data.
+- **Stamps.** A batch of stamps is one read of this tab, plus one write for the keys it has and one append for new keys.
+- **Saves.** A whole-tab write asks for the written values in its response (`includeValuesInResponse`). The response is the tab exactly as a read returns it right after the write, formatted and with formulas computed. The save caches it instead of reading the tab again (`fillCache`). A read that was already in flight from before the save can't replace it: a result computed before a key's latest change is never cached, and later calls don't join it. Range writes (cell edits, appended rows, deleted rows) still invalidate and re-read, because their response covers only the range.
 - **Expiry.** Sheet data never expires. It stays cached until a stamp, a local write or the spreadsheet watch says it changed. Shorter expiries on computed results cost no requests: a computed result is rebuilt from cached reads.
 - **User data.** `storeUserData` calls made at the same moment are one read and one write of the user's tab, and writes to one tab never overlap. Autosave starts all its writes together.
 - **Prefixes.** The prefix `database:getData:"TABLE_ID","TAB_NAME"` is also the cache key of the tab's unmapped read. Every mapped read of a tab is computed from that read, so a tab costs one sheet read however many mappings read it.

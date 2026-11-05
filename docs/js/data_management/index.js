@@ -1,5 +1,5 @@
 // caching
-export { invalidateCache, wrapMethods, clearCache, stampDataChange, ProgressBus, CacheInvalidationBus, triggerCachePoll, watchSpreadsheets, isAppOutdated, checkAppVersion, assertAppCurrent } from './utils/caching.js';
+export { invalidateCache, fillCache, wrapMethods, clearCache, stampDataChange, ProgressBus, CacheInvalidationBus, triggerCachePoll, watchSpreadsheets, isAppOutdated, checkAppVersion, assertAppCurrent } from './utils/caching.js';
 export { networkState } from './utils/networkState.js';
 
 // Data management components

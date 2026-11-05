@@ -798,36 +798,47 @@ class applicationUtils_uncached {
     }
 
     /**
-     * Write a timestamp to the CACHE/Caching tab for external cache invalidation signaling.
-     * Used by Database.setData after mutations to notify other sessions.
-     * 
-     * @param {string} prefix - Cache key prefix (e.g., 'database:getData:"INVENTORY","FURNITURE"')
+     * Write change stamps to the CACHE/Caching tab, for other sessions' pollers (caching.js
+     * stampDataChange queues them and retries a failed write). One read of the tab, then one
+     * write for the keys it already has and one atomic append for new keys, so two sessions
+     * adding new keys at once never write the same row. A failed read writes nothing.
+     * @param {Array<{prefix: string, timestamp: string}>} stamps - prefix: a cache key prefix such as
+     *   'database:getData:"INVENTORY","FURNITURE"'
+     * @returns {Promise<Object<string, string>>} prefix → the timestamp its row held before this
+     *   write, for the stamps that updated an existing row
      */
-    static async writeCacheTimestamp(prefix) {
-        try {
-            // Add 1 second to ensure timestamp is definitely newer than any cache entry filled during this method call.
-            // This prevents race conditions where async operations (getSheetData, analysis pipelines) might refill
-            // cache after we capture Date.now() but before the poll compares timestamps.
-            // In production, this means external changes are detected within 1 second of being written.
-            const timestamp = new Date(Date.now() + 1000).toISOString();
-            const rawData = await GoogleSheetsService.getSheetData('CACHE', 'Caching').catch(() => null);
-            if (!rawData || rawData.length === 0) {
-                await GoogleSheetsService.setSheetData('CACHE', 'Caching', [['Key', 'Timestamp'], [prefix, timestamp]], null);
-                return;
-            }
-            const rows = rawData.slice(1);
+    static async writeCacheTimestamps(stamps) {
+        const rawData = await GoogleSheetsService.getSheetData('CACHE', 'Caching');
+        const empty = !Array.isArray(rawData) || !rawData.length || !(rawData[0] || []).length;
+        if (empty) {
+            // A tab that really is empty: its header first (a range write, so nothing is truncated)
+            await GoogleSheetsService.setSheetData('CACHE', 'Caching!A1:B1', [['Key', 'Timestamp']], null);
+        }
+        const rows = empty ? [] : rawData.slice(1);
+        const updates = [];
+        const appends = [];
+        const replaced = {};
+        for (const { prefix, timestamp } of stamps) {
             const rowIndex = rows.findIndex(row => Array.isArray(row) && row[0] === prefix);
             if (rowIndex !== -1) {
-                const sheetRow = rowIndex + 2;
-                await GoogleSheetsService.setSheetData('CACHE', `Caching!B${sheetRow}:B${sheetRow}`, [[timestamp]], null);
+                updates.push({ range: `Caching!B${rowIndex + 2}:B${rowIndex + 2}`, values: [[timestamp]] });
+                replaced[prefix] = rows[rowIndex][1] || '';
             } else {
-                const newRowNumber = rows.length + 2;
-                await GoogleSheetsService.setSheetData('CACHE', `Caching!A${newRowNumber}:B${newRowNumber}`, [[prefix, timestamp]], null);
+                appends.push([prefix, timestamp]);
             }
-        } catch (err) {
-            console.warn('[writeCacheTimestamp] Failed to write cache timestamp:', err);
-            throw err;
         }
+        await GoogleSheetsService.batchSetValues('CACHE', updates, { raw: true });
+        await GoogleSheetsService.appendSheetValues('CACHE', 'Caching!A:B', appends);
+        return replaced;
+    }
+
+    /**
+     * Write one change stamp now, dated a second ahead (as stampDataChange dates them). For tests
+     * and the console helper, which simulate another session's write.
+     * @param {string} prefix - Cache key prefix
+     */
+    static async writeCacheTimestamp(prefix) {
+        await ApplicationUtils.writeCacheTimestamps([{ prefix, timestamp: new Date(Date.now() + 1000).toISOString() }]);
     }
 
     /**
@@ -958,7 +969,7 @@ class applicationUtils_uncached {
 export const ApplicationUtils = wrapMethods(
     applicationUtils_uncached, 
     'app_utils', 
-    ['storeUserData', '_writeUserData', 'initializeDefaultSavedSearches', 'lockSheet', 'unlockSheet', 'forceUnlockSheet', 'releaseAllUserLocks', '_writeUserColumn', '_writeLockKeyRow', '_writeLockCell', '_numberToColumnLetter', '_initializeLocksSheet', 'writeCacheTimestamp', 'readCacheTimestamps', 'getShortLink', 'expandShortLink'], // Mutation methods
+    ['storeUserData', '_writeUserData', 'initializeDefaultSavedSearches', 'lockSheet', 'unlockSheet', 'forceUnlockSheet', 'releaseAllUserLocks', '_writeUserColumn', '_writeLockKeyRow', '_writeLockCell', '_numberToColumnLetter', '_initializeLocksSheet', 'writeCacheTimestamps', 'writeCacheTimestamp', 'readCacheTimestamps', 'getShortLink', 'expandShortLink'], // Mutation methods
     ['expandShortLink', 'getToday'], // Infinite cache methods
     { 'getSheetLock': 10000, 'getLocksData': 10000 } // Custom cache durations (10 seconds for getSheetLock and getLocksData)
 );
@@ -1027,7 +1038,7 @@ setPersistentStore({
     }
 });
 
-setTimestampWriter((prefix) => ApplicationUtils.writeCacheTimestamp(prefix));
+setTimestampWriter((stamps) => ApplicationUtils.writeCacheTimestamps(stamps));
 startCacheTimestampPoller(() => ApplicationUtils.readCacheTimestamps(), isLocalhost() ? 10_000 : 30_000);
 startCacheCleanup(2 * 60 * 1000); // Clean up expired cache entries every 2 minutes
 
