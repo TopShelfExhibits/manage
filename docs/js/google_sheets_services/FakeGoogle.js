@@ -1271,7 +1271,11 @@ export class FakeGoogleSheetsService {
         return true;
     }
 
-    /** values.batchGet: one 2D array per range, in order (each range read as getSheetData would). */
+    /**
+     * values.batchGet: one 2D array per range, in order (each range read as getSheetData would).
+     * The fake has no grid limits. It behaves as GoogleSheetsService does with them
+     * (gridRanges.js): cells past a tab's last row read as empty, and writes past it grow the tab.
+     */
     static async batchGetValues(tableId, ranges) {
         return await Promise.all((ranges || []).map(range => this.getSheetData(tableId, range)));
     }

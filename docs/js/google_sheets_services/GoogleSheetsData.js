@@ -2,6 +2,7 @@ import { GoogleSheetsAuth } from './GoogleSheetsAuth.js';
 import { SheetSql } from './sheetSql.js';
 import { normalizeHeaderName } from '../data_management/utils/helpers.js';
 import { ProgressBus } from '../data_management/utils/caching.js';
+import { isGridLimitError, gridNeeded, clipRangeToGrid, parseA1Range } from './gridRanges.js';
 
 export class GoogleSheetsService {
 
@@ -78,10 +79,8 @@ export class GoogleSheetsService {
             try {
                 return await fn();
             } catch (err) {
-                // Immediately throw grid limit errors - these need to be caught by expansion logic, not retried
-                if (err && err.status === 400 && err.result?.error?.message?.includes('exceeds grid limits')) {
-                    throw err;
-                }
+                // Immediately throw grid limit errors: the range calls grow or clip to the grid (gridRanges.js)
+                if (isGridLimitError(err)) throw err;
                 
                 // Immediately throw auth errors — retrying won't help; the Auth layer handles re-auth
                 const isAuthError = err && (
@@ -186,18 +185,8 @@ export class GoogleSheetsService {
         const spreadsheetId = window.ENDPOINT_IDS[tableId];
         if (!spreadsheetId) throw new Error(`[GoogleSheetsData.getSheetData] SPREADSHEET_NOT_FOUND: Spreadsheet ID not found for table: ${tableId}`);
 
-        // Remove try/catch to allow errors to bubble up to reactive store
-        const response = await GoogleSheetsService.withExponentialBackoff(() =>
-            gapi.client.sheets.spreadsheets.values.get({
-                spreadsheetId,
-                range,
-            })
-        );
-        
-        const rawData = response.result && Array.isArray(response.result.values) ? response.result.values : [];
-        if (!rawData || rawData.length === 0) return [[]];
-        
-        // Return raw 2D array data to match FakeGoogle interface
+        // Errors bubble up to the reactive store
+        const [rawData] = await GoogleSheetsService._readRanges(spreadsheetId, [range]);
         return rawData;
     }
 
@@ -212,14 +201,7 @@ export class GoogleSheetsService {
         const spreadsheetId = window.ENDPOINT_IDS[tableId];
         if (!spreadsheetId) throw new Error(`[GoogleSheetsData.batchGetValues] SPREADSHEET_NOT_FOUND: Spreadsheet ID not found for table: ${tableId}`);
         if (!ranges || !ranges.length) return [];
-        const response = await GoogleSheetsService.withExponentialBackoff(() =>
-            gapi.client.sheets.spreadsheets.values.batchGet({ spreadsheetId, ranges })
-        );
-        const valueRanges = response.result?.valueRanges || [];
-        return ranges.map((_, i) => {
-            const values = valueRanges[i]?.values;
-            return Array.isArray(values) && values.length ? values : [[]];
-        });
+        return await GoogleSheetsService._readRanges(spreadsheetId, ranges);
     }
 
     /**
@@ -235,7 +217,7 @@ export class GoogleSheetsService {
         const spreadsheetId = window.ENDPOINT_IDS[tableId];
         if (!spreadsheetId) throw new Error(`[GoogleSheetsData.batchSetValues] SPREADSHEET_NOT_FOUND: Spreadsheet ID not found for table: ${tableId}`);
         if (!data || !data.length) return true;
-        await GoogleSheetsService.withExponentialBackoff(() =>
+        await GoogleSheetsService._writeGrowingGrid(spreadsheetId, gridNeeded(data.map(d => d.range)), () =>
             gapi.client.sheets.spreadsheets.values.batchUpdate({
                 spreadsheetId,
                 resource: { valueInputOption: options.raw ? 'RAW' : 'USER_ENTERED', data }
@@ -337,43 +319,20 @@ export class GoogleSheetsService {
         const range = `${tabName}`;
         // The requested range is the whole tab: the response holds every value in it
         const includeValuesInResponse = !!options.returnValues && !range.includes('!');
-        let response;
 
-        // Write new data with automatic grid expansion on error
-        try {
-            response = await GoogleSheetsService.withExponentialBackoff(() =>
-                gapi.client.sheets.spreadsheets.values.update({
-                    spreadsheetId,
-                    range,
-                    valueInputOption: 'USER_ENTERED',
-                    includeValuesInResponse,
-                    resource: { values }
-                })
-            );
-        } catch (error) {
-            // Check if error is due to exceeding grid limits
-            if (error.status === 400 && error.result?.error?.message?.includes('exceeds grid limits')) {
-                //console.warn(`[setSheetData] Range exceeds grid limits, expanding sheet and retrying...`);
-                
-                // Let _ensureSheetSize parse the range to determine absolute position
-                // Don't pass explicit row/col counts - let it extract from the range spec
-                await this._ensureSheetSize(spreadsheetId, range, null, null);
-                
-                // Retry the write operation
-                response = await GoogleSheetsService.withExponentialBackoff(() =>
-                    gapi.client.sheets.spreadsheets.values.update({
-                        spreadsheetId,
-                        range,
-                        valueInputOption: 'USER_ENTERED',
-                        includeValuesInResponse,
-                        resource: { values }
-                    })
-                );
-            } else {
-                // Re-throw other errors
-                throw error;
-            }
-        }
+        // A range outside the grid grows it (a whole-tab write needs its rows and widest row)
+        const needs = range.includes('!')
+            ? gridNeeded([range])
+            : new Map([[tabName, { rows: values.length, cols: Math.max(0, ...values.map(row => row.length)) }]]);
+        const response = await GoogleSheetsService._writeGrowingGrid(spreadsheetId, needs, () =>
+            gapi.client.sheets.spreadsheets.values.update({
+                spreadsheetId,
+                range,
+                valueInputOption: 'USER_ENTERED',
+                includeValuesInResponse,
+                resource: { values }
+            })
+        );
         // A range write ("Tab!A5:B5") leaves the rest of the tab as it is: nothing to truncate, and
         // the lookup below would cost a read request
         if (range.includes('!')) return true;
@@ -485,89 +444,86 @@ export class GoogleSheetsService {
     }
     
     /**
-     * Helper method to ensure a sheet has enough rows and columns for a given range
-     * @private
-     * @param {string} spreadsheetId
-     * @param {string} tabName - The tab name (can include range like "Locks!D1:D1")
-     * @param {number} [requiredRows] - Optional explicit row count requirement
-     * @param {number} [requiredCols] - Optional explicit column count requirement
+     * Each sheet's grid: title → { sheetId, rows, cols }. @private
      */
-    static async _ensureSheetSize(spreadsheetId, tabName, requiredRows = null, requiredCols = null) {
-        if (typeof gapi === 'undefined' || !gapi.client?.sheets?.spreadsheets?.get) return;
-        
-        // Extract sheet name from range if provided (e.g., "Locks!D1:D1" -> "Locks")
-        // (the sheet name may be quoted: "'Production Schedule'!A5:A5")
-        const bang = tabName.lastIndexOf('!');
-        const quoted = bang >= 0 ? tabName.slice(0, bang) : tabName;
-        const sheetName = /^'.*'$/.test(quoted) ? quoted.slice(1, -1).replace(/''/g, "'") : quoted;
-        const rangeSpec = bang >= 0 ? tabName.slice(bang + 1) : null;
-        
-        // Parse range to determine required rows/cols if not explicitly provided
-        if (rangeSpec && (requiredRows === null || requiredCols === null)) {
-            const match = rangeSpec.match(/([A-Z]+)(\d+)/);
-            if (match) {
-                const col = match[1];
-                const row = parseInt(match[2]);
-                
-                // Convert column letter to number (A=1, B=2, Z=26, AA=27, etc.)
-                let colNum = 0;
-                for (let i = 0; i < col.length; i++) {
-                    colNum = colNum * 26 + (col.charCodeAt(i) - 64);
-                }
-                
-                if (requiredRows === null) requiredRows = row;
-                if (requiredCols === null) requiredCols = colNum;
+    static async _gridSizes(spreadsheetId) {
+        const info = await GoogleSheetsService.withExponentialBackoff(() =>
+            gapi.client.sheets.spreadsheets.get({ spreadsheetId, includeGridData: false })
+        );
+        return new Map((info.result?.sheets || []).map(sheet => [sheet.properties.title, {
+            sheetId: sheet.properties.sheetId,
+            rows: sheet.properties.gridProperties?.rowCount || 0,
+            cols: sheet.properties.gridProperties?.columnCount || 0
+        }]));
+    }
+
+    /**
+     * Grow sheets to at least the rows and columns they need (gridNeeded), in one request. Rows
+     * grow with 10 to spare, so the next appended rows fit. @private
+     */
+    static async _ensureGrid(spreadsheetId, needs) {
+        const sizes = await GoogleSheetsService._gridSizes(spreadsheetId);
+        const requests = [];
+        for (const [sheet, need] of needs) {
+            const size = sizes.get(sheet);
+            if (!size) continue;
+            if (need.rows > size.rows) {
+                requests.push({ appendDimension: { sheetId: size.sheetId, dimension: 'ROWS', length: need.rows - size.rows + 10 } });
+            }
+            if (need.cols > size.cols) {
+                requests.push({ appendDimension: { sheetId: size.sheetId, dimension: 'COLUMNS', length: need.cols - size.cols } });
             }
         }
-        
-        const sheetInfo = await GoogleSheetsService.withExponentialBackoff(() =>
-            gapi.client.sheets.spreadsheets.get({
-                spreadsheetId,
-                ranges: [sheetName],
-                includeGridData: false
-            })
+        if (!requests.length) return;
+        await GoogleSheetsService.withExponentialBackoff(() =>
+            gapi.client.sheets.spreadsheets.batchUpdate({ spreadsheetId, resource: { requests } })
         );
-        
-        const sheet = sheetInfo.result.sheets.find(s => s.properties.title === sheetName);
-        if (!sheet) return;
-        
-        const currentRows = sheet.properties.gridProperties.rowCount;
-        const currentCols = sheet.properties.gridProperties.columnCount;
-        
-        const requests = [];
-        
-        // Expand rows if needed, adding 10 extra rows as buffer
-        if (requiredRows && requiredRows > currentRows) {
-            //console.log(`[_ensureSheetSize] Expanding rows from ${currentRows} to ${requiredRows + 10}`);
-            requests.push({
-                appendDimension: {
-                    sheetId: sheet.properties.sheetId,
-                    dimension: 'ROWS',
-                    length: requiredRows - currentRows + 10
-                }
-            });
+    }
+
+    /**
+     * Every range write goes through here: when a range is outside its sheet's grid, the grid
+     * grows to the needs (gridNeeded) and the write runs once more. @private
+     * @returns {Promise<*>} the write's response
+     */
+    static async _writeGrowingGrid(spreadsheetId, needs, write) {
+        try {
+            return await GoogleSheetsService.withExponentialBackoff(write);
+        } catch (error) {
+            if (!isGridLimitError(error)) throw error;
+            await GoogleSheetsService._ensureGrid(spreadsheetId, needs);
+            return await GoogleSheetsService.withExponentialBackoff(write);
         }
-        
-        // Expand columns if needed
-        if (requiredCols && requiredCols > currentCols) {
-            //console.log(`[_ensureSheetSize] Expanding columns from ${currentCols} to ${requiredCols}`);
-            requests.push({
-                appendDimension: {
-                    sheetId: sheet.properties.sheetId,
-                    dimension: 'COLUMNS',
-                    length: requiredCols - currentCols
-                }
-            });
-        }
-        
-        // Execute batch update if any requests were added
-        if (requests.length > 0) {
-            await GoogleSheetsService.withExponentialBackoff(() =>
-                gapi.client.sheets.spreadsheets.batchUpdate({
-                    spreadsheetId,
-                    resource: { requests }
-                })
+    }
+
+    /**
+     * Every range read goes through here (values.batchGet): one 2D array per range, [[]] when
+     * empty. A range outside its sheet's grid is clipped to the grid, so cells past it read as
+     * empty, as empty cells inside it do. @private
+     */
+    static async _readRanges(spreadsheetId, ranges) {
+        const read = async (list) => {
+            const response = await GoogleSheetsService.withExponentialBackoff(() =>
+                gapi.client.sheets.spreadsheets.values.batchGet({ spreadsheetId, ranges: list })
             );
+            const valueRanges = response.result?.valueRanges || [];
+            return list.map((_, i) => {
+                const values = valueRanges[i]?.values;
+                return Array.isArray(values) && values.length ? values : [[]];
+            });
+        };
+        try {
+            return await read(ranges);
+        } catch (error) {
+            if (!isGridLimitError(error)) throw error;
+            const sizes = await GoogleSheetsService._gridSizes(spreadsheetId);
+            const clipped = ranges.map(range => {
+                const size = sizes.get(parseA1Range(range).sheet);
+                return size ? clipRangeToGrid(range, size.rows, size.cols) : range;
+            });
+            const inside = clipped.filter(Boolean);
+            const values = inside.length ? await read(inside) : [];
+            let k = 0;
+            return clipped.map(range => range ? values[k++] : [[]]);
         }
     }
 

@@ -451,7 +451,7 @@ class database_uncached {
         const rawData = await GoogleSheetsService.getSheetData(tableId, tabName);
         const nextRow = (Array.isArray(rawData) ? rawData.length : 0) + 1;
         const endCol = _numberToColumnLetter(Math.max(values.length, 1));
-        const range = `${tabName}!A${nextRow}:${endCol}${nextRow}`;
+        const range = Database.a1Range(tabName, `A${nextRow}:${endCol}${nextRow}`);
 
         await GoogleSheetsService.setSheetData(tableId, range, [values], null);
 

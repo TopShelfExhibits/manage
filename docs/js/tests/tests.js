@@ -45,6 +45,7 @@ import { containerTier, viewportTier, BREAKPOINTS } from '../application/utils/u
 import { todayISOString, setTestToday, startOfTodayMs, resolveShortageAlertDays, shortageAlertDateFilters, INVENTORY_TAB_PREFERENCES, resolveInventoryTabList, itemVariantBase, resolveItemVariant, itemVariantFamilies, itemVariantKey, parseItemVariants, searchFilter, textFiltersToSearchParams, parseSearchParameters } from '../data_management/utils/helpers.js';
 import { instantWriteEntry, identityKey, cellKey, joinKey } from '../data_management/utils/instant-write-config.js';
 import { estimateShipDate } from '../data_management/utils/ship-date.js';
+import { parseA1Range, gridNeeded, clipRangeToGrid, isGridLimitError } from '../google_sheets_services/gridRanges.js';
 import { getReactiveStore, createAnalysisConfig, itemVariantCards } from '../application/index.js';
 import { checkSheetHealth } from './sheetHealth.js';
 import { guessColumnType, columnTypesEntry, columnTypeMap, columnTypeOf, isOpaqueType } from '../data_management/utils/column-types.js';
@@ -2230,6 +2231,37 @@ test('SAVE CACHING', 'a lock change is still confirmed by a fresh read at the ne
         }
     }));
     invalidateCache([{ namespace: 'app_utils', methodName: 'getLocksData', args: [] }]);
+});
+
+// ── Group: Grid ranges ────────────────────────────────────────────────────────
+// gridRanges.js: GoogleSheetsService grows a sheet's grid for range writes and clips range reads
+// to it. Regression: a show note appended after empty note rows were deleted wrote "ShowNotes!A7:C7"
+// to a 6-row grid ("exceeds grid limits"), because cell writes and range reads didn't handle it.
+
+test('GRID RANGES', 'parseA1Range reads sheets and bounds', async () => {
+    assertEqual(parseA1Range('ShowNotes!A7:C7'), { sheetPart: 'ShowNotes', sheet: 'ShowNotes', startRow: 7, startCol: 1, endRow: 7, endCol: 3 }, 'block');
+    assertEqual(parseA1Range("'Production Schedule'!AB5"), { sheetPart: "'Production Schedule'", sheet: 'Production Schedule', startRow: 5, startCol: 28, endRow: 5, endCol: 28 }, 'quoted single cell');
+    assertEqual(parseA1Range('Caching!A:B'), { sheetPart: 'Caching', sheet: 'Caching', startRow: null, startCol: 1, endRow: null, endCol: 2 }, 'whole columns');
+    assertEqual(parseA1Range("'Bob''s'"), { sheetPart: "'Bob''s'", sheet: "Bob's", startRow: null, startCol: null, endRow: null, endCol: null }, 'whole tab');
+});
+
+test('GRID RANGES', 'gridNeeded takes the furthest cell per sheet', async () => {
+    const needs = gridNeeded(['ShowNotes!A7:C7', 'ShowNotes!B9:B9', "'Production Schedule'!AA5:AA5", 'Caching!A:B']);
+    assertEqual([...needs], [['ShowNotes', { rows: 9, cols: 3 }], ['Production Schedule', { rows: 5, cols: 27 }], ['Caching', { rows: 0, cols: 2 }]], 'needs');
+});
+
+test('GRID RANGES', 'clipRangeToGrid pulls a range into the grid', async () => {
+    assertEqual(clipRangeToGrid('ShowNotes!A7:C7', 6, 3), null, 'row past the grid: nothing to read');
+    assertEqual(clipRangeToGrid('ShowNotes!A5:C8', 6, 3), 'ShowNotes!A5:C6', 'rows clipped');
+    assertEqual(clipRangeToGrid("'My Tab'!B2:Z2", 6, 3), "'My Tab'!B2:C2", 'columns clipped, quoting kept');
+    assertEqual(clipRangeToGrid('ShowNotes!D1:D1', 6, 3), null, 'column past the grid');
+    assertEqual(clipRangeToGrid('Caching!A:B', 6, 3), 'Caching!A:B', 'open rows stay open');
+    assertEqual(clipRangeToGrid('ShowNotes', 6, 3), 'ShowNotes', 'whole tab');
+});
+
+test('GRID RANGES', 'isGridLimitError recognises the API error', async () => {
+    const apiError = { status: 400, result: { error: { code: 400, message: 'Range (ShowNotes!A7:C7) exceeds grid limits. Max rows: 6, max columns: 3', status: 'INVALID_ARGUMENT' } } };
+    assertEqual([isGridLimitError(apiError), isGridLimitError({ status: 400, result: { error: { message: 'Unable to parse range' } } }), isGridLimitError(null)], [true, false, false], 'errors');
 });
 
 // ── Group: Tab reads ──────────────────────────────────────────────────────────
