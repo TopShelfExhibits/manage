@@ -1,4 +1,4 @@
-import { html, Requests, TableComponent, DataView, getReactiveStore, createAnalysisConfig, NavigationRegistry, Priority, invalidateCache, authState, undoRegistry, EditHistoryUtils, todayISOString, ProposalUtils, getInventoryNoteMaxLength, getInventoryTabList, INVENTORY_TAB_PREFERENCES, getShortageAlertsStore, getShortageAlertDays, shortagesByItem, itemShortageCards, itemVariantCards, THUMBNAIL_FIELD } from '../../index.js';
+import { html, Requests, TableComponent, DataView, getReactiveStore, createAnalysisConfig, NavigationRegistry, Priority, invalidateCache, authState, undoRegistry, EditHistoryUtils, todayISOString, ProposalUtils, getInventoryNoteMaxLength, getInventoryTabList, INVENTORY_TAB_PREFERENCES, getShortageAlertsStore, getShortageAlertDays, shortagesByItem, itemShortageCards, itemVariantCards, itemVariantFamilies, THUMBNAIL_FIELD } from '../../index.js';
 import { sheetLockMixin } from '../../utils/sheetLockMixin.js';
 import { thumbnailStyle, iconLabel } from '../../utils/views/viewStyles.js';
 import { CellRenderer } from '../interface/cells.js';
@@ -587,6 +587,10 @@ export const InventoryTableComponent = {
         tableData() {
             return this.inventoryTableStore ? this.inventoryTableStore.data : [];
         },
+        // Bases with a real letter variant item: their declared variants don't count
+        variantFamilies() {
+            return itemVariantFamilies(this.tableData.map(row => row.itemNumber));
+        },
         // Past states per item, rebuilt from the SAVED rows so unsaved edits or reverts
         // don't shift the reconstruction (see EditHistoryUtils.getHistoryStates)
         historyByItem() {
@@ -735,7 +739,7 @@ export const InventoryTableComponent = {
         // the variants declared in the description
         itemDecorations(row, key) {
             if (this.historyMode) return [];
-            if (key === 'description') return itemVariantCards(row, (message, title) => this.$modal.alert(message, title));
+            if (key === 'description') return itemVariantCards(row, (message, title) => this.$modal.alert(message, title), this.variantFamilies);
             if (key !== 'itemNumber') return [];
             return itemShortageCards(this.shortagesByItem.get(row.itemNumber), getShortageAlertDays());
         },

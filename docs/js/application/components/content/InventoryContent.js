@@ -1,4 +1,4 @@
-import { html, InventoryTableComponent, hamburgerMenuRegistry, NavigationRegistry, Requests, DataView, DashboardToggleComponent, getReactiveStore, findMatchingStores, createAnalysisConfig, generateStoreKey, authState, invalidateCache, todayISOString, getInventoryTabList, INVENTORY_TAB_PREFERENCES, getShortageAlertsStore, getShortageAlertDays, shortagesByItem, itemShortageCards, categoryShortageCards, itemVariantCards, THUMBNAIL_FIELD } from '../../index.js';
+import { html, InventoryTableComponent, hamburgerMenuRegistry, NavigationRegistry, Requests, DataView, DashboardToggleComponent, getReactiveStore, findMatchingStores, createAnalysisConfig, generateStoreKey, authState, invalidateCache, todayISOString, getInventoryTabList, INVENTORY_TAB_PREFERENCES, getShortageAlertsStore, getShortageAlertDays, shortagesByItem, itemShortageCards, categoryShortageCards, itemVariantCards, itemVariantFamilies, THUMBNAIL_FIELD } from '../../index.js';
 import { ShowInventoryReport } from './ShowInventoryReport.js';
 import { InventoryItemReport } from './InventoryItemReport.js';
 import { InventoryItemTimeline } from './InventoryItemTimeline.js';
@@ -248,6 +248,10 @@ export const InventoryContent = {
         allItemRows() {
             return this.inventoryStore?.data || [];
         },
+        // Bases with a real letter variant item: their declared variants don't count
+        variantFamilies() {
+            return itemVariantFamilies(this.allItemRows.map(row => row.itemNumber));
+        },
         // Description-only tabs (InventoryDescriptionOnly preference), hidden from the overview table
         descriptionOnlyTabs() {
             return getInventoryTabList(INVENTORY_TAB_PREFERENCES.descriptionOnly);
@@ -430,7 +434,7 @@ export const InventoryContent = {
         // Decorations (§4.14): a shortage warning on the item number of overview items that run
         // short, and the variants declared in the description
         itemDecorations(row, key) {
-            if (key === 'description') return itemVariantCards(row, (message, title) => this.$modal.alert(message, title));
+            if (key === 'description') return itemVariantCards(row, (message, title) => this.$modal.alert(message, title), this.variantFamilies);
             if (key !== 'itemNumber') return [];
             return itemShortageCards(this.shortagesByItem.get(row.itemNumber), getShortageAlertDays());
         },

@@ -33,7 +33,7 @@ import { FakeGoogleSheetsAuth, FakeGoogleSheetsService, FakeGoogleState, setFake
 import { refreshAppData } from './fakeGoogleDevTools.js';
 import { isCheckedValue } from '../data_management/utils/checkbox-values.js';
 import { useBatchEdits, useInstantEdits } from '../application/utils/cellEdits.js';
-import { CacheInvalidationBus, ApplicationUtils, ProductionUtils, triggerCachePoll, stampDataChange, Database, EditHistoryUtils, InventoryUtils, ProposalUtils, resolveInventoryNoteMaxLength, checkDateRollover, clearCache, invalidateCache, resolveSheetMapping, parseThumbnails, replaceFirstThumbnail, removeFirstThumbnail } from '../data_management/index.js';
+import { CacheInvalidationBus, ApplicationUtils, ProductionUtils, triggerCachePoll, stampDataChange, Database, DEFAULT_INVENTORY_MAPPING, EditHistoryUtils, InventoryUtils, ProposalUtils, resolveInventoryNoteMaxLength, checkDateRollover, clearCache, invalidateCache, resolveSheetMapping, parseThumbnails, replaceFirstThumbnail, removeFirstThumbnail } from '../data_management/index.js';
 import { authState } from '../application/utils/auth.js';
 import { commitInventoryProposal } from '../application/utils/inventoryProposals.js';
 import { resolveView, resolveAction, pickView, mergeView, matchesKeyPattern, setViewWarningHandler, withRegistryDefaults, searchTiers } from '../application/utils/views/resolveView.js';
@@ -42,7 +42,7 @@ import { formatValue, formatText } from '../application/utils/views/fieldFormat.
 import { rowsToCards, bucketRowsToCards } from '../application/utils/views/cardsAdapter.js';
 import { applyColorRule, colorFor, rowColorFor } from '../application/utils/views/viewColor.js';
 import { containerTier, viewportTier, BREAKPOINTS } from '../application/utils/useContainerSize.js';
-import { todayISOString, setTestToday, startOfTodayMs, resolveShortageAlertDays, shortageAlertDateFilters, INVENTORY_TAB_PREFERENCES, resolveInventoryTabList, itemVariantBase, resolveItemVariant, itemVariantKey, parseItemVariants, searchFilter, textFiltersToSearchParams, parseSearchParameters } from '../data_management/utils/helpers.js';
+import { todayISOString, setTestToday, startOfTodayMs, resolveShortageAlertDays, shortageAlertDateFilters, INVENTORY_TAB_PREFERENCES, resolveInventoryTabList, itemVariantBase, resolveItemVariant, itemVariantFamilies, itemVariantKey, parseItemVariants, searchFilter, textFiltersToSearchParams, parseSearchParameters } from '../data_management/utils/helpers.js';
 import { instantWriteEntry, identityKey, cellKey, joinKey } from '../data_management/utils/instant-write-config.js';
 import { estimateShipDate } from '../data_management/utils/ship-date.js';
 import { getReactiveStore, createAnalysisConfig, itemVariantCards } from '../application/index.js';
@@ -1201,6 +1201,31 @@ test('ITEM VARIANTS', 'inventory description cards show each declared variant', 
     cards[0].action();
     assertEqual(opened, [['Tall gray storage cabinet with locking doors', 'CAB-005b (1 of 6)']], 'card opens the variant');
     assertEqual(itemVariantCards({ itemNumber: 'CAB-004', quantity: '10', description: 'Counter' }, () => {}), [], 'no variants, no cards');
+});
+
+test('ITEM VARIANTS', 'a family with a real variant item shows that its variants are off', async () => {
+    assertEqual([...itemVariantFamilies(['CAB-005', 'CAB-006', 'CAB-006a', 'BX-10Rx39P'])], ['CAB-006', 'BX-10Rx39'], 'families');
+    const families = itemVariantFamilies(['CAB-005', 'CAB-006', 'CAB-006a']);
+    const cards = itemVariantCards({ itemNumber: 'CAB-006', quantity: '4', description: 'Rolling demo cabinet\n(1) CAB-006b with shelves' }, () => {}, families);
+    assertEqual(cards.map(card => [card.message, card.class]), [['Variants off', 'red']], 'one red card');
+    assertEqual(itemVariantCards({ itemNumber: 'CAB-005', quantity: '6', description: CAB_005_DESCRIPTION }, () => {}, families).map(card => card.message), ['b'], 'other families unaffected');
+});
+
+// Variant counts come from the inventory description through the cache: editing CAB-005's
+// description to declare (3) CAB-005b clears ATSC's shortage (3 declared, 2 needed: 1 spare).
+test('ITEM VARIANTS', 'editing a variant count updates the variant check', async () => {
+    const atscLine = { 'Extracted Item': 'CAB-005', Description: '(1) CAB-005b Tall gray storage cabinet with locking doors' };
+    const remaining = async () => (await Requests.checkVariantLevel(atscLine, 'ATSC 2025 NAB'))?.remaining ?? null;
+    const original = await Database.getData('INVENTORY', 'CABINETS', DEFAULT_INVENTORY_MAPPING);
+    const withDescription = (description) => original.map(row => row.itemNumber === 'CAB-005' ? { ...row, description } : row);
+    assertEqual(await remaining(), -1, 'before: 1 short');
+    try {
+        await Database.setData('INVENTORY', 'CABINETS', withDescription('Tall gray storage cabinet\n(3) CAB-005b with locking doors'), DEFAULT_INVENTORY_MAPPING, { skipMetadata: true });
+        assertEqual(await remaining(), null, 'after: no alert');
+    } finally {
+        await Database.setData('INVENTORY', 'CABINETS', withDescription(CAB_005_DESCRIPTION), DEFAULT_INVENTORY_MAPPING, { skipMetadata: true });
+    }
+    assertEqual(await remaining(), -1, 'restored: 1 short');
 });
 
 // ── Group 26: Thumbnail Column ────────────────────────────────────────────────

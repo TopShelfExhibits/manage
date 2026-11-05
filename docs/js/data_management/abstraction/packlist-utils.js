@@ -1,4 +1,4 @@
-import { Database, InventoryUtils, ProductionUtils, wrapMethods, INVENTORY_TAB_PREFERENCES, GetParagraphMatchRating, itemVariantBase, resolveItemVariant, itemVariantKey, parseItemVariants, parseDate, toISODateString, EditHistoryUtils, ApplicationUtils, invalidateCache, normalizeHeaderName, ProgressBus, mapWithConcurrency } from '../index.js';
+import { Database, InventoryUtils, ProductionUtils, wrapMethods, INVENTORY_TAB_PREFERENCES, GetParagraphMatchRating, ITEM_NUMBER_CHAR, itemVariantBase, resolveItemVariant, itemVariantKey, parseItemVariants, parseDate, toISODateString, EditHistoryUtils, ApplicationUtils, invalidateCache, normalizeHeaderName, ProgressBus, mapWithConcurrency } from '../index.js';
 
 /** Normalize an identifier for loose matching (strips spaces, case, non-alphanumeric) */
 function _normalizeId(v) { return String(v || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, ''); }
@@ -27,7 +27,7 @@ class packListUtils_uncached {
             };
         }
         
-        const itemRegex = /(?:\(([0-9]+)\))?\s*([A-Z]+-[0-9A-Za-z_○°]+)/;
+        const itemRegex = new RegExp(`(?:\\(([0-9]+)\\))?\\s*([A-Z]+-${ITEM_NUMBER_CHAR}+)`);
 
         const match = text.match(itemRegex);
         
@@ -142,7 +142,7 @@ class packListUtils_uncached {
 
                 // Create regex pattern: optional (qty) followed by the whole item number, not part
                 // of a longer word (so custom tabs have no item variants: X-1b doesn't match X-1)
-                const pattern = new RegExp(`(?:\\(([0-9]+)\\))?\\s*(?<![0-9A-Za-z_○°])${escapedItemNum}(?![0-9A-Za-z_○°])`, 'i');
+                const pattern = new RegExp(`(?:\\(([0-9]+)\\))?\\s*(?<!${ITEM_NUMBER_CHAR})${escapedItemNum}(?!${ITEM_NUMBER_CHAR})`, 'i');
                 const match = text.match(pattern);
                 
                 if (match) {
@@ -364,7 +364,7 @@ class packListUtils_uncached {
 
         const itemMap = {};
         for (const tab of matchingTabs) {
-            const tabItems = await deps.call(PackListUtils.extractItems, tab.title, ctgFilter, ...(variants ? [true] : []));
+            const tabItems = await deps.call(PackListUtils.extractItems, tab.title, ctgFilter, variants);
             for (const [itemId, qty] of Object.entries(tabItems)) {
                 itemMap[itemId] = (itemMap[itemId] || 0) + qty;
             }
@@ -392,7 +392,7 @@ class packListUtils_uncached {
                 const nodeItems = {};
                 const tabIds = matchingTabs.length ? matchingTabs.map(t => t.title) : [current];
                 for (const tabId of tabIds) {
-                    const tabItems = await deps.call(PackListUtils.extractAllItemsForShow, tabId, ctgFilter, ...(variants ? [true] : []));
+                    const tabItems = await deps.call(PackListUtils.extractAllItemsForShow, tabId, ctgFilter, variants);
                     for (const [itemId, qty] of Object.entries(tabItems)) {
                         nodeItems[itemId] = (nodeItems[itemId] || 0) + qty;
                     }
@@ -688,10 +688,9 @@ class packListUtils_uncached {
      * transship source and transship destinations (their items are in their chain root's items).
      * @param {Object} deps - Dependency decorator for tracking calls
      * @param {string} currentProjectId - Current project identifier
-     * @param {boolean} [variants] - Variant lines only (see extractItems)
      * @returns {Promise<Array<{show: string, items: Object}>>} Canonical show identifier and its chain items
      */
-    static async getOverlappingShowItems(deps, currentProjectId, variants = false) {
+    static async getOverlappingShowItems(deps, currentProjectId) {
         // Resolve currentProjectId to canonical schedule identifier — handles NameOverride tab titles
         const currentRow = await deps.call(ProductionUtils.getShowDetails, currentProjectId);
         const currentScheduleId = currentRow
@@ -725,7 +724,7 @@ class packListUtils_uncached {
             if (isDestination) continue;
 
             try {
-                const items = await deps.call(PackListUtils.extractChainItemsForIdentifier, scheduleProjectId, undefined, ...(variants ? [true] : []));
+                const items = await deps.call(PackListUtils.extractChainItemsForIdentifier, scheduleProjectId);
                 shows.push({ show: scheduleProjectId, items });
             } catch (e) {
                 // Ignore projects that can't be loaded
@@ -749,7 +748,8 @@ class packListUtils_uncached {
     /**
      * Variant quantities for one pack list line, against this show's and the overlapping shows'
      * demand. Variant counts are the counts declared in the base item's inventory description
-     * (parseItemVariants); the base item's quantity includes them.
+     * (parseItemVariants); the base item's quantity includes them. Both are read as of the
+     * show's ship date, like checkInventoryLevel.
      * - A declared variant line (CAB-004b) checks that variant's demand against its count.
      * - A base line (CAB-004) of a family with counted variants checks the unmodified pieces: the
      *   base demand less every variant's demand, against the quantity less the variant counts.
@@ -764,8 +764,9 @@ class packListUtils_uncached {
         const extracted = await deps.call(PackListUtils.extractItemFromText, text);
         const base = extracted.itemNumber;
         if (!base) return null;
-        const today = await deps.call(ApplicationUtils.getToday);
-        const description = await deps.call(InventoryUtils.getItemDescription, base, today);
+        const shipDate = await deps.call(ProductionUtils.getProjectShipDate, currentProjectId);
+        const referenceDate = shipDate || await deps.call(ApplicationUtils.getToday);
+        const description = await deps.call(InventoryUtils.getItemDescription, base, referenceDate);
         const counted = parseItemVariants(base, description).variants.filter(variant => variant.quantity !== null);
         if (!counted.length) return null;
 
@@ -779,8 +780,7 @@ class packListUtils_uncached {
             available = declared.quantity;
             demandOf = (show) => show.variants[key] || 0;
         } else {
-            const shipDate = await deps.call(ProductionUtils.getProjectShipDate, currentProjectId);
-            const quantity = await deps.call(PackListUtils.getItemInventoryQuantity, base, shipDate || today);
+            const quantity = await deps.call(PackListUtils.getItemInventoryQuantity, base, referenceDate);
             if (quantity === null || isNaN(quantity)) return null;
             kind = 'unmodified';
             itemNumber = base;
@@ -791,21 +791,16 @@ class packListUtils_uncached {
             demandOf = (show) => Math.max(0, (show.items[base] || 0) - variantDemand(show));
         }
 
-        // This show's chain, then each overlapping show's chain
+        // Item and variant totals of this show's chain, then of each overlapping show's chain
         const overlapping = await deps.call(PackListUtils.getOverlappingShowItems, currentProjectId);
-        const overlappingVariants = await deps.call(PackListUtils.getOverlappingShowItems, currentProjectId, true);
-        const shows = [
-            {
-                show: currentProjectId,
-                items: await deps.call(PackListUtils.extractChainItemsForIdentifier, currentProjectId),
-                variants: await deps.call(PackListUtils.extractChainItemsForIdentifier, currentProjectId, undefined, true)
-            },
-            ...overlapping.map(entry => ({
-                show: entry.show,
-                items: entry.items,
-                variants: overlappingVariants.find(other => other.show === entry.show)?.items || {}
-            }))
-        ];
+        const shows = [];
+        for (const show of [currentProjectId, ...overlapping.map(entry => entry.show)]) {
+            shows.push({
+                show,
+                items: await deps.call(PackListUtils.extractChainItemsForIdentifier, show),
+                variants: await deps.call(PackListUtils.extractChainItemsForIdentifier, show, undefined, true)
+            });
+        }
         const demand = shows
             .map(show => ({ show: show.show, quantity: demandOf(show) }))
             .filter(entry => entry.quantity > 0);
