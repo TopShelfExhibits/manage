@@ -131,6 +131,12 @@ Writes both columns A and B of the next empty row.
 
 All reads and writes use `GoogleSheetsService` directly (same pattern as the `Locks` tab). Do not route through the cache layer or `Database`.
 
+## Request cost
+
+Google Sheets allows 60 read and 60 write requests per minute per user, and 300 each per project.
+
+- **Polling.** Each poll is one read of this tab, every 30 s (10 s on localhost), only while the browser tab is visible. A hidden tab skips its polls, and polls once when it comes back into view.
+
 # Analytics Tab: Persisted Results
 
 Some cached API results take long enough to compute that a new session should start from the last saved copy. A method opts in through `wrapMethods`' last argument, `persistentMethods` (see the bottom of `api.js`). The persisted methods are `getInventoryShortageAlerts` and `getItemThumbnails` (item thumbnails for report pages; it reads every inventory tab).

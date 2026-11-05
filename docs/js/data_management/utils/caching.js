@@ -910,74 +910,91 @@ export async function assertAppCurrent() {
     }
 }
 
+// A hidden browser tab skips its polls: each one reads the Caching tab, and open-but-unseen tabs
+// would spend the Sheets read quota all day. Coming back into view polls at once if one was missed.
+let _lastPollAt = 0;
+if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', () => {
+        if (!document.hidden && _cacheTimestampPollerInterval && Date.now() - _lastPollAt >= _pollerIntervalMs) {
+            _pollCacheTimestamps();
+        }
+    });
+}
+
 export function startCacheTimestampPoller(readFn, intervalMs = 60 * 1000) {
     if (_cacheTimestampPollerInterval) return;
     _pollerReadFn = readFn;
     _pollerIntervalMs = intervalMs;
-    _cacheTimestampPollerInterval = setInterval(async () => {
-        // Check for application updates
-        checkAppVersion();
-        
-        try {
-            const entries = await readFn();
-            if (entries === null) {
-                // readFn signaled auth is unavailable — pause the poller until re-auth
-                stopCacheTimestampPoller();
-                stopCacheCleanup();
-                return;
+    _cacheTimestampPollerInterval = setInterval(() => {
+        if (typeof document === 'undefined' || !document.hidden) _pollCacheTimestamps();
+    }, intervalMs);
+}
+
+async function _pollCacheTimestamps() {
+    const readFn = _pollerReadFn;
+    _lastPollAt = Date.now();
+    // Check for application updates
+    checkAppVersion();
+
+    try {
+        const entries = await readFn();
+        if (entries === null) {
+            // readFn signaled auth is unavailable — pause the poller until re-auth
+            stopCacheTimestampPoller();
+            stopCacheCleanup();
+            return;
+        }
+        if (!Array.isArray(entries) || entries.length === 0) return;
+        for (const { key, timestamp } of entries) {
+            if (!key || !timestamp) continue;
+            const remoteTs = new Date(timestamp).getTime();
+            if (isNaN(remoteTs)) continue;
+            // CRITICAL: Poller can only invalidate cache entries that exist in CacheManager.cache.
+            // If data hasn't been loaded yet (user never navigated to that page), the cache entry
+            // won't exist and invalidation is silently skipped. This is by design - no point
+            // invalidating data that hasn't been loaded.
+            let shouldInvalidate = false;
+            for (const [cacheKey, entry] of CacheManager.cache.entries()) {
+                if (cacheKey.startsWith(key) && entry.filled && remoteTs > entry.filled) {
+                    shouldInvalidate = true;
+                    break;
+                }
             }
-            if (!Array.isArray(entries) || entries.length === 0) return;
-            for (const { key, timestamp } of entries) {
-                if (!key || !timestamp) continue;
-                const remoteTs = new Date(timestamp).getTime();
-                if (isNaN(remoteTs)) continue;
-                // CRITICAL: Poller can only invalidate cache entries that exist in CacheManager.cache.
-                // If data hasn't been loaded yet (user never navigated to that page), the cache entry
-                // won't exist and invalidation is silently skipped. This is by design - no point
-                // invalidating data that hasn't been loaded.
-                let shouldInvalidate = false;
-                for (const [cacheKey, entry] of CacheManager.cache.entries()) {
-                    if (cacheKey.startsWith(key) && entry.filled && remoteTs > entry.filled) {
+            // Fallback: if no live cache entry exists (TTL expired and entry was silently
+            // removed), check filledAt which persists beyond TTL expiry. This prevents the
+            // poller from going blind to external changes after the 4-minute cache TTL.
+            if (!shouldInvalidate) {
+                for (const [filledKey, filledTs] of CacheManager.filledAt.entries()) {
+                    if (filledKey.startsWith(key) && remoteTs > filledTs) {
                         shouldInvalidate = true;
                         break;
                     }
                 }
-                // Fallback: if no live cache entry exists (TTL expired and entry was silently
-                // removed), check filledAt which persists beyond TTL expiry. This prevents the
-                // poller from going blind to external changes after the 4-minute cache TTL.
-                if (!shouldInvalidate) {
-                    for (const [filledKey, filledTs] of CacheManager.filledAt.entries()) {
-                        if (filledKey.startsWith(key) && remoteTs > filledTs) {
-                            shouldInvalidate = true;
-                            break;
-                        }
-                    }
-                }
-                if (shouldInvalidate) {
-                    //console.log('[CacheTimestampPoller] Remote change detected for', key, '- invalidating');
-                    CacheManager.invalidateByPrefix(key);
-                }
             }
-        } catch (err) {
-            // Handle authentication errors by stopping the poller
-            // The poller will restart after successful re-authentication
-            const isAuthError = err && (
-                err.status === 401 ||
-                err.status === 403 ||
-                err.result?.error?.code === 401 ||
-                err.result?.error?.code === 403 ||
-                err.result?.error?.status === 'UNAUTHENTICATED' ||
-                err.result?.error?.status === 'PERMISSION_DENIED'
-            );
-            if (isAuthError) {
-                console.warn('[CacheTimestampPoller] Authentication error detected, stopping poller:', err);
-                stopCacheTimestampPoller();
-                stopCacheCleanup();
-                return;
+            if (shouldInvalidate) {
+                //console.log('[CacheTimestampPoller] Remote change detected for', key, '- invalidating');
+                CacheManager.invalidateByPrefix(key);
             }
-            console.warn('[CacheTimestampPoller] Poll failed:', err);
         }
-    }, intervalMs);
+    } catch (err) {
+        // Handle authentication errors by stopping the poller
+        // The poller will restart after successful re-authentication
+        const isAuthError = err && (
+            err.status === 401 ||
+            err.status === 403 ||
+            err.result?.error?.code === 401 ||
+            err.result?.error?.code === 403 ||
+            err.result?.error?.status === 'UNAUTHENTICATED' ||
+            err.result?.error?.status === 'PERMISSION_DENIED'
+        );
+        if (isAuthError) {
+            console.warn('[CacheTimestampPoller] Authentication error detected, stopping poller:', err);
+            stopCacheTimestampPoller();
+            stopCacheCleanup();
+            return;
+        }
+        console.warn('[CacheTimestampPoller] Poll failed:', err);
+    }
 }
 
 export function stopCacheTimestampPoller() {
