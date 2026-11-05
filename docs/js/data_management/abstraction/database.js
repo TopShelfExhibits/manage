@@ -537,9 +537,13 @@ export const Database = wrapMethods(
     ['createTab', 'hideTabs', 'showTabs', 'setData', 'updateRow', 'setCellValue', 'setCellValues', 'deleteSheetRows', 'appendSheetRow', 'uploadItemImage', 'getDriveFileBlob', 'readFresh', 'readFreshRanges', 'columnLetter', 'a1Range'], // getDriveFileBlob: uncached read (callers own the Blob)
     ['getTabs'], // Infinite cache
     {
-        // Sheet data: infinite for INVENTORY and PACK_LISTS (cross-session poller handles freshness);
-        // 20-minute default for everything else (PROD_SCHED, CACHE, etc.)
-        'getData': (args) => (args[0] === 'INVENTORY' || args[0] === 'PACK_LISTS') ? null : undefined
+        // Sheet data. Every app write stamps the Caching tab and the poller invalidates from it, so
+        // app data stays cached until it changes. The Production Schedule is also edited by hand
+        // (no stamp): it keeps the default expiry. Pack lists expire after 30 minutes, in case a
+        // stamp was missed.
+        'getData': (args) => args[0] === 'PROD_SCHED' ? undefined
+            : args[0] === 'PACK_LISTS' ? 30 * 60 * 1000
+            : null
     }
 );
 
