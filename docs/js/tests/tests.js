@@ -42,10 +42,10 @@ import { formatValue, formatText } from '../application/utils/views/fieldFormat.
 import { rowsToCards, bucketRowsToCards } from '../application/utils/views/cardsAdapter.js';
 import { applyColorRule, colorFor, rowColorFor } from '../application/utils/views/viewColor.js';
 import { containerTier, viewportTier, BREAKPOINTS } from '../application/utils/useContainerSize.js';
-import { todayISOString, setTestToday, startOfTodayMs, resolveShortageAlertDays, shortageAlertDateFilters, INVENTORY_TAB_PREFERENCES, resolveInventoryTabList, searchFilter, textFiltersToSearchParams, parseSearchParameters } from '../data_management/utils/helpers.js';
+import { todayISOString, setTestToday, startOfTodayMs, resolveShortageAlertDays, shortageAlertDateFilters, INVENTORY_TAB_PREFERENCES, resolveInventoryTabList, itemVariantBase, resolveItemVariant, itemVariantKey, parseItemVariants, searchFilter, textFiltersToSearchParams, parseSearchParameters } from '../data_management/utils/helpers.js';
 import { instantWriteEntry, identityKey, cellKey, joinKey } from '../data_management/utils/instant-write-config.js';
 import { estimateShipDate } from '../data_management/utils/ship-date.js';
-import { getReactiveStore, createAnalysisConfig } from '../application/index.js';
+import { getReactiveStore, createAnalysisConfig, itemVariantCards } from '../application/index.js';
 import { checkSheetHealth } from './sheetHealth.js';
 import { guessColumnType, columnTypesEntry, columnTypeMap, columnTypeOf, isOpaqueType } from '../data_management/utils/column-types.js';
 import { migrateThumbnails } from '../data_management/migrations/thumbnail-column.js';
@@ -1099,6 +1099,108 @@ test('HARDWARE INVENTORY', 'getItemQuantitiesSummary counts HH BOLTHOG 1-4 20 x 
     const row = rows?.find(r => r.itemId === 'HH BOLTHOG 1-4 20 x 2.5');
     if (!row) throw new Error('HH BOLTHOG 1-4 20 x 2.5 not found in TEST 2025 ENHANCED quantities');
     assertEqual(row.quantity, 15, 'TEST 2025 ENHANCED HH BOLTHOG 1-4 20 x 2.5 quantity');
+});
+
+// ── Item Variants ─────────────────────────────────────────────────────────────
+// A letter appended to a standard item number notes a variant of the base item. Variants are
+// declared, with optional counts, in the base item's inventory description (parseItemVariants).
+// FakeGoogle CABINETS:
+//   CAB-005 (QTY 6, no real variant parts): CAB-005b and CAB-005C count as CAB-005. Its description
+//     "Tall gray storage cabinet\n(1) CAB-005b with locking doors" declares one CAB-005b.
+//   CAB-006 with a real CAB-006a: CAB-006a matches itself, CAB-006b stays unmatched (no fallback)
+//   CAB-009 is not an item: CAB-009b stays CAB-009b
+// Pack lists:
+//   TEST 2025 ENHANCED crate 1: (6) CAB-005, (2) CAB-005b, (1) CAB-005C, (3) CAB-006a, (1) CAB-006b
+//     → CAB-005=9, CAB-006a=3, CAB-006b=1. No show overlaps it.
+//   ATSC 2025 NAB and GEARFIRE 2025 SHOT (overlapping, 1/10 to 1/31/2025): (1) CAB-005b each
+// Variant checks:
+//   ATSC CAB-005b: 1 declared, 2 needed (ATSC 1 + GEARFIRE 1) → 1 short (red)
+//   TEST ENHANCED CAB-005b: 1 declared, 2 needed → 1 short (red)
+//   TEST ENHANCED unmodified CAB-005: 6 - 1 = 5 available, 9 - 3 variants = 6 needed → 1 short (orange)
+//   TEST ENHANCED CAB-005C: undeclared → a description alert, no variant check
+
+const CAB_005_DESCRIPTION = 'Tall gray storage cabinet\n(1) CAB-005b with locking doors';
+
+test('ITEM VARIANTS', 'resolveItemVariant applies the variant rules', async () => {
+    const items = ['CAB-005', 'CAB-006', 'CAB-006a', 'BX-10Rx39P'];
+    assertEqual(itemVariantBase('CAB-005b'), 'CAB-005', 'lower-case suffix');
+    assertEqual(itemVariantBase('CAB-005B'), 'CAB-005', 'upper-case suffix');
+    assertEqual([itemVariantBase('CAB-005'), itemVariantBase('CAB-005bc'), itemVariantBase('BX-3Rx8_45°')], [null, null, null], 'not variant-shaped');
+    assertEqual([itemVariantKey('CAB-005C'), itemVariantKey('CAB-005b'), itemVariantKey('CAB-005')], ['CAB-005c', 'CAB-005b', null], 'variant keys');
+    assertEqual(resolveItemVariant('CAB-005b', items), 'CAB-005', 'falls back to base');
+    assertEqual(resolveItemVariant('CAB-006a', items), 'CAB-006a', 'a real variant matches itself');
+    assertEqual(resolveItemVariant('CAB-006b', items), 'CAB-006b', 'a family with a real variant does not fall back');
+    assertEqual(resolveItemVariant('CAB-009b', items), 'CAB-009b', 'no base item');
+    assertEqual(resolveItemVariant('BX-10Rx39P', items), 'BX-10Rx39P', 'a real item ending in a letter');
+});
+
+test('ITEM VARIANTS', 'parseItemVariants reads variant lines from a description', async () => {
+    const parsed = parseItemVariants('CAB-004', 'gray cabinet\n(3) CAB-004b with larger top\n(1) CAB-004C with smaller top\nCAB-004d');
+    assertEqual(parsed, {
+        baseDescription: 'gray cabinet',
+        variants: [
+            { key: 'CAB-004b', itemNumber: 'CAB-004b', letter: 'b', quantity: 3, note: 'with larger top', description: 'gray cabinet with larger top' },
+            { key: 'CAB-004c', itemNumber: 'CAB-004C', letter: 'c', quantity: 1, note: 'with smaller top', description: 'gray cabinet with smaller top' },
+            { key: 'CAB-004d', itemNumber: 'CAB-004d', letter: 'd', quantity: null, note: '', description: 'gray cabinet' }
+        ]
+    }, 'three variants');
+    const prose = 'Counter. (4) standoffs on front and top\nsee CAB-004b\n(2) CAB-004bc\n(1) CAB-0045b\n(1) TABLE-001b';
+    assertEqual(parseItemVariants('CAB-004', prose), { baseDescription: prose, variants: [] }, 'no variant lines');
+    assertEqual(parseItemVariants('CAB-004', 'a\n(1) CAB-004b x\n(5) CAB-004B y').variants.map(v => v.quantity), [1], 'first line for a letter wins');
+    assertEqual(parseItemVariants('BX-10Rx39P', 'panel\n(1) BX-10Rx39Pb').variants, [], 'base ending in a letter has no variants');
+    assertEqual(parseItemVariants('CAB-004', ''), { baseDescription: '', variants: [] }, 'empty description');
+});
+
+test('ITEM VARIANTS', 'pack list text extracts the variant base item', async () => {
+    const extract = (text) => Requests.extractItemNumber(text);
+    assertEqual(await extract('(2) CAB-005b Tall gray storage cabinet with locking doors'), 'CAB-005', 'CAB-005b');
+    assertEqual(await extract('(1) CAB-005C Tall gray storage cabinet'), 'CAB-005', 'CAB-005C');
+    assertEqual(await extract('(3) CAB-006a Rolling demo cabinet'), 'CAB-006a', 'CAB-006a');
+    assertEqual(await extract('(1) CAB-006b Rolling demo cabinet'), 'CAB-006b', 'CAB-006b');
+    assertEqual(await extract('(1) CAB-009b Unknown cabinet'), 'CAB-009b', 'CAB-009b');
+    const variant = await Requests.extractCustomItemFromText('(2) CAB-005b with locking doors', ['CABINETS']);
+    assertEqual(variant.itemNumber, null, 'CABINETS is not a custom item number tab');
+});
+
+test('ITEM VARIANTS', 'variant quantities count against the base item', async () => {
+    const rows = await Requests.getItemQuantitiesSummary('TEST 2025 ENHANCED');
+    const quantities = Object.fromEntries(rows.filter(r => r.itemId.startsWith('CAB-')).map(r => [r.itemId, r.quantity]));
+    assertEqual(quantities, { 'CAB-005': 9, 'CAB-006a': 3, 'CAB-006b': 1 }, 'TEST 2025 ENHANCED cabinet quantities');
+});
+
+test('ITEM VARIANTS', 'description matching uses the variant or base description', async () => {
+    const check = (Description) => Requests.checkDescriptionMatch({ 'Extracted Item': 'CAB-005', Description });
+    assertEqual(await check('(1) CAB-005b Tall gray storage cabinet with locking doors'), null, 'declared variant matches its description');
+    assertEqual(await check('(6) CAB-005 Tall gray storage cabinet'), null, 'base line matches the base description without variant lines');
+    const mismatch = await check('(1) CAB-005b red cabinet');
+    assertEqual([mismatch?.type, mismatch?.variant, mismatch?.inventoryDescription], ['description mismatch', 'CAB-005b', 'Tall gray storage cabinet with locking doors'], 'variant mismatch keeps the variant');
+    const undeclared = await check('(1) CAB-005C Tall gray storage cabinet, short top');
+    assertEqual([undeclared?.type, undeclared?.color, undeclared?.message, undeclared?.variant], ['undeclared variant', 'yellow', 'Undeclared variant of CAB-005', 'CAB-005C'], 'undeclared variant');
+});
+
+test('ITEM VARIANTS', 'variant counts are checked against this and overlapping shows', async () => {
+    const level = (Description, show) => Requests.checkVariantLevel({ 'Extracted Item': Description.match(/CAB-00\d/)[0], Description }, show);
+    const pick = (alert) => alert && [alert.type, alert.color, alert.message, alert.remaining, alert.details];
+    assertEqual(pick(await level('(1) CAB-005b Tall gray storage cabinet with locking doors', 'ATSC 2025 NAB')),
+        ['variant shortage', 'red', 'CAB-005b: 1 short', -1, 'CAB-005b: 1 in inventory, 2 needed by this and overlapping shows.\nATSC 2025 NAB: 1\nGEARFIRE 2025 SHOT: 1'],
+        'ATSC CAB-005b with GEARFIRE overlapping');
+    assertEqual(pick(await level('(2) CAB-005b Tall gray storage cabinet with locking doors', 'TEST 2025 ENHANCED')),
+        ['variant shortage', 'red', 'CAB-005b: 1 short', -1, 'CAB-005b: 1 in inventory, 2 needed by this and overlapping shows.\nTEST 2025 ENHANCED: 2'],
+        'TEST ENHANCED CAB-005b');
+    assertEqual(pick(await level('(6) CAB-005 Tall gray storage cabinet', 'TEST 2025 ENHANCED')),
+        ['variant shortage', 'orange', 'Unmodified CAB-005: 1 short', -1, 'Unmodified CAB-005: 5 in inventory, 6 needed by this and overlapping shows.\nTEST 2025 ENHANCED: 6'],
+        'TEST ENHANCED unmodified CAB-005');
+    assertEqual(await level('(1) CAB-005C Tall gray storage cabinet, short top', 'TEST 2025 ENHANCED'), null, 'undeclared variant has no count');
+    assertEqual(await level('(4) CAB-004 Curved-bottom white demo counter', 'ATSC 2025 NAB'), null, 'family without declared variants');
+});
+
+test('ITEM VARIANTS', 'inventory description cards show each declared variant', async () => {
+    const opened = [];
+    const cards = itemVariantCards({ itemNumber: 'CAB-005', quantity: '6', description: CAB_005_DESCRIPTION }, (message, title) => opened.push([message, title]));
+    assertEqual(cards.map(({ action, ...card }) => card), [{ message: 'b', class: 'purple', end: true, title: 'CAB-005b (1 of 6): Tall gray storage cabinet with locking doors' }], 'one card');
+    cards[0].action();
+    assertEqual(opened, [['Tall gray storage cabinet with locking doors', 'CAB-005b (1 of 6)']], 'card opens the variant');
+    assertEqual(itemVariantCards({ itemNumber: 'CAB-004', quantity: '10', description: 'Counter' }, () => {}), [], 'no variants, no cards');
 });
 
 // ── Group 26: Thumbnail Column ────────────────────────────────────────────────
@@ -3943,6 +4045,27 @@ test('INVENTORY TAB PREFERENCES', 'every tab listed for custom item numbers is s
         await setPreference(INVENTORY_TAB_PREFERENCES.customItemNumbers, '["HARDWARE"]');
     }
     assertEqual(await Requests.getTabNameForItem('VUE-V2C-LP'), 'HARDWARE', 'restored');
+});
+
+// Custom item numbers match whole item numbers only, longest first, so custom tabs have no
+// item variants. With CABINETS listed, its rows CAB-006 and CAB-006a are custom item numbers:
+// CAB-006a once matched CAB-006, the earlier row; CAB-006b and CAB-005b matched their bases.
+test('INVENTORY TAB PREFERENCES', 'custom item numbers match whole item numbers only', async () => {
+    const custom = async (text) => {
+        const found = await Requests.extractCustomItemFromText(text);
+        return [found.itemNumber, found.quantity];
+    };
+    assertEqual(await custom('(3) VUE-V2C-LP, spare'), ['VUE-V2C-LP', 3], 'followed by punctuation');
+    assertEqual(await custom('(3) VUE-V2C-LPb connectors'), [null, 1], 'a letter appended is not the item');
+    await setPreference(INVENTORY_TAB_PREFERENCES.customItemNumbers, '["HARDWARE","CABINETS"]');
+    try {
+        assertEqual(await custom('(3) CAB-006a Rolling demo cabinet'), ['CAB-006a', 3], 'longer item number wins');
+        assertEqual(await custom('(1) CAB-006b Rolling demo cabinet'), [null, 1], 'no variant fallback');
+        assertEqual(await Requests.extractItemNumber('(2) CAB-005b Tall gray storage cabinet'), null, 'extraction: no variants in custom tabs');
+        assertEqual(await Requests.extractItemNumber('(3) CAB-006a Rolling demo cabinet'), 'CAB-006a', 'extraction: whole item number');
+    } finally {
+        await setPreference(INVENTORY_TAB_PREFERENCES.customItemNumbers, '["HARDWARE"]');
+    }
 });
 
 // ── App update: an out-of-date session refuses data writes ───────────────────

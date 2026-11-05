@@ -1,4 +1,4 @@
-import { html, Requests, TableComponent, DataView, getReactiveStore, createAnalysisConfig, NavigationRegistry, Priority, invalidateCache, authState, undoRegistry, EditHistoryUtils, todayISOString, ProposalUtils, getInventoryNoteMaxLength, getInventoryTabList, INVENTORY_TAB_PREFERENCES, getShortageAlertsStore, getShortageAlertDays, shortagesByItem, itemShortageCards, THUMBNAIL_FIELD } from '../../index.js';
+import { html, Requests, TableComponent, DataView, getReactiveStore, createAnalysisConfig, NavigationRegistry, Priority, invalidateCache, authState, undoRegistry, EditHistoryUtils, todayISOString, ProposalUtils, getInventoryNoteMaxLength, getInventoryTabList, INVENTORY_TAB_PREFERENCES, getShortageAlertsStore, getShortageAlertDays, shortagesByItem, itemShortageCards, itemVariantCards, THUMBNAIL_FIELD } from '../../index.js';
 import { sheetLockMixin } from '../../utils/sheetLockMixin.js';
 import { thumbnailStyle, iconLabel } from '../../utils/views/viewStyles.js';
 import { CellRenderer } from '../interface/cells.js';
@@ -510,7 +510,7 @@ export const InventoryTableComponent = {
             INVENTORY_DELETED_VIEWS,
             lockNamespace: 'INVENTORY',
             shortageAlertsStore: getShortageAlertsStore(),
-            shortageDecorationKeys: ['itemNumber']
+            itemDecorationKeys: ['itemNumber', 'description']
         };
     },
     computed: {
@@ -731,9 +731,12 @@ export const InventoryTableComponent = {
         this.$notify.clearBanners(this.containerPath);
     },
     methods: {
-        // Decorations (§4.14): a shortage warning on the item number of items that run short
+        // Decorations (§4.14): a shortage warning on the item number of items that run short, and
+        // the variants declared in the description
         itemDecorations(row, key) {
-            if (this.historyMode || key !== 'itemNumber') return [];
+            if (this.historyMode) return [];
+            if (key === 'description') return itemVariantCards(row, (message, title) => this.$modal.alert(message, title));
+            if (key !== 'itemNumber') return [];
             return itemShortageCards(this.shortagesByItem.get(row.itemNumber), getShortageAlertDays());
         },
         onLockAcquireFailed() {
@@ -1199,7 +1202,7 @@ export const InventoryTableComponent = {
                 :registry="registry"
                 :action="timelineAction"
                 :decorations="itemDecorations"
-                :decoration-keys="shortageDecorationKeys"
+                :decoration-keys="itemDecorationKeys"
                 :patches="viewPatches"
                 :edit-mode="editModeName"
                 :title="inventoryName || tabTitle"

@@ -1,4 +1,4 @@
-import { Database, InventoryUtils, ProductionUtils, wrapMethods, INVENTORY_TAB_PREFERENCES, GetParagraphMatchRating, parseDate, toISODateString, EditHistoryUtils, ApplicationUtils, invalidateCache, normalizeHeaderName, ProgressBus, mapWithConcurrency } from '../index.js';
+import { Database, InventoryUtils, ProductionUtils, wrapMethods, INVENTORY_TAB_PREFERENCES, GetParagraphMatchRating, itemVariantBase, resolveItemVariant, itemVariantKey, parseItemVariants, parseDate, toISODateString, EditHistoryUtils, ApplicationUtils, invalidateCache, normalizeHeaderName, ProgressBus, mapWithConcurrency } from '../index.js';
 
 /** Normalize an identifier for loose matching (strips spaces, case, non-alphanumeric) */
 function _normalizeId(v) { return String(v || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, ''); }
@@ -15,7 +15,8 @@ class packListUtils_uncached {
      * Extract item information from text using regex pattern
      * @param {Object} deps - Dependency decorator for tracking calls
      * @param {string} text - Text to search for item information
-     * @returns {Promise<Object>} Object with {quantity: number, itemNumber: string|null, description: string}
+     * @returns {Promise<Object>} Object with {quantity: number, itemNumber: string|null, description: string},
+     *   plus `variant` (the item number as written, e.g. CAB-004b) when it counts as its base item
      */
     static async extractItemFromText(deps, text, ctgFilter = undefined) {
         if (!text || typeof text !== 'string') {
@@ -49,10 +50,13 @@ class packListUtils_uncached {
                         .replace(/\s+/g, ' ')  // Normalize whitespace
                         .trim();               // Remove leading/trailing spaces
                     
+                    const resolved = await deps.call(PackListUtils.resolveVariantItemNumber, itemNumber, tabName);
                     return {
                         quantity: match[1] ? parseInt(match[1], 10) : 1,
-                        itemNumber: itemNumber,
-                        description: description
+                        itemNumber: resolved,
+                        description: description,
+                        // The variant as written (CAB-004b) when it counts as its base item
+                        ...(resolved !== itemNumber ? { variant: itemNumber } : {})
                     };
                 }
             }
@@ -72,6 +76,26 @@ class packListUtils_uncached {
             itemNumber: null,
             description: text
         };
+    }
+
+    /**
+     * The item number a standard item number found in text counts against: a variant's base item
+     * (CAB-004b → CAB-004), by the rules of resolveItemVariant. Only a variant-shaped item number
+     * reads the inventory tab, so other extractions don't depend on inventory edits.
+     * @param {Object} deps - Dependency decorator for tracking calls
+     * @param {string} itemNumber - Standard item number found in text
+     * @param {string} tabName - The item number's inventory tab
+     * @returns {Promise<string>}
+     */
+    static async resolveVariantItemNumber(deps, itemNumber, tabName) {
+        if (!itemVariantBase(itemNumber)) return itemNumber;
+        try {
+            const tabData = await deps.call(InventoryUtils.getInventoryTabData, tabName);
+            return resolveItemVariant(itemNumber, (tabData || []).map(item => item.itemNumber));
+        } catch (error) {
+            console.error(`Error resolving item variant ${itemNumber}:`, error);
+            return itemNumber;
+        }
     }
 
     /**
@@ -107,13 +131,18 @@ class packListUtils_uncached {
                 }
             }
 
+            // Longest first, so a shorter item number never claims a longer one (X-1 in X-1b). The
+            // sort is stable: item numbers of the same length keep preference order.
+            customItemNumbers.sort((a, b) => b.length - a.length);
+
             // Check text for each item number with pattern: (qty) itemNumber
             for (const itemNum of customItemNumbers) {
                 // Escape special regex characters in item number
                 const escapedItemNum = itemNum.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                
-                // Create regex pattern: optional (qty) followed by the item number
-                const pattern = new RegExp(`(?:\\(([0-9]+)\\))?\\s*${escapedItemNum}`, 'i');
+
+                // Create regex pattern: optional (qty) followed by the whole item number, not part
+                // of a longer word (so custom tabs have no item variants: X-1b doesn't match X-1)
+                const pattern = new RegExp(`(?:\\(([0-9]+)\\))?\\s*(?<![0-9A-Za-z_○°])${escapedItemNum}(?![0-9A-Za-z_○°])`, 'i');
                 const match = text.match(pattern);
                 
                 if (match) {
@@ -279,9 +308,11 @@ class packListUtils_uncached {
      * Extracts item quantities from a project's pack list
      * @param {Object} deps - Dependency decorator for tracking calls
      * @param {string} projectIdentifier - The project identifier
+     * @param {string[]} [ctgFilter] - Only these inventory tabs
+     * @param {boolean} [variants] - Count only variant lines, by variant key (itemVariantKey: CAB-004b)
      * @returns {Promise<object>} Map of itemId to quantity
      */
-    static async extractItems(deps, projectIdentifier, ctgFilter = undefined) {
+    static async extractItems(deps, projectIdentifier, ctgFilter = undefined, variants = false) {
         // Get pack list content (array of crate objects with Items arrays)
         const crates = await deps.call(PackListUtils.getContent, projectIdentifier, "Pack");
 
@@ -300,8 +331,9 @@ class packListUtils_uncached {
                         if (key === 'edithistory' || key === 'metadata') continue;
                         if (!cell) continue;
                         const extracted = await deps.call(PackListUtils.extractItemFromText, cell, ctgFilter);
-                        if (extracted.itemNumber) {
-                            itemMap[extracted.itemNumber] = (itemMap[extracted.itemNumber] || 0) + extracted.quantity;
+                        const itemId = variants ? (extracted.variant && itemVariantKey(extracted.variant)) : extracted.itemNumber;
+                        if (itemId) {
+                            itemMap[itemId] = (itemMap[itemId] || 0) + extracted.quantity;
                         }
                     }
                 }
@@ -318,9 +350,10 @@ class packListUtils_uncached {
      * @param {Object} deps
      * @param {string} projectIdentifier - Project identifier
      * @param {string|undefined} ctgFilter - Optional item category filter
+     * @param {boolean} [variants] - Variant lines only (see extractItems)
      * @returns {Promise<Object>} Aggregated item map { itemId: totalQuantity }
      */
-    static async extractAllItemsForShow(deps, projectIdentifier, ctgFilter = undefined) {
+    static async extractAllItemsForShow(deps, projectIdentifier, ctgFilter = undefined, variants = false) {
         const allTabs = await deps.call(Database.getTabs, 'PACK_LISTS');
         const validTabs = allTabs.filter(tab => tab.title !== '_TEMPLATE' && !tab.title.startsWith('_'));
         const matchingTabs = await deps.call(ProductionUtils.findAllPackListTabsForShow, projectIdentifier, validTabs);
@@ -331,7 +364,7 @@ class packListUtils_uncached {
 
         const itemMap = {};
         for (const tab of matchingTabs) {
-            const tabItems = await deps.call(PackListUtils.extractItems, tab.title, ctgFilter);
+            const tabItems = await deps.call(PackListUtils.extractItems, tab.title, ctgFilter, ...(variants ? [true] : []));
             for (const [itemId, qty] of Object.entries(tabItems)) {
                 itemMap[itemId] = (itemMap[itemId] || 0) + qty;
             }
@@ -341,7 +374,8 @@ class packListUtils_uncached {
 
     // Walks the transship chain from identifier as root, returning max(qty) per item
     // across all chain members. Accepts either a canonical schedule id or a packlist tab title.
-    static async extractChainItemsForIdentifier(deps, identifier, ctgFilter = undefined) {
+    // variants: variant lines only (see extractItems).
+    static async extractChainItemsForIdentifier(deps, identifier, ctgFilter = undefined, variants = false) {
         const combined = {};
         const visited = new Set();
         let current = identifier;
@@ -358,7 +392,7 @@ class packListUtils_uncached {
                 const nodeItems = {};
                 const tabIds = matchingTabs.length ? matchingTabs.map(t => t.title) : [current];
                 for (const tabId of tabIds) {
-                    const tabItems = await deps.call(PackListUtils.extractAllItemsForShow, tabId, ctgFilter);
+                    const tabItems = await deps.call(PackListUtils.extractAllItemsForShow, tabId, ctgFilter, ...(variants ? [true] : []));
                     for (const [itemId, qty] of Object.entries(tabItems)) {
                         nodeItems[itemId] = (nodeItems[itemId] || 0) + qty;
                     }
@@ -546,7 +580,10 @@ class packListUtils_uncached {
      * @param {Object} deps - Dependency decorator for tracking calls
      * @param {string} itemNumber - The item number to look up in inventory
      * @param {string} description - The current item description to compare
-     * @returns {Promise<Object|null>} Comparison result with score and descriptions, or null if no comparison possible
+     * @returns {Promise<Object|null>} Comparison result with score and descriptions, or null if no comparison possible.
+     *   A variant line (CAB-004b) compares with its variant's description (parseItemVariants) and
+     *   carries `variant`; a variant the inventory description doesn't declare returns `undeclared: true`.
+     *   Other lines compare with the base description, without the variant lines.
      */
     static async checkDescriptionMatch(deps, itemNumber, description) {
         if (!itemNumber || !description) {
@@ -568,8 +605,18 @@ class packListUtils_uncached {
             // Extract clean descriptions using cached extraction functions
             // This removes item codes and quantities from both descriptions
             const packlistExtracted = await deps.call(PackListUtils.extractItemFromText, description);
-            const inventoryExtracted = await deps.call(PackListUtils.extractItemFromText, inventoryDescription);
-            
+            const { baseDescription, variants } = parseItemVariants(itemNumber, inventoryDescription);
+            const variant = packlistExtracted.variant || null;
+            let target = baseDescription;
+            if (variant) {
+                const declared = variants.find(entry => entry.key === itemVariantKey(variant));
+                if (!declared) {
+                    return { itemNumber, variant, inventoryFound: true, undeclared: true, score: 0 };
+                }
+                target = declared.description;
+            }
+            const inventoryExtracted = await deps.call(PackListUtils.extractItemFromText, target);
+
             const cleanPacklistDesc = packlistExtracted.description;
             const cleanInventoryDesc = inventoryExtracted.description;
 
@@ -578,6 +625,7 @@ class packListUtils_uncached {
 
             return {
                 itemNumber,
+                ...(variant ? { variant } : {}),
                 inventoryFound: true,
                 score: matchScore,
                 packlistDescription: cleanPacklistDesc,
@@ -636,13 +684,14 @@ class packListUtils_uncached {
     }
 
     /**
-     * Get overlapping projects that use a specific item
+     * The chain items of every show that overlaps a project, excluding the project itself, its
+     * transship source and transship destinations (their items are in their chain root's items).
      * @param {Object} deps - Dependency decorator for tracking calls
      * @param {string} currentProjectId - Current project identifier
-     * @param {string} itemId - Item ID to check for conflicts
-     * @returns {Promise<Array<string>>} Array of overlapping project identifiers that use this item
+     * @param {boolean} [variants] - Variant lines only (see extractItems)
+     * @returns {Promise<Array<{show: string, items: Object}>>} Canonical show identifier and its chain items
      */
-    static async getItemOverlappingPacklists(deps, currentProjectId, itemId) {
+    static async getOverlappingShowItems(deps, currentProjectId, variants = false) {
         // Resolve currentProjectId to canonical schedule identifier — handles NameOverride tab titles
         const currentRow = await deps.call(ProductionUtils.getShowDetails, currentProjectId);
         const currentScheduleId = currentRow
@@ -656,38 +705,112 @@ class packListUtils_uncached {
                 { column: 'Ship', value: currentProjectId, type: 'before' }
             ]
         });
-        
+
         // Deduplicate to prevent listing the same show multiple times
         overlappingProjects = await deps.call(ProductionUtils.deduplicateScheduleByShow, overlappingProjects);
-        
+
         // Identify transship source so it is not listed as conflicting demand
         const transshipSourceId = await deps.call(ProductionUtils.getTransshipSourceForShow, currentScheduleId);
 
-        const conflictingShows = [];
-        
-        // Check each overlapping project to see if it uses this item
+        const shows = [];
         for (const projectRow of overlappingProjects) {
             // Derive canonical schedule identifier — ScheduleOverrides stores canonical ids, not tab titles
             const scheduleProjectId = await deps.call(ProductionUtils.getCanonicalIdentifierForScheduleRow, projectRow);
             if (!scheduleProjectId) continue;
-            
+
             if (_normalizeId(scheduleProjectId) === _normalizeId(currentScheduleId)) continue;
             if (transshipSourceId && _normalizeId(scheduleProjectId) === _normalizeId(transshipSourceId)) continue;
             // Skip transship destinations — their items are already covered by the chain root's chain items
             const isDestination = await deps.call(ProductionUtils.getTransshipSourceForShow, scheduleProjectId);
             if (isDestination) continue;
-            
+
             try {
-                const projectItems = await deps.call(PackListUtils.extractChainItemsForIdentifier, scheduleProjectId);
-                if (projectItems[itemId] && projectItems[itemId] > 0) {
-                    conflictingShows.push(scheduleProjectId);
-                }
+                const items = await deps.call(PackListUtils.extractChainItemsForIdentifier, scheduleProjectId, undefined, ...(variants ? [true] : []));
+                shows.push({ show: scheduleProjectId, items });
             } catch (e) {
                 // Ignore projects that can't be loaded
             }
         }
-        
-        return conflictingShows;
+        return shows;
+    }
+
+    /**
+     * Get overlapping projects that use a specific item
+     * @param {Object} deps - Dependency decorator for tracking calls
+     * @param {string} currentProjectId - Current project identifier
+     * @param {string} itemId - Item ID to check for conflicts
+     * @returns {Promise<Array<string>>} Array of overlapping project identifiers that use this item
+     */
+    static async getItemOverlappingPacklists(deps, currentProjectId, itemId) {
+        const shows = await deps.call(PackListUtils.getOverlappingShowItems, currentProjectId);
+        return shows.filter(entry => entry.items[itemId] > 0).map(entry => entry.show);
+    }
+
+    /**
+     * Variant quantities for one pack list line, against this show's and the overlapping shows'
+     * demand. Variant counts are the counts declared in the base item's inventory description
+     * (parseItemVariants); the base item's quantity includes them.
+     * - A declared variant line (CAB-004b) checks that variant's demand against its count.
+     * - A base line (CAB-004) of a family with counted variants checks the unmodified pieces: the
+     *   base demand less every variant's demand, against the quantity less the variant counts.
+     * Null for other lines, and for variants without a count or not declared.
+     * @param {Object} deps - Dependency decorator for tracking calls
+     * @param {string} text - The pack list line
+     * @param {string} currentProjectId - Current project identifier
+     * @returns {Promise<{kind: 'variant'|'unmodified', itemNumber: string, available: number, needed: number, remaining: number, shows: Array<{show: string, quantity: number}>}|null>}
+     */
+    static async checkVariantLevel(deps, text, currentProjectId) {
+        if (!text || !currentProjectId) return null;
+        const extracted = await deps.call(PackListUtils.extractItemFromText, text);
+        const base = extracted.itemNumber;
+        if (!base) return null;
+        const today = await deps.call(ApplicationUtils.getToday);
+        const description = await deps.call(InventoryUtils.getItemDescription, base, today);
+        const counted = parseItemVariants(base, description).variants.filter(variant => variant.quantity !== null);
+        if (!counted.length) return null;
+
+        let kind, itemNumber, available, demandOf;
+        if (extracted.variant) {
+            const key = itemVariantKey(extracted.variant);
+            const declared = counted.find(variant => variant.key === key);
+            if (!declared) return null;
+            kind = 'variant';
+            itemNumber = declared.itemNumber;
+            available = declared.quantity;
+            demandOf = (show) => show.variants[key] || 0;
+        } else {
+            const shipDate = await deps.call(ProductionUtils.getProjectShipDate, currentProjectId);
+            const quantity = await deps.call(PackListUtils.getItemInventoryQuantity, base, shipDate || today);
+            if (quantity === null || isNaN(quantity)) return null;
+            kind = 'unmodified';
+            itemNumber = base;
+            available = quantity - counted.reduce((sum, variant) => sum + variant.quantity, 0);
+            const variantDemand = (show) => Object.entries(show.variants)
+                .filter(([key]) => itemVariantBase(key) === base)
+                .reduce((sum, [, qty]) => sum + qty, 0);
+            demandOf = (show) => Math.max(0, (show.items[base] || 0) - variantDemand(show));
+        }
+
+        // This show's chain, then each overlapping show's chain
+        const overlapping = await deps.call(PackListUtils.getOverlappingShowItems, currentProjectId);
+        const overlappingVariants = await deps.call(PackListUtils.getOverlappingShowItems, currentProjectId, true);
+        const shows = [
+            {
+                show: currentProjectId,
+                items: await deps.call(PackListUtils.extractChainItemsForIdentifier, currentProjectId),
+                variants: await deps.call(PackListUtils.extractChainItemsForIdentifier, currentProjectId, undefined, true)
+            },
+            ...overlapping.map(entry => ({
+                show: entry.show,
+                items: entry.items,
+                variants: overlappingVariants.find(other => other.show === entry.show)?.items || {}
+            }))
+        ];
+        const demand = shows
+            .map(show => ({ show: show.show, quantity: demandOf(show) }))
+            .filter(entry => entry.quantity > 0);
+        const needed = demand.reduce((sum, entry) => sum + entry.quantity, 0);
+        return { kind, itemNumber, available, needed, remaining: available - needed, shows: demand };
     }
 
     /**

@@ -383,8 +383,9 @@ export const CellRenderer = {
 };
 
 /**
- * Decoration cards (§4.14): { message (HTML), class|color, title|hoverMessage, action, disabled, button }.
+ * Decoration cards (§4.14): { message (HTML), class|color, title|hoverMessage, action, disabled, button, end }.
  * `button: true` renders a <button> (e.g. "View Packlist"); otherwise a div/span card.
+ * `end: true` floats the card to the end of its cell or detail value.
  */
 export const DecorationCards = {
     name: 'DecorationCards',
@@ -394,7 +395,7 @@ export const DecorationCards = {
     },
     methods: {
         cardClass(card) {
-            return ['card', card.class || card.color || '', { clickable: !!card.action && !card.disabled }];
+            return ['card', card.class || card.color || '', { clickable: !!card.action && !card.disabled, 'card-end': !!card.end }];
         },
         activate(card) {
             if (card.action && !card.disabled) card.action();

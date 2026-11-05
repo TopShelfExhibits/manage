@@ -1,6 +1,7 @@
 import { html, TableComponent, DataView, Requests, getReactiveStore, NavigationRegistry, createAnalysisConfig, invalidateCache, Priority, tableRowSelectionState, EditHistoryUtils, authState, undoRegistry, todayISOString, getAutoColorClass, getInventoryTabList, INVENTORY_TAB_PREFERENCES, THUMBNAIL_FIELD } from '../../index.js';
 import { resolveView } from '../../utils/views/resolveView.js';
 import { thumbnailStyle } from '../../utils/views/viewStyles.js';
+import { escapeHtml } from '../../utils/views/fieldFormat.js';
 import { sheetLockMixin } from '../../utils/sheetLockMixin.js';
 import { packlistIndexResolutionMixin } from '../interface/IndexResolutionModal.js';
 
@@ -561,6 +562,20 @@ export const PacklistTable = {
                     false // nonessential
                 ),
 
+                // Check declared variant counts (inventory description) against this and overlapping shows
+                createAnalysisConfig(
+                    Requests.checkVariantLevel,
+                    'variantAlert',
+                    'Checking variant quantities...',
+                    ['Description', 'Packing/shop notes'],
+                    [this.tabName],
+                    null,
+                    true, // passFullItem
+                    Priority.ANALYSIS,
+                    false,
+                    false // nonessential
+                ),
+
                 // Check edit history source flow and flag rows changed in CAD after prior web/app edits
                 createAnalysisConfig(
                     Requests.checkCadSourceHistory,
@@ -1110,7 +1125,10 @@ export const PacklistTable = {
          */
         handleAlertClick(item, alertKey, alert) {
             // Handle different types of alerts
-            if (alertKey === 'descriptionAlert' || alert.type === 'description mismatch') {
+            if (alert.details) {
+                // Variant alerts explain themselves
+                this.$modal.alert(escapeHtml(alert.details), alert.message);
+            } else if (alertKey === 'descriptionAlert' || alert.type === 'description mismatch') {
                 this.showDescriptionMismatchModal(item, alert);
             } else if (alertKey === 'inventoryAlert' || ['item shortage', 'item warning', 'low-inventory'].includes(alert.type)) {
                 this.navigateToInventoryDetails(item);
@@ -1227,7 +1245,8 @@ export const PacklistTable = {
          * @param {Object} alert - The alert data
          */
         showDescriptionMismatchModal(item, alert) {
-            const itemNumber = item['Extracted Item'] || 'Unknown';
+            // A variant line keeps its variant (CAB-004b) when its description is updated
+            const itemNumber = alert.variant || item['Extracted Item'] || 'Unknown';
             const extractedQty = item['Extracted Qty'] || '1';
             const matchPercentage = alert.score ? Math.round(alert.score * 100) : 0;
             const inventoryDescription = alert.inventoryDescription || 'N/A';

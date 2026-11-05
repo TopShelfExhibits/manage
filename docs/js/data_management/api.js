@@ -898,6 +898,18 @@ class Requests_uncached {
             };
         }
 
+        // A variant the base item's inventory description doesn't declare (it still counts as the base item)
+        if (result.undeclared) {
+            return {
+                type: 'undeclared variant',
+                color: 'yellow',
+                clickable: true,
+                message: `Undeclared variant of ${itemNumber}`,
+                variant: result.variant,
+                details: `${result.variant} counts as ${itemNumber}. To describe it, add a line to ${itemNumber}'s inventory description, such as:\n(1) ${result.variant} with ...`
+            };
+        }
+
         const color = result.score < 0.5 ? 'purple' : 'white';
 
         // Return alert if match is less than 100%
@@ -909,11 +921,62 @@ class Requests_uncached {
                 message: `Description mismatch`,
                 score: result.score,
                 packlistDescription: result.packlistDescription,
-                inventoryDescription: result.inventoryDescription
+                inventoryDescription: result.inventoryDescription,
+                ...(result.variant ? { variant: result.variant } : {})
             };
         }
-        
+
         // Good match, no alert needed
+        return null;
+    }
+
+    /**
+     * Check a pack list line's variant quantities (PackListUtils.checkVariantLevel) and return an
+     * alert: a declared variant that runs short or has no spare, or a base line whose unmodified
+     * pieces run short (a soft warning). Tabs in InventorySuppressCategoryAnalysis are skipped.
+     * @param {Object} deps - Dependency decorator for tracking calls
+     * @param {Object} item - Item object from packlist
+     * @param {string} currentProjectId - Current project identifier
+     * @returns {Promise<Object|null>} Alert object, or null
+     */
+    static async checkVariantLevel(deps, item, currentProjectId) {
+        const itemNumber = item['Extracted Item'];
+        const text = item.Description || item['Packing/shop notes'] || '';
+        if (!itemNumber || !text || !currentProjectId) return null;
+
+        const tab = await deps.call(InventoryUtils.getTabNameForItem, itemNumber);
+        const skippedTabs = await deps.call(InventoryUtils.getPreferenceTabs, INVENTORY_TAB_PREFERENCES.skipAnalysis);
+        if (tab && skippedTabs.includes(tab)) return null;
+
+        const level = await deps.call(PackListUtils.checkVariantLevel, text, currentProjectId);
+        if (!level) return null;
+        const { kind, remaining } = level;
+        const name = kind === 'variant' ? level.itemNumber : `Unmodified ${level.itemNumber}`;
+        const details = [
+            `${name}: ${level.available} in inventory, ${level.needed} needed by this and overlapping shows.`,
+            ...level.shows.map(entry => `${entry.show}: ${entry.quantity}`)
+        ].join('\n');
+
+        if (remaining < 0) {
+            return {
+                type: 'variant shortage',
+                color: kind === 'variant' ? 'red' : 'orange',
+                clickable: true,
+                message: `${name}: ${-remaining} short`,
+                details,
+                remaining
+            };
+        }
+        if (kind === 'variant' && remaining < 1) {
+            return {
+                type: 'variant shortage',
+                color: 'orange',
+                clickable: true,
+                message: `${name}: no buffer`,
+                details,
+                remaining
+            };
+        }
         return null;
     }
 

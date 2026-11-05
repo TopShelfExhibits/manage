@@ -441,6 +441,11 @@ td .card, .detail-item > span .card {
 td span:not(:empty):has(+ .card), .detail-item > span span:not(:empty):has(+ .card) {
     margin-right:var(--padding-sm);
 }
+/* A decoration card with end: true (DecorationCards) sits at the end of its cell */
+td .card-end, .detail-item > span .card-end {
+    float: right;
+    margin-left: var(--padding-sm);
+}
 
 .card:only-child,
 .card:first-child,
