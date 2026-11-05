@@ -14,12 +14,12 @@ export function iconLabel(symbol) {
  * A thumbnail column's look: an icon header, a narrow column and the image size. The cell itself
  * follows the field's data type ('thumbnail'), and editing follows the page's edit mode and the
  * field's `editable`. `itemKey` names the row key holding the item number (for the category image
- * and the upload's file name).
+ * and the upload's file name); `options` adds cell options (e.g. savedKey, see ThumbnailCell).
  */
-export function thumbnailStyle(itemKey, size = 48) {
+export function thumbnailStyle(itemKey, size = 48, options = {}) {
     return {
         width: 1,
         labelHtml: iconLabel('imagesmode'),
-        cellOptions: { itemKey, size }
+        cellOptions: { itemKey, size, ...options }
     };
 }

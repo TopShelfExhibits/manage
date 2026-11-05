@@ -4527,6 +4527,7 @@ export const TableComponent = {
                                             :commit="(value) => commitCellValue(idx, column, value)"
                                             :disabled="cellDisabledReason(row, column)"
                                             :row-action="column.cell === 'action' ? rowActionFor(row, idx) : null"
+                                            :original="batchEdits.originalValue(row, idx, column.key)"
                                             :cell-scope="{ rowIndex: idx, onInnerTableDirty: (isDirty) => batchEdits.setNested(idx, column.key, isDirty) }"
                                         />
                                         <span v-else v-html="highlightSearchText(row[column.key], column)"></span>

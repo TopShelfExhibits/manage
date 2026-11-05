@@ -1,11 +1,14 @@
 import { Requests, getReactiveStore, appSettings } from '../index.js';
+import { thumbnailKey } from '../../data_management/utils/thumbnail-values.js';
 
 /**
  * Thumbnail image cache (thumbnail cells, components/interface/thumbnails.js).
  *
- * Which file an item shows is data: its Thumbnail cell (a JSON array of Drive file IDs, see
- * thumbnail-values.js), or else its category image from the inventory INDEX. This module only
- * turns a file ID into a displayable image, and supplies the category images.
+ * Which file an item shows is data: its Thumbnail cell (a gallery of Drive files, each optionally
+ * cropped, see thumbnail-values.js), or else its category image from the inventory INDEX. This
+ * module only turns a file (and its crop) into a displayable image, and supplies the category
+ * images. Images are keyed by file and crop (thumbnailKey): a crop is applied to the downloaded
+ * file before downscaling, never to the file in Drive.
  *
  * Pipeline:
  *   1. A file is fetched only when a component asks for it (i.e. it scrolled into view).
@@ -28,14 +31,14 @@ const TOUCH_INTERVAL_MS = 24 * 60 * 60 * 1000;          // Refresh a stored thum
 const DB_NAME = 'tsli-thumbnails';
 const DB_STORE = 'thumbnails';
 
-const _urls = new Map();        // fileId → object URL (owned here; components must never revoke these)
-const _jobs = new Map();        // fileId → in-flight job
+const _urls = new Map();        // image key → object URL (owned here; components must never revoke these)
+const _jobs = new Map();        // image key → in-flight job
 const _queue = [];              // jobs waiting for a download slot (FIFO)
 const _failedAt = new Map();    // fileId → time of last failed download
 let _activeDownloads = 0;
 
 let _categoryStore = null;
-let _categoryIndex = null;      // Vue computed: Map<prefix, fileId>
+let _categoryIndex = null;      // Vue computed: Map<prefix, thumbnail value>
 let _pruneScheduled = false;
 
 function normalizeItemNumber(value) {
@@ -57,19 +60,19 @@ function getCategoryStore() {
         true    // exemptFromEviction — every thumbnail cell may fall back to it
     );
     if (!_categoryIndex) {
-        _categoryIndex = Vue.computed(() => new Map((_categoryStore.data || []).map(entry => [entry.prefix, entry.file])));
+        _categoryIndex = Vue.computed(() => new Map((_categoryStore.data || []).map(entry => [entry.prefix, entry.thumbnail])));
     }
     return _categoryStore;
 }
 
 // ─── Downloads ───────────────────────────────────────────────────────────────
 
-function createJob(fileId) {
-    const job = { fileId, waiters: 0, started: false, resolve: null, promise: null };
+function createJob(key, fileId, crop) {
+    const job = { key, fileId, crop, waiters: 0, started: false, resolve: null, promise: null };
     job.promise = new Promise(resolve => { job.resolve = resolve; });
-    _jobs.set(fileId, job);
+    _jobs.set(key, job);
 
-    readStoredThumbnail(fileId).then(blob => {
+    readStoredThumbnail(key).then(blob => {
         if (blob) {
             finishJob(job, blob);
         } else if (job.waiters <= 0 || appSettings.onlyRunEssentialAnalysis) {
@@ -89,7 +92,7 @@ function pumpDownloads() {
         const job = _queue.shift();
         job.started = true;
         _activeDownloads++;
-        downloadThumbnail(job.fileId)
+        downloadThumbnail(job)
             .then(blob => finishJob(job, blob))
             .finally(() => {
                 _activeDownloads--;
@@ -98,15 +101,15 @@ function pumpDownloads() {
     }
 }
 
-async function downloadThumbnail(fileId) {
+async function downloadThumbnail({ key, fileId, crop }) {
     try {
         const original = await Requests.getDriveFileBlob(fileId);
         if (!original) {
             _failedAt.set(fileId, Date.now());
             return null;
         }
-        const thumbnail = await downscaleImage(original);
-        storeThumbnail(fileId, thumbnail);
+        const thumbnail = await renderImage(original, { crop });
+        storeThumbnail(key, thumbnail);
         return thumbnail;
     } catch (err) {
         console.warn(`[icons] Thumbnail download failed for ${fileId}:`, err);
@@ -116,23 +119,26 @@ async function downloadThumbnail(fileId) {
 }
 
 function finishJob(job, blob) {
-    _jobs.delete(job.fileId);
+    _jobs.delete(job.key);
     let url = null;
     if (blob) {
         url = URL.createObjectURL(blob);
-        _urls.set(job.fileId, url);
+        _urls.set(job.key, url);
         _failedAt.delete(job.fileId);
     }
     job.resolve(url);
 }
 
 /**
- * Downscale an image blob to fit within THUMB_MAX_DIM × THUMB_MAX_DIM.
- * Decoding and resizing go through createImageBitmap, which runs off the main thread in Chromium.
- * Returns the original blob if it is already small or can't be decoded here (the <img> may still
- * manage, e.g. SVG).
+ * Render an image blob for display: apply a crop (fractions of the image, see thumbnail-values.js)
+ * and downscale to fit within maxDim × maxDim. Decoding, cropping and resizing go through
+ * createImageBitmap, which runs off the main thread in Chromium. Returns the original blob when
+ * there is nothing to do or it can't be decoded here (the <img> may still manage, e.g. SVG).
+ * @param {Blob} blob
+ * @param {{ crop?: {x,y,w,h}|null, maxDim?: number }} [options] maxDim defaults to the thumbnail size
+ * @returns {Promise<Blob>}
  */
-async function downscaleImage(blob) {
+export async function renderImage(blob, { crop = null, maxDim = THUMB_MAX_DIM } = {}) {
     if (typeof createImageBitmap !== 'function') return blob;
     let bitmap;
     try {
@@ -141,23 +147,29 @@ async function downscaleImage(blob) {
         return blob;
     }
     try {
-        const scale = THUMB_MAX_DIM / Math.max(bitmap.width, bitmap.height);
-        if (scale >= 1) return blob;
-        const width = Math.max(1, Math.round(bitmap.width * scale));
-        const height = Math.max(1, Math.round(bitmap.height * scale));
+        const sx = crop ? Math.round(crop.x * bitmap.width) : 0;
+        const sy = crop ? Math.round(crop.y * bitmap.height) : 0;
+        const sw = crop ? Math.max(1, Math.round(crop.w * bitmap.width)) : bitmap.width;
+        const sh = crop ? Math.max(1, Math.round(crop.h * bitmap.height)) : bitmap.height;
+        const scale = Math.min(1, maxDim / Math.max(sw, sh));
+        if (!crop && scale >= 1) return blob;
+        const width = Math.max(1, Math.round(sw * scale));
+        const height = Math.max(1, Math.round(sh * scale));
 
-        // Resize off-thread where supported; otherwise let the canvas scale it.
+        // Crop and resize off-thread where supported; otherwise let the canvas do it.
         let source = bitmap;
+        let region = [sx, sy, sw, sh];
         try {
-            source = await createImageBitmap(bitmap, { resizeWidth: width, resizeHeight: height, resizeQuality: 'high' });
-        } catch { /* fall back to drawImage scaling */ }
+            source = await createImageBitmap(bitmap, sx, sy, sw, sh, { resizeWidth: width, resizeHeight: height, resizeQuality: 'high' });
+            region = [0, 0, width, height];
+        } catch { /* fall back to drawImage cropping and scaling */ }
 
         const canvas = typeof OffscreenCanvas === 'function'
             ? new OffscreenCanvas(width, height)
             : Object.assign(document.createElement('canvas'), { width, height });
         const ctx = canvas.getContext('2d');
         ctx.imageSmoothingQuality = 'high';
-        ctx.drawImage(source, 0, 0, width, height);
+        ctx.drawImage(source, ...region, 0, 0, width, height);
         if (source !== bitmap) source.close();
 
         // WebP keeps transparency (product cutouts) at a fraction of PNG size.
@@ -167,7 +179,7 @@ async function downscaleImage(blob) {
             : await new Promise(resolve => canvas.toBlob(resolve, 'image/webp', 0.85));
         return resized || blob;
     } catch (err) {
-        console.warn('[icons] Thumbnail downscale failed, using original:', err);
+        console.warn('[icons] Image render failed, using original:', err);
         return blob;
     } finally {
         bitmap.close();
@@ -214,20 +226,20 @@ async function withStore(mode, fn) {
 }
 
 // Stored entries are { blob, t } (t: last use); entries from before ages were kept are bare Blobs.
-async function readStoredThumbnail(fileId) {
-    const result = await withStore('readonly', store => store.get(fileId));
+async function readStoredThumbnail(key) {
+    const result = await withStore('readonly', store => store.get(key));
     const blob = result instanceof Blob ? result : (result?.blob instanceof Blob ? result.blob : null);
     // Keep used thumbnails young (at most one write per day per file)
-    if (blob && !(Date.now() - (result.t || 0) < TOUCH_INTERVAL_MS)) storeThumbnail(fileId, blob);
+    if (blob && !(Date.now() - (result.t || 0) < TOUCH_INTERVAL_MS)) storeThumbnail(key, blob);
     return blob;
 }
 
-function storeThumbnail(fileId, blob) {
-    withStore('readwrite', store => store.put({ blob, t: Date.now() }, fileId));
+function storeThumbnail(key, blob) {
+    withStore('readwrite', store => store.put({ blob, t: Date.now() }, key));
 }
 
-function deleteStoredThumbnail(fileId) {
-    withStore('readwrite', store => store.delete(fileId));
+function deleteStoredThumbnail(key) {
+    withStore('readwrite', store => store.delete(key));
 }
 
 function schedulePrune() {
@@ -283,7 +295,7 @@ export const ThumbnailCache = {
     /**
      * The category image for an item without one of its own: the INDEX Thumbnail of its prefix
      * (e.g. "CHAIR" for "CHAIR-001"). Reactive on the index.
-     * @returns {string|null} Drive file ID
+     * @returns {string|null} a thumbnail value (its primary image: file and crop)
      */
     categoryFallback(itemNumber) {
         const key = normalizeItemNumber(itemNumber);
@@ -293,29 +305,30 @@ export const ThumbnailCache = {
     },
 
     /** Synchronous memory lookup — lets already-loaded images render without a placeholder frame. */
-    peek(fileId) {
-        return _urls.get(fileId) || null;
+    peek(fileId, crop = null) {
+        return _urls.get(thumbnailKey(fileId, crop)) || null;
     },
 
     /**
-     * Get a displayable URL for a file, fetching it if needed. Concurrent requests share one job.
-     * Pair every call that hasn't resolved yet with cancel() when the requester goes away.
+     * Get a displayable URL for a file (with its crop), fetching it if needed. Concurrent requests
+     * share one job. Pair every call that hasn't resolved yet with cancel() when the requester goes away.
      * @returns {Promise<string|null>} Object URL, or null if unavailable
      */
-    load(fileId) {
+    load(fileId, crop = null) {
         if (!fileId) return Promise.resolve(null);
-        const cached = _urls.get(fileId);
+        const key = thumbnailKey(fileId, crop);
+        const cached = _urls.get(key);
         if (cached) return Promise.resolve(cached);
         const failedAt = _failedAt.get(fileId);
         if (failedAt && Date.now() - failedAt < FAILURE_RETRY_MS) return Promise.resolve(null);
-        const job = _jobs.get(fileId) || createJob(fileId);
+        const job = _jobs.get(key) || createJob(key, fileId, crop);
         job.waiters++;
         return job.promise;
     },
 
     /** Withdraw a pending load() request. Drops the download if nobody else is waiting and it hasn't started. */
-    cancel(fileId) {
-        const job = _jobs.get(fileId);
+    cancel(fileId, crop = null) {
+        const job = _jobs.get(thumbnailKey(fileId, crop));
         if (!job) return;
         job.waiters--;
         if (job.waiters > 0 || job.started) return;
@@ -328,28 +341,33 @@ export const ThumbnailCache = {
     },
 
     /**
-     * Add an image the app already has (a fresh upload) under its Drive file ID, so neither this
-     * session nor the next one downloads it back from Drive.
+     * Add an image the app already has (a fresh upload, or a full-size file just cropped) under its
+     * file and crop, so neither this session nor the next one downloads it back from Drive.
+     * @param {string} fileId
+     * @param {Blob} blob - The whole file (the crop is applied here)
+     * @param {Object|null} [crop]
      * @returns {Promise<string|null>} Object URL for the stored thumbnail
      */
-    async seed(fileId, blob) {
+    async seed(fileId, blob, crop = null) {
         if (!fileId || !blob) return null;
-        const cached = _urls.get(fileId);
+        const key = thumbnailKey(fileId, crop);
+        const cached = _urls.get(key);
         if (cached) return cached;
-        const thumbnail = await downscaleImage(blob);
-        storeThumbnail(fileId, thumbnail);
-        if (!_urls.has(fileId)) {
-            _urls.set(fileId, URL.createObjectURL(thumbnail));
+        const thumbnail = await renderImage(blob, { crop });
+        storeThumbnail(key, thumbnail);
+        if (!_urls.has(key)) {
+            _urls.set(key, URL.createObjectURL(thumbnail));
             _failedAt.delete(fileId);
         }
-        return _urls.get(fileId);
+        return _urls.get(key);
     },
 
-    /** Forget a file whose image failed to decode so the next load() downloads it fresh. */
-    discard(fileId) {
-        _urls.delete(fileId);
+    /** Forget an image that failed to decode so the next load() downloads it fresh. */
+    discard(fileId, crop = null) {
+        const key = thumbnailKey(fileId, crop);
+        _urls.delete(key);
         _failedAt.delete(fileId);
-        deleteStoredThumbnail(fileId);
+        deleteStoredThumbnail(key);
     },
 
     observeVisibility(el, callback) {

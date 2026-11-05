@@ -1,4 +1,4 @@
-import { Database, ProductionUtils, PackListUtils, wrapMethods, PREFERENCES_MAPPING, INVENTORY_TAB_PREFERENCES, resolveInventoryTabList, parseDate, toISODateString, searchFilter, todayISOString, startOfTodayMs, offsetToISO, ApplicationUtils, invalidateCache, EditHistoryUtils, DEFAULT_INVENTORY_NOTE_MAX_LENGTH, firstThumbnail, MAX_HISTORY_ENTRIES } from '../index.js';
+import { Database, ProductionUtils, PackListUtils, wrapMethods, PREFERENCES_MAPPING, INVENTORY_TAB_PREFERENCES, resolveInventoryTabList, parseDate, toISODateString, searchFilter, todayISOString, startOfTodayMs, offsetToISO, ApplicationUtils, invalidateCache, EditHistoryUtils, DEFAULT_INVENTORY_NOTE_MAX_LENGTH, MAX_HISTORY_ENTRIES, primaryThumbnailValue } from '../index.js';
 
 /** Normalize an identifier for loose matching (strips spaces, case, non-alphanumeric) */
 function _normalizeId(v) { return String(v || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, ''); }
@@ -71,15 +71,16 @@ class inventoryUtils_uncached {
     }
 
     /**
-     * Category images: [{ prefix, file }], the first file ID of each prefix's index Thumbnail
-     * cell. Items of that prefix without an image of their own show it (thumbnail cell fallback).
-     * @returns {Promise<Array<{prefix: string, file: string}>>}
+     * Category images: [{ prefix, thumbnail }], the primary image of each prefix's index Thumbnail
+     * cell (a thumbnail value: file and crop). Items of that prefix without an image of their own
+     * show it (thumbnail cell fallback).
+     * @returns {Promise<Array<{prefix: string, thumbnail: string}>>}
      */
     static async getCategoryThumbnails(deps) {
         const index = await deps.call(InventoryUtils.getInventoryIndex);
         return index
-            .map(row => ({ prefix: String(row.prefix ?? '').trim(), file: firstThumbnail(row.thumbnail) }))
-            .filter(entry => entry.prefix && entry.file);
+            .map(row => ({ prefix: String(row.prefix ?? '').trim(), thumbnail: primaryThumbnailValue(row.thumbnail) }))
+            .filter(entry => entry.prefix && entry.thumbnail);
     }
 
     /**

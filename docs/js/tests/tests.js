@@ -33,7 +33,7 @@ import { FakeGoogleSheetsAuth, FakeGoogleSheetsService, FakeGoogleState, setFake
 import { refreshAppData } from './fakeGoogleDevTools.js';
 import { isCheckedValue } from '../data_management/utils/checkbox-values.js';
 import { useBatchEdits, useInstantEdits } from '../application/utils/cellEdits.js';
-import { CacheInvalidationBus, ApplicationUtils, ProductionUtils, triggerCachePoll, Database, EditHistoryUtils, InventoryUtils, ProposalUtils, resolveInventoryNoteMaxLength, checkDateRollover, clearCache, invalidateCache, resolveSheetMapping, parseThumbnails, replaceFirstThumbnail, removeFirstThumbnail } from '../data_management/index.js';
+import { CacheInvalidationBus, ApplicationUtils, ProductionUtils, triggerCachePoll, Database, EditHistoryUtils, InventoryUtils, ProposalUtils, resolveInventoryNoteMaxLength, checkDateRollover, clearCache, invalidateCache, resolveSheetMapping, parseThumbnails, parseThumbnailEntries, serializeThumbnailEntries, addThumbnails, removeThumbnailAt, setPrimaryThumbnail, setThumbnailNote, setThumbnailCrop, primaryThumbnailValue, thumbnailKey } from '../data_management/index.js';
 import { authState } from '../application/utils/auth.js';
 import { commitInventoryProposal } from '../application/utils/inventoryProposals.js';
 import { resolveView, resolveAction, pickView, mergeView, matchesKeyPattern, setViewWarningHandler, withRegistryDefaults, searchTiers } from '../application/utils/views/resolveView.js';
@@ -1133,10 +1133,7 @@ test('THUMBNAIL COLUMN', 'thumbnail values parse arrays, bare IDs and blanks', a
     assertEqual(parseThumbnails('abc'), ['abc'], 'bare file ID');
     assertEqual(parseThumbnails(''), [], 'blank');
     assertEqual(parseThumbnails('[broken'), [], 'invalid JSON');
-    assertEqual(replaceFirstThumbnail('["a","b"]', 'c'), '["c","b"]', 'replace keeps the others');
-    assertEqual(replaceFirstThumbnail('', 'c'), '["c"]', 'replace on blank');
-    assertEqual(removeFirstThumbnail('["a"]'), '', 'remove the only image');
-    assertEqual(removeFirstThumbnail('["a","b"]'), '["b"]', 'remove keeps the others');
+    assertEqual(parseThumbnails('["a", {"id": "b", "note": "x"}]'), ['a', 'b'], 'objects give their file ID');
 });
 
 test('THUMBNAIL COLUMN', 'a column-preserving mapping owns only its own columns', async () => {
@@ -1196,15 +1193,16 @@ test('THUMBNAIL COLUMN', 'a missing required column is added after the last head
 });
 
 test('THUMBNAIL COLUMN', 'item thumbnails list items of thumbnail tabs only', async () => {
-    const map = new Map((await Requests.getItemThumbnails()).map(e => [e.item, e.file]));
-    assertEqual(map.get('CHAIR-001'), 'file_id_chair_001', 'own image');
+    const map = new Map((await Requests.getItemThumbnails()).map(e => [e.item, e.thumbnail]));
+    assertEqual(map.get('CHAIR-001'), '["file_id_chair_001"]', 'own image');
+    assertEqual(map.get('CHAIR-002'), '["file_id_chair_002"]', 'only the primary image');
     assertEqual(map.get('TABLE-001'), '', 'thumbnail tab, no image');
     assertEqual(map.get('BX-16x39'), '', 'PANELS item');
     assertEqual(map.has('LB-001'), false, 'tab without a Thumbnail column');
 });
 
 test('THUMBNAIL COLUMN', 'category images come from the index Thumbnail column', async () => {
-    assertEqual(await Requests.getCategoryThumbnails(), [{ prefix: 'TABLE', file: 'file_id_table_prefix' }], 'TABLE only');
+    assertEqual(await Requests.getCategoryThumbnails(), [{ prefix: 'TABLE', thumbnail: '["file_id_table_prefix"]' }], 'TABLE only');
 });
 
 test('THUMBNAIL COLUMN', 'proposals carry thumbnail changes like other fields', async () => {
@@ -1323,6 +1321,43 @@ test('NEW ROW HISTORY', 'a scheduled save gives a new row its identity and creat
         const highest = Math.max(...saved.filter(r => r.itemNumber !== 'STOOL-009').map(r => _parsed(r).i || 0));
         assertEqual([eh.i, eh.h.map(e => [e.u, e.c]), eh.p.length], [highest + 1, [['test', []]], 1], 'next identity, marker and the pending change');
     });
+});
+
+// ── Group 26c: Thumbnail Gallery ──────────────────────────────────────────────
+// A thumbnail cell is a gallery: images as file IDs, or { id, note, crop } objects; the first is the
+// primary (the icon). When each image entered the item's history comes from its EditHistory
+// (EditHistoryUtils.listItemOrigins). FakeGoogle: FURNITURE CHAIR-002 holds
+// ['file_id_chair_002', { id: 'file_id_chair_001', note: 'Side view', crop: { x: 0.25, y: 0, w: 0.5, h: 1 } }]
+// and one history entry: sam (t 17912947200) changed thumbnail from '["file_id_chair_002"]'.
+
+test('THUMBNAIL GALLERY', 'images with notes and crops parse and write compactly', async () => {
+    assertEqual(parseThumbnailEntries('["a", {"id": "b", "note": " n ", "crop": {"x": 0, "y": 0, "w": 1, "h": 1}}]'),
+        [{ id: 'a' }, { id: 'b', note: 'n' }], 'note trimmed, whole-image crop dropped');
+    assertEqual(serializeThumbnailEntries([{ id: 'a' }, { id: 'b', note: 'n' }]), '["a",{"id":"b","note":"n"}]', 'plain images stay bare IDs');
+    assertEqual(primaryThumbnailValue('[{"id":"a","note":"n","crop":{"x":0.1,"y":0,"w":0.5,"h":1}},"b"]'),
+        '[{"id":"a","crop":{"x":0.1,"y":0,"w":0.5,"h":1}}]', 'icon: primary file and crop, no note');
+    assertEqual(thumbnailKey('a', { x: 0.1, y: 0.2, w: 0.5, h: 0.5 }), 'a#0.1,0.2,0.5,0.5', 'cache key with crop');
+    assertEqual(thumbnailKey('a', null), 'a', 'cache key without crop');
+});
+
+test('THUMBNAIL GALLERY', 'gallery edits add, remove, reorder, note and crop', async () => {
+    assertEqual(addThumbnails('["a"]', ['b', 'a']), '["a","b"]', 'add at the end, no duplicates');
+    assertEqual(addThumbnails('', ['a', 'b']), '["a","b"]', 'first added becomes the primary');
+    assertEqual(removeThumbnailAt('["a","b","c"]', 1), '["a","c"]', 'remove');
+    assertEqual(setPrimaryThumbnail('["a","b","c"]', 2), '["c","a","b"]', 'set as thumbnail moves it first');
+    const noted = setThumbnailNote('["a"]', 0, 'front');
+    assertEqual(noted, '[{"id":"a","note":"front"}]', 'note');
+    assertEqual(setThumbnailNote(noted, 0, ''), '["a"]', 'blank note clears it');
+    assertEqual(setThumbnailCrop('["a"]', 0, { x: 0.1, y: 0.2, w: 0.5, h: 0.5 }), '[{"id":"a","crop":{"x":0.1,"y":0.2,"w":0.5,"h":0.5}}]', 'crop');
+    assertEqual(setThumbnailCrop('[{"id":"a","crop":{"x":0.1,"y":0.2,"w":0.5,"h":0.5}}]', 0, null), '["a"]', 'crop cleared');
+});
+
+test('THUMBNAIL GALLERY', 'the CHAIR-002 gallery reads its images, note, crop and origins', async () => {
+    const row = (await Requests.getInventoryTabData('FURNITURE')).find(r => r.itemNumber === 'CHAIR-002');
+    assertEqual(parseThumbnailEntries(row.thumbnail), [{ id: 'file_id_chair_002' }, { id: 'file_id_chair_001', note: 'Side view', crop: { x: 0.25, y: 0, w: 0.5, h: 1 } }], 'entries');
+    const origins = EditHistoryUtils.listItemOrigins(row.edithistory, 'thumbnail', row.thumbnail, parseThumbnails);
+    assertEqual(origins.get('file_id_chair_001'), { u: 'sam', t: 17912947200, created: false }, 'added by sam');
+    assertEqual(origins.get('file_id_chair_002'), null, 'primary predates the history');
 });
 
 // ── Group 26: Row-Based Transship and Date Normalization ──────────────────────

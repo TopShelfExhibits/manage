@@ -223,7 +223,7 @@ export class FakeGoogleSheetsService {
                 ['M8x20', '', '300', '', '', '', 'M8 x 20mm bolt', ''],
                 ['FOOT-L', '', '100', '', '', '', 'Large leveling foot', '']
             ],
-            // FURNITURE has a Thumbnail column (JSON arrays of Drive file IDs). TABLE-001 is left blank
+            // FURNITURE has a Thumbnail column (image galleries, thumbnail-values.js). TABLE-001 is left blank
             // for the thumbnail migration to fill from CACHE/Thumbnails. 'Packing/shop notes' is a
             // column the app doesn't map: saves must leave it alone.
             'FURNITURE': [
@@ -232,7 +232,12 @@ export class FakeGoogleSheetsService {
                 ['TABLE-002', '', '2', '', '', '', 'Glass-top square end table w/ metal bases 18x18x16', ''],
                 ['TABLE-003', '', '2', '', '', '', 'Glass-top rectangular coffee table w/ metal bases 42x18x16', ''],
                 ['CHAIR-001', '["file_id_chair_001"]', '20', '', '', '', 'Stack Chair ( Black & Black ) w/ Arms', ''],
-                ['CHAIR-002', '["file_id_chair_002"]', '15', '', '', '', 'Lounge Chair (White Leather) Swivel Barrel', ''],
+                // CHAIR-002: a gallery of two images; the second has a note and a crop, and its
+                // history shows sam adding it
+                ['CHAIR-002', _json(['file_id_chair_002', { id: 'file_id_chair_001', note: 'Side view', crop: { x: 0.25, y: 0, w: 0.5, h: 1 } }]), '15', _json({
+                    i: 6,
+                    h: [{ u: 'sam', t: 17912947200, c: [{ n: 'thumbnail', o: '["file_id_chair_002"]' }] }]
+                }), '', '', 'Lounge Chair (White Leather) Swivel Barrel', ''],
                 // CHAIR-003: three history entries and a future scheduled restock
                 ['CHAIR-003', '', '12', _json({
                     i: 4,

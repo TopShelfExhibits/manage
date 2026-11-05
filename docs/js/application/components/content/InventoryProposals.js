@@ -111,7 +111,8 @@ const PROPOSAL_TABLE_VIEWS = {
         hidden: 'rest',
         sortable: ['category', 'itemNumber', 'currentQuantity', 'quantityChange', 'description'],
         style: {
-            thumbnail: thumbnailStyle('itemNumber', 32),
+            // The item's edit history ends at its current thumbnail, not the proposed one
+            thumbnail: thumbnailStyle('itemNumber', 32, { savedKey: 'currentThumbnail' }),
             category: { width: 130 },
             itemNumber: { width: 120 },
             currentQuantity: { width: 90, cell: 'slot' },

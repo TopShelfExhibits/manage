@@ -1,4 +1,4 @@
-import { wrapMethods, normalizeHeaderName, Database, InventoryUtils, PackListUtils, ProductionUtils, ApplicationUtils, EditHistoryUtils, InstantWriteUtils, ARCHIVE_TAB_NAME, ARCHIVE_HEADERS, offsetToISO, resolveShortageAlertDays, shortageAlertDateFilters, PREFERENCES_MAPPING, INVENTORY_TAB_PREFERENCES, sanitizeTabName, mapWithConcurrency, ProgressBus, getRandomLoadingQuote, DEFAULT_INVENTORY_MAPPING, ProposalUtils, PROPOSALS_TAB_NAME, PROPOSAL_MAPPING, resolveInventoryNoteMaxLength, firstThumbnail } from './index.js';
+import { wrapMethods, normalizeHeaderName, Database, InventoryUtils, PackListUtils, ProductionUtils, ApplicationUtils, EditHistoryUtils, InstantWriteUtils, ARCHIVE_TAB_NAME, ARCHIVE_HEADERS, offsetToISO, resolveShortageAlertDays, shortageAlertDateFilters, PREFERENCES_MAPPING, INVENTORY_TAB_PREFERENCES, sanitizeTabName, mapWithConcurrency, ProgressBus, getRandomLoadingQuote, DEFAULT_INVENTORY_MAPPING, ProposalUtils, PROPOSALS_TAB_NAME, PROPOSAL_MAPPING, resolveInventoryNoteMaxLength, primaryThumbnailValue } from './index.js';
 import { authState } from '../application/utils/auth.js';
 import { instantWriteEntry, identityText, parseColoredName } from './utils/instant-write-config.js';
 import { columnTypesEntry } from './utils/column-types.js';
@@ -754,25 +754,25 @@ class Requests_uncached {
     }
 
     /**
-     * Item thumbnails for pages whose rows aren't inventory rows: [{ item, file }], the displayed
-     * file ID of each item ('' when it has none) in tabs that have a Thumbnail column. Items of
-     * other tabs are absent: they have no thumbnails. A bare file ID is a valid thumbnail value
-     * (parseThumbnails), which keeps this small. Persisted (CACHE/Analytics): it reads every
-     * inventory tab.
+     * Item thumbnails for pages whose rows aren't inventory rows: [{ item, thumbnail }], each item's
+     * primary image as a thumbnail value (file and crop; '' when it has none), for items in tabs
+     * that have a Thumbnail column. Items of other tabs are absent: they have no thumbnails. Only
+     * the icon is listed, which keeps this small; a gallery loads the item's full cell when it
+     * opens. Persisted (CACHE/Analytics): it reads every inventory tab.
      * @param {Object} deps - Dependency decorator for tracking calls
-     * @returns {Promise<Array<{item: string, file: string}>>}
+     * @returns {Promise<Array<{item: string, thumbnail: string}>>}
      */
     static async getItemThumbnails(deps) {
         const rows = await deps.call(Requests.getAllInventoryData);
         return rows
             .filter(row => row.itemNumber && 'thumbnail' in row)
-            .map(row => ({ item: row.itemNumber, file: firstThumbnail(row.thumbnail) || '' }));
+            .map(row => ({ item: row.itemNumber, thumbnail: primaryThumbnailValue(row.thumbnail) }));
     }
 
     /**
-     * Category images from the inventory INDEX: [{ prefix, file }] (Drive file ID).
+     * Category images from the inventory INDEX: [{ prefix, thumbnail }] (a thumbnail value).
      * @param {Object} deps - Dependency decorator for tracking calls
-     * @returns {Promise<Array<{prefix: string, file: string}>>}
+     * @returns {Promise<Array<{prefix: string, thumbnail: string}>>}
      */
     static async getCategoryThumbnails(deps) {
         return await deps.call(InventoryUtils.getCategoryThumbnails);

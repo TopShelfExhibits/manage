@@ -15,7 +15,8 @@ import { escapeHtml, formatText } from '../../utils/views/fieldFormat.js';
  *   editMode ('batch'|'instant'; when a text cell reports: batch on every change, instant when
  *   editing ends), commit(value) (report an edit: batch → cell-edit and dirty tracking;
  *   instant → the delayed write queue), disabled (why editing is blocked; shown as the tooltip),
- *   rowAction ({ run(), disabled, title }: the row's primary action, for the action cell)
+ *   rowAction ({ run(), disabled, title }: the row's primary action, for the action cell),
+ *   original (the cell's saved value in batch mode; undefined for a new row or outside a table)
  * Cell options come from `field.cellOptions`, which the view sets (style[key].cellOptions; e.g. which
  * key holds the item number). An entry without a compact form falls back to formatted text when compact.
  *
@@ -35,7 +36,8 @@ export const cellProps = {
     editMode: { type: String, default: '' },
     commit: { type: Function, default: null },
     disabled: { type: String, default: '' },
-    rowAction: { type: Object, default: null }
+    rowAction: { type: Object, default: null },
+    original: { default: undefined }
 };
 
 // Clean pasted text before it enters a cell: normalize line endings, turn non-breaking spaces into
@@ -340,7 +342,8 @@ function cellComponentFor(field, density = 'full') {
  * Props: row, field, renderer, density, searchTerm, highlight(value, field) → HTML (else the value
  *        is formatted and escaped), theme, cellSlot (the page's #cell slot function, if any),
  *        editable, editMode, commit, disabled (a cell is editable only with a commit and no reason blocking it),
- *        rowAction (the row's primary action { run(), disabled, title }, for the action cell)
+ *        rowAction (the row's primary action { run(), disabled, title }, for the action cell),
+ *        original (the cell's saved value, batch mode)
  */
 export const CellRenderer = {
     name: 'CellRenderer',
@@ -358,17 +361,18 @@ export const CellRenderer = {
         commit: { type: Function, default: null },
         disabled: { type: String, default: '' },
         rowAction: { type: Object, default: null },
+        original: { default: undefined },
         // Extra scope for the page's #cell slot (e.g. rowIndex, onInnerTableDirty in PacklistTable)
         cellScope: { type: Object, default: null }
     },
     render() {
         const h = Vue.h;
-        const { row, field, renderer, density, searchTerm, highlight, theme, editMode, commit, disabled, rowAction } = this;
+        const { row, field, renderer, density, searchTerm, highlight, theme, editMode, commit, disabled, rowAction, original } = this;
         const value = row ? row[field.key] : undefined;
         const comp = cellComponentFor(field, density);
         if (comp) {
             const editable = this.editable && !!commit && !disabled;
-            return h(comp, { row, field, value, renderer, density, searchTerm, highlight, theme, editable, editMode, commit, disabled, rowAction });
+            return h(comp, { row, field, value, renderer, density, searchTerm, highlight, theme, editable, editMode, commit, disabled, rowAction, original });
         }
         if ((field.cell === 'slot' || field.cell === 'external-edit') && this.cellSlot) {
             return this.cellSlot({ ...(this.cellScope || {}), row, field, value, renderer, density });

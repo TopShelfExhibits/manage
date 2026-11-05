@@ -3,25 +3,26 @@ import { Requests, getReactiveStore, Priority } from '../index.js';
 /**
  * Item thumbnails on pages whose rows aren't inventory rows (reports, proposals, the item
  * timeline). The page joins each row's item thumbnail as its `thumbnail` field, a derived field the
- * thumbnail cell then draws (Requests.getItemThumbnails). Inventory rows carry the field already.
+ * thumbnail cell then draws (Requests.getItemThumbnails). It holds only the item's primary image;
+ * the cell's gallery loads the item's full cell when it opens. Inventory rows carry the field already.
  */
 
 /**
  * The app-wide item thumbnails store: loaded at background priority and never evicted.
- * @returns {Object} Reactive store of [{ item, file }]
+ * @returns {Object} Reactive store of [{ item, thumbnail }]
  */
 export function getItemThumbnailsStore() {
     return getReactiveStore(Requests.getItemThumbnails, null, [], null, true, { load: Priority.BACKGROUND }, true);
 }
 
 /**
- * Item number → displayed file ID ('' when the item has none). Items in tabs without a Thumbnail
- * column are absent.
- * @param {Array<{item: string, file: string}>} entries - The store's data
+ * Item number → its primary image as a thumbnail value ('' when it has none). Items in tabs
+ * without a Thumbnail column are absent.
+ * @param {Array<{item: string, thumbnail: string}>} entries - The store's data
  * @returns {Map<string, string>}
  */
 export function itemThumbnailMap(entries) {
-    return new Map((entries || []).map(entry => [entry.item, entry.file]));
+    return new Map((entries || []).map(entry => [entry.item, entry.thumbnail]));
 }
 
 /**
