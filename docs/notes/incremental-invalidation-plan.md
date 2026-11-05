@@ -1,7 +1,8 @@
 # Incremental Invalidation Plan
 
-**Branch:** api-separation
-**Status:** Phase 1 done (commit 28a87dd). Phases 2–4 proposed; questions below need answers first.
+**Branch:** api-separation (main merged in at 91da36b)
+**Status:** Phase 1 done (commit 28a87dd) and passing with main's caching work. Phases 2–4 have been
+re-assessed against main. The questions at the end need answers first.
 
 ## Goal
 
@@ -13,16 +14,43 @@ Keep the API layer (`data_management/`) and the reactive stores (`application/ut
 separate, so the API layer can later move to a server. The contract between them stays one kind
 of message: "cache key K (method + args) has a new value".
 
-## How it works today
+## What main changed
 
-1. **Invalidation deletes top-down.** `CacheManager.invalidate` deletes a key, then every key
-   that depends on it, then their dependency records, and emits a bus event for every `api:` key
-   it deleted. Nothing checks whether a value changed.
-2. **Main data reloads replace every row.** A main-key event makes the store refetch, deep-copy
-   all rows, clear every analysis result, and re-run all analysis.
-3. **Whole-tab reads fan out.** Most analysis depends on whole-tab reads (`getData`, `getTabs`).
-   One cell edited in CACHE/Clients invalidates every row's index check, and also the main
-   Production Schedule data, because that load reads the index too.
+Main's caching work (caching.js, database.js, application-utils.js; notes in
+caching-tab-structure.md) changes when invalidation happens and gives this plan building blocks.
+It doesn't change how invalidation propagates.
+
+**When data is invalidated now:**
+
+- **Sheet reads never expire.** `getData` and `getTabs` are cached indefinitely. One raw read
+  per tab (`database:getData:"T","tab"`) feeds every mapped read of that tab.
+- **The spreadsheet watch decides staleness.** Each poll reads Drive's `modifiedTime` per
+  spreadsheet:
+  - *Production Schedule* (`editedByHand`): any change invalidates every cached read of the
+    whole spreadsheet, so every store built on it reloads.
+  - *Stamped spreadsheets:* the Caching tab stamps name the changed tab. A change no stamp
+    accounts for expires that table's older reads silently, without reloading stores.
+- **Saves fill the cache.** A whole-tab write invalidates the tab's reads, so stores reload,
+  then caches the written tab as the new raw read (`fillCache`), so the reload doesn't read the
+  sheet again.
+- **Tab reads are batched.** Reads go out as one request per spreadsheet.
+- **The clock is a source.** `app_utils:getToday` is a cached source. The date rollover
+  invalidates it and everything computed from it.
+
+**Building blocks phase 3 can reuse:**
+
+- **Generations** (`invalidatedAt`, `_changedSince`): a computation that started before its
+  key's latest change is not cached, and later callers don't join it.
+- **`expire(key)`:** drops a value and everything computed from it without announcing, and
+  keeps dependency records. It is a "stale, not announced" primitive.
+- **`collectSourceKeys(key)`:** walks the dependency graph down to its sources.
+- **Persisted results** (`persistentMethods`, CACHE/Analytics): opt-in results saved with
+  their sources and restored when no source is stamped newer. Their values must be JSON, and
+  `keepEmpty` caches "nothing found".
+
+**Unchanged:** `invalidate` still deletes the chain top-down, deletes dependency records, finds
+dependents by scanning every key, and announces every `api:` key it deleted. Phases 2–4 are
+still needed. Main makes phase 3 both more valuable and cheaper, as described below.
 
 ## Phase 1 — targeted re-analysis (done)
 
@@ -35,128 +63,147 @@ of message: "cache key K (method + args) has a new value".
   main reload are dropped, because analysis runs after the reload.
 - Configs whose key can't be predicted (`passFullItem`) re-run all their rows, without blanking.
 - Tests: the TARGETED ANALYSIS group in tests.js, three tests that fail on the old store code.
-  On the Schedule page, an invalidation of the packlist tab list now keeps all 41 packlist cells
-  on screen.
+  The suite passes with main merged (343 tests).
 
-**Limit:** a cascade that reaches the main data, for example a CACHE/Clients change on the
-Schedule page, still reloads and blanks everything. Phases 3 and 4 address that.
+**Limit:** a cascade that reaches the main data still reloads and blanks everything. On the
+Schedule page this is now the common case: any hand edit anywhere in the Production Schedule
+spreadsheet invalidates every read of it.
 
-## Phase 2 — an immutability boundary
+## Phase 2 — an immutability boundary (still needed)
 
-Early cutoff (phase 3) compares a recomputed value with the cached one. That only works if
-nothing mutates cached values, and today two things do:
+Early cutoff compares a recomputed value with the cached one, so cached values must not be
+mutated. Both problems found before the merge remain, and the first matters more now that sheet
+reads stay cached indefinitely:
 
-- `store.load` runs `appDataInit` on the API result before `setData` clones it, so the cached
-  array gains `AppData`.
-- The packlist `checkInventoryLevel` config uses `passFullItem`, so its argument, and therefore
-  its cache key, is the whole reactive row including `AppData`. The key changes whenever
-  `AppData` changes, which also defeats the cache for that call.
+- `store.load` runs `appDataInit` on the API result before `setData` clones it
+  (reactiveStores.js, `appDataInit(dataToSet, false)`), so the cached array gains `AppData`.
+- The packlist `checkInventoryLevel` config still uses `passFullItem`. Its cache key is the whole
+  reactive row, `AppData` included, so the key changes whenever `AppData` does.
 
 Work:
 
 1. Clone at the store boundary: run `appDataInit` only on the store's own copy.
-2. Strip `AppData` from full-item arguments, or replace `passFullItem` with explicit source
-   columns (see question 2).
-3. In development, deep-freeze values on `CacheManager.set` so any remaining mutation throws in
-   tests instead of silently corrupting comparisons.
-4. Keep a value hash per entry (computed on set), so comparisons stay cheap and still work
-   after the TTL drops the value.
-5. Record a placeholder for results `set()` refuses to cache today (null, empty, boolean), so
-   these keys have something to compare against (see question 3).
+2. Give `checkInventoryLevel` the fields it reads (see question 2).
+3. In development, deep-freeze values on `CacheManager.set` and `fillCache`, so remaining
+   mutations throw in tests.
+4. Store a value hash per entry (computed on set and on `fillCache`), kept when a value expires,
+   so comparisons stay cheap and survive `expire()`.
+5. Record a hash for results `set()` doesn't keep (null, empty, boolean), so these keys can be
+   compared too. Main's `keepEmpty` already caches empties for persisted methods.
 
-## Phase 3 — early cutoff in the cache
+## Phase 3 — early cutoff, in two steps
 
-1. **Mark, don't delete.** Invalidating a key marks it stale and its transitive dependents
-   unverified. Values and dependency records are kept.
-2. **Verify bottom-up.** Refetch the stale key and compare its hash with the old one. If equal,
-   mark everything above verified without rerunning. If different, rerun the direct dependents
-   and compare each in turn; stop wherever a value comes out the same. A dependent with several
-   dependencies reruns once, after all of them are verified.
+### 3a. Cutoff at the sources
+
+When a source is invalidated by the poller (stamp or hand edit) or by the date rollover, read
+the new value first and compare its hash with the old one. Only a source whose value changed
+runs today's cascade. An unchanged source announces nothing.
+
+- **Cost:** none extra. These reads happen anyway when the stores reload, and they're batched
+  per spreadsheet.
+- **Effect:** a hand edit in one Production Schedule tab reloads only stores built on that tab;
+  the other tabs' reads come back identical and stop there. The midnight rollover stops at
+  `getToday`'s dependents whose inputs don't change, once 3b is in. A stamp from another session
+  that wrote identical data is ignored.
+- **Scope:** the source keys `collectSourceKeys` already names (raw tab reads, `getTabs`,
+  `getToday`), and only invalidations from outside. A local save is a change by definition and
+  keeps today's path (invalidate, then `fillCache`).
+- **Size:** small to medium. This is the most value for the least change, and it can ship on
+  its own.
+
+### 3b. Cutoff through the graph
+
+1. **Mark, don't delete.** A changed source marks its transitive dependents stale (the
+   `expire()` idea: keep dependency records, don't announce) and keeps their values for
+   comparison.
+2. **Verify bottom-up.** Recompute the direct dependents of what changed and compare each with
+   its old hash. Where a value comes out the same, stop. A dependent with several dependencies
+   recomputes once, after all of them are verified. Generations guard every step, as
+   `_changedSince` does today.
 3. **Announce changes only.** The bus emits for an `api:` key only when its value changed.
-4. **Dependencies are replaced, not cleared.** A rerun rebuilds its own dependency set, since
-   dependencies can differ between runs.
-5. **Reverse index.** Keep dependency → dependents, instead of today's scan of every key per
-   invalidation.
-6. **Who verifies.** Keys with a live store subscriber are verified right away. Others are
-   verified lazily on their next read (see question 4).
-7. **Contracts to restate.** The ordering rules in `invalidate`'s comment block, the poller's
-   use of `filled`/`filledAt` (becomes "verified at"), and the save-time
-   `stampDataChange`-before-refill ordering, which must be preserved.
-8. **Switch.** Run behind a setting that falls back to delete-cascade (see question 6).
+4. **Dependencies are replaced, not cleared,** on every recompute, since they can differ between
+   runs.
+5. **Reverse index:** dependency → dependents. This replaces the full scan in both `invalidate`
+   and `expire`.
+6. **Who verifies:** keys with a live store subscriber are verified right away. Others stay
+   stale until their next read (see question 4).
+7. **Persisted results:** a restored value is hashed like any other. Its re-linked sources cut
+   it off the same way.
+8. **Contracts to restate:** the ordering rules in `invalidate`'s comment block, the poller's
+   use of `filled`/`filledAt` (it becomes "verified at"), the stamp ordering in
+   `stampDataChange`, and `fillCache`'s "a read still in flight keeps its result" rule.
+9. **Switch:** a setting that falls back to delete-cascade (see question 6).
 
-Expected effect: a CACHE/Clients edit refetches Clients and reruns every function that reads it
-(in memory, from cache). Only rows whose index state actually changed get an event. The
-Schedule's main data reruns, comes out identical, and the store is not reloaded.
+## Phase 4 — row matching on main-data reloads (simpler than planned)
 
-## Phase 4 — row matching on main-data reloads
+When a store's main data does change, match rows instead of replacing them. Main already has the
+matcher: `EditHistoryUtils.matchRows` (metadata-utils.js) is pure and implements the row identity
+contract in metadata-implementation.md:
 
-When a store's main key does change, match rows instead of replacing them:
+- Rows with `EditHistory.i` match on it.
+- Rows without it match by identical content, nearest position first.
+- Remaining rows match by the most equal fields within the gap between matched neighbours.
 
-- Each store declares a row identity: a function from row to key.
-- Unchanged rows keep their objects and analysis results.
-- Changed rows are updated in place and re-analyzed.
-- New rows are added and analyzed; missing rows are removed.
+That covers every store without a per-store identity: inventory and packlist rows carry `i`, and
+Production Schedule rows (no history column) match by content.
+
+- Matched, unchanged rows keep their objects and analysis results.
+- Matched, changed rows are updated in place and re-analyzed.
+- Unmatched new rows are added and analyzed; unmatched old rows are removed.
 - Order follows the new data, using moves rather than a rebuild.
 - Stores with unsaved edits keep today's behavior: flag the conflict and don't reload.
 
-The runtime `_rowId` can't be the identity: it's random and regenerated on each reload.
-
 ## Testing approach
 
-- Extend the FakeGoogle fault hooks: edit one cell of a tab, then assert which `api:` keys
-  emitted and which store rows were written (Vue watchers with `flush: 'sync'`, as in Phase 1).
-- Assert no event for unchanged values: an edit that rewrites the same value, or a cell no
-  function reads.
-- Add counters (bus events emitted, functions rerun, rows written) exposed on localhost, to
-  compare phases on real pages.
-- Keep the seeded randomized approach from the instant-write tests for the cutoff logic. Random
-  edit sequences must leave every cached value equal to a from-scratch recompute.
+- Extend the FakeGoogle fault hooks and the spreadsheet watch's fake `modifiedTime`. Edit one
+  cell of one tab, then assert which `api:` keys emitted and which store rows were written (Vue
+  watchers with `flush: 'sync'`, as in phase 1).
+- Assert no event for unchanged values: a hand edit to another tab, a rewrite of the same value,
+  a stamp for identical data, and a date rollover that changes no result.
+- Add counters (bus events emitted, functions rerun, rows written), exposed on localhost. Main's
+  notes backlog already asks for a cache-usage metric, and these can share it.
+- Keep the seeded randomized approach from the instant-write tests for 3b. Random edit sequences
+  must leave every cached value equal to a from-scratch recompute.
 
 ## Questions
 
 **Phase 2**
 
-1. **Boundary enforcement:** is dev-only deep freezing acceptable, or should values be frozen in
-   production too? Freezing large tabs costs time on every cache fill.
-2. **Full-item analysis:** for the packlist inventory-level check, may I replace `passFullItem`
-   with explicit source columns (the fields `checkInventoryLevel` actually reads)? Or strip
-   `AppData` from full-item arguments everywhere?
-3. **Empty results:** `set()` never caches null, empty arrays, empty objects or booleans. Is that
-   deliberate, for example so an empty read is retried after an auth hiccup? If so, I'll store a
-   hash only (for comparison) and still re-run these keys on every read.
+1. **Freezing:** is dev-only deep freezing acceptable, or should values be frozen in production
+   too? Freezing large tabs costs time on every cache fill.
+2. **Full-item analysis:** may I give `checkInventoryLevel` the fields it actually reads,
+   instead of the whole packlist row?
 
 **Phase 3**
 
-4. **Eager vs lazy:** is it OK that keys no store watches are verified only when next read?
-   This keeps network use down, but a value can be stale in memory until then.
-5. **TTL expiry:** today an expired entry refetches silently on next read and stores are never
-   told. With hashes, expiry could also detect changes, like a slow poller, and notify stores.
-   Should expiry stay silent, or notify when the refetched value differs?
+3. **Ship 3a first?** It handles the Production Schedule hand-edit case alone, at low risk. 3b
+   then follows separately.
+4. **Silent expiry:** main expires unconfirmed reads silently, by design, so stores keep showing
+   their data until something else reloads them. With hashes, a refill that comes back different
+   could announce it. Should it, or should expiry stay silent?
+5. **Unwatched keys:** is it OK that keys no store watches stay stale until their next read?
 6. **Rollout switch:** do you want the fallback setting in Preferences, so a live session can
    turn early cutoff off, or only as a code constant?
-7. **Lock listener:** sheetLockMixin re-checks locks on `api:getSheetLock` invalidation events.
-   Under phase 3 it would hear only real changes. That's intended, but please confirm nothing
-   relies on the event firing for an unchanged lock.
-8. **Server shape:** for the eventual server, should change events carry only the key (client
-   re-requests), or the new value too? Key-only is simpler and is what this plan assumes.
+7. **Lock listener:** sheetLockMixin re-checks locks on `api:getSheetLock` events. Under 3b it
+   would hear only real changes. Please confirm nothing relies on the event firing for an
+   unchanged lock.
+8. **Server shape:** should change events for a future server carry only the key (client
+   re-requests), or the new value too? The plan assumes key-only.
 
 **Phase 4**
 
-9. **Row identities.** Please confirm or correct each:
-   - Schedule: Client + Year + Show, with position among duplicates for multi-booth rows.
-   - Inventory: item number.
-   - Packlists: crate position plus item position, falling back to replacing the store.
-10. **Undo history:** a matched reload changes rows in place under the undo system, which holds
-    row references. For read-only stores this is fine. For editable stores with no unsaved
-    edits, should a reload clear the undo history, as a full reload does today, or keep it?
+9. **Undo history:** a matched reload changes rows in place under the undo system, which holds
+   row references. For editable stores with no unsaved edits, should a reload clear the undo
+   history, as a full reload does today, or keep it?
 
 ## Order and size
 
 | Phase | Work | Risk |
 |---|---|---|
-| 2 | Small to medium | Low; mostly boundary cleanup with tests |
-| 3 | Large; the core of the change | Medium; behind a switch, with cutoff and randomized tests |
-| 4 | Medium | Medium; touches undo and editable stores |
+| 2 | Small to medium | Low; boundary cleanup with tests |
+| 3a | Small to medium | Low; sources only, today's cascade otherwise |
+| 3b | Large | Medium; behind a switch, with cutoff and randomized tests |
+| 4 | Medium, less than first planned | Medium; touches undo and editable stores |
 
-Phase 3 depends on phase 2. Phase 4 is independent but pays off most after phase 3, which makes
-main-data reloads rare.
+3a needs only phase 2's hashes for source values. 3b needs all of phase 2. Phase 4 is
+independent and could run alongside 3a.
