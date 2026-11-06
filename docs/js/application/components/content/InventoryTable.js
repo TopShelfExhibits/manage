@@ -505,7 +505,7 @@ export const InventoryTableComponent = {
         return {
             inventoryTableStore: null,
             proposalsStore: null,
-            archivedRows: [],
+            archivedStore: null,
             revertNote: '',
             INVENTORY_DELETED_VIEWS,
             lockNamespace: 'INVENTORY',
@@ -611,8 +611,9 @@ export const InventoryTableComponent = {
             }
             return map;
         },
+        // The category's deleted items: a store, so every deletion (any page, any session) shows
         deletedRows() {
-            return this.archivedRows.map(entry => ({
+            return (this.archivedStore?.data || []).map(entry => ({
                 itemNumber: entry.RowData.itemNumber ?? '',
                 quantity: entry.RowData.quantity ?? '',
                 description: entry.RowData.description ?? '',
@@ -711,7 +712,9 @@ export const InventoryTableComponent = {
         );
         if (!this.historyMode) this.proposalsStore = getProposalsStore();
 
-        if (this.historyMode) this.loadArchivedRows();
+        if (this.historyMode && this.tabTitle) {
+            this.archivedStore = getReactiveStore(Requests.getArchivedRows, null, ['INVENTORY', this.tabTitle]);
+        }
 
         // Apply any pending changes that are due today or earlier
         if (this.tabTitle) {
@@ -949,18 +952,8 @@ export const InventoryTableComponent = {
                     if (scheduledDate > todayISOString() || this.historyMode) {
                         await this.inventoryTableStore.load('Loading...');
                     }
-                    // Items this save deleted join the deleted items list
-                    if (this.historyMode) this.loadArchivedRows();
                 }
             }, 'Save Changes');
-        },
-
-        /** The category's deleted items (history page). */
-        loadArchivedRows() {
-            if (!this.tabTitle) return;
-            Requests.getArchivedRows('INVENTORY', this.tabTitle)
-                .then(rows => { this.archivedRows = rows || []; })
-                .catch(err => console.warn('[InventoryTable] Failed to load deleted rows:', err));
         },
 
         /**

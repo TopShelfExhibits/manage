@@ -50,6 +50,7 @@ import { SEVERITY, remainingSeverity } from '../data_management/utils/severity.j
 import { severityColor, statusColor } from '../application/utils/severity.js';
 import { getAutoColorClass } from '../application/utils/autoColor.js';
 import { getReactiveStore, createAnalysisConfig, itemVariantCards, itemShortageCards, NavigationRegistry, isMarkedForDeletion } from '../application/index.js';
+import { calculateStoreDiff, applyDiffToData } from '../application/utils/reactiveStores.js';
 import { checkSheetHealth } from './sheetHealth.js';
 import { guessColumnType, columnTypesEntry, columnTypeMap, columnTypeOf, isOpaqueType } from '../data_management/utils/column-types.js';
 import { migrateThumbnails } from '../data_management/migrations/thumbnail-column.js';
@@ -2647,13 +2648,15 @@ test('EDIT HISTORY VIEW', 'getArchivedRows returns [] when the spreadsheet has n
     assertEqual(await Requests.getArchivedRows('CACHE', 'Notes'), [], 'no CACHE/_EditHistory tab');
 });
 
-// The history page's ✕ (admins) marks a row as the table's Delete key does; saving removes it
-// from the tab and archives it. FakeGoogle SHELVES holds SHLF-001 only; the test puts it back.
+// The history page's delete button (admins) marks a row as the table's Delete key does; saving
+// removes it from the tab and archives it, and the page's deleted items store shows it without a
+// reload. FakeGoogle SHELVES holds SHLF-001 only; the test puts it back.
 test('EDIT HISTORY VIEW', 'a row marked for deletion is removed and archived on save', async () => {
     const original = await Database.getData('INVENTORY', 'SHELVES', DEFAULT_INVENTORY_MAPPING);
-    const store = getReactiveStore(Requests.getInventoryTabData, Requests.saveInventoryTabData, ['SHELVES', undefined, undefined, undefined]);
-    for (let i = 0; i < 100 && (store.isLoading || store.initialLoad); i++) await new Promise(r => setTimeout(r, 50));
+    const store = await _loadedStore(Requests.getInventoryTabData, Requests.saveInventoryTabData, ['SHELVES', undefined, undefined, undefined]);
+    const deletedItems = await _loadedStore(Requests.getArchivedRows, null, ['INVENTORY', 'SHELVES']);
     try {
+        assertEqual(deletedItems.data, [], 'nothing deleted yet');
         const index = store.data.findIndex(row => row.itemNumber === 'SHLF-001');
         store.markRowForDeletion(index, true);
         assertEqual(isMarkedForDeletion(store.data[index]), true, 'marked');
@@ -2661,8 +2664,77 @@ test('EDIT HISTORY VIEW', 'a row marked for deletion is removed and archived on 
         assertEqual(store.data.map(row => row.itemNumber), [], 'gone from the store');
         assertEqual((await Requests.getInventoryTabData('SHELVES')).map(row => row.itemNumber), [], 'gone from the tab');
         assertEqual((await Requests.getArchivedRows('INVENTORY', 'SHELVES')).map(row => row.RowData.itemNumber), ['SHLF-001'], 'archived');
+        for (let i = 0; i < 100 && !deletedItems.data.length; i++) await new Promise(r => setTimeout(r, 50));
+        assertEqual(deletedItems.data.map(row => row.RowData.itemNumber), ['SHLF-001'], 'the deleted items store reloaded');
     } finally {
         await Database.setData('INVENTORY', 'SHELVES', original, DEFAULT_INVENTORY_MAPPING, { skipMetadata: true });
+    }
+});
+
+// ── Store backups ──
+// Unsaved edits are backed up to the user's data as a diff (calculateStoreDiff) and restored when
+// their store loads again (applyDiffToData). Each change names its row (EditHistory i, or a
+// fingerprint of its values), so it lands on that row after rows move. Regression: changes were
+// restored by position, so after a row above was deleted (by a save elsewhere, or a proposal
+// commit) a restored deletion mark fell on the next row, and the next save deleted that row.
+// FakeGoogle PANELS starts BX-16x39, BX-16x47, BX-15x39; the tests put it back.
+
+async function _loadedStore(...args) {
+    const store = getReactiveStore(...args);
+    for (let i = 0; i < 100 && (store.isLoading || store.initialLoad); i++) await new Promise(r => setTimeout(r, 50));
+    return store;
+}
+const _panels = () => Database.getData('INVENTORY', 'PANELS', DEFAULT_INVENTORY_MAPPING);
+const _marked = (rows) => rows.filter(row => isMarkedForDeletion(row)).map(row => row.itemNumber);
+const _withMark = (row) => ({ ...row, metadata: JSON.stringify({ deletion: { marked: true } }) });
+
+test('STORE BACKUPS', 'a restored change follows its row after rows move', async () => {
+    const original = await _panels();
+    try {
+        // Unsaved: BX-15x39 marked for deletion and BX-16x47's notes edited, backed up as a diff
+        const edited = original.map(row => row.itemNumber === 'BX-15x39' ? _withMark(row)
+            : row.itemNumber === 'BX-16x47' ? { ...row, notes: 'check edges' } : row);
+        const diff = calculateStoreDiff(original, edited);
+        // Another session deletes BX-16x39 (every row below it moves up one) and saves the tab
+        await Database.setData('INVENTORY', 'PANELS', original.filter(row => row.itemNumber !== 'BX-16x39'), DEFAULT_INVENTORY_MAPPING, { username: 'other@example.com' });
+        const restored = applyDiffToData(await _panels(), diff);
+        assertEqual(_marked(restored), ['BX-15x39'], 'the mark is back on its own row');
+        assertEqual(restored.filter(row => row.notes === 'check edges').map(row => row.itemNumber), ['BX-16x47'], 'and the edit');
+    } finally {
+        await Database.setData('INVENTORY', 'PANELS', original, DEFAULT_INVENTORY_MAPPING, { skipMetadata: true });
+    }
+});
+
+test('STORE BACKUPS', 'a change whose row is gone is not restored', async () => {
+    const original = await _panels();
+    const diff = calculateStoreDiff(original, original.map(row => row.itemNumber === 'BX-16x39' ? _withMark(row) : row));
+    const restored = applyDiffToData(original.filter(row => row.itemNumber !== 'BX-16x39'), diff);
+    assertEqual(_marked(restored), [], 'no other row takes the mark');
+});
+
+test('STORE BACKUPS', 'an older backup restores edits by position, never a deletion mark', async () => {
+    const original = await _panels();
+    // A backup saved before changes named their rows: index only
+    const legacy = [{ index: 2, type: 'modified', data: { notes: 'legacy edit', metadata: JSON.stringify({ deletion: { marked: true } }) } }];
+    const restored = applyDiffToData(original, legacy);
+    assertEqual([restored[2].itemNumber, restored[2].notes, _marked(restored)], ['BX-15x39', 'legacy edit', []], 'edit at its position, no mark');
+});
+
+test('STORE BACKUPS', 'discarding edits discards their backup', async () => {
+    const store = await _loadedStore(Requests.getInventoryTabData, Requests.saveInventoryTabData, ['PANELS', undefined, undefined, undefined]);
+    const calls = [];
+    const discardBackup = store.discardBackup;
+    store.discardBackup = async () => { calls.push('discarded'); };
+    try {
+        await store.load('Loading...');
+        assertEqual(calls, [], 'an unmodified reload keeps any backup');
+        store.markRowForDeletion(0, true);
+        // Discard, Refresh and sending edits to a proposal all reload the modified store
+        await store.load('Loading...');
+        assertEqual([calls, _marked(store.data)], [['discarded'], []], 'the edit and its backup are gone');
+    } finally {
+        store.discardBackup = discardBackup;
+        store.setData(store.originalData);
     }
 });
 

@@ -1,4 +1,4 @@
-import { CacheInvalidationBus, ProgressBus, Requests, authState, Auth, resolveInventoryNoteMaxLength, resolveInventoryTabList } from '../index.js';
+import { CacheInvalidationBus, ProgressBus, Requests, authState, Auth, resolveInventoryNoteMaxLength, resolveInventoryTabList, EditHistoryUtils } from '../index.js';
 import { PriorityQueue, Priority } from './priorityQueue.js';
 
 // Re-export Priority for component use
@@ -555,6 +555,9 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
                 const kept = keptResults(this._data);
                 this.setData(dataToSet);
                 restoreKept(this._data, kept);
+                // The edits were discarded (Discard, Refresh, edits sent to a proposal): so is
+                // their autosave backup, or a later load would restore them
+                if (modifiedAtStart) this.discardBackup().catch(() => {});
                 
                 // Release lock BEFORE running analysis so analysis can proceed
                 this.isReloadingMainData = false;
@@ -608,15 +611,8 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
                 // Must happen after removeMarkedRows so deleted rows are not included in the baseline.
                 this.setOriginalData(this._data);
                 
-                // Remove backup from user data after successful save
-                const storeKey = generateStoreKey(apiCall, saveCall, apiArgs, analysisConfig);
-                await removeStoreBackupFromUserData(storeKey);
-                if (this.loadedBackupKey && this.loadedBackupKey !== storeKey) {
-                    await removeStoreBackupFromUserData(this.loadedBackupKey);
-                }
-                this.loadedBackupKey = null;
-                this.autoSaved = false; // Clear auto-save flag after successful save
-                this.lastAutoSaveHash = null; // Clear auto-save hash after manual save
+                // The edits are saved: their autosave backup goes
+                await this.discardBackup();
                 this.externalConflict = false; // Conflict resolved — our save is now the latest
                 // Repopulate cache after save so the poller can detect future cross-session changes.
                 // The cascade during setData deleted the cache entries; this restores them without
@@ -642,6 +638,17 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
                 this.isSaving = false;
                 this.setLoading(false, '');
             }
+        },
+        /** Remove this store's autosave backup (its edits were saved or discarded). */
+        async discardBackup() {
+            const storeKey = generateStoreKey(apiCall, saveCall, apiArgs, analysisConfig);
+            await removeStoreBackupFromUserData(storeKey);
+            if (this.loadedBackupKey && this.loadedBackupKey !== storeKey) {
+                await removeStoreBackupFromUserData(this.loadedBackupKey);
+            }
+            this.loadedBackupKey = null;
+            this.autoSaved = false;
+            this.lastAutoSaveHash = null;
         },
         // Mark/unmark for deletion by index using metadata
         markRowForDeletion(idx, value = true) {
@@ -1398,6 +1405,62 @@ let autoSaveInterval = null;
 const AUTO_SAVE_INTERVAL_MS = 2 * 60 * 1000; // 2 minutes
 
 /**
+ * The row a backup change was made on, so it can be found again after rows move: its
+ * EditHistory identity, or (rows without one) a fingerprint of its saved values.
+ * @param {Object} row - The row as loaded (originalData)
+ * @param {Set<string>} excludedColumns - Analysis columns (not part of the row's data)
+ * @returns {{ i: number }|{ keys: string[], sig: string }}
+ */
+function rowAnchor(row, excludedColumns) {
+    const i = EditHistoryUtils.getRowIndex(row?.edithistory);
+    if (i !== null) return { i };
+    const keys = Object.keys(row)
+        // History is left out: any save appends to it (and gives the row an identity)
+        .filter(key => !Array.isArray(row[key]) && !shouldExcludeColumn(key, excludedColumns) && !['AppData', 'metadata', 'edithistory'].includes(key))
+        .sort();
+    return { keys, sig: rowSignature(row, keys) };
+}
+
+/** A short hash of a row's values under the given keys. */
+function rowSignature(row, keys) {
+    const text = JSON.stringify(keys.map(key => row?.[key] ?? ''));
+    let hash = 0;
+    for (let n = 0; n < text.length; n++) hash = (hash * 31 + text.charCodeAt(n)) | 0;
+    return (hash >>> 0).toString(36);
+}
+
+function anchorMatches(row, anchor) {
+    if (!isValidObject(row)) return false;
+    if (anchor.i !== undefined) return EditHistoryUtils.getRowIndex(row.edithistory) === anchor.i;
+    return rowSignature(row, anchor.keys) === anchor.sig;
+}
+
+/**
+ * Where a backup change applies in the data it is restored onto. A change that names its row
+ * (base) applies to that row wherever it is now, and nowhere when it's gone or was changed since.
+ * A change from an older backup (no base) applies at its index, as those backups always did.
+ * @returns {number} Row index, or -1 to skip the change
+ */
+function locateChangeRow(rows, change) {
+    if (!change.base) return change.index < rows.length ? change.index : -1;
+    if (anchorMatches(rows[change.index], change.base)) return change.index;
+    const hits = [];
+    rows.forEach((row, index) => { if (anchorMatches(row, change.base)) hits.push(index); });
+    return hits.length === 1 ? hits[0] : -1;
+}
+
+/** Whether a metadata value (string or object) marks its row for deletion. */
+function hasDeletionMark(metadata) {
+    if (!metadata) return false;
+    try {
+        const parsed = typeof metadata === 'string' ? JSON.parse(metadata) : metadata;
+        return parsed?.deletion?.marked === true;
+    } catch (e) {
+        return false;
+    }
+}
+
+/**
  * Calculate diff between original and current data recursively
  * Only stores row indices with their changed fields for efficiency
  * Handles nested arrays recursively
@@ -1407,7 +1470,7 @@ const AUTO_SAVE_INTERVAL_MS = 2 * 60 * 1000; // 2 minutes
  * @param {Array} analysisConfig - Analysis configuration to identify columns to exclude
  * @returns {Array} Array of changes with indices and modified fields
  */
-function calculateStoreDiff(originalData, currentData, analysisConfig = null) {
+export function calculateStoreDiff(originalData, currentData, analysisConfig = null) {
     if (!Array.isArray(originalData) || !Array.isArray(currentData)) {
         return null;
     }
@@ -1463,6 +1526,7 @@ function calculateStoreDiff(originalData, currentData, analysisConfig = null) {
             changes.push({
                 index,
                 type: 'modified',
+                base: rowAnchor(original, excludedColumns),
                 data: modifiedFields
             });
         }
@@ -1621,7 +1685,7 @@ function stopAutoSaveTimer() {
  * @param {Array} diff - Array of changes to apply
  * @returns {Array} Modified data
  */
-function applyDiffToData(data, diff) {
+export function applyDiffToData(data, diff) {
     if (!Array.isArray(data) || !Array.isArray(diff)) {
         return data;
     }
@@ -1629,12 +1693,19 @@ function applyDiffToData(data, diff) {
     const result = [...data];
     
     diff.forEach(change => {
-        if (change.type === 'modified' && change.index < result.length) {
+        if (change.type === 'modified') {
+            const at = locateChangeRow(result, change);
+            if (at === -1) {
+                console.warn('[ReactiveStore] Backup change skipped: its row is gone or changed since', change);
+                return;
+            }
             // Apply modified fields, handling nested diffs
-            const updatedItem = { ...result[change.index] };
+            const updatedItem = { ...result[at] };
             
             Object.keys(change.data).forEach(key => {
                 const value = change.data[key];
+                // An older backup can't say which row it marked for deletion: never restore that mark
+                if (!change.base && key === 'metadata' && hasDeletionMark(value)) return;
                 
                 // Check if this is a nested diff
                 if (value && typeof value === 'object' && value._nestedDiff) {
@@ -1646,7 +1717,7 @@ function applyDiffToData(data, diff) {
                 }
             });
             
-            result[change.index] = updatedItem;
+            result[at] = updatedItem;
         } else if (change.type === 'added') {
             // Add new item if not already present, handling nested diffs
             if (change.index >= result.length) {

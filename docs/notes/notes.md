@@ -101,6 +101,7 @@ Ongoing User Conversations:
 - [ ] some sticky headers too high on mobile after page switch, dashboard nav issue
 - [ ] thumbnails are still slow on chromium. Sometimes takes a second to start loading, and a full inventory page can take a while to load thumbs for.
 - [ ] autosave backup is currently broken, probably because of failure to identify user tab or backup entries correctly
+    - Fixed one cause: backups restored changes by row position, so after rows moved a restored edit or deletion mark landed on another row (and the next save deleted it). Changes now name their row (EditHistory `i`, or a fingerprint of its values) and skip it when it's gone; older index-only backups still restore by position but never a deletion mark. Discarding edits (Discard, Refresh, sending edits to a proposal) discards their backup.
 - [ ] packlist print from dashboard will not print correctly if not on packlist page first because navigation doesn't complete before the print command locks the interface
 - [ ] it's possible for multiple api requests to be reporting progress simultaniously and do odd things to api progress tracking. We need some way to tie the bar to one message channel.
 - [ ] some clicks doubleclick (opening sched details for the first time, some other things that I can't remember) this might be a latency issue, or a click handling issue, or a click action swap timing issue
