@@ -3967,6 +3967,18 @@ test('SHORTAGE ALERTS', 'alerts list the periods where an item runs out in the w
     assertEqual(await Requests.getInventoryShortageAlerts(), [CAB_004_ALERT], 'CAB-004 runs short');
 });
 
+// A "Short N" card opens the item's timeline over its shortage (CAB-004: 1/10 to 1/31/2025), as
+// pack list shortage alerts do
+test('SHORTAGE ALERTS', 'a Short card opens the item timeline over its shortage', async () => {
+    const opened = [];
+    const [card] = itemShortageCards([CAB_004_ALERT], 120, path => opened.push(NavigationRegistry.parsePath(path)));
+    card.action();
+    assertEqual(opened.map(({ path, parameters }) => [path, parameters]), [['inventory/cabinets/CAB-004', {
+        dateFilters: [{ column: 'Date', value: '2025-01-10', type: 'after' }, { column: 'Date', value: '2025-01-31', type: 'before' }]
+    }]], 'timeline over the shortage');
+    assertEqual(itemShortageCards([CAB_004_ALERT], 120)[0].action, null, 'no navigator, no action');
+});
+
 test('SHORTAGE ALERTS', 'a preference of 0 turns the alerts off, and saving it refreshes them', async () => {
     await setAlertDays('0');
     try {
