@@ -32,10 +32,10 @@ export const ThumbnailCropEditor = {
     name: 'ThumbnailCropEditor',
     props: {
         src: { type: String, required: true },
-        crop: { type: Object, default: null }
+        initialCrop: { type: Object, default: null }
     },
     data() {
-        const c = normalizeCrop(this.crop) || { x: 0, y: 0, w: 1, h: 1 };
+        const c = normalizeCrop(this.initialCrop) || { x: 0, y: 0, w: 1, h: 1 };
         return { rect: { ...c }, drag: null, ratio: null };
     },
     computed: {
@@ -272,23 +272,9 @@ export const ThumbnailGalleryModal = {
             await this.loadUncropped();
         },
         async applyCrop() {
-            await this.$nextTick();
-            let crop = null;
-            try {
-                if (this.$refs.cropEditor && typeof this.$refs.cropEditor.crop === 'function') {
-                    crop = this.$refs.cropEditor.crop();
-                    console.log('[ThumbnailGalleryModal.applyCrop] crop() returned:', crop);
-                } else {
-                    console.log('[ThumbnailGalleryModal.applyCrop] ref or method not found');
-                    console.log('  ref exists:', !!this.$refs.cropEditor);
-                    if (this.$refs.cropEditor) {
-                        console.log('  crop is:', typeof this.$refs.cropEditor.crop);
-                        console.log('  all methods:', Object.keys(this.$refs.cropEditor.$options?.methods || {}));
-                    }
-                }
-            } catch (e) {
-                console.error('[ThumbnailGalleryModal.applyCrop] Error calling crop():', e);
-            }
+            const crop = this.$refs.cropEditor && typeof this.$refs.cropEditor.crop === 'function'
+                ? this.$refs.cropEditor.crop()
+                : null;
             const e = this.entry;
             this.mode = 'view';
             this.change(setThumbnailCrop(this.current, this.index, crop));
@@ -306,7 +292,7 @@ export const ThumbnailGalleryModal = {
         <div class="thumbnail-gallery-stage">
             <button class="button-symbol" :disabled="entries.length < 2 || mode !== 'view'" title="Previous image (←)" @click="go(-1)"><span class="material-symbols-outlined">chevron_left</span></button>
             <template v-if="mode === 'crop'">
-                <ThumbnailCropEditor v-if="uncroppedUrl" ref="cropEditor" :src="uncroppedUrl" :crop="entry && entry.crop" />
+                <ThumbnailCropEditor v-if="uncroppedUrl" ref="cropEditor" :src="uncroppedUrl" :initialCrop="entry && entry.crop" />
                 <div v-else class="card gray">Loading the full image…</div>
             </template>
             <img v-else :src="displayUrl" :alt="'Image ' + (index + 1) + ' of ' + itemNumber" />
