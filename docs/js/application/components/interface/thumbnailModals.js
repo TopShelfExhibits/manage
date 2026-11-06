@@ -281,6 +281,11 @@ export const ThumbnailGalleryModal = {
             // Show the cropped icon in the table right away, from the file already downloaded
             const blob = await this.fileBlob(e.id);
             if (blob) ThumbnailCache.seed(e.id, blob, crop);
+        },
+        resetCrop() {
+            if (this.$refs.cropEditor && typeof this.$refs.cropEditor.reset === 'function') {
+                this.$refs.cropEditor.reset();
+            }
         }
     },
     template: html`
@@ -331,7 +336,7 @@ export const ThumbnailGalleryModal = {
             </div>
             <div v-else-if="mode === 'crop'" class="button-bar">
                 <button class="purple" :disabled="!uncroppedUrl" @click="applyCrop">Apply crop</button>
-                <button :disabled="!uncroppedUrl" @click="$refs.cropEditor.reset()">Whole image</button>
+                <button :disabled="!uncroppedUrl" @click="resetCrop">Whole image</button>
                 <button class="gray" @click="mode = 'view'">Cancel</button>
             </div>
             <div v-else class="button-bar">
