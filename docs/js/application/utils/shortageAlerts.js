@@ -72,12 +72,32 @@ export function shortagesByItem(alerts) {
 }
 
 /**
- * Decoration cards (views-and-renderers-plan §4.14) for one item's shortage periods.
+ * The item's timeline over its shortage periods (the earliest start to the latest end), where the
+ * shows that take it below zero are listed. Pack list shortage alerts open the same page.
+ * @param {Array} periods - One item's alert rows ({ itemId, tabName, startDate, endDate })
+ * @returns {string|null} Path, or null without a category
+ */
+export function shortageTimelinePath(periods) {
+    const { itemId, tabName } = periods?.[0] || {};
+    if (!itemId || !tabName) return null;
+    const starts = periods.map(period => period.startDate).filter(Boolean).sort();
+    const ends = periods.map(period => period.endDate || period.startDate).filter(Boolean).sort();
+    const dateFilters = starts.length ? [
+        { column: 'Date', value: starts[0], type: 'after' },
+        { column: 'Date', value: ends[ends.length - 1], type: 'before' }
+    ] : null;
+    return NavigationRegistry.buildPath(`inventory/${tabName.toLowerCase()}/${itemId}`, dateFilters ? { dateFilters } : {});
+}
+
+/**
+ * Decoration cards (views-and-renderers-plan §4.14) for one item's shortage periods. The card
+ * opens the item's timeline over the periods (shortageTimelinePath).
  * @param {Array|undefined} periods - The item's alert rows
  * @param {number} days
+ * @param {Function} [navigateToPath]
  * @returns {Object[]}
  */
-export function itemShortageCards(periods, days) {
+export function itemShortageCards(periods, days, navigateToPath = null) {
     if (!periods?.length) return [];
     const lowest = Math.min(...periods.map(period => period.minQty));
     const lines = periods.map(period => {
@@ -85,10 +105,12 @@ export function itemShortageCards(periods, days) {
         const shows = period.shows.length ? ` (${period.shows.join(', ')})` : '';
         return `${range}: ${period.minQty}${shows}`;
     });
+    const path = shortageTimelinePath(periods);
     return [{
         message: `Short ${-lowest}`,
         severity: SEVERITY.critical,
-        title: `Runs short in the next ${days} days:\n${lines.join('\n')}`
+        title: `Runs short in the next ${days} days:\n${lines.join('\n')}`,
+        action: path && navigateToPath ? () => navigateToPath(path) : null
     }];
 }
 

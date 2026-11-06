@@ -1102,8 +1102,18 @@ export const PacklistTable = {
         handleAlertClick(item, alertKey, alert) {
             // Handle different types of alerts
             if (alert.details) {
-                // Variant alerts explain themselves
-                this.$modal.alert(escapeHtml(alert.details), alert.message);
+                // Variant alerts explain themselves, then lead to where they're resolved: an
+                // undeclared variant to its base item's row (to declare it), a shortage to the
+                // base item's timeline over this show
+                const undeclared = alert.type === 'undeclared variant';
+                this.$modal.confirm(
+                    escapeHtml(alert.details),
+                    () => undeclared ? this.navigateToInventoryItem(item) : this.navigateToInventoryDetails(item),
+                    null,
+                    alert.message,
+                    undeclared ? 'Open item' : 'View timeline',
+                    'Close'
+                );
             } else if (alertKey === 'descriptionAlert' || alert.type === 'description mismatch') {
                 this.showDescriptionMismatchModal(item, alert);
             } else if (alertKey === 'inventoryAlert' || ['item shortage', 'item warning', 'low-inventory'].includes(alert.type)) {
@@ -1323,6 +1333,19 @@ export const PacklistTable = {
                 : basePath;
 
             this.$emit('navigate-to-path', finalPath);
+        },
+
+        /**
+         * Navigate to the item's row in its inventory category (searched for), where its
+         * description can be edited
+         * @param {Object} item - The pack list item
+         */
+        async navigateToInventoryItem(item) {
+            const itemNumber = item['Extracted Item'];
+            if (!itemNumber) return;
+            const tabName = await Requests.getTabNameForItem(itemNumber).catch(() => null);
+            if (!tabName) return this.navigateToInventoryDetails(item);
+            this.$emit('navigate-to-path', NavigationRegistry.buildPath(`inventory/${tabName.toLowerCase()}`, { searchTerm: itemNumber }));
         },
 
         async handlePrint() {

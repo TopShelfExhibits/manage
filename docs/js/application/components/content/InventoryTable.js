@@ -740,7 +740,7 @@ export const InventoryTableComponent = {
             if (this.historyMode) return [];
             if (key === 'description') return itemVariantCards(row, (message, title) => this.$modal.alert(message, title), this.variantFamilies);
             if (key !== 'itemNumber') return [];
-            return itemShortageCards(this.shortagesByItem.get(row.itemNumber), getShortageAlertDays());
+            return itemShortageCards(this.shortagesByItem.get(row.itemNumber), getShortageAlertDays(), this.appContext?.navigateToPath);
         },
         onLockAcquireFailed() {
             if (this.inventoryTableStore) {

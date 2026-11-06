@@ -436,7 +436,7 @@ export const InventoryContent = {
         itemDecorations(row, key) {
             if (key === 'description') return itemVariantCards(row, (message, title) => this.$modal.alert(message, title), this.variantFamilies);
             if (key !== 'itemNumber') return [];
-            return itemShortageCards(this.shortagesByItem.get(row.itemNumber), getShortageAlertDays());
+            return itemShortageCards(this.shortagesByItem.get(row.itemNumber), getShortageAlertDays(), this.navigateToPath);
         },
         categoryAppData(key) {
             return this.categoryList.find(c => c.originalTitle === key)?.AppData;
