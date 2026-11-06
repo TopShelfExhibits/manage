@@ -49,7 +49,7 @@ import { parseA1Range, gridNeeded, clipRangeToGrid, isGridLimitError } from '../
 import { SEVERITY, remainingSeverity } from '../data_management/utils/severity.js';
 import { severityColor, statusColor } from '../application/utils/severity.js';
 import { getAutoColorClass } from '../application/utils/autoColor.js';
-import { getReactiveStore, createAnalysisConfig, itemVariantCards } from '../application/index.js';
+import { getReactiveStore, createAnalysisConfig, itemVariantCards, itemShortageCards, NavigationRegistry } from '../application/index.js';
 import { checkSheetHealth } from './sheetHealth.js';
 import { guessColumnType, columnTypesEntry, columnTypeMap, columnTypeOf, isOpaqueType } from '../data_management/utils/column-types.js';
 import { migrateThumbnails } from '../data_management/migrations/thumbnail-column.js';

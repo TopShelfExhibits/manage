@@ -272,7 +272,9 @@ export const ThumbnailGalleryModal = {
             await this.loadUncropped();
         },
         async applyCrop() {
-            const crop = this.$refs.cropEditor?.crop() ?? null;
+            const crop = this.$refs.cropEditor && typeof this.$refs.cropEditor.crop === 'function'
+                ? this.$refs.cropEditor.crop()
+                : null;
             const e = this.entry;
             this.mode = 'view';
             this.change(setThumbnailCrop(this.current, this.index, crop));
