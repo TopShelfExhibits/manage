@@ -1340,6 +1340,14 @@ class Requests_uncached {
      */
     static async resolvePacklistIdentifier(deps, identifier) {
         const tabs = await deps.call(Database.getTabs, 'PACK_LISTS');
+        // Use the same path the schedule does: look up the schedule row first so that
+        // NameOverrides (manual client-abbreviation links) are honoured.
+        const scheduleRow = await deps.call(ProductionUtils.getShowDetails, identifier);
+        if (scheduleRow) {
+            const results = await deps.call(ProductionUtils.findPacklistTabsForScheduleRow, scheduleRow, tabs);
+            if (results.length > 0) return results[0].title;
+        }
+        // Fallback for custom / unscheduled packlists that have no schedule row
         const resolvedTab = await deps.call(ProductionUtils.findPackListTab, identifier, tabs);
         return resolvedTab ? resolvedTab.title : null;
     }
