@@ -1975,7 +1975,7 @@ html.row-dragging * {
     padding: var(--padding-sm);
     cursor: pointer;
     display: flex;
-    flex-direction: row;
+    flex-direction: row-reverse;
     align-items: center;
     gap: var(--padding-sm);
     overflow: hidden;
@@ -2054,13 +2054,14 @@ html.row-dragging * {
 }
 /* Chip end: one button bar (action cells, decoration cards, the primary action button last).
    Every control is the same height and font; the generic .button-bar sizing (28px symbol
-   buttons, growing buttons) doesn't apply inside a chip. */
+   buttons, growing buttons) doesn't apply inside a chip.
+   First in DOM and at the flex start (row-reverse right side), so overflow clips leftward
+   and the rightmost/primary action button is always visible on narrow chips. */
 .calendar-chip .chip-actions.button-bar {
     flex-shrink: 0;
     display: flex;
     align-items: stretch;
     gap: 0;
-    margin-left: auto;
 }
 .calendar-chip .chip-actions.button-bar > * {
     box-sizing: border-box;
@@ -2069,6 +2070,7 @@ html.row-dragging * {
     margin: 0;
     padding: 0 4px;
     flex: 0 0 auto;
+    width: auto;
     display: inline-flex;
     align-items: center;
     justify-content: center;

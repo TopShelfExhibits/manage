@@ -554,18 +554,10 @@ export const CalendarComponent = {
                             @click="handleEventClick(seg.row, $event)"
                             @keydown="handleKeyDown($event, seg.row)"
                         >
-                            <div class="chip-text">
-                                <!-- N chip lines (resolved.calendar.chip); the first line is the title line -->
-                                <span v-for="(line, li) in chipLines" :key="li" :class="li === 0 ? 'chip-first-row' : 'chip-second-row'">
-                                    <template v-for="(col, colIdx) in line" :key="col.key">
-                                        <span v-if="colIdx > 0" class="chip-sep"> | </span>
-                                        <span :class="['chip-val', valueColorClass(seg.row, col)]"><CellRenderer :row="seg.row" :field="col" renderer="calendar" density="compact" :highlight="highlightValue" :theme="theme" :search-term="search.searchKey.value" :cell-slot="$slots.cell" :row-action="col.cell === 'action' ? rowActionFor(seg.row) : null" /></span>
-                                        <DecorationCards :cards="inlineCards(seg.row, col.key)" :inline="true" />
-                                    </template>
-                                </span>
-                            </div>
                             <!-- Chip end: one button bar with the view's action cells (calendar.actions), the
-                                 decoration cards (hidden when narrow) and the primary action button, last -->
+                                 decoration cards (hidden when narrow) and the primary action button, last.
+                                 Placed first in DOM so flex-direction:row-reverse anchors it to the right;
+                                 overflow clips left-ward so the action button is always visible. -->
                             <div v-if="seg.isEnd && (chipActionFields.length || hasActionButton || (hasEndCards && endCards(seg.row).length))" class="chip-actions button-bar">
                                 <template v-for="f in chipActionFields" :key="f.key">
                                     <CellRenderer :row="seg.row" :field="f" renderer="calendar" density="compact" :highlight="highlightValue" :theme="theme" :search-term="search.searchKey.value" :cell-slot="$slots.cell" :row-action="f.cell === 'action' ? rowActionFor(seg.row) : null" />
@@ -589,6 +581,16 @@ export const CalendarComponent = {
                                     :title="effectiveAction.title || effectiveAction.label || 'Details'"
                                     @click.stop="handleActionButton(seg.row)"
                                 ><template v-if="effectiveAction.label">{{ effectiveAction.label }}</template><span v-else-if="isSymbolName(effectiveAction.icon)" class="material-symbols-outlined">{{ effectiveAction.icon }}</span><template v-else>{{ effectiveAction.icon || '☷' }}</template></button>
+                            </div>
+                            <div class="chip-text">
+                                <!-- N chip lines (resolved.calendar.chip); the first line is the title line -->
+                                <span v-for="(line, li) in chipLines" :key="li" :class="li === 0 ? 'chip-first-row' : 'chip-second-row'">
+                                    <template v-for="(col, colIdx) in line" :key="col.key">
+                                        <span v-if="colIdx > 0" class="chip-sep"> | </span>
+                                        <span :class="['chip-val', valueColorClass(seg.row, col)]"><CellRenderer :row="seg.row" :field="col" renderer="calendar" density="compact" :highlight="highlightValue" :theme="theme" :search-term="search.searchKey.value" :cell-slot="$slots.cell" :row-action="col.cell === 'action' ? rowActionFor(seg.row) : null" /></span>
+                                        <DecorationCards :cards="inlineCards(seg.row, col.key)" :inline="true" />
+                                    </template>
+                                </span>
                             </div>
                         </div>
                     </div>
