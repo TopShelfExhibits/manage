@@ -445,6 +445,54 @@ export class EditHistoryUtils {
     }
 
     /**
+     * The deleted rows to list for a tab: the newest archive entry of each item number, except
+     * item numbers in the tab again (restored, or taken by another item: either way it can't be
+     * restored). The archive itself is never rewritten, so a row deleted, restored and deleted
+     * again lists its newest deletion (also when the older one was archived without an identity).
+     * @param {Array<{RowData: Object, Timestamp: number}>} entries - Archive entries of the tab
+     *   (getArchivedRows: RowData parsed), newest first
+     * @param {Array<Object>} rows - The tab's rows now (unsaved restores included)
+     * @returns {Array<Object>} The entries still deleted, newest first
+     */
+    static currentDeletions(entries, rows) {
+        const inTab = new Set((rows || []).map(row => row.itemNumber));
+        const seen = new Set();
+        return (entries || []).filter(entry => {
+            const data = entry?.RowData || {};
+            if (seen.has(data.itemNumber)) return false;
+            seen.add(data.itemNumber);
+            return !inTab.has(data.itemNumber);
+        });
+    }
+
+    /**
+     * A deleted row as it is put back: its archived values, identity and history, without a
+     * deletion mark. Its first save records a creation marker, as for any row new to the tab.
+     * When a row added since holds its identity (the tab's last one is reused), it gives the
+     * identity up and the save assigns a new one; its history stays.
+     * @param {Object} rowData - The archive entry's RowData (parsed)
+     * @param {Array<Object>} [rows] - The tab's rows now
+     * @returns {Object}
+     */
+    static restoredRow(rowData, rows = []) {
+        const { AppData, ...row } = rowData || {};
+        const i = this.getRowIndex(row[HISTORY_KEY]);
+        if (i !== null && rows.some(other => this.getRowIndex(other?.[HISTORY_KEY]) === i)) {
+            const history = this.parseEditHistory(row[HISTORY_KEY]) || {};
+            delete history.i;
+            row[HISTORY_KEY] = JSON.stringify(history);
+        }
+        if (row.metadata) {
+            try {
+                const metadata = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata;
+                delete metadata.deletion;
+                row.metadata = Object.keys(metadata).length ? JSON.stringify(metadata) : '';
+            } catch { /* unreadable metadata: keep as stored */ }
+        }
+        return row;
+    }
+
+    /**
      * Convert decisecond timestamp to Date object
      * @param {number} deciseconds - Timestamp in deciseconds (1/10th second)
      * @returns {Date} Date object

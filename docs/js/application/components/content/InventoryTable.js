@@ -456,7 +456,7 @@ const INVENTORY_HISTORY_VIEWS = {
     }]
 };
 
-// Edit History page: rows deleted from the category (the _EditHistory archive), read only
+// Edit History page: rows deleted from the category (the _EditHistory archive); admins can restore them
 const INVENTORY_DELETED_VIEWS = {
     id: 'inventory-deleted',
     default: 'table',
@@ -465,10 +465,11 @@ const INVENTORY_DELETED_VIEWS = {
         id: 'table',
         name: 'Deleted items',
         layout: 'table',
-        columns: ['itemNumber', 'quantity', 'description', 'notes', 'deletedAt', 'deletedBy'],
+        columns: ['itemNumber', 'quantity', 'description', 'notes', '_restore', 'deletedAt', 'deletedBy'],
         style: {
             itemNumber: { width: 120 },
             quantity: { width: 80 },
+            _restore: { width: 36, labelHtml: iconLabel('restore_from_trash'), cell: 'slot' },
             deletedAt: historyMeta(160),
             deletedBy: historyMeta(90)
         }
@@ -574,12 +575,18 @@ export const InventoryTableComponent = {
         editModeName() {
             return this.allowEdit ? 'batch' : 'none';
         },
+        // Only admins restore deleted items
+        deletedViewPatches() {
+            if (this.isAdmin) return [];
+            return [{ patch: { columns: INVENTORY_DELETED_VIEWS.views[0].columns.filter(key => key !== '_restore') } }];
+        },
         deletedFields() {
             return [
                 { key: 'itemNumber', label: 'Item#', type: 'item' },
                 { key: 'quantity', label: 'Qty', format: 'number' },
                 { key: 'description', label: 'Description' },
                 { key: 'notes', label: 'Notes' },
+                { key: '_restore', label: '' },
                 { key: 'deletedAt', label: 'Deleted' },
                 { key: 'deletedBy', label: 'By' }
             ];
@@ -611,9 +618,11 @@ export const InventoryTableComponent = {
             }
             return map;
         },
-        // The category's deleted items: a store, so every deletion (any page, any session) shows
+        // The category's deleted items: a store, so every deletion (any page, any session) shows.
+        // Rows back in the table (restored, saved or not) leave the list.
         deletedRows() {
-            return (this.archivedStore?.data || []).map(entry => ({
+            return EditHistoryUtils.currentDeletions(this.archivedStore?.data || [], this.tableData).map(entry => ({
+                _entry: entry,
                 itemNumber: entry.RowData.itemNumber ?? '',
                 quantity: entry.RowData.quantity ?? '',
                 description: entry.RowData.description ?? '',
@@ -1175,6 +1184,32 @@ export const InventoryTableComponent = {
         },
 
         /**
+         * Put a deleted item back (admins, history page): its archived row, identity and history
+         * return to the table as an unsaved change, and leave the deleted items list. Saving
+         * restores it (its first entry records the restore); Discard or undo cancels it.
+         */
+        async restoreItem(entry) {
+            const store = this.inventoryTableStore;
+            const row = EditHistoryUtils.restoredRow(entry?.RowData, store?.data);
+            if (!store || !row.itemNumber) return;
+            if (store.data.some(other => other.itemNumber === row.itemNumber)) {
+                this.$modal.alert(`${row.itemNumber} can't be restored: ${this.tabTitle} already has an item with that number.`, 'Restore');
+                return;
+            }
+            if (!await this.acquireLockForEdit()) {
+                this.$modal.alert(`Cannot restore: ${this.tabTitle} is locked for editing by ${this.lockOwnerDisplay || 'another user'}.`, 'Locked');
+                return;
+            }
+
+            const routeKey = this.appContext?.currentPath?.split('?')[0];
+            if (routeKey) undoRegistry.capture(store.data, routeKey, { type: 'restore' });
+            // Fields the archived row lacks (a column added since) start empty
+            const fieldNames = Object.keys(store.data[0] || {}).filter(key => key !== 'AppData');
+            store.addRow(row, fieldNames);
+            this.revertNote = `restore ${row.itemNumber}`.slice(0, getInventoryNoteMaxLength());
+        },
+
+        /**
          * Restore an item to a past state, rewinding every newer change. Applies the state to
          * the store (shared with the category table); the user saves it from either page.
          */
@@ -1329,6 +1364,7 @@ export const InventoryTableComponent = {
                 :fields="deletedFields"
                 :rows="deletedRows"
                 :registry="INVENTORY_DELETED_VIEWS"
+                :patches="deletedViewPatches"
                 title="Deleted items"
                 :showSearch="false"
                 :showRefresh="false"
@@ -1336,7 +1372,12 @@ export const InventoryTableComponent = {
                 class="inventory-deleted-rows"
             >
                 <template #cell="{ row, field }">
-                    <span class="history-meta">{{ row[field.key] }}</span>
+                    <button v-if="field.key === '_restore'"
+                        class="button-symbol purple"
+                        :title="'Put ' + row.itemNumber + ' back in ' + tabTitle + '; saving restores it'"
+                        @click.stop="restoreItem(row._entry)"
+                    ><span class="material-symbols-outlined">restore_from_trash</span></button>
+                    <span v-else class="history-meta">{{ row[field.key] }}</span>
                 </template>
             </DataView>
         </slot>

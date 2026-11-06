@@ -2671,6 +2671,52 @@ test('EDIT HISTORY VIEW', 'a row marked for deletion is removed and archived on 
     }
 });
 
+test('EDIT HISTORY VIEW', 'deleted items list the newest deletion of each item; a restored row drops its mark', async () => {
+    const entry = (itemNumber, i, t) => ({ Timestamp: t, RowData: { itemNumber, edithistory: i ? JSON.stringify({ i, h: [] }) : '' } });
+    const entries = [entry('A-1', 3, 30), entry('B-1', 5, 20), entry('A-1', 3, 10), entry('C-1', null, 5)];
+    assertEqual(EditHistoryUtils.currentDeletions(entries, [{ itemNumber: 'B-1' }]).map(e => [e.RowData.itemNumber, e.Timestamp]),
+        [['A-1', 30], ['C-1', 5]], 'newest per item number; B-1 is in the tab again');
+    const archived = { itemNumber: 'A-1', AppData: { x: 1 }, metadata: JSON.stringify({ deletion: { marked: true }, grouping: 1 }), edithistory: JSON.stringify({ i: 3, h: [{ u: 'dan' }] }) };
+    const restored = EditHistoryUtils.restoredRow(archived);
+    assertEqual([restored.AppData, JSON.parse(restored.metadata), JSON.parse(restored.edithistory).i], [undefined, { grouping: 1 }, 3], 'no mark, identity kept');
+    const taken = EditHistoryUtils.restoredRow(archived, [{ itemNumber: 'Z-9', edithistory: JSON.stringify({ i: 3 }) }]);
+    assertEqual(JSON.parse(taken.edithistory), { h: [{ u: 'dan' }] }, 'an identity taken since is given up; history stays');
+});
+
+// Full cycle on the history page: delete an item, restore it from the deleted items list (its row,
+// identity and history come back as an unsaved change, and the save records the restore), then
+// delete it again: the list holds its newest deletion once. FakeGoogle SHELVES holds SHLF-001
+// only; the test gives it an identity first and puts the tab back.
+test('EDIT HISTORY VIEW', 'a deleted row restores with its identity and history, and deletes again', async () => {
+    const original = await Database.getData('INVENTORY', 'SHELVES', DEFAULT_INVENTORY_MAPPING);
+    const archivedBefore = (await Requests.getArchivedRows('INVENTORY', 'SHELVES')).length;
+    try {
+        await Database.setData('INVENTORY', 'SHELVES', original, DEFAULT_INVENTORY_MAPPING, { username: 'test@example.com' });
+        const store = await _loadedStore(Requests.getInventoryTabData, Requests.saveInventoryTabData, ['SHELVES', undefined, undefined, undefined]);
+        const identity = EditHistoryUtils.getRowIndex(store.data[0].edithistory);
+        const listed = async () => EditHistoryUtils.currentDeletions(await Requests.getArchivedRows('INVENTORY', 'SHELVES'), store.data);
+
+        store.markRowForDeletion(0, true);
+        await _asUser(() => store.save('Saving...'));
+        const [deleted] = await listed();
+        assertEqual([deleted?.RowData.itemNumber, store.data.length], ['SHLF-001', 0], 'deleted and listed');
+
+        store.addRow(EditHistoryUtils.restoredRow(deleted.RowData, store.data));
+        assertEqual([await listed(), store.isModified], [[], true], 'restoring takes it off the list, unsaved');
+        await _asUser(() => store.save('Saving...', { note: 'restore SHLF-001' }));
+        const [row] = await Requests.getInventoryTabData('SHELVES');
+        const history = EditHistoryUtils.parseEditHistory(row.edithistory);
+        assertEqual([row.itemNumber, history.i, history.h[0].s, history.h[0].c], ['SHLF-001', identity, 'restore SHLF-001', []], 'back with its identity; the save records the restore');
+
+        store.markRowForDeletion(0, true);
+        await _asUser(() => store.save('Saving...'));
+        const archived = await Requests.getArchivedRows('INVENTORY', 'SHELVES');
+        assertEqual([archived.length - archivedBefore, (await listed()).length], [2, 1], 'two deletions archived, the newest listed');
+    } finally {
+        await Database.setData('INVENTORY', 'SHELVES', original, DEFAULT_INVENTORY_MAPPING, { skipMetadata: true });
+    }
+});
+
 // ── Store backups ──
 // Unsaved edits are backed up to the user's data as a diff (calculateStoreDiff) and restored when
 // their store loads again (applyDiffToData). Each change names its row (EditHistory i, or a
