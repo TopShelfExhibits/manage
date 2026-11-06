@@ -1,4 +1,4 @@
-import { html, InventoryTableComponent, hamburgerMenuRegistry, NavigationRegistry, Requests, DataView, DashboardToggleComponent, getReactiveStore, findMatchingStores, createAnalysisConfig, generateStoreKey, authState, invalidateCache, todayISOString, getInventoryTabList, INVENTORY_TAB_PREFERENCES, getShortageAlertsStore, getShortageAlertDays, shortagesByItem, itemShortageCards, categoryShortageCards, itemVariantCards, itemVariantFamilies, THUMBNAIL_FIELD, ProposalUtils, getInventoryNoteMaxLength } from '../../index.js';
+import { html, InventoryTableComponent, hamburgerMenuRegistry, NavigationRegistry, Requests, DataView, DashboardToggleComponent, getReactiveStore, findMatchingStores, createAnalysisConfig, generateStoreKey, authState, invalidateCache, todayISOString, getInventoryTabList, INVENTORY_TAB_PREFERENCES, getShortageAlertsStore, getShortageAlertDays, shortagesByItem, itemShortageCards, categoryShortageCards, itemVariantCards, itemVariantFamilies, THUMBNAIL_FIELD, isMarkedForDeletion, ProposalUtils, getInventoryNoteMaxLength } from '../../index.js';
 import { ShowInventoryReport } from './ShowInventoryReport.js';
 import { InventoryItemReport } from './InventoryItemReport.js';
 import { InventoryItemTimeline } from './InventoryItemTimeline.js';
@@ -504,6 +504,7 @@ export const InventoryContent = {
                 onProposal: (name, isNew) => this.handleCategoryProposal(categoryTitle, storeMatch.store, name, isNew),
                 proposalNames: proposals.filter(p => !p.committed).map(p => p.name),
                 allProposalNames: proposals.map(p => p.name),
+                deletionCount: data.filter(isMarkedForDeletion).length,
                 onConfirm: async (scheduledDate, note) => {
                     await storeMatch.store.save('Saving inventory...', { scheduledDate, note });
                     if (scheduledDate > todayISOString()) {

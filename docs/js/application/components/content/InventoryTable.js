@@ -46,6 +46,11 @@ export const InventorySaveModal = {
         allProposalNames: {
             type: Array,
             default: () => []
+        },
+        // Rows marked for deletion: removed when saved now, so they can't be scheduled or proposed
+        deletionCount: {
+            type: Number,
+            default: 0
         }
     },
     data() {
@@ -79,6 +84,10 @@ export const InventorySaveModal = {
     },
     methods: {
         handleUpdateProposal() {
+            if (this.deletionCount) {
+                this.proposalError = 'Items marked for deletion can\'t go into a proposal: apply them now, or unmark them.';
+                return;
+            }
             const newName = this.newProposalName.trim();
             if (newName) {
                 const error = ProposalUtils.validateName(newName, this.allProposalNames, this.noteMaxLength);
@@ -118,6 +127,7 @@ export const InventorySaveModal = {
                 this.error = 'Select a future date to schedule';
                 return;
             }
+            if (this.deletionCount) return;
             this.onConfirm(this.scheduledDate, this.note.trim());
             this.$emit('close-modal');
         }
@@ -169,12 +179,13 @@ export const InventorySaveModal = {
                 <label>Effective Date</label>
                 <input type="date" v-model="scheduledDate" :min="todayISO" :class="{ red: !!error && scheduledDate < todayISO }" />
                 <span v-if="error && scheduledDate < todayISO" class="red font-small">{{ error }}</span>
+                <span v-else-if="isFutureDate && deletionCount" class="red font-small">Items marked for deletion can't be scheduled: apply them now, or unmark them</span>
                 <span v-else-if="!isFutureDate" class="font-small gray">Changes will be immediate</span>
                 <span v-else class="font-small gray">Changes will be scheduled</span>
             </div>
             <div class="button-bar">
                 <button v-if="!isFutureDate" @click="handleApplyNow" class="purple">Apply Now</button>
-                <button v-else @click="handleSchedule" class="purple" :title="'Schedule for ' + scheduledDate">Schedule</button>
+                <button v-else @click="handleSchedule" class="purple" :disabled="deletionCount > 0" :title="'Schedule for ' + scheduledDate">Schedule</button>
                 <button v-if="onProposal" @click="mode = 'proposal'" title="Save these edits to a proposal instead of inventory">Proposal</button>
                 <button @click="$emit('close-modal')">Cancel</button>
             </div>
@@ -951,6 +962,7 @@ export const InventoryTableComponent = {
                 onProposal: this.historyMode ? null : (name, isNew) => this.handleProposal(name, isNew),
                 proposalNames: proposals.filter(p => !p.committed).map(p => p.name),
                 allProposalNames: proposals.map(p => p.name),
+                deletionCount: data.filter(isMarkedForDeletion).length,
                 onConfirm: async (scheduledDate, note) => {
                     await this.inventoryTableStore.save('Saving inventory...', { scheduledDate, note });
                     this.revertNote = '';
