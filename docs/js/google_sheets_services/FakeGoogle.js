@@ -2059,7 +2059,7 @@ export const FakeGoogleState = {
 };
 
 // Persist after every mutating call
-['setSheetData', 'batchSetValues', 'deleteSheetRows', 'copySheetTab', 'createBlankTab', 'hideTabs', 'showTabs', 'setMockData'].forEach(name => {
+['setSheetData', 'batchSetValues', 'appendSheetValues', 'deleteSheetRows', 'copySheetTab', 'createBlankTab', 'hideTabs', 'showTabs', 'setMockData'].forEach(name => {
     const original = FakeGoogleSheetsService[name];
     FakeGoogleSheetsService[name] = function (...args) {
         const result = original.apply(this, args);

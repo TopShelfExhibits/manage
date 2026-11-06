@@ -2683,6 +2683,25 @@ test('EDIT HISTORY VIEW', 'deleted items list the newest deletion of each item; 
     assertEqual(JSON.parse(taken.edithistory), { h: [{ u: 'dan' }] }, 'an identity taken since is given up; history stays');
 });
 
+// The archive is appended in one values.append per save, so deletions saved at the same time
+// (two sessions, two categories) each keep their entry. Regression: each entry went to the next
+// free row found by a read, and simultaneous saves could write the same row (losing a deleted row
+// for good). FakeGoogle SHELVES holds SHLF-001, COUNTERTOPS CNTR-001; the test puts them back.
+test('EDIT HISTORY VIEW', 'deletions saved at the same time each keep their archive entry', async () => {
+    const tabs = ['SHELVES', 'COUNTERTOPS'];
+    const originals = await Promise.all(tabs.map(tab => Database.getData('INVENTORY', tab, DEFAULT_INVENTORY_MAPPING)));
+    const archived = async (tab) => (await Requests.getArchivedRows('INVENTORY', tab)).map(entry => entry.RowData.itemNumber);
+    const before = await Promise.all(tabs.map(archived));
+    try {
+        await Promise.all(tabs.map(tab => Database.setData('INVENTORY', tab, [], DEFAULT_INVENTORY_MAPPING, { username: 'test@example.com' })));
+        const after = await Promise.all(tabs.map(archived));
+        assertEqual(after.map((list, k) => list.length - before[k].length), [1, 1], 'one new entry each');
+        assertEqual(after.map(list => list[0]), ['SHLF-001', 'CNTR-001'], 'for the deleted rows');
+    } finally {
+        await Promise.all(tabs.map((tab, k) => Database.setData('INVENTORY', tab, originals[k], DEFAULT_INVENTORY_MAPPING, { skipMetadata: true })));
+    }
+});
+
 // Full cycle on the history page: delete an item, restore it from the deleted items list (its row,
 // identity and history come back as an unsaved change, and the save records the restore), then
 // delete it again: the list holds its newest deletion once. FakeGoogle SHELVES holds SHLF-001
