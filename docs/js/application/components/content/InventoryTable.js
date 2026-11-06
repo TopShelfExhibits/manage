@@ -1,4 +1,4 @@
-import { html, Requests, TableComponent, DataView, getReactiveStore, createAnalysisConfig, NavigationRegistry, Priority, invalidateCache, authState, undoRegistry, EditHistoryUtils, todayISOString, ProposalUtils, getInventoryNoteMaxLength, getInventoryTabList, INVENTORY_TAB_PREFERENCES, getShortageAlertsStore, getShortageAlertDays, shortagesByItem, itemShortageCards, itemVariantCards, itemVariantFamilies, THUMBNAIL_FIELD, SEVERITY } from '../../index.js';
+import { html, Requests, TableComponent, DataView, getReactiveStore, createAnalysisConfig, NavigationRegistry, Priority, invalidateCache, authState, undoRegistry, EditHistoryUtils, todayISOString, ProposalUtils, getInventoryNoteMaxLength, getInventoryTabList, INVENTORY_TAB_PREFERENCES, getShortageAlertsStore, getShortageAlertDays, shortagesByItem, itemShortageCards, itemVariantCards, itemVariantFamilies, THUMBNAIL_FIELD, SEVERITY, getPreferencesStore } from '../../index.js';
 import { sheetLockMixin } from '../../utils/sheetLockMixin.js';
 import { thumbnailStyle, iconLabel } from '../../utils/views/viewStyles.js';
 import { CellRenderer } from '../interface/cells.js';
@@ -692,6 +692,14 @@ export const InventoryTableComponent = {
             const result = this.isDirty && !this.lockedByOther && this.lockCheckComplete;
             //console.log('[InventoryTable] allowSave computed:', result, '| isDirty:', this.isDirty, '| lockedByOther:', this.lockedByOther, '| lockCheckComplete:', this.lockCheckComplete);
             return result;
+        },
+        isAdmin() {
+            const prefs = getPreferencesStore().data || [];
+            const adminPref = prefs.find(p => p.id === 'admin');
+            try {
+                const admins = JSON.parse(adminPref?.value || '[]');
+                return Array.isArray(admins) && admins.includes(authState.user?.email?.split('@')[0]);
+            } catch { return false; }
         }
     },
     async mounted() {
@@ -1147,6 +1155,32 @@ export const InventoryTableComponent = {
         },
 
         /**
+         * Remove an item from the category entirely (dschwab admin only, history mode).
+         * Splices the row out of the store — the existing save flow archives it to _EditHistory.
+         */
+        async deleteItem(row) {
+            const confirmed = await new Promise(resolve =>
+                this.$modal.confirm(
+                    `Remove ${row.itemNumber} from inventory?\nIt will be archived and appear in the Deleted items list after saving.`,
+                    () => resolve(true), () => resolve(false),
+                    'Remove Item', 'Remove', 'Cancel', 'hamburger-menu'
+                )
+            );
+            if (!confirmed) return;
+
+            const store = this.inventoryTableStore;
+            if (!store) return;
+            if (!await this.acquireLockForEdit()) {
+                this.$modal.alert(`Cannot delete: ${this.tabTitle} is locked for editing by ${this.lockOwnerDisplay || 'another user'}.`, 'Locked');
+                return;
+            }
+            const routeKey = this.appContext?.currentPath?.split('?')[0];
+            if (routeKey) undoRegistry.capture(store.data, routeKey, { type: 'delete' });
+            const idx = store.data.findIndex(r => r.itemNumber === row.itemNumber);
+            if (idx >= 0) store.data.splice(idx, 1);
+        },
+
+        /**
          * Restore an item to a past state, rewinding every newer change. Applies the state to
          * the store (shared with the category table); the user saves it from either page.
          */
@@ -1237,6 +1271,11 @@ export const InventoryTableComponent = {
                     <span v-if="field.key === '_historyDate'" :class="['history-meta', { 'history-unsaved-label': currentHistoryMeta(row).unsaved }]">{{ currentHistoryMeta(row).date }}</span>
                     <span v-else-if="field.key === '_historyUser'" class="history-meta">{{ currentHistoryMeta(row).user }}</span>
                     <span v-else-if="field.key === '_historyNote'" class="history-meta">{{ currentHistoryMeta(row).note }}</span>
+                    <button v-else-if="field.key === '_revert' && historyMode && isAdmin"
+                        class="button-symbol red"
+                        title="Remove this item from inventory"
+                        @click.stop="deleteItem(row)"
+                    >✕</button>
                 </template>
                 <template #row-detail-rows="{ row, visibleColumns, hasActionCell }">
                     <tr
