@@ -95,8 +95,13 @@ export const ThumbnailCropEditor = {
         <div class="thumbnail-crop-stage" :style="ratio ? { '--crop-ratio': ratio } : null">
             <div ref="box" class="thumbnail-crop-box" :style="{ visibility: ratio ? 'visible' : 'hidden' }">
                 <img :src="src" alt="Image to crop" draggable="false" @load="onLoad" />
-                <div class="thumbnail-crop-rect" :style="rectStyle" @pointerdown="start('move', $event)">
-                    <span v-for="corner in ['nw', 'ne', 'sw', 'se']" :key="corner" :class="['thumbnail-crop-handle', corner]" @pointerdown.stop="start(corner, $event)"></span>
+                <div class="thumbnail-crop-rect" :style="rectStyle" @pointerdown="start('move', $event)"></div>
+            </div>
+            <div class="thumbnail-crop-handles" :style="{ visibility: ratio ? 'visible' : 'hidden' }">
+                <div class="thumbnail-crop-handles-box">
+                    <div class="thumbnail-crop-handles-rect" :style="rectStyle">
+                        <span v-for="corner in ['nw', 'ne', 'sw', 'se']" :key="corner" :class="['thumbnail-crop-handle', corner]" @pointerdown.stop="start(corner, $event)"></span>
+                    </div>
                 </div>
             </div>
         </div>

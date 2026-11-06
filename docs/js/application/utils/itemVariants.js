@@ -26,7 +26,8 @@ export function itemVariantCards(row, openModal, families = new Set()) {
             action: () => openModal(escapeHtml(message), `${row.itemNumber} variants`)
         }];
     }
-    return variants.map(variant => {
+    // float: right stacks cards right-to-left in DOM order, so reverse to keep declaration order
+    return [...variants].reverse().map(variant => {
         const counted = variant.quantity !== null;
         const title = counted ? `${variant.itemNumber} (${variant.quantity} of ${row.quantity})` : variant.itemNumber;
         return {
