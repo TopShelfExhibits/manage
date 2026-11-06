@@ -1276,7 +1276,7 @@ export const InventoryTableComponent = {
                         :class="['button-symbol', isMarkedForDeletion(row) ? 'white' : 'red']"
                         :title="isMarkedForDeletion(row) ? 'Keep this item (unmark for deletion)' : 'Mark this item for deletion; saving removes it'"
                         @click.stop="toggleDeletion(row)"
-                    >{{ isMarkedForDeletion(row) ? '⮢' : '✕' }}</button>
+                    ><span class="material-symbols-outlined">{{ isMarkedForDeletion(row) ? 'restore_from_trash' : 'delete' }}</span></button>
                 </template>
                 <template #row-detail-rows="{ row, visibleColumns, hasActionCell }">
                     <tr
