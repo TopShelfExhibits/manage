@@ -1,8 +1,9 @@
-import { html, InventoryTableComponent, hamburgerMenuRegistry, NavigationRegistry, Requests, DataView, DashboardToggleComponent, getReactiveStore, findMatchingStores, createAnalysisConfig, generateStoreKey, authState, invalidateCache, todayISOString, getInventoryTabList, INVENTORY_TAB_PREFERENCES, getShortageAlertsStore, getShortageAlertDays, shortagesByItem, itemShortageCards, categoryShortageCards, itemVariantCards, itemVariantFamilies, THUMBNAIL_FIELD } from '../../index.js';
+import { html, InventoryTableComponent, hamburgerMenuRegistry, NavigationRegistry, Requests, DataView, DashboardToggleComponent, getReactiveStore, findMatchingStores, createAnalysisConfig, generateStoreKey, authState, invalidateCache, todayISOString, getInventoryTabList, INVENTORY_TAB_PREFERENCES, getShortageAlertsStore, getShortageAlertDays, shortagesByItem, itemShortageCards, categoryShortageCards, itemVariantCards, itemVariantFamilies, THUMBNAIL_FIELD, ProposalUtils, getInventoryNoteMaxLength } from '../../index.js';
 import { ShowInventoryReport } from './ShowInventoryReport.js';
 import { InventoryItemReport } from './InventoryItemReport.js';
 import { InventoryItemTimeline } from './InventoryItemTimeline.js';
-import { getProposalsStore, PROPOSALS_PATH } from '../../utils/inventoryProposals.js';
+import { getProposalsStore, PROPOSALS_PATH, reloadProposals, proposalPath } from '../../utils/inventoryProposals.js';
+import { InventorySaveModal } from './InventoryTable.js';
 
 /** Route key of the per-category history page: inventory/<category>/edit-history */
 export const EDIT_HISTORY_ROUTE = 'edit-history';
@@ -482,26 +483,51 @@ export const InventoryContent = {
             this.navigateToPath(newPath);
         },
         async saveCategory(categoryTitle) {
-            try {
-                // Find the reactive store for this inventory category
-                const matchingStores = findMatchingStores(
-                    Requests.getInventoryTabData,
-                    [categoryTitle, undefined, undefined, undefined]
-                );
-                if (matchingStores.length === 0) {
-                    this.$modal.alert('Category not found or no changes to save.', 'Save');
-                    return;
+            const matchingStores = findMatchingStores(
+                Requests.getInventoryTabData,
+                [categoryTitle, undefined, undefined, undefined]
+            );
+            if (matchingStores.length === 0 || !matchingStores[0].isModified) {
+                this.$modal.alert('No unsaved changes to save.', 'Save');
+                return;
+            }
+            const storeMatch = matchingStores[0];
+            const data = storeMatch.store.data || [];
+            const original = storeMatch.store.originalData || [];
+            const hasQtyChanges = data.some(row => {
+                const orig = original.find(o => o.itemNumber === row.itemNumber);
+                return orig && String(row.quantity) !== String(orig.quantity);
+            });
+            const proposals = ProposalUtils.groupProposals(this.proposalsStore?.data || []);
+            this.$modal.custom(InventorySaveModal, {
+                hasQtyChanges,
+                onProposal: (name, isNew) => this.handleCategoryProposal(categoryTitle, storeMatch.store, name, isNew),
+                proposalNames: proposals.filter(p => !p.committed).map(p => p.name),
+                allProposalNames: proposals.map(p => p.name),
+                onConfirm: async (scheduledDate, note) => {
+                    await storeMatch.store.save('Saving inventory...', { scheduledDate, note });
+                    if (scheduledDate > todayISOString()) {
+                        await storeMatch.store.load('Loading...');
+                    }
                 }
-                const storeMatch = matchingStores[0];
-                if (!storeMatch.isModified) {
-                    this.$modal.alert('No unsaved changes to save.', 'Save');
-                    return;
-                }
-                await storeMatch.store.save();
-                this.$modal.alert('Category saved successfully.', 'Success');
-            } catch (error) {
-                console.error('[InventoryContent] Failed to save category:', error);
-                this.$modal.error(`Failed to save category: ${error.message}`, 'Save Error');
+            }, 'Save Changes');
+        },
+        async handleCategoryProposal(categoryTitle, store, name, isNew) {
+            const savedByItem = new Map((store.originalData || []).map(row => [row.itemNumber, row]));
+            const updates = (store.data || [])
+                .filter(row => row.itemNumber)
+                .map(row => ({
+                    itemNumber: row.itemNumber,
+                    changes: ProposalUtils.diffRow(savedByItem.get(row.itemNumber) || { ...row, quantity: '0' }, row)
+                }))
+                .filter(update => update.changes.length > 0);
+            if (updates.length > 0) {
+                await Requests.updateInventoryProposal(name, categoryTitle, updates);
+            }
+            await store.load('Loading...');
+            await reloadProposals();
+            if (isNew && this.appContext?.navigateToPath) {
+                this.appContext.navigateToPath(proposalPath(name));
             }
         },
         navigateToCategoriesView() {
