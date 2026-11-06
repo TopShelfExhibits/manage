@@ -1,4 +1,4 @@
-import { html, NavigationRegistry, appSettings, runNonessentialAnalysisOnAllStores, SEVERITY } from '../../index.js';
+import { html, NavigationRegistry, appSettings, runNonessentialAnalysisOnAllStores, SEVERITY, hamburgerMenuRegistry } from '../../index.js';
 import { PriorityQueue } from '../../utils/priorityQueue.js';
 import { viewportTier } from '../../utils/useContainerSize.js';
 
@@ -11,7 +11,9 @@ const SettingsMenuComponent = {
         showDashboardHeaders: { type: Boolean, required: true },
         toggleDarkMode: { type: Function, required: true },
         toggleEssentialAnalysis: { type: Function, required: true },
-        toggleDashboardHeaders: { type: Function, required: true }
+        toggleDashboardHeaders: { type: Function, required: true },
+        openPageMenu: { type: Function, default: null },
+        isAuthenticated: { type: Boolean, default: false }
     },
     emits: ['close-modal'],
     methods: {
@@ -26,6 +28,10 @@ const SettingsMenuComponent = {
         handleToggleDashboardHeaders() {
             this.toggleDashboardHeaders();
             this.$emit('close-modal');
+        },
+        handleOpenPageMenu() {
+            this.$emit('close-modal');
+            this.openPageMenu?.();
         }
     },
     template: html`
@@ -41,6 +47,9 @@ const SettingsMenuComponent = {
             <button @click="handleToggleDashboardHeaders" 
                     :class="['page-menu-item', { 'red': !showDashboardHeaders }]">
                 {{ showDashboardHeaders ? 'Hide' : 'Show' }} Dashboard Headers
+            </button>
+            <button v-if="openPageMenu" @click="handleOpenPageMenu" class="page-menu-item" :disabled="!isAuthenticated">
+                Open Page Menu
             </button>
         </div>
     `
@@ -134,8 +143,16 @@ export const PrimaryNavComponent = {
                 showDashboardHeaders: this.showDashboardHeaders,
                 toggleDarkMode: this.toggleDarkMode,
                 toggleEssentialAnalysis: this.toggleEssentialAnalysis,
-                toggleDashboardHeaders: this.toggleDashboardHeaders
+                toggleDashboardHeaders: this.toggleDashboardHeaders,
+                openPageMenu: this.openCurrentPageMenu,
+                isAuthenticated: this.isAuthenticated
             }, 'Application Settings');
+        },
+        openCurrentPageMenu() {
+            const containerType = this.currentPath.split('?')[0].split('/')[0];
+            const containerPath = this.currentPath.split('?')[0];
+            const menu = hamburgerMenuRegistry.getMenuComponent(containerType, containerPath);
+            this.$modal.custom(menu.components, menu.props, menu.props.title || containerType);
         },
         updateAnalysisBanner() {
             const banners = this.$notify.getBanners('app') || [];
