@@ -272,13 +272,22 @@ export const ThumbnailGalleryModal = {
             await this.loadUncropped();
         },
         async applyCrop() {
-            const hasRef = !!this.$refs.cropEditor;
-            const hasMethod = hasRef && typeof this.$refs.cropEditor.crop === 'function';
-            console.log('[ThumbnailGalleryModal.applyCrop] ref exists:', hasRef, 'method is function:', hasMethod);
-            const crop = this.$refs.cropEditor && typeof this.$refs.cropEditor.crop === 'function'
-                ? this.$refs.cropEditor.crop()
-                : null;
-            console.log('[ThumbnailGalleryModal.applyCrop] crop value:', crop);
+            let crop = null;
+            try {
+                if (this.$refs.cropEditor && typeof this.$refs.cropEditor.crop === 'function') {
+                    crop = this.$refs.cropEditor.crop();
+                    console.log('[ThumbnailGalleryModal.applyCrop] crop() returned:', crop);
+                } else {
+                    console.log('[ThumbnailGalleryModal.applyCrop] ref or method not found');
+                    console.log('  ref exists:', !!this.$refs.cropEditor);
+                    if (this.$refs.cropEditor) {
+                        console.log('  crop is:', typeof this.$refs.cropEditor.crop);
+                        console.log('  all methods:', Object.keys(this.$refs.cropEditor.$options?.methods || {}));
+                    }
+                }
+            } catch (e) {
+                console.error('[ThumbnailGalleryModal.applyCrop] Error calling crop():', e);
+            }
             const e = this.entry;
             this.mode = 'view';
             this.change(setThumbnailCrop(this.current, this.index, crop));
