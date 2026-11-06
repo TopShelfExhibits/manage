@@ -49,7 +49,7 @@ import { parseA1Range, gridNeeded, clipRangeToGrid, isGridLimitError } from '../
 import { SEVERITY, remainingSeverity } from '../data_management/utils/severity.js';
 import { severityColor, statusColor } from '../application/utils/severity.js';
 import { getAutoColorClass } from '../application/utils/autoColor.js';
-import { getReactiveStore, createAnalysisConfig, itemVariantCards, itemShortageCards, NavigationRegistry } from '../application/index.js';
+import { getReactiveStore, createAnalysisConfig, itemVariantCards, itemShortageCards, NavigationRegistry, isMarkedForDeletion } from '../application/index.js';
 import { checkSheetHealth } from './sheetHealth.js';
 import { guessColumnType, columnTypesEntry, columnTypeMap, columnTypeOf, isOpaqueType } from '../data_management/utils/column-types.js';
 import { migrateThumbnails } from '../data_management/migrations/thumbnail-column.js';
@@ -2357,10 +2357,11 @@ test('TAB READS', 'getAllInventoryData reads every inventory tab in one request'
 });
 
 // ── Group 35: Preferences ─────────────────────────────────────────────────────
-// FakeGoogle CACHE/Preferences has 13 rows, among them:
+// FakeGoogle CACHE/Preferences has 14 rows, among them:
 //   4 schedule* integer prefs (offsets 14, 14, 7, 7)
 //   3 inventory* json tab lists (InventorySuppressCategoryAnalysis, InventoryCustomItemNumbers,
 //     InventoryDescriptionOnly), the only source of those settings
+//   admin: usernames with admin-only UI (the test user), such as the history page's delete buttons
 
 test('PREFERENCES', 'getPreferences returns an array', async () => {
     const result = await Requests.getPreferences();
@@ -2369,7 +2370,7 @@ test('PREFERENCES', 'getPreferences returns an array', async () => {
 
 test('PREFERENCES', 'getPreferences returns every fixture row', async () => {
     const result = await Requests.getPreferences();
-    assertEqual(result.length, 13, 'getPreferences row count');
+    assertEqual(result.length, 14, 'getPreferences row count');
 });
 
 test('PREFERENCES', 'all rows have required fields', async () => {
@@ -2644,6 +2645,25 @@ test('EDIT HISTORY VIEW', 'getArchivedRows returns this tab\'s deleted rows, par
 
 test('EDIT HISTORY VIEW', 'getArchivedRows returns [] when the spreadsheet has no archive tab', async () => {
     assertEqual(await Requests.getArchivedRows('CACHE', 'Notes'), [], 'no CACHE/_EditHistory tab');
+});
+
+// The history page's ✕ (admins) marks a row as the table's Delete key does; saving removes it
+// from the tab and archives it. FakeGoogle SHELVES holds SHLF-001 only; the test puts it back.
+test('EDIT HISTORY VIEW', 'a row marked for deletion is removed and archived on save', async () => {
+    const original = await Database.getData('INVENTORY', 'SHELVES', DEFAULT_INVENTORY_MAPPING);
+    const store = getReactiveStore(Requests.getInventoryTabData, Requests.saveInventoryTabData, ['SHELVES', undefined, undefined, undefined]);
+    for (let i = 0; i < 100 && (store.isLoading || store.initialLoad); i++) await new Promise(r => setTimeout(r, 50));
+    try {
+        const index = store.data.findIndex(row => row.itemNumber === 'SHLF-001');
+        store.markRowForDeletion(index, true);
+        assertEqual(isMarkedForDeletion(store.data[index]), true, 'marked');
+        await _asUser(() => store.save('Saving...'));
+        assertEqual(store.data.map(row => row.itemNumber), [], 'gone from the store');
+        assertEqual((await Requests.getInventoryTabData('SHELVES')).map(row => row.itemNumber), [], 'gone from the tab');
+        assertEqual((await Requests.getArchivedRows('INVENTORY', 'SHELVES')).map(row => row.RowData.itemNumber), ['SHLF-001'], 'archived');
+    } finally {
+        await Database.setData('INVENTORY', 'SHELVES', original, DEFAULT_INVENTORY_MAPPING, { skipMetadata: true });
+    }
 });
 
 test('EDIT HISTORY VIEW', 'item timeline shows field changes and rebuilt quantities (CHAIR-003)', async () => {

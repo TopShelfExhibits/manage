@@ -168,7 +168,7 @@ function shouldExcludeColumn(key, excludedColumns) {
  * @param {Object} obj - The object to check
  * @returns {boolean} True if marked for deletion
  */
-function isMarkedForDeletion(obj) {
+export function isMarkedForDeletion(obj) {
     if (!isValidObject(obj) || !obj.metadata) return false;
     try {
         const metadata = typeof obj.metadata === 'string' ? JSON.parse(obj.metadata) : obj.metadata;

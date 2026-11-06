@@ -1,4 +1,4 @@
-import { html, Requests, TableComponent, DataView, getReactiveStore, createAnalysisConfig, NavigationRegistry, Priority, invalidateCache, authState, undoRegistry, EditHistoryUtils, todayISOString, ProposalUtils, getInventoryNoteMaxLength, getInventoryTabList, INVENTORY_TAB_PREFERENCES, getShortageAlertsStore, getShortageAlertDays, shortagesByItem, itemShortageCards, itemVariantCards, itemVariantFamilies, THUMBNAIL_FIELD, SEVERITY, getPreferencesStore } from '../../index.js';
+import { html, Requests, TableComponent, DataView, getReactiveStore, createAnalysisConfig, NavigationRegistry, Priority, invalidateCache, authState, undoRegistry, EditHistoryUtils, todayISOString, ProposalUtils, getInventoryNoteMaxLength, getInventoryTabList, INVENTORY_TAB_PREFERENCES, getShortageAlertsStore, getShortageAlertDays, shortagesByItem, itemShortageCards, itemVariantCards, itemVariantFamilies, THUMBNAIL_FIELD, SEVERITY, getPreferencesStore, isMarkedForDeletion } from '../../index.js';
 import { sheetLockMixin } from '../../utils/sheetLockMixin.js';
 import { thumbnailStyle, iconLabel } from '../../utils/views/viewStyles.js';
 import { CellRenderer } from '../interface/cells.js';
@@ -711,11 +711,7 @@ export const InventoryTableComponent = {
         );
         if (!this.historyMode) this.proposalsStore = getProposalsStore();
 
-        if (this.historyMode && this.tabTitle) {
-            Requests.getArchivedRows('INVENTORY', this.tabTitle)
-                .then(rows => { this.archivedRows = rows || []; })
-                .catch(err => console.warn('[InventoryTable] Failed to load deleted rows:', err));
-        }
+        if (this.historyMode) this.loadArchivedRows();
 
         // Apply any pending changes that are due today or earlier
         if (this.tabTitle) {
@@ -742,6 +738,7 @@ export const InventoryTableComponent = {
         this.$notify.clearBanners(this.containerPath);
     },
     methods: {
+        isMarkedForDeletion,
         // Decorations (§4.14): a shortage warning on the item number of items that run short, and
         // the variants declared in the description
         itemDecorations(row, key) {
@@ -952,8 +949,18 @@ export const InventoryTableComponent = {
                     if (scheduledDate > todayISOString() || this.historyMode) {
                         await this.inventoryTableStore.load('Loading...');
                     }
+                    // Items this save deleted join the deleted items list
+                    if (this.historyMode) this.loadArchivedRows();
                 }
             }, 'Save Changes');
+        },
+
+        /** The category's deleted items (history page). */
+        loadArchivedRows() {
+            if (!this.tabTitle) return;
+            Requests.getArchivedRows('INVENTORY', this.tabTitle)
+                .then(rows => { this.archivedRows = rows || []; })
+                .catch(err => console.warn('[InventoryTable] Failed to load deleted rows:', err));
         },
 
         /**
@@ -1155,29 +1162,23 @@ export const InventoryTableComponent = {
         },
 
         /**
-         * Remove an item from the category entirely (dschwab admin only, history mode).
-         * Splices the row out of the store — the existing save flow archives it to _EditHistory.
+         * Mark an item for deletion, or unmark it (admins, history page). The same mark as the
+         * table's Delete key: the row shows as marked, and saving removes it from the tab, which
+         * archives it to the deleted items list (Database._archiveDeletedRows).
          */
-        async deleteItem(row) {
-            const confirmed = await new Promise(resolve =>
-                this.$modal.confirm(
-                    `Remove ${row.itemNumber} from inventory?\nIt will be archived and appear in the Deleted items list after saving.`,
-                    () => resolve(true), () => resolve(false),
-                    'Remove Item', 'Remove', 'Cancel', 'hamburger-menu'
-                )
-            );
-            if (!confirmed) return;
-
+        async toggleDeletion(row) {
             const store = this.inventoryTableStore;
-            if (!store) return;
+            const index = store?.data.findIndex(r => r.itemNumber === row.itemNumber) ?? -1;
+            if (index < 0) return;
+
             if (!await this.acquireLockForEdit()) {
                 this.$modal.alert(`Cannot delete: ${this.tabTitle} is locked for editing by ${this.lockOwnerDisplay || 'another user'}.`, 'Locked');
                 return;
             }
+
             const routeKey = this.appContext?.currentPath?.split('?')[0];
-            if (routeKey) undoRegistry.capture(store.data, routeKey, { type: 'delete' });
-            const idx = store.data.findIndex(r => r.itemNumber === row.itemNumber);
-            if (idx >= 0) store.data.splice(idx, 1);
+            if (routeKey) undoRegistry.capture(store.data, routeKey, { type: 'deletion' });
+            store.markRowForDeletion(index, !isMarkedForDeletion(store.data[index]));
         },
 
         /**
@@ -1272,10 +1273,10 @@ export const InventoryTableComponent = {
                     <span v-else-if="field.key === '_historyUser'" class="history-meta">{{ currentHistoryMeta(row).user }}</span>
                     <span v-else-if="field.key === '_historyNote'" class="history-meta">{{ currentHistoryMeta(row).note }}</span>
                     <button v-else-if="field.key === '_revert' && historyMode && isAdmin"
-                        class="button-symbol red"
-                        title="Remove this item from inventory"
-                        @click.stop="deleteItem(row)"
-                    >✕</button>
+                        :class="['button-symbol', isMarkedForDeletion(row) ? 'white' : 'red']"
+                        :title="isMarkedForDeletion(row) ? 'Keep this item (unmark for deletion)' : 'Mark this item for deletion; saving removes it'"
+                        @click.stop="toggleDeletion(row)"
+                    >{{ isMarkedForDeletion(row) ? '⮢' : '✕' }}</button>
                 </template>
                 <template #row-detail-rows="{ row, visibleColumns, hasActionCell }">
                     <tr
