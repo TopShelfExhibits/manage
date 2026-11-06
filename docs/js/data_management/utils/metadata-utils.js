@@ -449,19 +449,28 @@ export class EditHistoryUtils {
      * item numbers in the tab again (restored, or taken by another item: either way it can't be
      * restored). The archive itself is never rewritten, so a row deleted, restored and deleted
      * again lists its newest deletion (also when the older one was archived without an identity).
+     * A row without an item number goes by its EditHistory identity instead (each one without
+     * either is listed).
      * @param {Array<{RowData: Object, Timestamp: number}>} entries - Archive entries of the tab
      *   (getArchivedRows: RowData parsed), newest first
      * @param {Array<Object>} rows - The tab's rows now (unsaved restores included)
      * @returns {Array<Object>} The entries still deleted, newest first
      */
     static currentDeletions(entries, rows) {
-        const inTab = new Set((rows || []).map(row => row.itemNumber));
+        const numberOf = (row) => String(row?.itemNumber ?? '').trim();
+        const numbers = new Set((rows || []).map(numberOf).filter(Boolean));
+        const identities = new Set((rows || []).map(row => this.getRowIndex(row?.[HISTORY_KEY])).filter(i => i !== null));
         const seen = new Set();
         return (entries || []).filter(entry => {
             const data = entry?.RowData || {};
-            if (seen.has(data.itemNumber)) return false;
-            seen.add(data.itemNumber);
-            return !inTab.has(data.itemNumber);
+            const number = numberOf(data);
+            const i = this.getRowIndex(data[HISTORY_KEY]);
+            const key = number ? `item:${number}` : (i !== null ? `i:${i}` : null);
+            if (key) {
+                if (seen.has(key)) return false;
+                seen.add(key);
+            }
+            return number ? !numbers.has(number) : !(i !== null && identities.has(i));
         });
     }
 

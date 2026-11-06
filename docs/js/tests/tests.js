@@ -2681,6 +2681,10 @@ test('EDIT HISTORY VIEW', 'deleted items list the newest deletion of each item; 
     assertEqual([restored.AppData, JSON.parse(restored.metadata), JSON.parse(restored.edithistory).i], [undefined, { grouping: 1 }, 3], 'no mark, identity kept');
     const taken = EditHistoryUtils.restoredRow(archived, [{ itemNumber: 'Z-9', edithistory: JSON.stringify({ i: 3 }) }]);
     assertEqual(JSON.parse(taken.edithistory), { h: [{ u: 'dan' }] }, 'an identity taken since is given up; history stays');
+    // Rows without item numbers go by identity: each is listed until a row with its identity is back
+    const blank = [entry('', 7, 40), entry('', 8, 35), entry('', 7, 15), entry('', null, 12), entry('', null, 11)];
+    assertEqual(EditHistoryUtils.currentDeletions(blank, [{ itemNumber: '', edithistory: JSON.stringify({ i: 8 }) }]).map(e => e.Timestamp),
+        [40, 12, 11], 'no item numbers: newest per identity, identity 8 is back, rows without either all listed');
 });
 
 // The archive is appended in one values.append per save, so deletions saved at the same time

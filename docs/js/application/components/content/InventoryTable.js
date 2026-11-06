@@ -1170,7 +1170,7 @@ export const InventoryTableComponent = {
          */
         async toggleDeletion(row) {
             const store = this.inventoryTableStore;
-            const index = store?.data.findIndex(r => r.itemNumber === row.itemNumber) ?? -1;
+            const index = this.storeIndexOf(row);
             if (index < 0) return;
 
             if (!await this.acquireLockForEdit()) {
@@ -1184,15 +1184,27 @@ export const InventoryTableComponent = {
         },
 
         /**
+         * The store index of a row the table shows: the same row object, else the same row id.
+         * (Item numbers can repeat or be blank, so they don't identify a row.)
+         */
+        storeIndexOf(row) {
+            const data = this.inventoryTableStore?.data || [];
+            const index = data.indexOf(row);
+            if (index >= 0) return index;
+            const id = row?.AppData?._rowId;
+            return id ? data.findIndex(other => other?.AppData?._rowId === id) : -1;
+        },
+
+        /**
          * Put a deleted item back (admins, history page): its archived row, identity and history
          * return to the table as an unsaved change, and leave the deleted items list. Saving
          * restores it (its first entry records the restore); Discard or undo cancels it.
          */
         async restoreItem(entry) {
             const store = this.inventoryTableStore;
-            const row = EditHistoryUtils.restoredRow(entry?.RowData, store?.data);
-            if (!store || !row.itemNumber) return;
-            if (store.data.some(other => other.itemNumber === row.itemNumber)) {
+            if (!store || !entry?.RowData) return;
+            const row = EditHistoryUtils.restoredRow(entry.RowData, store.data);
+            if (row.itemNumber && store.data.some(other => other.itemNumber === row.itemNumber)) {
                 this.$modal.alert(`${row.itemNumber} can't be restored: ${this.tabTitle} already has an item with that number.`, 'Restore');
                 return;
             }
@@ -1206,7 +1218,7 @@ export const InventoryTableComponent = {
             // Fields the archived row lacks (a column added since) start empty
             const fieldNames = Object.keys(store.data[0] || {}).filter(key => key !== 'AppData');
             store.addRow(row, fieldNames);
-            this.revertNote = `restore ${row.itemNumber}`.slice(0, getInventoryNoteMaxLength());
+            this.revertNote = `restore ${row.itemNumber || 'item'}`.slice(0, getInventoryNoteMaxLength());
         },
 
         /**
@@ -1215,7 +1227,7 @@ export const InventoryTableComponent = {
          */
         async revertToState(row, detail) {
             const store = this.inventoryTableStore;
-            const target = store?.data.find(r => r.itemNumber === row.itemNumber);
+            const target = store?.data[this.storeIndexOf(row)];
             if (!target || !detail.revertState) return;
 
             if (!await this.acquireLockForEdit()) {
@@ -1372,12 +1384,12 @@ export const InventoryTableComponent = {
                 class="inventory-deleted-rows"
             >
                 <template #cell="{ row, field }">
-                    <button v-if="field.key === '_restore'"
+                    <button v-if="field.key === '_restore' && isAdmin"
                         class="button-symbol purple"
                         :title="'Put ' + row.itemNumber + ' back in ' + tabTitle + '; saving restores it'"
                         @click.stop="restoreItem(row._entry)"
                     ><span class="material-symbols-outlined">restore_from_trash</span></button>
-                    <span v-else class="history-meta">{{ row[field.key] }}</span>
+                    <span v-else-if="field.key !== '_restore'" class="history-meta">{{ row[field.key] }}</span>
                 </template>
             </DataView>
         </slot>
