@@ -272,9 +272,13 @@ export const ThumbnailGalleryModal = {
             await this.loadUncropped();
         },
         async applyCrop() {
+            const hasRef = !!this.$refs.cropEditor;
+            const hasMethod = hasRef && typeof this.$refs.cropEditor.crop === 'function';
+            console.log('[ThumbnailGalleryModal.applyCrop] ref exists:', hasRef, 'method is function:', hasMethod);
             const crop = this.$refs.cropEditor && typeof this.$refs.cropEditor.crop === 'function'
                 ? this.$refs.cropEditor.crop()
                 : null;
+            console.log('[ThumbnailGalleryModal.applyCrop] crop value:', crop);
             const e = this.entry;
             this.mode = 'view';
             this.change(setThumbnailCrop(this.current, this.index, crop));
