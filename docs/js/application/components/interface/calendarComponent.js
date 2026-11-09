@@ -1,4 +1,4 @@
-import { html, parseDate, LoadingBarComponent, NavigationRegistry } from '../../index.js';
+import { html, parseDate, LoadingBarComponent, NavigationRegistry, readRowMetadata } from '../../index.js';
 import { useSearch, SearchBoxComponent, scrollToSearchResult, scrollToActiveResult } from '../../utils/useSearch.js';
 import { useStickyHeader } from '../../utils/useStickyHeader.js';
 import { formatText, escapeHtml } from '../../utils/views/fieldFormat.js';
@@ -346,11 +346,7 @@ export const CalendarComponent = {
     methods: {
         statusColor,
         _isGroupMaster(row) {
-            if (!row || !row.metadata) return false;
-            try {
-                const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata;
-                return !!meta?.grouping?.isGroupMaster;
-            } catch { return false; }
+            return !!readRowMetadata(row).grouping?.isGroupMaster;
         },
         _getWeekStart(date, weekStartDay) {
             const d = new Date(date.getFullYear(), date.getMonth(), date.getDate());

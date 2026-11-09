@@ -1,4 +1,4 @@
-import { CacheInvalidationBus, ProgressBus, Requests, authState, Auth, resolveInventoryNoteMaxLength, resolveInventoryTabList, EditHistoryUtils } from '../index.js';
+import { CacheInvalidationBus, ProgressBus, Requests, authState, Auth, resolveInventoryNoteMaxLength, resolveInventoryTabList, EditHistoryUtils, readRowMetadata, writeRowMetadata } from '../index.js';
 import { PriorityQueue, Priority } from './priorityQueue.js';
 
 // Re-export Priority for component use
@@ -169,13 +169,7 @@ function shouldExcludeColumn(key, excludedColumns) {
  * @returns {boolean} True if marked for deletion
  */
 export function isMarkedForDeletion(obj) {
-    if (!isValidObject(obj) || !obj.metadata) return false;
-    try {
-        const metadata = typeof obj.metadata === 'string' ? JSON.parse(obj.metadata) : obj.metadata;
-        return metadata?.deletion?.marked === true;
-    } catch (e) {
-        return false;
-    }
+    return isValidObject(obj) && hasDeletionMark(obj.metadata);
 }
 
 /**
@@ -678,14 +672,7 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
                 const row = this._data[idx];
                 
                 // Parse existing metadata
-                let metadata = {};
-                if (row.metadata) {
-                    try {
-                        metadata = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata;
-                    } catch (e) {
-                        console.warn('Failed to parse metadata:', e);
-                    }
-                }
+                const metadata = readRowMetadata(row);
                 
                 // Set or remove deletion flag
                 if (value) {
@@ -694,10 +681,9 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
                     delete metadata.deletion;
                 }
                 
-                // Save back to metadata; with nothing left the key goes, as the row was loaded
-                // (so mark-then-unmark leaves the row, and its undo snapshot, unchanged)
-                if (Object.keys(metadata).length > 0) row.metadata = JSON.stringify(metadata);
-                else delete row.metadata;
+                // With nothing left the key goes (writeRowMetadata), as the row was loaded, so
+                // mark-then-unmark leaves the row, and its undo snapshot, unchanged
+                writeRowMetadata(row, metadata);
                 
                 // If marking for deletion and row is empty, remove immediately
                 if (value) {
@@ -789,17 +775,11 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
                     // If the row above the insertion point is in a group, add the new row to that group
                     const items = this._data[parentIdx][key];
                     const rowAbove = insertIndex > 0 ? items[insertIndex - 1] : null;
-                    if (rowAbove && rowAbove.metadata) {
-                        try {
-                            const aboveMeta = JSON.parse(rowAbove.metadata);
-                            const aboveGrouping = aboveMeta?.grouping;
-                            if (aboveGrouping) {
-                                let meta = {};
-                                try { meta = JSON.parse(row.metadata || '{}'); } catch (e) { meta = {}; }
-                                meta.grouping = { groupId: aboveGrouping.groupId, isGroupMaster: false };
-                                row.metadata = JSON.stringify(meta);
-                            }
-                        } catch (e) { /* malformed metadata - skip grouping */ }
+                    const aboveGrouping = rowAbove ? readRowMetadata(rowAbove).grouping : null;
+                    if (aboveGrouping) {
+                        const meta = readRowMetadata(row);
+                        meta.grouping = { groupId: aboveGrouping.groupId, isGroupMaster: false };
+                        writeRowMetadata(row, meta);
                     }
                 } else {
                     // Default: append to end
@@ -1475,13 +1455,7 @@ function locateChangeRow(rows, change) {
 
 /** Whether a metadata value (string or object) marks its row for deletion. */
 function hasDeletionMark(metadata) {
-    if (!metadata) return false;
-    try {
-        const parsed = typeof metadata === 'string' ? JSON.parse(metadata) : metadata;
-        return parsed?.deletion?.marked === true;
-    } catch (e) {
-        return false;
-    }
+    return readRowMetadata({ metadata }).deletion?.marked === true;
 }
 
 /**

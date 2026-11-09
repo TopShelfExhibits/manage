@@ -33,7 +33,7 @@ import { FakeGoogleSheetsAuth, FakeGoogleSheetsService, FakeGoogleState, setFake
 import { refreshAppData } from './fakeGoogleDevTools.js';
 import { isCheckedValue } from '../data_management/utils/checkbox-values.js';
 import { useBatchEdits, useInstantEdits } from '../application/utils/cellEdits.js';
-import { CacheInvalidationBus, ApplicationUtils, ProductionUtils, triggerCachePoll, stampDataChange, Database, DEFAULT_INVENTORY_MAPPING, EditHistoryUtils, InventoryUtils, ProposalUtils, PROPOSAL_LOCK_NAMESPACE, resolveInventoryNoteMaxLength, checkDateRollover, clearCache, invalidateCache, resolveSheetMapping, parseThumbnails, parseThumbnailEntries, serializeThumbnailEntries, addThumbnails, removeThumbnailAt, setPrimaryThumbnail, setThumbnailNote, setThumbnailCrop, primaryThumbnailValue, thumbnailKey } from '../data_management/index.js';
+import { CacheInvalidationBus, ApplicationUtils, ProductionUtils, triggerCachePoll, stampDataChange, Database, DEFAULT_INVENTORY_MAPPING, EditHistoryUtils, InventoryUtils, ProposalUtils, PROPOSAL_LOCK_NAMESPACE, resolveInventoryNoteMaxLength, readRowMetadata, writeRowMetadata, checkDateRollover, clearCache, invalidateCache, resolveSheetMapping, parseThumbnails, parseThumbnailEntries, serializeThumbnailEntries, addThumbnails, removeThumbnailAt, setPrimaryThumbnail, setThumbnailNote, setThumbnailCrop, primaryThumbnailValue, thumbnailKey } from '../data_management/index.js';
 import { authState } from '../application/utils/auth.js';
 import { commitInventoryProposal, saveToProposal, proposalTableStore, sendEditsToProposal } from '../application/utils/inventoryProposals.js';
 import { hasQuantityChanges } from '../application/components/content/InventoryTable.js';
@@ -2703,6 +2703,25 @@ test('EDIT HISTORY VIEW', 'a row marked for deletion is removed and archived on 
     } finally {
         await Database.setData('INVENTORY', 'SHELVES', original, DEFAULT_INVENTORY_MAPPING, { skipMetadata: true });
     }
+});
+
+// Row flags (deletion mark, highlight, grouping) live in a row's metadata as JSON text. Pages read and
+// write them with readRowMetadata / writeRowMetadata; clearing the last flag removes the key, as rows load.
+test('ROW METADATA', 'readRowMetadata reads JSON text or an object; anything else reads as no flags', async () => {
+    const flags = { grouping: { groupId: 'G1', isGroupMaster: true } };
+    assertEqual(readRowMetadata({ metadata: JSON.stringify(flags) }), flags, 'JSON text');
+    const row = { metadata: flags };
+    assertEqual(readRowMetadata(row) === flags, true, 'an object is returned as is');
+    assertEqual([{}, { metadata: '' }, { metadata: null }, { metadata: 'not json' }, { metadata: '"text"' }, null].map(readRowMetadata),
+        [{}, {}, {}, {}, {}, {}], 'missing, empty, unreadable or not an object');
+});
+
+test('ROW METADATA', 'writeRowMetadata stores JSON text, and removes the key when no flags are left', async () => {
+    const row = { itemNumber: 'A-1', metadata: '' };
+    writeRowMetadata(row, { highlight: { class: 'yellow' } });
+    assertEqual(row.metadata, '{"highlight":{"class":"yellow"}}', 'stored as text');
+    writeRowMetadata(row, {});
+    assertEqual('metadata' in row, false, 'key removed');
 });
 
 test('EDIT HISTORY VIEW', 'deleted items list the newest deletion of each item; a restored row drops its mark', async () => {

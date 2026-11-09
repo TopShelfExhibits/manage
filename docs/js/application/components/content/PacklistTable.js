@@ -1,4 +1,4 @@
-import { html, TableComponent, Requests, getReactiveStore, NavigationRegistry, createAnalysisConfig, invalidateCache, Priority, undoRegistry, statusColor, severityColor, SEVERITY, getInventoryTabList, INVENTORY_TAB_PREFERENCES } from '../../index.js';
+import { html, TableComponent, Requests, getReactiveStore, NavigationRegistry, createAnalysisConfig, invalidateCache, Priority, undoRegistry, isMarkedForDeletion, readRowMetadata, writeRowMetadata, statusColor, severityColor, SEVERITY, getInventoryTabList, INVENTORY_TAB_PREFERENCES } from '../../index.js';
 import { resolveView } from '../../utils/views/resolveView.js';
 import { InventorySelectorModal } from './InventorySelectorModal.js';
 import { escapeHtml } from '../../utils/views/fieldFormat.js';
@@ -81,15 +81,7 @@ const RowOptionsMenuComponent = {
     inject: ['$modal'],
     computed: {
         anyHighlighted() {
-            return this.selectedRows.some(({ row }) => {
-                if (!row || !row.metadata) return false;
-                try {
-                    const metadata = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata;
-                    return metadata?.highlight?.class === 'yellow';
-                } catch (e) {
-                    return false;
-                }
-            });
+            return this.selectedRows.some(({ row }) => readRowMetadata(row).highlight?.class === 'yellow');
         },
         menuItems() {
             const highlightLabel = this.anyHighlighted ? 'Unhighlight row(s)' : 'Highlight row(s)';
@@ -487,6 +479,7 @@ export const PacklistTable = {
         });
     },
     methods: {
+        isMarkedForDeletion,
         onForeignLockWhileClean() {
             if (!this.tabName) return;
 
@@ -827,13 +820,7 @@ export const PacklistTable = {
         },
 
         getRowGrouping(row) {
-            if (!row || !row.metadata) return null;
-            try {
-                const metadata = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata;
-                return metadata?.grouping || null;
-            } catch (e) {
-                return null;
-            }
+            return readRowMetadata(row).grouping || null;
         },
 
         isGroupMasterRow(row) {
@@ -1240,16 +1227,8 @@ export const PacklistTable = {
             // Toggle highlight class in metadata for selected rows
             selectedRows.forEach(({ row }) => {
                 if (row) {
-                    // Parse metadata (handle both string and object formats)
-                    let metadata = {};
-                    if (row.metadata) {
-                        try {
-                            metadata = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata;
-                        } catch (e) {
-                            metadata = {};
-                        }
-                    }
-                    
+                    const metadata = readRowMetadata(row);
+
                     if (shouldRemove) {
                         // Remove highlight
                         if (metadata.highlight) {
@@ -1267,8 +1246,7 @@ export const PacklistTable = {
                         metadata.highlight.class = 'yellow';
                     }
                     
-                    // Store back as JSON string
-                    row.metadata = JSON.stringify(metadata);
+                    writeRowMetadata(row, metadata);
                 }
             });
         },
@@ -1371,15 +1349,7 @@ export const PacklistTable = {
                             <!-- Only count visible (not marked-for-deletion) rows for Piece # -->
                             {{
                                 mainTableData
-                                    .filter(r => {
-                                        if (!r || !r.metadata) return true;
-                                        try {
-                                            const metadata = typeof r.metadata === 'string' ? JSON.parse(r.metadata) : r.metadata;
-                                            return metadata?.deletion?.marked !== true;
-                                        } catch (e) {
-                                            return true;
-                                        }
-                                    })
+                                    .filter(r => r && !isMarkedForDeletion(r))
                                     .findIndex(r => r === row) + 1
                             }}
                         </template>

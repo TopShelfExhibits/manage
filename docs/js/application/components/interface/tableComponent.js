@@ -1,4 +1,4 @@
-import { html, parseDate, LoadingBarComponent, NavigationRegistry, undoRegistry, setTableRowSelectionState, modalManager } from '../../index.js';
+import { html, parseDate, LoadingBarComponent, NavigationRegistry, undoRegistry, setTableRowSelectionState, modalManager, readRowMetadata, writeRowMetadata } from '../../index.js';
 import { useSearch, SearchBoxComponent, scrollToSearchResult } from '../../utils/useSearch.js';
 import { useStickyHeader } from '../../utils/useStickyHeader.js';
 import { formatValue, formatText, escapeHtml } from '../../utils/views/fieldFormat.js';
@@ -155,13 +155,9 @@ export const tableRowSelectionState = Vue.reactive({
             raw = { ...withoutAppData };
         }
         if (raw.metadata) {
-            try {
-                const meta = JSON.parse(raw.metadata);
-                delete meta.deletion;
-                raw.metadata = Object.keys(meta).length > 0 ? JSON.stringify(meta) : '';
-            } catch (e) {
-                raw.metadata = '';
-            }
+            const meta = { ...readRowMetadata(raw) };
+            delete meta.deletion;
+            writeRowMetadata(raw, meta);
         }
         return raw;
     },
@@ -172,23 +168,18 @@ export const tableRowSelectionState = Vue.reactive({
     _remapCloneGroupIds(clones) {
         const idMap = new Map(); // oldGroupId -> newGroupId
         clones.forEach(clone => {
-            if (!clone.metadata) return;
-            let meta;
-            try { meta = JSON.parse(clone.metadata); } catch (e) { return; }
-            const gid = meta?.grouping?.groupId;
+            const gid = readRowMetadata(clone).grouping?.groupId;
             if (gid && !idMap.has(gid)) {
                 idMap.set(gid, `G${Date.now()}_${Math.random().toString(36).substr(2, 9)}`);
             }
         });
         if (idMap.size === 0) return;
         clones.forEach(clone => {
-            if (!clone.metadata) return;
-            let meta;
-            try { meta = JSON.parse(clone.metadata); } catch (e) { return; }
-            const gid = meta?.grouping?.groupId;
+            const meta = readRowMetadata(clone);
+            const gid = meta.grouping?.groupId;
             if (gid && idMap.has(gid)) {
                 meta.grouping = { ...meta.grouping, groupId: idMap.get(gid) };
-                clone.metadata = JSON.stringify(meta);
+                writeRowMetadata(clone, meta);
             }
         });
     },
@@ -352,10 +343,9 @@ export const tableRowSelectionState = Vue.reactive({
             const groupId = existingGrouping?.groupId || `G${Date.now()}`;
 
             if (!existingGrouping?.isGroupMaster) {
-                let meta = {};
-                try { meta = JSON.parse(targetItem.metadata || '{}'); } catch (e) {}
+                const meta = readRowMetadata(targetItem);
                 meta.grouping = { groupId, isGroupMaster: true };
-                targetItem.metadata = JSON.stringify(meta);
+                writeRowMetadata(targetItem, meta);
             }
 
             let rowsToInsert;
@@ -376,20 +366,18 @@ export const tableRowSelectionState = Vue.reactive({
                 if (isCut) {
                     for (const item of this.clipboardItems) {
                         if (item.original) {
-                            let meta = {};
-                            try { meta = JSON.parse(item.original.metadata || '{}'); } catch (e) {}
+                            const meta = readRowMetadata(item.original);
                             meta.deletion = { marked: true };
-                            item.original.metadata = JSON.stringify(meta);
+                            writeRowMetadata(item.original, meta);
                         }
                     }
                 }
             }
 
             rowsToInsert.forEach(row => {
-                let meta = {};
-                try { meta = JSON.parse(row.metadata || '{}'); } catch (e) {}
+                const meta = readRowMetadata(row);
                 meta.grouping = { groupId, isGroupMaster: false };
-                row.metadata = JSON.stringify(meta);
+                writeRowMetadata(row, meta);
             });
 
             // Re-find target index after possible removals (same-array removal shifts indices)
@@ -466,10 +454,9 @@ export const tableRowSelectionState = Vue.reactive({
             if (isCut) {
                 for (const item of this.clipboardItems) {
                     if (item.original) {
-                        let meta = {};
-                        try { meta = JSON.parse(item.original.metadata || '{}'); } catch (e) {}
+                        const meta = readRowMetadata(item.original);
                         meta.deletion = { marked: true };
-                        item.original.metadata = JSON.stringify(meta);
+                        writeRowMetadata(item.original, meta);
                     }
                 }
             }
@@ -825,14 +812,9 @@ export const tableRowSelectionState = Vue.reactive({
                     const item = sourceArray[i];
                     if (item) {
                         // Parse existing metadata and remove only grouping
-                        let metadata = {};
-                        try {
-                            metadata = JSON.parse(item.metadata || '{}');
-                        } catch (e) {
-                            metadata = {};
-                        }
+                        const metadata = readRowMetadata(item);
                         delete metadata.grouping;
-                        item.metadata = Object.keys(metadata).length > 0 ? JSON.stringify(metadata) : '';
+                        writeRowMetadata(item, metadata);
                         //console.log(`Removed orphaned group master at index ${i} (no children found)`);
                     }
                 }
@@ -887,17 +869,12 @@ export const tableRowSelectionState = Vue.reactive({
         // Update target item to be group master (if not already)
         if (!targetGrouping?.isGroupMaster) {
             // Parse existing metadata and add/update grouping
-            let metadata = {};
-            try {
-                metadata = JSON.parse(targetItem.metadata || '{}');
-            } catch (e) {
-                metadata = {};
-            }
+            const metadata = readRowMetadata(targetItem);
             metadata.grouping = {
                 groupId: groupId,
                 isGroupMaster: true
             };
-            targetItem.metadata = JSON.stringify(metadata);
+            writeRowMetadata(targetItem, metadata);
             //console.log('Set target as group master:', groupId, 'index:', targetIndex);
         }
         
@@ -921,17 +898,12 @@ export const tableRowSelectionState = Vue.reactive({
         // Update dropped items metadata with grouping info
         droppedItems.forEach(droppedItem => {
             // Parse existing metadata and add/update grouping
-            let metadata = {};
-            try {
-                metadata = JSON.parse(droppedItem.metadata || '{}');
-            } catch (e) {
-                metadata = {};
-            }
+            const metadata = readRowMetadata(droppedItem);
             metadata.grouping = {
                 groupId: groupId,
                 isGroupMaster: false
             };
-            droppedItem.metadata = JSON.stringify(metadata);
+            writeRowMetadata(droppedItem, metadata);
             //console.log('Grouped item with master:', groupId);
         });
         
@@ -1025,14 +997,7 @@ export const tableRowSelectionState = Vue.reactive({
                 const row = sourceArray[rowIndex];
                 
                 // Parse existing metadata
-                let metadata = {};
-                if (row.metadata) {
-                    try {
-                        metadata = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata;
-                    } catch (e) {
-                        console.warn('Failed to parse metadata:', e);
-                    }
-                }
+                const metadata = readRowMetadata(row);
                 
                 // Set or remove deletion flag
                 if (Value) {
@@ -1042,7 +1007,7 @@ export const tableRowSelectionState = Vue.reactive({
                 }
                 
                 // Save back to metadata
-                row.metadata = Object.keys(metadata).length > 0 ? JSON.stringify(metadata) : null;
+                writeRowMetadata(row, metadata);
                 
                 deletedCount++;
             }
@@ -1222,14 +1187,9 @@ export const tableRowSelectionState = Vue.reactive({
                         const item = sourceArray[rowIndex];
                         if (item) {
                             // Parse existing metadata and remove only grouping
-                            let metadata = {};
-                            try {
-                                metadata = JSON.parse(item.metadata || '{}');
-                            } catch (e) {
-                                metadata = {};
-                            }
+                            const metadata = readRowMetadata(item);
                             delete metadata.grouping;
-                            item.metadata = Object.keys(metadata).length > 0 ? JSON.stringify(metadata) : '';
+                            writeRowMetadata(item, metadata);
                             //console.log(`Removed grouping from row ${rowIndex} (between drop, master not selected)`);
                         }
                     }
@@ -1349,8 +1309,7 @@ export const tableRowSelectionState = Vue.reactive({
             // If dropped into a group, assign moved rows to that group as children
             if (splitGroupId) {
                 movedRows.forEach(row => {
-                    let metadata = {};
-                    try { metadata = JSON.parse(row.metadata || '{}'); } catch(e) { metadata = {}; }
+                    const metadata = readRowMetadata(row);
                     const grouping = metadata.grouping;
                     // Don't reassign if this row is already the master of the target group
                     if (grouping && grouping.isGroupMaster && grouping.groupId === splitGroupId) return;
@@ -1359,7 +1318,7 @@ export const tableRowSelectionState = Vue.reactive({
                     // Assign as child if not already in this group
                     if (!grouping || grouping.groupId !== splitGroupId) {
                         metadata.grouping = { groupId: splitGroupId, isGroupMaster: false };
-                        row.metadata = JSON.stringify(metadata);
+                        writeRowMetadata(row, metadata);
                     }
                 });
             }

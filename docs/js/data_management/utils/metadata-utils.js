@@ -66,6 +66,36 @@ export function resolveInventoryNoteMaxLength(preferences) {
     return Number.isInteger(value) && value > 0 ? value : DEFAULT_INVENTORY_NOTE_MAX_LENGTH;
 }
 
+/**
+ * A row's MetaData flags (deletion mark, highlight, grouping) as an object. The column holds JSON
+ * text, or the object itself once parsed; empty or unreadable metadata reads as {}. When the row
+ * holds an object, that same object is returned: change it, then writeRowMetadata.
+ * @param {Object} row
+ * @returns {Object}
+ */
+export function readRowMetadata(row) {
+    const raw = row?.metadata;
+    if (!raw) return {};
+    if (typeof raw === 'object') return raw;
+    try {
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch (e) {
+        return {};
+    }
+}
+
+/**
+ * Store a row's MetaData flags as JSON text. With no flags left the key goes, as rows load without
+ * flags (a pack list saves it as an empty cell), so clearing a flag leaves the row unchanged.
+ * @param {Object} row
+ * @param {Object} metadata
+ */
+export function writeRowMetadata(row, metadata) {
+    if (metadata && Object.keys(metadata).length > 0) row.metadata = JSON.stringify(metadata);
+    else delete row.metadata;
+}
+
 const DIFF_IGNORED_COLUMNS = [HISTORY_KEY, 'AppData'];
 
 export class EditHistoryUtils {
@@ -491,13 +521,10 @@ export class EditHistoryUtils {
             delete history.i;
             row[HISTORY_KEY] = JSON.stringify(history);
         }
-        if (row.metadata) {
-            try {
-                const metadata = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata;
-                delete metadata.deletion;
-                row.metadata = Object.keys(metadata).length ? JSON.stringify(metadata) : '';
-            } catch { /* unreadable metadata: keep as stored */ }
-        }
+        // The archived row was marked for deletion: it comes back unmarked
+        const metadata = { ...readRowMetadata(row) };
+        delete metadata.deletion;
+        writeRowMetadata(row, metadata);
         return row;
     }
 
