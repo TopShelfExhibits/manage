@@ -475,19 +475,21 @@ export class EditHistoryUtils {
     }
 
     /**
-     * The deleted rows to list for a tab: the newest archive entry of each item number, except
-     * item numbers in the tab again (restored, or taken by another item: either way it can't be
-     * restored). The archive itself is never rewritten, so a row deleted, restored and deleted
-     * again lists its newest deletion (also when the older one was archived without an identity).
-     * A row without an item number goes by its EditHistory identity instead (each one without
+     * The deleted rows to list for a tab: the newest archive entry of each key (an inventory tab's
+     * item number), except keys in the tab again (restored, or taken by another row: either way it
+     * can't be restored). The archive itself is never rewritten, so a row deleted, restored and
+     * deleted again lists its newest deletion (also when the older one was archived without an
+     * identity). A row without a key goes by its EditHistory identity instead (each one without
      * either is listed).
      * @param {Array<{RowData: Object, Timestamp: number}>} entries - Archive entries of the tab
      *   (getArchivedRows: RowData parsed), newest first
      * @param {Array<Object>} rows - The tab's rows now (unsaved restores included)
+     * @param {string|null} keyField - The field naming a row ('itemNumber'), or null to go by
+     *   identity only
      * @returns {Array<Object>} The entries still deleted, newest first
      */
-    static currentDeletions(entries, rows) {
-        const numberOf = (row) => String(row?.itemNumber ?? '').trim();
+    static currentDeletions(entries, rows, keyField) {
+        const numberOf = (row) => (keyField ? String(row?.[keyField] ?? '').trim() : '');
         const numbers = new Set((rows || []).map(numberOf).filter(Boolean));
         const identities = new Set((rows || []).map(row => this.getRowIndex(row?.[HISTORY_KEY])).filter(i => i !== null));
         const seen = new Set();

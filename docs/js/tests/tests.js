@@ -2727,8 +2727,10 @@ test('ROW METADATA', 'writeRowMetadata stores JSON text, and removes the key whe
 test('EDIT HISTORY VIEW', 'deleted items list the newest deletion of each item; a restored row drops its mark', async () => {
     const entry = (itemNumber, i, t) => ({ Timestamp: t, RowData: { itemNumber, edithistory: i ? JSON.stringify({ i, h: [] }) : '' } });
     const entries = [entry('A-1', 3, 30), entry('B-1', 5, 20), entry('A-1', 3, 10), entry('C-1', null, 5)];
-    assertEqual(EditHistoryUtils.currentDeletions(entries, [{ itemNumber: 'B-1' }]).map(e => [e.RowData.itemNumber, e.Timestamp]),
+    assertEqual(EditHistoryUtils.currentDeletions(entries, [{ itemNumber: 'B-1' }], 'itemNumber').map(e => [e.RowData.itemNumber, e.Timestamp]),
         [['A-1', 30], ['C-1', 5]], 'newest per item number; B-1 is in the tab again');
+    assertEqual(EditHistoryUtils.currentDeletions(entries, [{ itemNumber: 'B-1' }], null).map(e => [e.RowData.itemNumber, e.Timestamp]),
+        [['A-1', 30], ['B-1', 20], ['C-1', 5]], 'without a key field: newest per identity, item numbers ignored');
     const archived = { itemNumber: 'A-1', AppData: { x: 1 }, metadata: JSON.stringify({ deletion: { marked: true }, grouping: 1 }), edithistory: JSON.stringify({ i: 3, h: [{ u: 'dan' }] }) };
     const restored = EditHistoryUtils.restoredRow(archived);
     assertEqual([restored.AppData, JSON.parse(restored.metadata), JSON.parse(restored.edithistory).i], [undefined, { grouping: 1 }, 3], 'no mark, identity kept');
@@ -2736,7 +2738,7 @@ test('EDIT HISTORY VIEW', 'deleted items list the newest deletion of each item; 
     assertEqual(JSON.parse(taken.edithistory), { h: [{ u: 'dan' }] }, 'an identity taken since is given up; history stays');
     // Rows without item numbers go by identity: each is listed until a row with its identity is back
     const blank = [entry('', 7, 40), entry('', 8, 35), entry('', 7, 15), entry('', null, 12), entry('', null, 11)];
-    assertEqual(EditHistoryUtils.currentDeletions(blank, [{ itemNumber: '', edithistory: JSON.stringify({ i: 8 }) }]).map(e => e.Timestamp),
+    assertEqual(EditHistoryUtils.currentDeletions(blank, [{ itemNumber: '', edithistory: JSON.stringify({ i: 8 }) }], 'itemNumber').map(e => e.Timestamp),
         [40, 12, 11], 'no item numbers: newest per identity, identity 8 is back, rows without either all listed');
 });
 
@@ -2770,7 +2772,7 @@ test('EDIT HISTORY VIEW', 'a deleted row restores with its identity and history,
         await Database.setData('INVENTORY', 'SHELVES', original, DEFAULT_INVENTORY_MAPPING, { username: 'test@example.com' });
         const store = await _loadedStore(Requests.getInventoryTabData, Requests.saveInventoryTabData, ['SHELVES', undefined, undefined, undefined]);
         const identity = EditHistoryUtils.getRowIndex(store.data[0].edithistory);
-        const listed = async () => EditHistoryUtils.currentDeletions(await Requests.getArchivedRows('INVENTORY', 'SHELVES'), store.data);
+        const listed = async () => EditHistoryUtils.currentDeletions(await Requests.getArchivedRows('INVENTORY', 'SHELVES'), store.data, 'itemNumber');
 
         store.markRowForDeletion(0, true);
         await _asUser(() => store.save('Saving...'));

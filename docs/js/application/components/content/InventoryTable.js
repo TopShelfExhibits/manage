@@ -699,7 +699,7 @@ export const InventoryTableComponent = {
         // The category's deleted items: a store, so every deletion (any page, any session) shows.
         // Rows back in the table (restored, saved or not) leave the list.
         deletedRows() {
-            return EditHistoryUtils.currentDeletions(this.archivedStore?.data || [], this.tableData).map(entry => ({
+            return EditHistoryUtils.currentDeletions(this.archivedStore?.data || [], this.tableData, 'itemNumber').map(entry => ({
                 _entry: entry,
                 itemNumber: entry.RowData.itemNumber ?? '',
                 quantity: entry.RowData.quantity ?? '',
