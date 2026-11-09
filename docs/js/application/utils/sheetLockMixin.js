@@ -43,6 +43,33 @@ import { Requests, authState, CacheInvalidationBus, getDeviceId } from '../index
  * methods: setLockState, checkLockStatus, handleLockState, claimLock, acquireLockForEdit,
  *          editWithLock (an edit applied at once, the lock taken behind it; the way to edit)
  */
+/**
+ * Take a sheet's edit lock for an operation that runs outside the page that edits the sheet
+ * (adding to a proposal, committing one). Refuses when someone else holds the lock, or when this
+ * user holds it on another device: that session may have unsaved edits, and releasing its lock
+ * afterwards would leave them unguarded (pages hand a lock over with the Claim banner instead).
+ * @param {string} namespace - Lock namespace, e.g. 'INVENTORY'
+ * @param {string} key - Lock key, e.g. a tab name
+ * @param {string} what - What is locked, for the error, e.g. "The Spring buy proposal"
+ * @param {string} [consequence] - Appended to the error, e.g. "Nothing was added."
+ * @returns {Promise<Function>} release() — call it when done (it never throws)
+ * @throws {Error} When the lock can't be taken
+ */
+export async function acquireSheetLock(namespace, key, what, consequence = '') {
+    const user = authState.user?.email;
+    if (!user) throw new Error('Log in first');
+    const refuse = (holder) => new Error(`${what} is ${holder}.${consequence ? ' ' + consequence : ''}`);
+    const held = await Requests.getSheetLock(namespace, key);
+    if (held && held.user === user && held.deviceId && held.deviceId !== getDeviceId()) {
+        throw refuse('being edited on another of your devices');
+    }
+    if (!await Requests.lockSheet(namespace, key, user, getDeviceId())) {
+        const lockInfo = await Requests.getSheetLock(namespace, key, user);
+        throw refuse(`locked${lockInfo?.user ? ` by ${lockInfo.user}` : ''}`);
+    }
+    return () => Requests.unlockSheet(namespace, key, user).catch(() => {});
+}
+
 export const sheetLockMixin = {
     data() {
         return {

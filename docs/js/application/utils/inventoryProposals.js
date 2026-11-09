@@ -1,4 +1,5 @@
-import { Requests, authState, getDeviceId, getReactiveStore, ProposalUtils, PROPOSAL_LOCK_NAMESPACE, NavigationRegistry, todayISOString } from '../index.js';
+import { acquireSheetLock } from './sheetLockMixin.js';
+import { Requests, authState, getReactiveStore, ProposalUtils, PROPOSAL_LOCK_NAMESPACE, NavigationRegistry, todayISOString } from '../index.js';
 
 /**
  * Inventory proposal helpers for the application layer: the shared proposal list store, route
@@ -76,10 +77,7 @@ export async function saveToProposal(name, category, items) {
     const store = proposalTableStore(name);
     await waitForLoad(store);
     if (store.isModified) throw new Error(`Save or discard the unsaved changes in the ${name} proposal first.`);
-    if (!await Requests.lockSheet(PROPOSAL_LOCK_NAMESPACE, name, user, getDeviceId())) {
-        const lockInfo = await Requests.getSheetLock(PROPOSAL_LOCK_NAMESPACE, name, user);
-        throw new Error(`The ${name} proposal is locked${lockInfo?.user ? ` by ${lockInfo.user}` : ''}. Nothing was added.`);
-    }
+    const release = await acquireSheetLock(PROPOSAL_LOCK_NAMESPACE, name, `The ${name} proposal`, 'Nothing was added.');
     try {
         for (const { inventoryRow, changes } of items) {
             const itemNumber = inventoryRow.itemNumber;
@@ -96,7 +94,7 @@ export async function saveToProposal(name, category, items) {
             throw new Error(message);
         }
     } finally {
-        await Requests.unlockSheet(PROPOSAL_LOCK_NAMESPACE, name, user).catch(() => {});
+        await release();
     }
     await reloadProposals();
 }
@@ -150,16 +148,11 @@ export async function commitInventoryProposal(name, scheduledDate, note) {
     }
 
     // ── Pass 1: lock every category, then apply the changes ──
-    const locked = [];
+    const releases = new Map();
     const edited = [];
     try {
         for (const category of categories) {
-            const acquired = await Requests.lockSheet('INVENTORY', category, user, getDeviceId());
-            if (!acquired) {
-                const lockInfo = await Requests.getSheetLock('INVENTORY', category, user);
-                throw new Error(`${category} is locked${lockInfo?.user ? ` by ${lockInfo.user}` : ''}. Nothing was committed.`);
-            }
-            locked.push(category);
+            releases.set(category, await acquireSheetLock('INVENTORY', category, category, 'Nothing was committed.'));
         }
         for (const category of categories) {
             const store = stores.get(category);
@@ -175,9 +168,7 @@ export async function commitInventoryProposal(name, scheduledDate, note) {
             const store = stores.get(category);
             store.setData(store.originalData);
         }
-        for (const category of locked) {
-            await Requests.unlockSheet('INVENTORY', category, user).catch(() => {});
-        }
+        for (const release of releases.values()) await release();
         throw error;
     }
 
@@ -196,7 +187,7 @@ export async function commitInventoryProposal(name, scheduledDate, note) {
             // A scheduled save keeps today's values and records pending entries: show the saved state
             if (isFuture) await store.load('Loading...');
         }
-        await Requests.unlockSheet('INVENTORY', category, user).catch(() => {});
+        await releases.get(category)();
     }
 
     if (committed.length > 0) {

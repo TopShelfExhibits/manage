@@ -17,7 +17,7 @@
 | Row label | `<Name> proposal`, no date. |
 | Names | Unique ignoring case (across active and committed proposals), no renaming. Length: the `InventoryNoteMaxLength` preference minus `proposal: ` (25 → 15 characters). |
 | After commit | Kept, immutable. Committed cards are styled gray and sorted after active ones. No management UI yet. |
-| Commit safety | Two passes. Pass 1 locks every category and applies the edits to each category's store; any lock failure undoes everything. Pass 2 saves every category and releases its lock. If any affected category has unsaved edits, the commit refuses and asks the user to save or discard them first. |
+| Commit safety | Two passes. Pass 1 locks every category (`acquireSheetLock`: refused when another user holds the lock, or this user does on another device) and applies the edits to each category's store; any lock failure undoes everything. Pass 2 saves every category and releases its lock. If any affected category has unsaved edits, the commit refuses and asks the user to save or discard them first. |
 | Overlapping proposals | Allowed. An item can show several proposal rows; each has an info button that opens that proposal, where the item can be removed (×). |
 | Projected quantity | On the proposal page, for a date picked in the table header: saved quantity + scheduled changes due by that date + this proposal's change. This is the **owned total**, not availability (no show usage subtracted). |
 
@@ -51,7 +51,7 @@ Text fields are applied as plain values; only `quantity` goes through `applyNeVa
 1. Save → the save dialog gains a **Proposal** button between Apply/Schedule and Cancel.
 2. Proposal mode lists active proposals and a new-name field; **Update Proposal** confirms. Date and note are not used.
 3. If the edits include new rows: confirm, then save those rows to inventory at quantity 0 (note `proposal: <name>`).
-4. Add the diff (vs. the saved rows) to the proposal the way the proposal page saves (`saveToProposal` in `inventoryProposals.js`): load the proposal's table store, refuse if it has unsaved edits, take the proposal lock (`INVENTORY_PROPOSALS:<name>`; refuse if someone else holds it), merge each item's changes into its row (one row per item, `ProposalUtils.mergeChanges`) or add a row, run the store's save, release the lock. New and existing proposals take the same path; every proposal write is a table save (`saveInventoryProposalTable`).
+4. Add the diff (vs. the saved rows) to the proposal the way the proposal page saves (`saveToProposal` in `inventoryProposals.js`): load the proposal's table store, refuse if it has unsaved edits, take the proposal lock (`INVENTORY_PROPOSALS:<name>`; refuse if someone else holds it, or this user does on another device), merge each item's changes into its row (one row per item, `ProposalUtils.mergeChanges`) or add a row, run the store's save, release the lock. New and existing proposals take the same path; every proposal write is a table save (`saveInventoryProposalTable`).
    Then reload the category store (dropping the edits), which releases the category lock.
 5. New proposal → navigate to `reports/inventory-proposals/<slug>`.
 

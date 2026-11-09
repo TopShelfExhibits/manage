@@ -2954,7 +2954,7 @@ test('INVENTORY PROPOSALS', 'saveToProposal creates a proposal, then merges into
     }
 });
 
-test('INVENTORY PROPOSALS', 'saveToProposal refuses while the proposal is locked or has unsaved edits', async () => {
+test('INVENTORY PROPOSALS', 'saveToProposal refuses while the proposal is locked, edited on another device, or has unsaved edits', async () => {
     const name = 'Lock test';
     const added = async (itemNumber) => {
         try { await _asUser(async () => saveToProposal(name, 'FURNITURE', [await _furnitureItem(itemNumber, [{ n: 'quantity', ne: '+1' }])])); return null; }
@@ -2965,6 +2965,11 @@ test('INVENTORY PROPOSALS', 'saveToProposal refuses while the proposal is locked
         await ApplicationUtils.lockSheet(PROPOSAL_LOCK_NAMESPACE, name, 'other@example.com');
         assertEqual(/is locked/.test(await added('CHAIR-002') || ''), true, 'refused while another user holds the lock');
         await ApplicationUtils.unlockSheet(PROPOSAL_LOCK_NAMESPACE, name, 'other@example.com');
+        // The same user editing it on another device: that session's lock is left alone
+        await ApplicationUtils.lockSheet(PROPOSAL_LOCK_NAMESPACE, name, 'test@example.com', 'other-device');
+        assertEqual(/another of your devices/.test(await added('CHAIR-002') || ''), true, 'refused while this user edits it on another device');
+        assertEqual((await ApplicationUtils.getSheetLock(PROPOSAL_LOCK_NAMESPACE, name))?.deviceId, 'other-device', "the other device's lock kept");
+        await ApplicationUtils.unlockSheet(PROPOSAL_LOCK_NAMESPACE, name, 'test@example.com');
         const store = proposalTableStore(name);
         for (let i = 0; i < 100 && (store.isLoading || store.initialLoad); i++) await new Promise(r => setTimeout(r, 50));
         store.data[0].notes = 'unsaved edit';
@@ -2974,6 +2979,7 @@ test('INVENTORY PROPOSALS', 'saveToProposal refuses while the proposal is locked
         assertEqual((await _proposalRows(name)).map(e => e.itemNumber), ['CHAIR-001'], 'nothing added either time');
     } finally {
         await ApplicationUtils.unlockSheet(PROPOSAL_LOCK_NAMESPACE, name, 'other@example.com').catch(() => {});
+        await ApplicationUtils.unlockSheet(PROPOSAL_LOCK_NAMESPACE, name, 'test@example.com').catch(() => {});
         await _asUser(() => Requests.saveInventoryProposalTable([], name));
     }
 });
@@ -3108,6 +3114,17 @@ test('INVENTORY PROPOSALS', 'commit changes nothing when a category is locked by
     const cab = (await Requests.getInventoryTabData('CABINETS')).find(r => r.itemNumber === 'CAB-004');
     assertEqual(cab.quantity, '10', 'quantity unchanged');
     assertEqual((await _proposalRows('Cabinet fix'))[0].committed, 0, 'not committed');
+});
+
+test('INVENTORY PROPOSALS', "commit leaves alone a category this user is editing on another device", async () => {
+    await ApplicationUtils.lockSheet('INVENTORY', 'FURNITURE', 'test@example.com', 'other-device');
+    let error = null;
+    try { await _asUser(() => commitInventoryProposal('Spring buy', new Date().toISOString().slice(0, 10), 'proposal: Spring buy')); } catch (e) { error = e; }
+    const lock = await ApplicationUtils.getSheetLock('INVENTORY', 'FURNITURE');
+    await ApplicationUtils.unlockSheet('INVENTORY', 'FURNITURE', 'test@example.com');
+    assertEqual(error?.message, 'FURNITURE is being edited on another of your devices. Nothing was committed.', 'refused');
+    assertEqual(lock?.deviceId, 'other-device', "the other device's lock kept");
+    assertEqual((await _proposalRows('Spring buy')).every(e => !e.committed), true, 'nothing committed');
 });
 
 test('INVENTORY PROPOSALS', 'commit applies every category with the note and marks the proposal committed', async () => {
