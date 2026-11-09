@@ -35,7 +35,8 @@ import { isCheckedValue } from '../data_management/utils/checkbox-values.js';
 import { useBatchEdits, useInstantEdits } from '../application/utils/cellEdits.js';
 import { CacheInvalidationBus, ApplicationUtils, ProductionUtils, triggerCachePoll, stampDataChange, Database, DEFAULT_INVENTORY_MAPPING, EditHistoryUtils, InventoryUtils, ProposalUtils, PROPOSAL_LOCK_NAMESPACE, resolveInventoryNoteMaxLength, checkDateRollover, clearCache, invalidateCache, resolveSheetMapping, parseThumbnails, parseThumbnailEntries, serializeThumbnailEntries, addThumbnails, removeThumbnailAt, setPrimaryThumbnail, setThumbnailNote, setThumbnailCrop, primaryThumbnailValue, thumbnailKey } from '../data_management/index.js';
 import { authState } from '../application/utils/auth.js';
-import { commitInventoryProposal, saveToProposal, proposalTableStore } from '../application/utils/inventoryProposals.js';
+import { commitInventoryProposal, saveToProposal, proposalTableStore, sendEditsToProposal } from '../application/utils/inventoryProposals.js';
+import { hasQuantityChanges } from '../application/components/content/InventoryTable.js';
 import { resolveView, resolveAction, pickView, mergeView, matchesKeyPattern, setViewWarningHandler, withRegistryDefaults, searchTiers } from '../application/utils/views/resolveView.js';
 import { SEARCH_LIMITS, searchWords, matchRow, matchRows, makeHighlighter } from '../application/utils/views/searchMatch.js';
 import { formatValue, formatText } from '../application/utils/views/fieldFormat.js';
@@ -3125,6 +3126,47 @@ test('INVENTORY PROPOSALS', "commit leaves alone a category this user is editing
     assertEqual(error?.message, 'FURNITURE is being edited on another of your devices. Nothing was committed.', 'refused');
     assertEqual(lock?.deviceId, 'other-device', "the other device's lock kept");
     assertEqual((await _proposalRows('Spring buy')).every(e => !e.committed), true, 'nothing committed');
+});
+
+// The save dialog's Proposal button, from the category table or the categories view, sends edits
+// with sendEditsToProposal: an item new to the category is first created in inventory at quantity
+// 0 (so the proposal can commit it) and the proposal holds its quantity. The test adds CHAIR-900
+// (quantity 3) and changes CHAIR-001 by +1, then puts FURNITURE back.
+test('INVENTORY PROPOSALS', 'sendEditsToProposal creates new items at 0 and proposes their quantity', async () => {
+    const name = 'Send test';
+    const store = await _loadedStore(Requests.getInventoryTabData, Requests.saveInventoryTabData, ['FURNITURE', undefined, undefined, undefined]);
+    const saved = (await Requests.getInventoryTabData('FURNITURE')).map(row => ({ ...row }));
+    const fieldNames = Object.keys(store.data[0]).filter(key => key !== 'AppData');
+    const edit = () => {
+        const chair = store.data.find(row => row.itemNumber === 'CHAIR-001');
+        chair.quantity = String(Number(chair.quantity) + 1);
+        store.addRow({ itemNumber: 'CHAIR-900', quantity: '3', description: 'Test chair' }, fieldNames);
+    };
+    try {
+        edit();
+        assertEqual(await _asUser(() => sendEditsToProposal(store, 'FURNITURE', name, async () => false)), false, 'declined: nothing sent');
+        assertEqual([(await _proposalRows(name)).length, store.isModified], [0, true], 'declined: no proposal, edits kept');
+        assertEqual(await _asUser(() => sendEditsToProposal(store, 'FURNITURE', name, async () => true)), true, 'sent');
+        const created = (await Requests.getInventoryTabData('FURNITURE')).find(row => row.itemNumber === 'CHAIR-900');
+        assertEqual(created?.quantity, '0', 'CHAIR-900 created in inventory at 0');
+        assertEqual((await _proposalRows(name)).map(e => [e.itemNumber, e.changes.map(({ n, ne }) => `${n}=${ne}`).join(',')]),
+            [['CHAIR-001', 'quantity=+1'], ['CHAIR-900', 'quantity=+3']], 'both proposed');
+        assertEqual(store.isModified, false, 'edits dropped from the category store');
+    } finally {
+        store.setData(store.originalData);
+        await _asUser(() => Requests.saveInventoryProposalTable([], name));
+        await _asUser(() => Requests.saveInventoryTabData(saved, 'FURNITURE'));
+        await store.load('Loading...');
+    }
+});
+
+test('INVENTORY PROPOSALS', 'hasQuantityChanges pairs rows by their history id, not item number', async () => {
+    const row = (itemNumber, quantity, i) => ({ itemNumber, quantity, edithistory: i ? JSON.stringify({ i }) : '' });
+    const originalData = [row('A-1', '5', 1), row('A-1', '2', 2), row('', '7', 3)];
+    assertEqual(hasQuantityChanges({ originalData, data: [row('A-1', '5', 1), row('A-1', '2', 2), row('', '7', 3)] }), false, 'unchanged');
+    assertEqual(hasQuantityChanges({ originalData, data: [row('A-1', '5', 1), row('A-1', '4', 2), row('', '7', 3)] }), true, 'the second A-1 changed');
+    assertEqual(hasQuantityChanges({ originalData, data: [row('A-1', '5', 1), row('A-1', '2', 2), row('', '9', 3)] }), true, 'a row without an item number changed');
+    assertEqual(hasQuantityChanges({ originalData, data: [...originalData, row('B-1', '3')] }), false, 'a new row is not a quantity change');
 });
 
 test('INVENTORY PROPOSALS', 'commit applies every category with the note and marks the proposal committed', async () => {

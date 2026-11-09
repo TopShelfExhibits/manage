@@ -1,5 +1,5 @@
 import { acquireSheetLock } from './sheetLockMixin.js';
-import { Requests, authState, getReactiveStore, ProposalUtils, PROPOSAL_LOCK_NAMESPACE, NavigationRegistry, todayISOString } from '../index.js';
+import { Requests, authState, getReactiveStore, getInventoryNoteMaxLength, ProposalUtils, PROPOSAL_LOCK_NAMESPACE, NavigationRegistry, todayISOString } from '../index.js';
 
 /**
  * Inventory proposal helpers for the application layer: the shared proposal list store, route
@@ -97,6 +97,34 @@ export async function saveToProposal(name, category, items) {
         await release();
     }
     await reloadProposals();
+}
+
+/**
+ * Send a category store's edits to a proposal instead of inventory (the save dialog's Proposal
+ * button, from the category table or the categories view). Items new to the category are first
+ * created in inventory at quantity 0, once confirmNewItems() agrees, so the proposal can commit
+ * them; the proposal holds their quantity. The edits are then dropped from the store.
+ * @param {Object} store - The category's inventory store
+ * @param {string} category - Inventory tab
+ * @param {string} name - Proposal name, new or existing
+ * @param {Function} confirmNewItems - async () => boolean, asked only when there are new items
+ * @returns {Promise<boolean>} false when the user declined to create the new items
+ * @throws {Error} When saving the new items or the proposal fails (see saveToProposal)
+ */
+export async function sendEditsToProposal(store, category, name, confirmNewItems) {
+    const savedItems = new Set((store.originalData || []).map(row => row.itemNumber));
+    const newRows = (store.data || []).filter(row => row.itemNumber && !savedItems.has(row.itemNumber));
+    if (newRows.length > 0 && !await confirmNewItems()) return false;
+    const items = proposalItemsFromStore(store);
+    if (newRows.length > 0) {
+        const rows = [...store.originalData.map(row => ({ ...row })), ...newRows.map(row => ({ ...row, quantity: '0' }))];
+        await Requests.saveInventoryTabData(rows, category, undefined, undefined, undefined, {
+            note: ProposalUtils.commitNote(name, getInventoryNoteMaxLength())
+        });
+    }
+    if (items.length > 0) await saveToProposal(name, category, items);
+    await store.load('Loading...');
+    return true;
 }
 
 function inventoryStore(category) {

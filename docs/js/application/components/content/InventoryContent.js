@@ -1,9 +1,9 @@
-import { html, InventoryTableComponent, hamburgerMenuRegistry, NavigationRegistry, Requests, DataView, DashboardToggleComponent, getReactiveStore, findMatchingStores, createAnalysisConfig, generateStoreKey, authState, invalidateCache, todayISOString, getInventoryTabList, INVENTORY_TAB_PREFERENCES, getShortageAlertsStore, getShortageAlertDays, shortagesByItem, itemShortageCards, categoryShortageCards, itemVariantCards, itemVariantFamilies, THUMBNAIL_FIELD, isMarkedForDeletion, ParamToggles, ProposalUtils } from '../../index.js';
+import { html, InventoryTableComponent, hamburgerMenuRegistry, NavigationRegistry, Requests, DataView, DashboardToggleComponent, getReactiveStore, findMatchingStores, createAnalysisConfig, generateStoreKey, authState, invalidateCache, todayISOString, getInventoryTabList, INVENTORY_TAB_PREFERENCES, getShortageAlertsStore, getShortageAlertDays, shortagesByItem, itemShortageCards, categoryShortageCards, itemVariantCards, itemVariantFamilies, THUMBNAIL_FIELD, ParamToggles } from '../../index.js';
 import { ShowInventoryReport } from './ShowInventoryReport.js';
 import { InventoryItemReport } from './InventoryItemReport.js';
 import { InventoryItemTimeline } from './InventoryItemTimeline.js';
-import { getProposalsStore, PROPOSALS_PATH, proposalPath, proposalItemsFromStore, saveToProposal } from '../../utils/inventoryProposals.js';
-import { InventorySaveModal, INVENTORY_DETAIL_TOGGLES } from './InventoryTable.js';
+import { getProposalsStore, PROPOSALS_PATH } from '../../utils/inventoryProposals.js';
+import { openInventorySaveDialog, INVENTORY_DETAIL_TOGGLES } from './InventoryTable.js';
 
 /** Route key of the per-category history page: inventory/<category>/edit-history */
 export const EDIT_HISTORY_ROUTE = 'edit-history';
@@ -496,41 +496,7 @@ export const InventoryContent = {
                 this.$modal.alert('No unsaved changes to save.', 'Save');
                 return;
             }
-            const storeMatch = matchingStores[0];
-            const data = storeMatch.store.data || [];
-            const original = storeMatch.store.originalData || [];
-            const hasQtyChanges = data.some(row => {
-                const orig = original.find(o => o.itemNumber === row.itemNumber);
-                return orig && String(row.quantity) !== String(orig.quantity);
-            });
-            const proposals = ProposalUtils.groupProposals(this.proposalsStore?.data || []);
-            this.$modal.custom(InventorySaveModal, {
-                hasQtyChanges,
-                onProposal: (name, isNew) => this.handleCategoryProposal(categoryTitle, storeMatch.store, name, isNew),
-                proposalNames: proposals.filter(p => !p.committed).map(p => p.name),
-                allProposalNames: proposals.map(p => p.name),
-                deletionCount: data.filter(isMarkedForDeletion).length,
-                onConfirm: async (scheduledDate, note) => {
-                    await storeMatch.store.save('Saving inventory...', { scheduledDate, note });
-                    if (scheduledDate > todayISOString()) {
-                        await storeMatch.store.load('Loading...');
-                    }
-                }
-            }, 'Save Changes');
-        },
-        // Send a category's edits to a proposal (saveToProposal: the proposal's store, under its lock)
-        async handleCategoryProposal(categoryTitle, store, name, isNew) {
-            const items = proposalItemsFromStore(store);
-            try {
-                if (items.length > 0) await saveToProposal(name, categoryTitle, items);
-            } catch (error) {
-                this.$modal.alert(`Could not update the proposal: ${error.message}`, 'Error');
-                return;
-            }
-            await store.load('Loading...');
-            if (isNew && this.appContext?.navigateToPath) {
-                this.appContext.navigateToPath(proposalPath(name));
-            }
+            openInventorySaveDialog(this, { store: matchingStores[0].store, category: categoryTitle });
         },
         navigateToCategoriesView() {
             this.navigateToPath(NavigationRegistry.buildPath('inventory', { view: 'categories' }));

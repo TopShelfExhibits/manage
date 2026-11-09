@@ -48,7 +48,7 @@ Text fields are applied as plain values; only `quantity` goes through `applyNeVa
 
 ### Proposal from a category page
 
-1. Save → the save dialog gains a **Proposal** button between Apply/Schedule and Cancel.
+1. Save → the save dialog gains a **Proposal** button between Apply/Schedule and Cancel. The category table and the categories view's Save card open the same dialog (`openInventorySaveDialog` in `InventoryTable.js`), and steps 3–4 are one function (`sendEditsToProposal` in `inventoryProposals.js`).
 2. Proposal mode lists active proposals and a new-name field; **Update Proposal** confirms. Date and note are not used.
 3. If the edits include new rows: confirm, then save those rows to inventory at quantity 0 (note `proposal: <name>`).
 4. Add the diff (vs. the saved rows) to the proposal the way the proposal page saves (`saveToProposal` in `inventoryProposals.js`): load the proposal's table store, refuse if it has unsaved edits, take the proposal lock (`INVENTORY_PROPOSALS:<name>`; refuse if someone else holds it, or this user does on another device), merge each item's changes into its row (one row per item, `ProposalUtils.mergeChanges`) or add a row, run the store's save, release the lock. New and existing proposals take the same path; every proposal write is a table save (`saveInventoryProposalTable`).

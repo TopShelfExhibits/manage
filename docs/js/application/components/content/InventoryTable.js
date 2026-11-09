@@ -2,7 +2,7 @@ import { html, Requests, DataView, getReactiveStore, NavigationRegistry, invalid
 import { sheetLockMixin } from '../../utils/sheetLockMixin.js';
 import { thumbnailStyle, iconLabel } from '../../utils/views/viewStyles.js';
 import { CellRenderer, RowDeletionButton } from '../interface/cells.js';
-import { getProposalsStore, proposalPath, proposalItemsFromStore, saveToProposal } from '../../utils/inventoryProposals.js';
+import { getProposalsStore, proposalPath, sendEditsToProposal } from '../../utils/inventoryProposals.js';
 
 /**
  * Modal displayed before any inventory save.
@@ -193,7 +193,66 @@ export const InventorySaveModal = {
     `
 };
 
+/**
+ * Whether a category store's edits change a saved quantity (the save dialog then offers to
+ * schedule the save). Rows pair by their EditHistory row id, since item numbers can repeat or be
+ * blank; a row without history yet pairs by item number.
+ */
+export function hasQuantityChanges(store) {
+    const key = (row) => EditHistoryUtils.getRowIndex(row?.edithistory) ?? `item:${row?.itemNumber}`;
+    const saved = new Map((store.originalData || []).map(row => [key(row), row.quantity]));
+    return (store.data || []).some(row => saved.has(key(row)) && String(saved.get(key(row))) !== String(row.quantity));
+}
 
+/**
+ * Open the save dialog (InventorySaveModal) for a category's edits: save them to inventory, now or
+ * scheduled, or send them to a proposal (sendEditsToProposal). The category table and the
+ * categories view both save through here.
+ * @param {Object} page - The component opening it (its $modal and appContext)
+ * @param {Object} options
+ * @param {Object} options.store - The category's inventory store
+ * @param {string} options.category - Inventory tab
+ * @param {string} [options.initialNote] - The note field's starting text
+ * @param {boolean} [options.allowProposal=true] - Offer the Proposal button
+ * @param {boolean} [options.reloadAfterSave=false] - Reload after any save, not only a scheduled one
+ * @param {Function} [options.afterSave] - Called once the edits are saved to inventory
+ */
+export function openInventorySaveDialog(page, { store, category, initialNote = '', allowProposal = true, reloadAfterSave = false, afterSave = null }) {
+    const proposals = ProposalUtils.groupProposals(getProposalsStore().data || []);
+    const confirmNewItems = () => new Promise(resolve => page.$modal.confirm(
+        'This will create and add new items to the table immediately set to quantity 0.',
+        () => resolve(true),
+        () => resolve(false),
+        'New Items',
+        'Create Items',
+        'Cancel'
+    ));
+    const sendToProposal = async (name, isNew) => {
+        try {
+            if (!await sendEditsToProposal(store, category, name, confirmNewItems)) return;
+        } catch (error) {
+            console.error('[InventorySave] Proposal update failed:', error);
+            page.$modal.alert(`Could not update the proposal: ${error.message}`, 'Error');
+            return;
+        }
+        if (isNew) page.appContext?.navigateToPath?.(proposalPath(name));
+    };
+    page.$modal.custom(InventorySaveModal, {
+        hasQtyChanges: hasQuantityChanges(store),
+        initialNote,
+        onProposal: allowProposal ? sendToProposal : null,
+        proposalNames: proposals.filter(p => !p.committed).map(p => p.name),
+        allProposalNames: proposals.map(p => p.name),
+        deletionCount: (store.data || []).filter(isMarkedForDeletion).length,
+        onConfirm: async (scheduledDate, note) => {
+            await store.save('Saving inventory...', { scheduledDate, note });
+            afterSave?.();
+            // A scheduled (future) save keeps today's quantity and records a pending entry, while
+            // the store still shows the edit: reload to show what was saved
+            if (scheduledDate > todayISOString() || reloadAfterSave) await store.load('Loading...');
+        }
+    }, 'Save Changes');
+}
 
 // Simple modal component for entering new item number
 const NewItemNumberPrompt = {
@@ -942,83 +1001,19 @@ export const InventoryTableComponent = {
             // Store is now dirty, save button will appear
         },
         
-        async handleSave() {
+        handleSave() {
             if (!this.inventoryTableStore) return;
-            const data = this.inventoryTableStore.data || [];
-            const original = this.inventoryTableStore.originalData || [];
-            const hasQtyChanges = data.some(row => {
-                const orig = original.find(o => o.itemNumber === row.itemNumber);
-                return orig && String(row.quantity) !== String(orig.quantity);
-            });
-            const proposals = ProposalUtils.groupProposals(this.proposalsStore?.data || []);
-            this.$modal.custom(InventorySaveModal, {
-                hasQtyChanges,
+            openInventorySaveDialog(this, {
+                store: this.inventoryTableStore,
+                category: this.tabTitle,
+                // The history page saves restores and reverts with their note; only the category
+                // table sends edits to a proposal
                 initialNote: this.historyMode ? this.revertNote : '',
-                // Edits on the category table can go to a proposal instead of inventory
-                onProposal: this.historyMode ? null : (name, isNew) => this.handleProposal(name, isNew),
-                proposalNames: proposals.filter(p => !p.committed).map(p => p.name),
-                allProposalNames: proposals.map(p => p.name),
-                deletionCount: data.filter(isMarkedForDeletion).length,
-                onConfirm: async (scheduledDate, note) => {
-                    await this.inventoryTableStore.save('Saving inventory...', { scheduledDate, note });
-                    this.revertNote = '';
-                    // After a scheduled (future) save the server keeps the original quantity and
-                    // stores the change as a pending entry. The store's optimistic data still
-                    // shows the user-edited quantity, so force a reload to display the actual state.
-                    // On the history page, reload so the entry this save recorded appears right away.
-                    if (scheduledDate > todayISOString() || this.historyMode) {
-                        await this.inventoryTableStore.load('Loading...');
-                    }
-                }
-            }, 'Save Changes');
-        },
-
-        /**
-         * Send the table's edits to a proposal instead of inventory (saveToProposal: through the
-         * proposal's store, under its lock). New items are first created in inventory at quantity 0
-         * (after confirmation); the proposal holds their quantity. The edits are then dropped from
-         * the table, which releases the category lock.
-         */
-        async handleProposal(name, isNew) {
-            const store = this.inventoryTableStore;
-            if (!store || !this.tabTitle) return;
-            const savedByItem = new Map(store.originalData.map(row => [row.itemNumber, row]));
-            const newRows = store.data.filter(row => row.itemNumber && !savedByItem.has(row.itemNumber));
-
-            if (newRows.length > 0) {
-                const confirmed = await new Promise(resolve => this.$modal.confirm(
-                    'This will create and add new items to the table immediately set to quantity 0.',
-                    () => resolve(true),
-                    () => resolve(false),
-                    'New Items',
-                    'Create Items',
-                    'Cancel'
-                ));
-                if (!confirmed) return;
-            }
-
-            const items = proposalItemsFromStore(store);
-
-            try {
-                if (newRows.length > 0) {
-                    const rowsToSave = [
-                        ...store.originalData.map(row => ({ ...row })),
-                        ...newRows.map(row => ({ ...row, quantity: '0' }))
-                    ];
-                    await Requests.saveInventoryTabData(rowsToSave, this.tabTitle, undefined, undefined, undefined, {
-                        note: ProposalUtils.commitNote(name, getInventoryNoteMaxLength())
-                    });
-                }
-                if (items.length > 0) await saveToProposal(name, this.tabTitle, items);
-                // Drop the edits: they now live in the proposal (and new items in inventory)
-                await store.load('Loading...');
-                if (isNew && this.appContext?.navigateToPath) {
-                    this.appContext.navigateToPath(proposalPath(name));
-                }
-            } catch (error) {
-                console.error('[InventoryTable] Proposal update failed:', error);
-                this.$modal.alert(`Could not update the proposal: ${error.message}`, 'Error');
-            }
+                allowProposal: !this.historyMode,
+                // On the history page, reload so the entry this save recorded appears right away
+                reloadAfterSave: this.historyMode,
+                afterSave: () => { this.revertNote = ''; }
+            });
         },
 
         openProposal(entry) {
