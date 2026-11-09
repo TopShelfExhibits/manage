@@ -527,10 +527,11 @@ const INVENTORY_HISTORY_VIEWS = {
 };
 
 // Sub-rows under inventory items, each shown or hidden by a URL toggle in the inventory menu
-// (ParamToggles): pending = scheduled changes, proposals = changes in active proposals
+// (ParamToggles): pending = scheduled changes, proposals = changes in active proposals. Both start
+// off; the URL holds a toggle only while it's on (pending:true).
 export const INVENTORY_DETAIL_TOGGLES = [
-    { param: 'pending', label: 'Pending', title: 'scheduled changes' },
-    { param: 'proposals', label: 'Proposals', title: 'proposed changes' }
+    { param: 'pending', label: 'Pending', title: 'scheduled changes', default: false },
+    { param: 'proposals', label: 'Proposals', title: 'proposed changes', default: false }
 ];
 
 // Edit History page: rows deleted from the category (the _EditHistory archive); admins can restore them
