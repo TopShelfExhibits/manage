@@ -33,7 +33,7 @@ import { Requests, authState, CacheInvalidationBus, getDeviceId } from '../index
  *   onLockAcquireFailed(lockInfo)
  *     Called when a lock acquisition attempt in handleLockState() fails because
  *     another user already holds the lock.  Use this for component-specific
- *     recovery (e.g. InventoryTable prompting the user to refresh).
+ *     recovery of edits still in the store (e.g. InventoryTable and PacklistTable drop them).
  *
  * ─── PROVIDED ────────────────────────────────────────────────────────────────
  * data:    isLocked, lockingInProgress, lockedByOther, lockedBySelf, lockOwner, lockCheckComplete

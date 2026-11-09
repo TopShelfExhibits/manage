@@ -1543,18 +1543,6 @@ class Requests_uncached {
     }
 
     /**
-     * Delete a scheduled pending change entry by effectiveDateDeciseconds.
-     * Mutation — uncached.
-     * @param {string} tabOrItemName
-     * @param {number} effectiveDateDeciseconds
-     * @returns {Promise<boolean>}
-     */
-    static async deletePendingChangeEntry(tabOrItemName, effectiveDateDeciseconds) {
-        const username = authState.user?.email || null;
-        return await InventoryUtils.deletePendingChangeEntry(tabOrItemName, effectiveDateDeciseconds, username);
-    }
-
-    /**
      * Get rows archived (deleted) from one tab, newest first.
      * Reads the _EditHistory tab of the same spreadsheet (contract: "Archive Table").
      * @param {Object} deps - Dependency decorator for tracking calls
@@ -1837,7 +1825,7 @@ export const Requests = wrapMethods(
         'saveData', 'createNewTab', 'showTabs', 'hideTabs',
         'saveInventoryTabData', 'savePackList', 'storeUserData', 'uploadItemImage',
         'lockSheet', 'unlockSheet', 'forceUnlockSheet',
-        'checkAndApplyPendingChanges', 'savePendingChangeEntry', 'deletePendingChangeEntry',
+        'checkAndApplyPendingChanges', 'savePendingChangeEntry',
         'ensureScheduleReferenceRows',
         'addScheduleReferenceName', 'appendScheduleReferenceAbbreviation',
         'addCustomScheduleReferenceEntry',

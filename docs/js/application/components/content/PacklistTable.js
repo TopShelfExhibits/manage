@@ -1,4 +1,4 @@
-import { html, TableComponent, Requests, getReactiveStore, NavigationRegistry, createAnalysisConfig, invalidateCache, Priority, tableRowSelectionState, EditHistoryUtils, undoRegistry, statusColor, severityColor, SEVERITY, getInventoryTabList, INVENTORY_TAB_PREFERENCES } from '../../index.js';
+import { html, TableComponent, Requests, getReactiveStore, NavigationRegistry, createAnalysisConfig, invalidateCache, Priority, undoRegistry, statusColor, severityColor, SEVERITY, getInventoryTabList, INVENTORY_TAB_PREFERENCES } from '../../index.js';
 import { resolveView } from '../../utils/views/resolveView.js';
 import { InventorySelectorModal } from './InventorySelectorModal.js';
 import { escapeHtml } from '../../utils/views/fieldFormat.js';

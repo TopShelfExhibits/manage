@@ -1,4 +1,4 @@
-import { html, Requests, TableComponent, DataView, getReactiveStore, createAnalysisConfig, NavigationRegistry, Priority, invalidateCache, authState, undoRegistry, EditHistoryUtils, todayISOString, ProposalUtils, getInventoryNoteMaxLength, getInventoryTabList, INVENTORY_TAB_PREFERENCES, getShortageAlertsStore, getShortageAlertDays, shortagesByItem, itemShortageCards, itemVariantCards, itemVariantFamilies, THUMBNAIL_FIELD, SEVERITY, isMarkedForDeletion, isTemporaryAdmin, paramToggleValue } from '../../index.js';
+import { html, Requests, DataView, getReactiveStore, NavigationRegistry, invalidateCache, authState, undoRegistry, EditHistoryUtils, todayISOString, ProposalUtils, getInventoryNoteMaxLength, getInventoryTabList, INVENTORY_TAB_PREFERENCES, getShortageAlertsStore, getShortageAlertDays, shortagesByItem, itemShortageCards, itemVariantCards, itemVariantFamilies, THUMBNAIL_FIELD, SEVERITY, isMarkedForDeletion, isTemporaryAdmin, paramToggleValue } from '../../index.js';
 import { sheetLockMixin } from '../../utils/sheetLockMixin.js';
 import { thumbnailStyle, iconLabel } from '../../utils/views/viewStyles.js';
 import { CellRenderer, RowDeletionButton } from '../interface/cells.js';
@@ -666,9 +666,7 @@ export const InventoryTableComponent = {
             return this.inventoryTableStore ? this.inventoryTableStore.isLoading : false;
         },
         isDirty() {
-            const result = this.inventoryTableStore?.isModified || false;
-            //console.log('[InventoryTable] isDirty computed:', result, '| store exists:', !!this.inventoryTableStore, '| isModified:', this.inventoryTableStore?.isModified);
-            return result;
+            return this.inventoryTableStore?.isModified || false;
         },
         lockKey() {
             return this.tabTitle;
@@ -718,9 +716,7 @@ export const InventoryTableComponent = {
             return !this.lockedByOther && this.lockCheckComplete;
         },
         allowSave() {
-            const result = this.isDirty && !this.lockedByOther && this.lockCheckComplete;
-            //console.log('[InventoryTable] allowSave computed:', result, '| isDirty:', this.isDirty, '| lockedByOther:', this.lockedByOther, '| lockCheckComplete:', this.lockCheckComplete);
-            return result;
+            return this.isDirty && !this.lockedByOther && this.lockCheckComplete;
         },
         // TEMPORARY: shows or hides the admin-only buttons (delete, restore) until a real admin
         // system with permissions replaces isTemporaryAdmin
