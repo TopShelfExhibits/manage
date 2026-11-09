@@ -615,7 +615,7 @@ export const PacklistTable = {
             const refreshData = async () => {
                 // Invalidate cache for database first, then API call for the current pack list in case it was empty
                 // Clear undo/redo history for this route
-                const routeKey = this.$route?.path;
+                const routeKey = this.appContext?.currentPath?.split('?')[0];
                 if (routeKey) {
                     undoRegistry.clearRouteHistory(routeKey);
                 }
@@ -994,7 +994,7 @@ export const PacklistTable = {
          * @param {string} alertKey - AppData key to clear after applying (e.g. 'cadSourceAlert')
          */
         applyItemChanges(item, changes, alertKey) {
-            const routeKey = this.$route?.path;
+            const routeKey = this.appContext?.currentPath?.split('?')[0];
             if (routeKey) {
                 undoRegistry.capture(this.packlistTableStore.data, routeKey, { type: 'restore' });
             }

@@ -1,4 +1,4 @@
-import { html, DataView, ProposalUtils, PROPOSAL_LOCK_NAMESPACE, parseDate, todayISOString, getInventoryNoteMaxLength, THUMBNAIL_FIELD, SEVERITY, undoRegistry, isMarkedForDeletion } from '../../index.js';
+import { html, DataView, ProposalUtils, PROPOSAL_LOCK_NAMESPACE, parseDate, todayISOString, getInventoryNoteMaxLength, THUMBNAIL_FIELD, SEVERITY, isMarkedForDeletion } from '../../index.js';
 import { sheetLockMixin } from '../../utils/sheetLockMixin.js';
 import { getProposalsStore, reloadProposals, proposalPath, proposalTableStore, commitInventoryProposal } from '../../utils/inventoryProposals.js';
 import { thumbnailStyle } from '../../utils/views/viewStyles.js';
@@ -276,7 +276,7 @@ export const InventoryProposalTable = {
         // Mark an item for removal from the proposal, or unmark it; saving removes the marked items
         async toggleRemoval(row) {
             const toggle = () => this.tableStore.toggleRowDeletion(row);
-            await this.editWithLock(toggle, toggle, 'remove items');
+            await this.editWithLock(toggle, toggle, { action: 'remove items', undo: 'deletion' });
         },
         // New Item: pick an inventory item to add to the proposal
         handleAddItem() {
@@ -301,9 +301,7 @@ export const InventoryProposalTable = {
             }
             const store = this.tableStore;
             const row = ProposalUtils.toTableRow({ category: item.tab, itemNumber: item.itemNumber, changes: [] }, item);
-            const routeKey = this.appContext?.currentPath?.split('?')[0];
-            if (routeKey) undoRegistry.capture(store.data, routeKey, { type: 'add-row' });
-            await this.editWithLock(() => store.addRow(row), () => store.data.splice(store.indexOfRow(row), 1), 'add items');
+            await this.editWithLock(() => store.addRow(row), () => store.data.splice(store.indexOfRow(row), 1), { action: 'add items', undo: 'add-row' });
         },
         async handleSave() {
             await this.tableStore.save('Saving proposal...');

@@ -846,7 +846,7 @@ export const InventoryTableComponent = {
                 'This removes undo history and clears unsaved changes.',
                 () => {
                     // Clear undo/redo history for this route
-                    const routeKey = this.$route?.path;
+                    const routeKey = this.appContext?.currentPath?.split('?')[0];
                     if (routeKey) {
                         undoRegistry.clearRouteHistory(routeKey);
                     }
@@ -1166,9 +1166,8 @@ export const InventoryTableComponent = {
             const store = this.inventoryTableStore;
             if (!store || store.indexOfRow(row) < 0) return;
 
-            const routeKey = this.appContext?.currentPath?.split('?')[0];
-            if (routeKey) undoRegistry.capture(store.data, routeKey, { type: 'deletion' });
-            await this.editWithLock(() => store.toggleRowDeletion(row), () => store.toggleRowDeletion(row), 'delete');
+            const toggle = () => store.toggleRowDeletion(row);
+            await this.editWithLock(toggle, toggle, { action: 'delete', undo: 'deletion' });
         },
 
         /**
@@ -1184,14 +1183,12 @@ export const InventoryTableComponent = {
                 this.$modal.alert(`${row.itemNumber} can't be restored: ${this.tabTitle} already has an item with that number.`, 'Restore');
                 return;
             }
-            const routeKey = this.appContext?.currentPath?.split('?')[0];
-            if (routeKey) undoRegistry.capture(store.data, routeKey, { type: 'restore' });
             // Fields the archived row lacks (a column added since) start empty
             const fieldNames = Object.keys(store.data[0] || {}).filter(key => key !== 'AppData');
             const restored = await this.editWithLock(
                 () => store.addRow(row, fieldNames),
                 () => store.data.splice(store.indexOfRow(row), 1), // the unsaved restored row only
-                'restore'
+                { action: 'restore', undo: 'restore' }
             );
             if (restored) this.revertNote = `restore ${row.itemNumber || 'item'}`.slice(0, getInventoryNoteMaxLength());
         },
@@ -1205,17 +1202,13 @@ export const InventoryTableComponent = {
             const target = store?.data[store.indexOfRow(row)];
             if (!target || !detail.revertState) return;
 
-            const routeKey = this.appContext?.currentPath?.split('?')[0];
-            if (routeKey) {
-                undoRegistry.capture(store.data, routeKey, { type: 'revert' });
-            }
             // Only the fields the row has (a tab without a Thumbnail column has no thumbnail)
             const fields = HISTORY_FIELDS.filter(field => field in target);
             const previous = Object.fromEntries(fields.map(field => [field, target[field]]));
             const reverted = await this.editWithLock(
                 () => fields.forEach(field => { target[field] = detail.revertState[field] ?? ''; }),
                 () => Object.assign(target, previous),
-                'revert'
+                { action: 'revert', undo: 'revert' }
             );
             if (!reverted) return;
             // Save note (InventoryNoteMaxLength), e.g. "revert to Oct 6, 2026" / "revert to earliest"

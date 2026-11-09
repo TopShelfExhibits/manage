@@ -1,4 +1,4 @@
-import { Requests, authState, CacheInvalidationBus, getDeviceId } from '../index.js';
+import { Requests, authState, CacheInvalidationBus, getDeviceId, undoRegistry } from '../index.js';
 
 /**
  * sheetLockMixin — Vue Options API mixin for sheet-level write-lock management.
@@ -310,14 +310,24 @@ export const sheetLockMixin = {
 
         /**
          * An optimistic edit: apply() changes the store at once and the lock is taken behind it,
-         * so an edit never waits on the lock. If the lock can't be had, revert() undoes the change
-         * and, when `action` is given ("delete"), the user is told who holds the lock.
+         * so an edit never waits on the lock. If the lock can't be had, revert() undoes the change.
+         * @param {Function} apply - Makes the edit
+         * @param {Function} revert - Undoes it
+         * @param {Object} [options]
+         * @param {string} [options.action] - What the edit does ("delete"): a refused edit then tells
+         *   the user who holds the lock (cell edits leave it out; the lock banner says so)
+         * @param {string} [options.undo] - Undo step type ("deletion"): the store's rows are captured
+         *   for undo first, and the step is dropped again if the edit is reverted
          * @returns {Promise<boolean>} whether the edit stands
          */
-        async editWithLock(apply, revert, action = null) {
+        async editWithLock(apply, revert, { action = null, undo = null } = {}) {
+            const rows = this.activeStore?.data;
+            const routeKey = undo && rows ? this.appContext?.currentPath?.split('?')[0] : null;
+            if (routeKey) undoRegistry.capture(rows, routeKey, { type: undo });
             apply();
             if (await this.acquireLockForEdit()) return true;
             revert();
+            if (routeKey) undoRegistry.discardLastSnapshotIfUnchanged(rows, routeKey);
             if (action) {
                 this.$modal.alert(`Cannot ${action}: ${this.lockKey} is locked for editing by ${this.lockOwner ? this.lockOwnerDisplay : 'another user'}.`, 'Locked');
             }

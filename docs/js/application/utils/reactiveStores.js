@@ -694,8 +694,10 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
                     delete metadata.deletion;
                 }
                 
-                // Save back to metadata
-                row.metadata = Object.keys(metadata).length > 0 ? JSON.stringify(metadata) : null;
+                // Save back to metadata; with nothing left the key goes, as the row was loaded
+                // (so mark-then-unmark leaves the row, and its undo snapshot, unchanged)
+                if (Object.keys(metadata).length > 0) row.metadata = JSON.stringify(metadata);
+                else delete row.metadata;
                 
                 // If marking for deletion and row is empty, remove immediately
                 if (value) {
