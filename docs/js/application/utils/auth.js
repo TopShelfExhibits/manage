@@ -22,6 +22,17 @@ export const authState = Vue.reactive({
     isOffline: !navigator.onLine
 });
 
+// TEMPORARY admin check, until a real admin system with permissions replaces it: a hand-kept
+// list of usernames (the part of the email before @), plus the fake test user on localhost so
+// admin-only UI can be tested. Pages use it only to show or hide admin-only buttons.
+const TEMPORARY_ADMINS = ['dschwab'];
+
+/** TEMPORARY (to be replaced by the admin system): whether the logged-in user is an admin. */
+export function isTemporaryAdmin() {
+    const name = String(authState.user?.email || '').split('@')[0];
+    return !!name && (TEMPORARY_ADMINS.includes(name) || (isLocalhost() && name === 'test'));
+}
+
 // Import DashboardRegistry for cleanup on logout
 import { DashboardRegistry } from './DashboardRegistry.js';
 import { reloadErrorStores } from './reactiveStores.js';

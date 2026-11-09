@@ -36,6 +36,14 @@ Top Shelf Exhibits' live inventory web app. It is plain ES modules and Vue 3 (Op
 
 Fields describe what the data is. Views describe how it looks and behaves. Read "Principle: data or view?" in the plan notes before you change a page, a field, a view or a renderer. `resolveView` ignores presentation set on fields and warns on localhost.
 
+## Editing patterns
+
+- **Page options in the URL: `ParamToggles`.** An on/off option a page reads goes in its container's URL parameters, so links and dashboard cards keep it.
+  - Declare the toggles as `[{ param, label, default }]`, and render `ParamToggles` in the page's hamburger menu.
+  - Read a toggle with `paramToggleValue(NavigationRegistry.getParametersForContainer(containerPath, currentPath), toggle)`.
+  - Write container parameters only through `NavigationRegistry.updateContainerParams`, which also handles the dashboard.
+- **Admin-only UI is temporary.** `isTemporaryAdmin()` (`auth.js`) checks a hand-kept username list. It only shows or hides buttons until a real admin system with permissions replaces it, so don't build on it.
+
 ## Styling (docs/css/styles.css)
 
 Style through shared classes, and adapt them to a context with one scoped rule.

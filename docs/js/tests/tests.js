@@ -49,7 +49,7 @@ import { parseA1Range, gridNeeded, clipRangeToGrid, isGridLimitError } from '../
 import { SEVERITY, remainingSeverity } from '../data_management/utils/severity.js';
 import { severityColor, statusColor } from '../application/utils/severity.js';
 import { getAutoColorClass } from '../application/utils/autoColor.js';
-import { getReactiveStore, createAnalysisConfig, itemVariantCards, itemShortageCards, NavigationRegistry, isMarkedForDeletion } from '../application/index.js';
+import { getReactiveStore, createAnalysisConfig, itemVariantCards, itemShortageCards, NavigationRegistry, isMarkedForDeletion, paramToggleValue, isTemporaryAdmin } from '../application/index.js';
 import { calculateStoreDiff, applyDiffToData } from '../application/utils/reactiveStores.js';
 import { checkSheetHealth } from './sheetHealth.js';
 import { guessColumnType, columnTypesEntry, columnTypeMap, columnTypeOf, isOpaqueType } from '../data_management/utils/column-types.js';
@@ -2237,6 +2237,40 @@ test('SAVE CACHING', 'a lock change is still confirmed by a fresh read at the ne
     invalidateCache([{ namespace: 'app_utils', methodName: 'getLocksData', args: [] }]);
 });
 
+// ── Group: URL toggles ────────────────────────────────────────────────────────
+// ParamToggles keeps on/off page options in the container's URL parameters (CLAUDE.md "Page
+// options in the URL"). A toggle at its default leaves the URL; other parameters are kept.
+
+test('URL TOGGLES', 'a toggle reads its parameter, else its default', async () => {
+    const pending = { param: 'pending', label: 'Pending' };
+    const hidden = { param: 'extra', label: 'Extra', default: false };
+    assertEqual([paramToggleValue({}, pending), paramToggleValue({ pending: false }, pending), paramToggleValue({}, hidden), paramToggleValue({ extra: true }, hidden)],
+        [true, false, false, true], 'values');
+});
+
+test('URL TOGGLES', 'updateContainerParams writes only the changed parameters', async () => {
+    const opened = [];
+    const navigate = path => opened.push(NavigationRegistry.parsePath(path));
+    const current = NavigationRegistry.buildPath('inventory/furniture', { searchTerm: 'chair' });
+    NavigationRegistry.updateContainerParams('inventory/furniture', current, { pending: false }, navigate);
+    const toggled = NavigationRegistry.buildPath('inventory/furniture', { searchTerm: 'chair', pending: false });
+    NavigationRegistry.updateContainerParams('inventory/furniture', toggled, { pending: undefined }, navigate);
+    assertEqual(opened.map(({ path, parameters }) => [path, parameters]),
+        [['inventory/furniture', { searchTerm: 'chair', pending: false }], ['inventory/furniture', { searchTerm: 'chair' }]], 'set, then removed');
+});
+
+// TEMPORARY admin check (until an admin system with permissions replaces it): a hand-kept list,
+// plus the fake test user on localhost
+test('URL TOGGLES', 'isTemporaryAdmin: the listed users, and the test user on localhost', async () => {
+    const previous = authState.user;
+    try {
+        const as = (email) => { authState.user = email ? { email } : null; return isTemporaryAdmin(); };
+        assertEqual([as('dschwab@topshelfexhibits.com'), as('test@example.com'), as('sam@example.com'), as(null)], [true, true, false, false], 'admins');
+    } finally {
+        authState.user = previous;
+    }
+});
+
 // ── Group: Severity ───────────────────────────────────────────────────────────
 // Alerts, banners and status cards carry a severity (data_management/utils/severity.js); the UI
 // gives each one colour (application/utils/severity.js). Expected colours are SEVERITY_COLORS.
@@ -2358,11 +2392,10 @@ test('TAB READS', 'getAllInventoryData reads every inventory tab in one request'
 });
 
 // ── Group 35: Preferences ─────────────────────────────────────────────────────
-// FakeGoogle CACHE/Preferences has 14 rows, among them:
+// FakeGoogle CACHE/Preferences has 13 rows, among them:
 //   4 schedule* integer prefs (offsets 14, 14, 7, 7)
 //   3 inventory* json tab lists (InventorySuppressCategoryAnalysis, InventoryCustomItemNumbers,
 //     InventoryDescriptionOnly), the only source of those settings
-//   admin: usernames with admin-only UI (the test user), such as the history page's delete buttons
 
 test('PREFERENCES', 'getPreferences returns an array', async () => {
     const result = await Requests.getPreferences();
@@ -2371,7 +2404,7 @@ test('PREFERENCES', 'getPreferences returns an array', async () => {
 
 test('PREFERENCES', 'getPreferences returns every fixture row', async () => {
     const result = await Requests.getPreferences();
-    assertEqual(result.length, 14, 'getPreferences row count');
+    assertEqual(result.length, 13, 'getPreferences row count');
 });
 
 test('PREFERENCES', 'all rows have required fields', async () => {

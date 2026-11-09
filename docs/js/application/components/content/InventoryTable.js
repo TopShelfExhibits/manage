@@ -1,4 +1,4 @@
-import { html, Requests, TableComponent, DataView, getReactiveStore, createAnalysisConfig, NavigationRegistry, Priority, invalidateCache, authState, undoRegistry, EditHistoryUtils, todayISOString, ProposalUtils, getInventoryNoteMaxLength, getInventoryTabList, INVENTORY_TAB_PREFERENCES, getShortageAlertsStore, getShortageAlertDays, shortagesByItem, itemShortageCards, itemVariantCards, itemVariantFamilies, THUMBNAIL_FIELD, SEVERITY, getPreferencesStore, isMarkedForDeletion } from '../../index.js';
+import { html, Requests, TableComponent, DataView, getReactiveStore, createAnalysisConfig, NavigationRegistry, Priority, invalidateCache, authState, undoRegistry, EditHistoryUtils, todayISOString, ProposalUtils, getInventoryNoteMaxLength, getInventoryTabList, INVENTORY_TAB_PREFERENCES, getShortageAlertsStore, getShortageAlertDays, shortagesByItem, itemShortageCards, itemVariantCards, itemVariantFamilies, THUMBNAIL_FIELD, SEVERITY, isMarkedForDeletion, isTemporaryAdmin, paramToggleValue } from '../../index.js';
 import { sheetLockMixin } from '../../utils/sheetLockMixin.js';
 import { thumbnailStyle, iconLabel } from '../../utils/views/viewStyles.js';
 import { CellRenderer } from '../interface/cells.js';
@@ -467,6 +467,13 @@ const INVENTORY_HISTORY_VIEWS = {
     }]
 };
 
+// Sub-rows under inventory items, each shown or hidden by a URL toggle in the inventory menu
+// (ParamToggles): pending = scheduled changes, proposals = changes in active proposals
+export const INVENTORY_DETAIL_TOGGLES = [
+    { param: 'pending', label: 'Pending', title: 'scheduled changes' },
+    { param: 'proposals', label: 'Proposals', title: 'proposed changes' }
+];
+
 // Edit History page: rows deleted from the category (the _EditHistory archive); admins can restore them
 const INVENTORY_DELETED_VIEWS = {
     id: 'inventory-deleted',
@@ -586,7 +593,7 @@ export const InventoryTableComponent = {
         editModeName() {
             return this.allowEdit ? 'batch' : 'none';
         },
-        // Only admins restore deleted items
+        // Only admins restore deleted items (TEMPORARY admin check: see isTemporaryAdmin)
         deletedViewPatches() {
             if (this.isAdmin) return [];
             return [{ patch: { columns: INVENTORY_DELETED_VIEWS.views[0].columns.filter(key => key !== '_restore') } }];
@@ -714,13 +721,15 @@ export const InventoryTableComponent = {
             //console.log('[InventoryTable] allowSave computed:', result, '| isDirty:', this.isDirty, '| lockedByOther:', this.lockedByOther, '| lockCheckComplete:', this.lockCheckComplete);
             return result;
         },
+        // TEMPORARY: shows or hides the admin-only buttons (delete, restore) until a real admin
+        // system with permissions replaces isTemporaryAdmin
         isAdmin() {
-            const prefs = getPreferencesStore().data || [];
-            const adminPref = prefs.find(p => p.id === 'admin');
-            try {
-                const admins = JSON.parse(adminPref?.value || '[]');
-                return Array.isArray(admins) && admins.includes(authState.user?.email?.split('@')[0]);
-            } catch { return false; }
+            return isTemporaryAdmin();
+        },
+        // Which sub-rows show under items (INVENTORY_DETAIL_TOGGLES, kept in the URL)
+        detailToggles() {
+            const params = NavigationRegistry.getParametersForContainer(this.containerPath, this.appContext?.currentPath);
+            return Object.fromEntries(INVENTORY_DETAIL_TOGGLES.map(toggle => [toggle.param, paramToggleValue(params, toggle)]));
         }
     },
     async mounted() {
@@ -730,7 +739,7 @@ export const InventoryTableComponent = {
             Requests.saveInventoryTabData,
             [this.tabTitle, undefined, undefined, undefined] // No filters needed - search is handled in UI
         );
-        if (!this.historyMode) this.proposalsStore = getProposalsStore();
+        this.proposalsStore = getProposalsStore();
 
         if (this.historyMode && this.tabTitle) {
             this.archivedStore = getReactiveStore(Requests.getArchivedRows, null, ['INVENTORY', this.tabTitle]);
@@ -1066,39 +1075,38 @@ export const InventoryTableComponent = {
         },
 
         /**
-         * Sub-rows under an item, in one shape for both kinds:
-         *   - category table: pending (scheduled) changes
-         *   - edit history page: past states, newest first (no pending rows)
+         * Sub-rows under an item, in one shape for every kind, newest first:
+         *   - pending (scheduled) changes and proposal changes, when their toggles are on
+         *     (INVENTORY_DETAIL_TOGGLES), on both pages
+         *   - edit history page: then the past states
          * @returns {Array<{label, fields, changed: Set, meta: {date, user, note}|null, revertState, rowClass}>}
          */
         getDetailRows(row) {
-            if (!this.historyMode) {
-                const pending = this.getPendingEntriesForDisplay(row).map(entry => ({
-                    label: `${this.formatPendingDate(entry.t)}→`,
-                    fields: entry.fields,
-                    changed: HIGHLIGHT_CHANGES.pending ? new Set(Object.keys(entry.fields)) : new Set(),
+            const pending = !this.detailToggles.pending ? [] : this.getPendingEntriesForDisplay(row).map(entry => ({
+                label: `${this.formatPendingDate(entry.t)}→`,
+                fields: entry.fields,
+                changed: HIGHLIGHT_CHANGES.pending ? new Set(Object.keys(entry.fields)) : new Set(),
+                meta: null,
+                revertState: null,
+                rowClass: 'detail-row-pending'
+            }));
+            // Proposal rows: the proposed change (quantity as "+8"), never applied to the item
+            const proposals = !this.detailToggles.proposals ? [] : (this.proposalEntriesByItem.get(row.itemNumber) || []).map(entry => {
+                const fields = {};
+                for (const ch of entry.changes) {
+                    fields[ch.n] = ch.n === 'quantity' ? ProposalUtils.formatQuantityChange(ch.ne) : ch.ne;
+                }
+                return {
+                    label: `${entry.proposal} proposal`,
+                    fields,
+                    changed: HIGHLIGHT_CHANGES.pending ? new Set(Object.keys(fields)) : new Set(),
                     meta: null,
                     revertState: null,
-                    rowClass: 'detail-row-pending'
-                }));
-                // Proposal rows: the proposed change (quantity as "+8"), never applied to the item
-                const proposals = (this.proposalEntriesByItem.get(row.itemNumber) || []).map(entry => {
-                    const fields = {};
-                    for (const ch of entry.changes) {
-                        fields[ch.n] = ch.n === 'quantity' ? ProposalUtils.formatQuantityChange(ch.ne) : ch.ne;
-                    }
-                    return {
-                        label: `${entry.proposal} proposal`,
-                        fields,
-                        changed: HIGHLIGHT_CHANGES.pending ? new Set(Object.keys(fields)) : new Set(),
-                        meta: null,
-                        revertState: null,
-                        rowClass: 'detail-row-proposal',
-                        proposal: entry
-                    };
-                });
-                return [...pending, ...proposals];
-            }
+                    rowClass: 'detail-row-proposal',
+                    proposal: entry
+                };
+            });
+            if (!this.historyMode) return [...pending, ...proposals];
             const states = this.historyByItem.get(row.itemNumber) || [];
             // With unsaved changes the main row shows the live values, so the saved state
             // becomes the first history row
@@ -1107,7 +1115,7 @@ export const InventoryTableComponent = {
             const above = (j) => unsaved ? (j === 0 ? row : states[j - 1].state) : states[j].state;
             // Highlight the fields where this past state differs from the next-newer one
             // (the row above it), i.e. the values that the newer change replaced
-            return shown.map((item, j) => ({
+            return [...pending, ...proposals, ...shown.map((item, j) => ({
                 label: item.kind === 'current' ? 'Saved'
                     : item.kind === 'created' ? 'Created'
                     : item.kind === 'earliest' ? 'Earliest recorded' : '',
@@ -1118,15 +1126,15 @@ export const InventoryTableComponent = {
                 meta: this.historyMeta(item.entry),
                 revertState: item.state,
                 rowClass: 'detail-row-history'
-            }));
+            }))];
         },
 
         hasDetailRows(row) {
-            if (this.historyMode) {
-                const count = this.historyByItem.get(row.itemNumber)?.length || 0;
-                return count > 1 || (count > 0 && this.unsavedFields(row).size > 0);
-            }
-            return this.getPendingEntries(row).length > 0 || this.proposalEntriesByItem.has(row.itemNumber);
+            if (this.detailToggles.pending && this.getPendingEntries(row).length > 0) return true;
+            if (this.detailToggles.proposals && this.proposalEntriesByItem.has(row.itemNumber)) return true;
+            if (!this.historyMode) return false;
+            const count = this.historyByItem.get(row.itemNumber)?.length || 0;
+            return count > 1 || (count > 0 && this.unsavedFields(row).size > 0);
         },
 
         // History fields whose live (store) value differs from the saved row, e.g. after a revert
@@ -1369,6 +1377,13 @@ export const InventoryTableComponent = {
                                 @click.stop="revertToState(row, detail)"
                                 title="Revert to this state (undoes every newer change)"
                             >↶</button>
+                            <!-- The history page has no row action column: its proposal rows open the proposal here -->
+                            <button
+                                v-else-if="cell.key === '_revert' && detail.proposal"
+                                class="button-symbol purple"
+                                @click.stop="openProposal(detail.proposal)"
+                                :title="'Open the ' + detail.proposal.proposal + ' proposal'"
+                            ><span class="material-symbols-outlined">info</span></button>
                         </td>
                         </template>
                         <!-- Under the row action (item timeline): a proposal row opens its proposal -->
@@ -1396,6 +1411,7 @@ export const InventoryTableComponent = {
                 class="inventory-deleted-rows"
             >
                 <template #cell="{ row, field }">
+                    <!-- TEMPORARY admin check (isAdmin), until the admin system replaces it -->
                     <button v-if="field.key === '_restore' && isAdmin"
                         class="button-symbol purple"
                         :title="'Put ' + row.itemNumber + ' back in ' + tabTitle + '; saving restores it'"

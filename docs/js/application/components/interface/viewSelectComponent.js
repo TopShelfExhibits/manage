@@ -29,17 +29,10 @@ export const ViewSelectComponent = {
     methods: {
         select(id) {
             if (!id || id === this.currentId) return;
-            const cleanPath = this.containerPath.split('?')[0];
-            const isOnDashboard = this.appContext?.currentPath?.split('?')[0].split('/')[0] === 'dashboard';
-            const newPath = NavigationRegistry.buildPathWithCurrentParams(cleanPath, this.appContext?.currentPath, {
+            NavigationRegistry.updateContainerParams(this.containerPath, this.appContext?.currentPath, {
                 view: id === this.defaultId ? undefined : id,
                 layout: undefined
-            });
-            if (isOnDashboard) {
-                NavigationRegistry.dashboardRegistry.updatePath(cleanPath, newPath);
-            } else if (this.navigateToPath) {
-                this.navigateToPath(newPath);
-            }
+            }, this.navigateToPath);
         }
     },
     template: html`

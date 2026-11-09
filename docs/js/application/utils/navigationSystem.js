@@ -315,6 +315,25 @@ export const NavigationRegistry = {
     },
 
     /**
+     * Set some of a container's URL parameters, keeping the others (undefined, null or '' removes
+     * one). On the dashboard the card's stored path is updated instead of navigating, so the card
+     * keeps them. View switches and URL toggles (ParamToggles) all write through here.
+     * @param {string} containerPath - The container's path
+     * @param {string} currentPath - The app's current path (appContext.currentPath)
+     * @param {Object} params - Parameters to set
+     * @param {Function} navigateToPath - The page's navigation function
+     */
+    updateContainerParams(containerPath, currentPath, params, navigateToPath) {
+        const cleanPath = containerPath.split('?')[0];
+        const newPath = this.buildPathWithCurrentParams(cleanPath, currentPath, params);
+        if (currentPath?.split('?')[0].split('/')[0] === 'dashboard') {
+            this.dashboardRegistry.updatePath(cleanPath, newPath);
+        } else {
+            navigateToPath?.(newPath);
+        }
+    },
+
+    /**
      * Build path with updated parameters, preserving existing ones
      * Convenience method that gets current parameters and merges with new ones
      * Parameters with undefined, null, or empty string values are removed

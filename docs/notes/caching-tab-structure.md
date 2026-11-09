@@ -173,4 +173,3 @@ Reads and writes use `GoogleSheetsService` directly, in `application-utils.js` (
 
 1. A `CACHE/Analytics` tab with the headers `Key | SavedAt | Sources | Value` in row 1.
 2. A `CACHE/Preferences` row: ID `InventoryShortageAlertDays`, Name `Shortage Alert Days`, Description `days ahead the inventory shortage alerts look; 0 turns them off`, Page `inventory*`, Type `integer`, Value set to the number of days (for example `60`).
-3. A `CACHE/Preferences` row: ID `admin`, Name `Admin Users`, Description `usernames with admin-only UI privileges`, Page `*`, Type `json`, Value `["dschwab"]`. Admins get the history page's delete buttons.
