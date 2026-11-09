@@ -813,20 +813,10 @@ export const InventoryTableComponent = {
             const user = authState.user?.email;
             if (!user || !this.tabTitle) return;
 
-            const originalValue = colKey && this.inventoryTableStore ? this.inventoryTableStore.data[rowIdx]?.[colKey] : undefined;
-
-            // Apply the value immediately to prevent flicker during async lock operations.
-            // If the lock check fails, revert below.
-            if (colKey && this.inventoryTableStore) {
-                this.inventoryTableStore.data[rowIdx][colKey] = value;
-            }
-
-            if (!await this.acquireLockForEdit()) {
-                if (colKey && this.inventoryTableStore && originalValue !== undefined) {
-                    this.inventoryTableStore.data[rowIdx][colKey] = originalValue;
-                }
-                return;
-            }
+            const row = colKey && this.inventoryTableStore?.data[rowIdx];
+            if (!row) return;
+            const previous = row[colKey];
+            await this.editWithLock(() => { row[colKey] = value; }, () => { row[colKey] = previous; });
         },
         async handleNewRow(positionData) {
             // positionData: { position: 'above'|'below', targetIndex: number }
@@ -1185,14 +1175,9 @@ export const InventoryTableComponent = {
             const store = this.inventoryTableStore;
             if (!store || store.indexOfRow(row) < 0) return;
 
-            if (!await this.acquireLockForEdit()) {
-                this.$modal.alert(`Cannot delete: ${this.tabTitle} is locked for editing by ${this.lockOwnerDisplay || 'another user'}.`, 'Locked');
-                return;
-            }
-
             const routeKey = this.appContext?.currentPath?.split('?')[0];
             if (routeKey) undoRegistry.capture(store.data, routeKey, { type: 'deletion' });
-            store.toggleRowDeletion(row);
+            await this.editWithLock(() => store.toggleRowDeletion(row), () => store.toggleRowDeletion(row), 'delete');
         },
 
         /**
@@ -1208,17 +1193,16 @@ export const InventoryTableComponent = {
                 this.$modal.alert(`${row.itemNumber} can't be restored: ${this.tabTitle} already has an item with that number.`, 'Restore');
                 return;
             }
-            if (!await this.acquireLockForEdit()) {
-                this.$modal.alert(`Cannot restore: ${this.tabTitle} is locked for editing by ${this.lockOwnerDisplay || 'another user'}.`, 'Locked');
-                return;
-            }
-
             const routeKey = this.appContext?.currentPath?.split('?')[0];
             if (routeKey) undoRegistry.capture(store.data, routeKey, { type: 'restore' });
             // Fields the archived row lacks (a column added since) start empty
             const fieldNames = Object.keys(store.data[0] || {}).filter(key => key !== 'AppData');
-            store.addRow(row, fieldNames);
-            this.revertNote = `restore ${row.itemNumber || 'item'}`.slice(0, getInventoryNoteMaxLength());
+            const restored = await this.editWithLock(
+                () => store.addRow(row, fieldNames),
+                () => store.data.splice(store.indexOfRow(row), 1), // the unsaved restored row only
+                'restore'
+            );
+            if (restored) this.revertNote = `restore ${row.itemNumber || 'item'}`.slice(0, getInventoryNoteMaxLength());
         },
 
         /**
@@ -1230,19 +1214,19 @@ export const InventoryTableComponent = {
             const target = store?.data[store.indexOfRow(row)];
             if (!target || !detail.revertState) return;
 
-            if (!await this.acquireLockForEdit()) {
-                this.$modal.alert(`Cannot revert: ${this.tabTitle} is locked for editing by ${this.lockOwnerDisplay || 'another user'}.`, 'Locked');
-                return;
-            }
-
             const routeKey = this.appContext?.currentPath?.split('?')[0];
             if (routeKey) {
                 undoRegistry.capture(store.data, routeKey, { type: 'revert' });
             }
             // Only the fields the row has (a tab without a Thumbnail column has no thumbnail)
-            for (const field of HISTORY_FIELDS) {
-                if (field in target) target[field] = detail.revertState[field] ?? '';
-            }
+            const fields = HISTORY_FIELDS.filter(field => field in target);
+            const previous = Object.fromEntries(fields.map(field => [field, target[field]]));
+            const reverted = await this.editWithLock(
+                () => fields.forEach(field => { target[field] = detail.revertState[field] ?? ''; }),
+                () => Object.assign(target, previous),
+                'revert'
+            );
+            if (!reverted) return;
             // Save note (InventoryNoteMaxLength), e.g. "revert to Oct 6, 2026" / "revert to earliest"
             const when = detail.meta?.date
                 ? detail.meta.date.split(',').slice(0, 2).join(',')

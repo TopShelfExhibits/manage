@@ -270,14 +270,13 @@ export const InventoryProposalTable = {
             const row = this.tableStore?.data[rowIdx];
             if (!key || !row) return;
             const previous = row[key];
-            row[key] = value;
-            if (!await this.acquireLockForEdit()) row[key] = previous;
+            await this.editWithLock(() => { row[key] = value; }, () => { row[key] = previous; });
         },
         isMarkedForDeletion,
         // Mark an item for removal from the proposal, or unmark it; saving removes the marked items
         async toggleRemoval(row) {
-            if (!await this.acquireLockForEdit()) return;
-            this.tableStore.toggleRowDeletion(row);
+            const toggle = () => this.tableStore.toggleRowDeletion(row);
+            await this.editWithLock(toggle, toggle, 'remove items');
         },
         // New Item: pick an inventory item to add to the proposal
         handleAddItem() {
@@ -296,14 +295,15 @@ export const InventoryProposalTable = {
                 this.$modal.alert(`${item.itemNumber} is already in this proposal.`, 'Add Item');
                 return;
             }
-            if (!await this.acquireLockForEdit()) return;
             if (existing) {
-                this.tableStore.toggleRowDeletion(existing);
+                await this.toggleRemoval(existing);
                 return;
             }
+            const store = this.tableStore;
+            const row = ProposalUtils.toTableRow({ category: item.tab, itemNumber: item.itemNumber, changes: [] }, item);
             const routeKey = this.appContext?.currentPath?.split('?')[0];
-            if (routeKey) undoRegistry.capture(this.tableStore.data, routeKey, { type: 'add-row' });
-            this.tableStore.addRow(ProposalUtils.toTableRow({ category: item.tab, itemNumber: item.itemNumber, changes: [] }, item));
+            if (routeKey) undoRegistry.capture(store.data, routeKey, { type: 'add-row' });
+            await this.editWithLock(() => store.addRow(row), () => store.data.splice(store.indexOfRow(row), 1), 'add items');
         },
         async handleSave() {
             await this.tableStore.save('Saving proposal...');

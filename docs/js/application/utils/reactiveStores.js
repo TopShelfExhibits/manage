@@ -427,8 +427,10 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
                 this.analysisConfig
             );
             
-            // Deep comparison using JSON serialization
-            return !areValuesEqual(cleanCurrent, cleanOriginal);
+            // Deep comparison using JSON serialization. Empty metadata (absent, '' or the null an
+            // unmarked deletion leaves) counts as none, so mark-then-unmark is no change.
+            const withoutEmptyMetadata = (key, value) => (key === 'metadata' && !value ? undefined : value);
+            return JSON.stringify(cleanCurrent, withoutEmptyMetadata) !== JSON.stringify(cleanOriginal, withoutEmptyMetadata);
         },
         
         setData(newData) {

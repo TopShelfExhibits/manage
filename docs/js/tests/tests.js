@@ -3039,7 +3039,7 @@ test('INVENTORY PROPOSALS', 'removing an item marks it; saving takes it out of t
     try {
         const row = store.data.find(r => r.itemNumber === 'CHAIR-001');
         assertEqual(store.indexOfRow({ AppData: { _rowId: row.AppData._rowId } }), store.data.indexOf(row), 'found by row id');
-        assertEqual([store.toggleRowDeletion(row), store.toggleRowDeletion(row), isMarkedForDeletion(row)], [true, true, false], 'toggles back');
+        assertEqual([store.toggleRowDeletion(row), store.toggleRowDeletion(row), isMarkedForDeletion(row), store.isModified], [true, true, false, false], 'toggles back, unmodified');
         store.toggleRowDeletion(row);
         assertEqual([store.data.length, (await _proposalRows(name)).length], [2, 2], 'marked: still in the proposal until saved');
         await _asUser(() => store.save('Saving proposal...'));

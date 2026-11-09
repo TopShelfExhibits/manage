@@ -1,4 +1,4 @@
-import { html, TableComponent, Requests, getReactiveStore, NavigationRegistry, createAnalysisConfig, invalidateCache, Priority, tableRowSelectionState, EditHistoryUtils, authState, undoRegistry, statusColor, severityColor, SEVERITY, getInventoryTabList, INVENTORY_TAB_PREFERENCES } from '../../index.js';
+import { html, TableComponent, Requests, getReactiveStore, NavigationRegistry, createAnalysisConfig, invalidateCache, Priority, tableRowSelectionState, EditHistoryUtils, undoRegistry, statusColor, severityColor, SEVERITY, getInventoryTabList, INVENTORY_TAB_PREFERENCES } from '../../index.js';
 import { resolveView } from '../../utils/views/resolveView.js';
 import { InventorySelectorModal } from './InventorySelectorModal.js';
 import { escapeHtml } from '../../utils/views/fieldFormat.js';
@@ -670,34 +670,25 @@ export const PacklistTable = {
             this.$modal.alert(`Cannot edit: this pack list is locked by ${lockInfo?.user || 'another user'}`, 'Locked');
         },
         
-        // cell-edit contract: (rowIndex, columnKey, value)
-        async handleCellEdit(rowIdx, colKey, value, type = 'main') {
-            const user = authState.user?.email;
-            if (user && this.tabName) {
-                if (!await this.acquireLockForEdit()) {
-                    if (this.editMode && this.lockOwner) {
-                        const currentParams = NavigationRegistry.getParametersForContainer(
-                            `packlist/${this.tabName}`,
-                            this.appContext?.currentPath
-                        );
-                        const { edit, ...paramsWithoutEdit } = currentParams;
-                        this.$emit('navigate-to-path', {
-                            targetPath: NavigationRegistry.buildPath(`packlist/${this.tabName}`, paramsWithoutEdit),
-                            replaceHistory: true
-                        });
-                    }
-                    if (this.lockOwner) {
-                        this.$modal.alert(`Cannot edit: this pack list is locked by ${this.lockOwnerDisplay}`, 'Locked');
-                    }
-                    return;
-                }
+        // cell-edit contract: (rowIndex, columnKey, value). The value shows at once (editWithLock);
+        // if someone else holds the lock it's put back and the page leaves edit mode.
+        async handleCellEdit(rowIdx, colKey, value) {
+            const row = colKey && this.mainTableData[rowIdx];
+            if (!row) return;
+            const previous = row[colKey];
+            if (await this.editWithLock(() => { row[colKey] = value; }, () => { row[colKey] = previous; })) return;
+            if (!this.lockOwner) return;
+            if (this.editMode) {
+                const { edit, ...paramsWithoutEdit } = NavigationRegistry.getParametersForContainer(
+                    `packlist/${this.tabName}`,
+                    this.appContext?.currentPath
+                );
+                this.$emit('navigate-to-path', {
+                    targetPath: NavigationRegistry.buildPath(`packlist/${this.tabName}`, paramsWithoutEdit),
+                    replaceHistory: true
+                });
             }
-            
-            if (type === 'main') {
-                if (colKey && this.mainTableData[rowIdx]) {
-                    this.mainTableData[rowIdx][colKey] = value;
-                }
-            }
+            this.$modal.alert(`Cannot edit: this pack list is locked by ${this.lockOwnerDisplay}`, 'Locked');
         },
         handleAddCrate() {
             // Capture state for undo before adding crate

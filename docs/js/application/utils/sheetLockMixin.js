@@ -40,7 +40,8 @@ import { Requests, authState, CacheInvalidationBus, getDeviceId } from '../index
  *            lockedBySelf — true when lockedByOther is true but the lock owner is the current user
  *            on a different device. Lets components show a device-specific message and Claim action.
  * computed: lockOwnerDisplay
- * methods: setLockState, checkLockStatus, handleLockState, claimLock
+ * methods: setLockState, checkLockStatus, handleLockState, claimLock, acquireLockForEdit,
+ *          editWithLock (an edit applied at once, the lock taken behind it; the way to edit)
  */
 export const sheetLockMixin = {
     data() {
@@ -201,8 +202,8 @@ export const sheetLockMixin = {
          * - isDirty true  → acquire lock (if not already held).
          * - isDirty false → release lock (if held by this component).
          *
-         * On acquire failure (another user holds it), sets lockedByOther and calls
-         * onLockAcquireFailed(lockInfo) if the component defines it.
+         * On acquire failure (another user holds it), sets lockedByOther and, if edits are still
+         * in the store, calls onLockAcquireFailed({ user }) if the component defines it.
          *
          * Called from the component's isDirty watcher.
          */
@@ -216,21 +217,19 @@ export const sheetLockMixin = {
 
             try {
                 if (isDirty && !this.isLocked) {
-                    const lockAcquired = await Requests.lockSheet(this.lockNamespace, this.lockKey, user, getDeviceId());
-                    if (lockAcquired) {
-                        this.setLockState(true, user);
-                    } else {
-                        const lockInfo = await Requests.getSheetLock(this.lockNamespace, this.lockKey);
-                        if (lockInfo && lockInfo.user !== user) {
-                            this.setLockState(false, lockInfo.user);
-                            console.warn(`[sheetLockMixin] Sheet locked by ${lockInfo.user}`);
-                            this.onLockAcquireFailed?.(lockInfo);
-                        }
+                    // Shares an edit's request (editWithLock). That edit reverts itself on failure;
+                    // the hook handles edits still left without the lock.
+                    const lockAcquired = await this.acquireLockForEdit();
+                    if (!lockAcquired && this.lockedByOther && this.isDirty) {
+                        console.warn(`[sheetLockMixin] Sheet locked by ${this.lockOwner}`);
+                        this.onLockAcquireFailed?.({ user: this.lockOwner });
                     }
                 } else if (!isDirty && this.isLocked) {
                     const unlocked = await Requests.unlockSheet(this.lockNamespace, this.lockKey, user);
                     if (unlocked) {
                         this.setLockState(false, null);
+                        // An edit made while the release was out still needs the lock
+                        if (this.isDirty) Vue.nextTick(() => this.handleLockState(this.isDirty));
                     } else {
                         console.warn(`[sheetLockMixin] Failed to release lock for ${this.lockKey}`);
                     }
@@ -269,10 +268,38 @@ export const sheetLockMixin = {
             await this.checkLockStatus();
         },
 
-        async acquireLockForEdit() {
+        /**
+         * Take the edit lock, or confirm it's held. Calls made while a request is out (several
+         * quick edits, the isDirty watcher) share that one request.
+         * @returns {Promise<boolean>} whether this session holds the lock
+         */
+        acquireLockForEdit() {
+            if (this.isLocked) return Promise.resolve(true);
+            if (!this._lockRequest) {
+                this._lockRequest = this._requestLock().finally(() => { this._lockRequest = null; });
+            }
+            return this._lockRequest;
+        },
+
+        /**
+         * An optimistic edit: apply() changes the store at once and the lock is taken behind it,
+         * so an edit never waits on the lock. If the lock can't be had, revert() undoes the change
+         * and, when `action` is given ("delete"), the user is told who holds the lock.
+         * @returns {Promise<boolean>} whether the edit stands
+         */
+        async editWithLock(apply, revert, action = null) {
+            apply();
+            if (await this.acquireLockForEdit()) return true;
+            revert();
+            if (action) {
+                this.$modal.alert(`Cannot ${action}: ${this.lockKey} is locked for editing by ${this.lockOwner ? this.lockOwnerDisplay : 'another user'}.`, 'Locked');
+            }
+            return false;
+        },
+
+        async _requestLock() {
             const user = authState.user?.email;
             if (!user || !this.lockKey) return false;
-            if (this.isLocked) return true;
 
             try {
                 const lockInfo = await Requests.getSheetLock(this.lockNamespace, this.lockKey, user);
