@@ -51,7 +51,8 @@ Text fields are applied as plain values; only `quantity` goes through `applyNeVa
 1. Save → the save dialog gains a **Proposal** button between Apply/Schedule and Cancel.
 2. Proposal mode lists active proposals and a new-name field; **Update Proposal** confirms. Date and note are not used.
 3. If the edits include new rows: confirm, then save those rows to inventory at quantity 0 (note `proposal: <name>`).
-4. Merge the diff (vs. the saved rows) into the proposal, reload the category store (dropping the edits), which releases the lock.
+4. Add the diff (vs. the saved rows) to the proposal the way the proposal page saves (`saveToProposal` in `inventoryProposals.js`): load the proposal's table store, refuse if it has unsaved edits, take the proposal lock (`INVENTORY_PROPOSALS:<name>`; refuse if someone else holds it), merge each item's changes into its row (one row per item, `ProposalUtils.mergeChanges`) or add a row, run the store's save, release the lock. New and existing proposals take the same path; every proposal write is a table save (`saveInventoryProposalTable`).
+   Then reload the category store (dropping the edits), which releases the category lock.
 5. New proposal → navigate to `reports/inventory-proposals/<slug>`.
 
 ### Category table
@@ -72,7 +73,9 @@ Inventory pages show **View Proposals** when an active proposal exists → `repo
 
 ### Proposal page
 
-One table: image (read-only, as on the overview table), Category, Item#, Current Qty, Change (green `+` / red `-`), Projected Qty, Description, Notes, × (removes the item from the proposal).
+One table: image (read-only, as on the overview table), Category, Item#, Current Qty, Change (green `+` / red `-`), Projected Qty, Description, Notes, and a trash button that marks the item for removal (saving removes it; CLAUDE.md "Deleting rows").
+
+- **New Item** picks an item from inventory (`InventorySelectorModal`, shared with the pack list) and adds it with no change. One row per item: an item already in the proposal isn't added again (if it was marked for removal, adding it unmarks it), and saving keeps one entry per item.
 
 - Projected date picker in the table's button bar (`card white`, "Projected on:"), defaulting to today.
 - Editable with the standard lock (`INVENTORY_PROPOSALS:<name>`) and Save/Discard. Edited Description/Notes that match the current value drop that change; a zero quantity change drops it.

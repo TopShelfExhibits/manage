@@ -650,6 +650,26 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
             this.autoSaved = false;
             this.lastAutoSaveHash = null;
         },
+        /**
+         * Index of a row of this store: the same row object, else the same row id (AppData._rowId).
+         * Item numbers and other values can repeat or be blank, so they don't identify a row.
+         */
+        indexOfRow(row) {
+            const index = this._data.indexOf(row);
+            if (index >= 0) return index;
+            const id = row?.AppData?._rowId;
+            return id ? this._data.findIndex(other => other?.AppData?._rowId === id) : -1;
+        },
+        /**
+         * Mark a row for deletion, or unmark it. Rows are never removed on the spot: save()
+         * removes the marked ones (CLAUDE.md "Deleting rows"). @returns {boolean} whether found
+         */
+        toggleRowDeletion(row) {
+            const index = this.indexOfRow(row);
+            if (index < 0) return false;
+            this.markRowForDeletion(index, !isMarkedForDeletion(this._data[index]));
+            return true;
+        },
         // Mark/unmark for deletion by index using metadata
         markRowForDeletion(idx, value = true) {
             if (this._data[idx]) {

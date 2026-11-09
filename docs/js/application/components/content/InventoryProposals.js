@@ -1,8 +1,10 @@
-import { html, Requests, DataView, getReactiveStore, ProposalUtils, PROPOSAL_LOCK_NAMESPACE, parseDate, todayISOString, getInventoryNoteMaxLength, THUMBNAIL_FIELD, SEVERITY } from '../../index.js';
+import { html, DataView, ProposalUtils, PROPOSAL_LOCK_NAMESPACE, parseDate, todayISOString, getInventoryNoteMaxLength, THUMBNAIL_FIELD, SEVERITY, undoRegistry, isMarkedForDeletion } from '../../index.js';
 import { sheetLockMixin } from '../../utils/sheetLockMixin.js';
-import { getProposalsStore, reloadProposals, proposalPath, commitInventoryProposal } from '../../utils/inventoryProposals.js';
+import { getProposalsStore, reloadProposals, proposalPath, proposalTableStore, commitInventoryProposal } from '../../utils/inventoryProposals.js';
 import { thumbnailStyle } from '../../utils/views/viewStyles.js';
 import { InventorySaveModal } from './InventoryTable.js';
+import { InventorySelectorModal } from './InventorySelectorModal.js';
+import { RowDeletionButton } from '../interface/cells.js';
 
 /**
  * Inventory proposals pages (Reports → Inventory Proposals).
@@ -83,7 +85,9 @@ export const InventoryProposalsGrid = {
 
 // What each proposal row key is (ProposalUtils.toTableRow). _projected and _remove hold no data:
 // the projected quantity and the remove button (the page draws both). The thumbnail is the proposed
-// image (items of tabs without a Thumbnail column have none).
+// image (items of tabs without a Thumbnail column have none). Items are added with New Item
+// (InventorySelectorModal; one row per item), and removed by marking them, then saving
+// (CLAUDE.md "Deleting rows").
 const PROPOSAL_TABLE_FIELDS = [
     { ...THUMBNAIL_FIELD, editable: true },
     { key: 'category', label: 'Category' },
@@ -135,7 +139,7 @@ const COMMITTED_COLUMNS = PROPOSAL_TABLE_VIEWS.views[0].columns.filter(key => ke
  */
 export const InventoryProposalTable = {
     mixins: [sheetLockMixin],
-    components: { DataView },
+    components: { DataView, RowDeletionButton },
     inject: ['appContext', '$modal', '$notify'],
     props: {
         proposalSlug: { type: String, required: true },
@@ -239,7 +243,7 @@ export const InventoryProposalTable = {
         proposalName: {
             handler(name) {
                 if (!name || this.tableStore) return;
-                this.tableStore = getReactiveStore(Requests.getInventoryProposalTable, Requests.saveInventoryProposalTable, [name]);
+                this.tableStore = proposalTableStore(name);
                 this.checkLockStatus();
             },
             immediate: true
@@ -269,10 +273,37 @@ export const InventoryProposalTable = {
             row[key] = value;
             if (!await this.acquireLockForEdit()) row[key] = previous;
         },
-        async removeRow(row) {
+        isMarkedForDeletion,
+        // Mark an item for removal from the proposal, or unmark it; saving removes the marked items
+        async toggleRemoval(row) {
             if (!await this.acquireLockForEdit()) return;
-            const index = this.tableStore.data.indexOf(row);
-            if (index !== -1) this.tableStore.data.splice(index, 1);
+            this.tableStore.toggleRowDeletion(row);
+        },
+        // New Item: pick an inventory item to add to the proposal
+        handleAddItem() {
+            this.$modal.custom(InventorySelectorModal, {
+                onItemSelected: (item) => this.addItem(item),
+                size: 'page',
+                tall: true
+            }, `Add to ${this.proposalName}`);
+        },
+        // One row per item: an added item starts with no changes (a row without changes saves no
+        // entry). An item already in the proposal isn't added again; if it was marked for removal,
+        // adding it unmarks it.
+        async addItem(item) {
+            const existing = this.tableData.find(row => row.category === item.tab && row.itemNumber === item.itemNumber);
+            if (existing && !isMarkedForDeletion(existing)) {
+                this.$modal.alert(`${item.itemNumber} is already in this proposal.`, 'Add Item');
+                return;
+            }
+            if (!await this.acquireLockForEdit()) return;
+            if (existing) {
+                this.tableStore.toggleRowDeletion(existing);
+                return;
+            }
+            const routeKey = this.appContext?.currentPath?.split('?')[0];
+            if (routeKey) undoRegistry.capture(this.tableStore.data, routeKey, { type: 'add-row' });
+            this.tableStore.addRow(ProposalUtils.toTableRow({ category: item.tab, itemNumber: item.itemNumber, changes: [] }, item));
         },
         async handleSave() {
             await this.tableStore.save('Saving proposal...');
@@ -337,7 +368,9 @@ export const InventoryProposalTable = {
             :container-path="containerPath"
             :navigate-to-path="navigateToPath"
             :external-dirty-state="isDirty"
+            :showNewRowButton="allowEdit"
             emptyMessage="This proposal has no items."
+            @new-row="handleAddItem"
             @cell-edit="handleCellEdit"
             @on-save="handleSave"
             @refresh="handleRefresh"
@@ -362,12 +395,13 @@ export const InventoryProposalTable = {
                     <span v-if="row.missing" class="red" title="This item no longer exists in inventory">missing</span>
                     <template v-else>{{ row.currentQuantity }}</template>
                 </template>
-                <button
+                <RowDeletionButton
                     v-else-if="field.key === '_remove' && allowEdit"
-                    class="button-symbol white"
-                    @click.stop="removeRow(row)"
-                    title="Remove this item from the proposal"
-                >×</button>
+                    :marked="isMarkedForDeletion(row)"
+                    title="Remove this item from the proposal; saving removes it"
+                    marked-title="Keep this item in the proposal"
+                    @toggle="toggleRemoval(row)"
+                />
             </template>
         </DataView>
     `

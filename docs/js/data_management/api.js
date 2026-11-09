@@ -1769,18 +1769,6 @@ class Requests_uncached {
     }
 
     /**
-     * Merge item changes from a category page into a proposal (created if new).
-     * MUTATION METHOD — excluded from caching.
-     * @param {string} name - Proposal name
-     * @param {string} category - Inventory tab
-     * @param {Array<{itemNumber: string, changes: Array<{n, ne}>}>} updates
-     */
-    static async updateInventoryProposal(name, category, updates) {
-        return await _updateProposalEntries((entries, user, now) =>
-            ProposalUtils.mergeIntoProposal(entries, name, category, updates, user, now));
-    }
-
-    /**
      * Save edits from the proposal page (see ProposalUtils.replaceActiveEntries). Signature matches
      * the reactive store save call: (data, ...apiArgs, options).
      * MUTATION METHOD — excluded from caching.
@@ -1858,7 +1846,7 @@ export const Requests = wrapMethods(
         'removeTransshipLink',
         'savePageNotes',
         'savePreferences',
-        'updateInventoryProposal', 'saveInventoryProposalTable', 'markInventoryProposalCommitted',
+        'saveInventoryProposalTable', 'markInventoryProposalCommitted',
         'getDriveFileBlob', // Uncached read: callers own the Blob
         'writeCellsVerified',
         'saveShowNote'

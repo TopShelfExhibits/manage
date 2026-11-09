@@ -1,8 +1,8 @@
 import { html, Requests, TableComponent, DataView, getReactiveStore, createAnalysisConfig, NavigationRegistry, Priority, invalidateCache, authState, undoRegistry, EditHistoryUtils, todayISOString, ProposalUtils, getInventoryNoteMaxLength, getInventoryTabList, INVENTORY_TAB_PREFERENCES, getShortageAlertsStore, getShortageAlertDays, shortagesByItem, itemShortageCards, itemVariantCards, itemVariantFamilies, THUMBNAIL_FIELD, SEVERITY, isMarkedForDeletion, isTemporaryAdmin, paramToggleValue } from '../../index.js';
 import { sheetLockMixin } from '../../utils/sheetLockMixin.js';
 import { thumbnailStyle, iconLabel } from '../../utils/views/viewStyles.js';
-import { CellRenderer } from '../interface/cells.js';
-import { getProposalsStore, reloadProposals, proposalPath } from '../../utils/inventoryProposals.js';
+import { CellRenderer, RowDeletionButton } from '../interface/cells.js';
+import { getProposalsStore, proposalPath, proposalItemsFromStore, saveToProposal } from '../../utils/inventoryProposals.js';
 
 /**
  * Modal displayed before any inventory save.
@@ -498,7 +498,8 @@ export const InventoryTableComponent = {
     mixins: [sheetLockMixin],
     components: {
         DataView,
-        CellRenderer
+        CellRenderer,
+        RowDeletionButton
     },
     inject: ['appContext', '$modal', '$notify'],
     props: {
@@ -987,9 +988,10 @@ export const InventoryTableComponent = {
         },
 
         /**
-         * Send the table's edits to a proposal instead of inventory. New items are first created
-         * in inventory at quantity 0 (after confirmation); the proposal holds their quantity.
-         * The edits are then dropped from the table, which releases the lock.
+         * Send the table's edits to a proposal instead of inventory (saveToProposal: through the
+         * proposal's store, under its lock). New items are first created in inventory at quantity 0
+         * (after confirmation); the proposal holds their quantity. The edits are then dropped from
+         * the table, which releases the category lock.
          */
         async handleProposal(name, isNew) {
             const store = this.inventoryTableStore;
@@ -1009,13 +1011,7 @@ export const InventoryTableComponent = {
                 if (!confirmed) return;
             }
 
-            const updates = store.data
-                .filter(row => row.itemNumber)
-                .map(row => ({
-                    itemNumber: row.itemNumber,
-                    changes: ProposalUtils.diffRow(savedByItem.get(row.itemNumber) || { ...row, quantity: '0' }, row)
-                }))
-                .filter(update => update.changes.length > 0);
+            const items = proposalItemsFromStore(store);
 
             try {
                 if (newRows.length > 0) {
@@ -1027,12 +1023,9 @@ export const InventoryTableComponent = {
                         note: ProposalUtils.commitNote(name, getInventoryNoteMaxLength())
                     });
                 }
-                if (updates.length > 0) {
-                    await Requests.updateInventoryProposal(name, this.tabTitle, updates);
-                }
+                if (items.length > 0) await saveToProposal(name, this.tabTitle, items);
                 // Drop the edits: they now live in the proposal (and new items in inventory)
                 await store.load('Loading...');
-                await reloadProposals();
                 if (isNew && this.appContext?.navigateToPath) {
                     this.appContext.navigateToPath(proposalPath(name));
                 }
@@ -1190,8 +1183,7 @@ export const InventoryTableComponent = {
          */
         async toggleDeletion(row) {
             const store = this.inventoryTableStore;
-            const index = this.storeIndexOf(row);
-            if (index < 0) return;
+            if (!store || store.indexOfRow(row) < 0) return;
 
             if (!await this.acquireLockForEdit()) {
                 this.$modal.alert(`Cannot delete: ${this.tabTitle} is locked for editing by ${this.lockOwnerDisplay || 'another user'}.`, 'Locked');
@@ -1200,19 +1192,7 @@ export const InventoryTableComponent = {
 
             const routeKey = this.appContext?.currentPath?.split('?')[0];
             if (routeKey) undoRegistry.capture(store.data, routeKey, { type: 'deletion' });
-            store.markRowForDeletion(index, !isMarkedForDeletion(store.data[index]));
-        },
-
-        /**
-         * The store index of a row the table shows: the same row object, else the same row id.
-         * (Item numbers can repeat or be blank, so they don't identify a row.)
-         */
-        storeIndexOf(row) {
-            const data = this.inventoryTableStore?.data || [];
-            const index = data.indexOf(row);
-            if (index >= 0) return index;
-            const id = row?.AppData?._rowId;
-            return id ? data.findIndex(other => other?.AppData?._rowId === id) : -1;
+            store.toggleRowDeletion(row);
         },
 
         /**
@@ -1247,7 +1227,7 @@ export const InventoryTableComponent = {
          */
         async revertToState(row, detail) {
             const store = this.inventoryTableStore;
-            const target = store?.data[this.storeIndexOf(row)];
+            const target = store?.data[store.indexOfRow(row)];
             if (!target || !detail.revertState) return;
 
             if (!await this.acquireLockForEdit()) {
@@ -1332,11 +1312,13 @@ export const InventoryTableComponent = {
                     <span v-if="field.key === '_historyDate'" :class="['history-meta', { 'history-unsaved-label': currentHistoryMeta(row).unsaved }]">{{ currentHistoryMeta(row).date }}</span>
                     <span v-else-if="field.key === '_historyUser'" class="history-meta">{{ currentHistoryMeta(row).user }}</span>
                     <span v-else-if="field.key === '_historyNote'" class="history-meta">{{ currentHistoryMeta(row).note }}</span>
-                    <button v-else-if="field.key === '_revert' && historyMode && isAdmin"
-                        :class="['button-symbol', isMarkedForDeletion(row) ? 'white' : 'red']"
-                        :title="isMarkedForDeletion(row) ? 'Keep this item (unmark for deletion)' : 'Mark this item for deletion; saving removes it'"
-                        @click.stop="toggleDeletion(row)"
-                    ><span class="material-symbols-outlined">{{ isMarkedForDeletion(row) ? 'restore_from_trash' : 'delete' }}</span></button>
+                    <!-- TEMPORARY admin check (isAdmin), until the admin system replaces it -->
+                    <RowDeletionButton v-else-if="field.key === '_revert' && historyMode && isAdmin"
+                        :marked="isMarkedForDeletion(row)"
+                        title="Mark this item for deletion; saving removes it"
+                        marked-title="Keep this item (unmark for deletion)"
+                        @toggle="toggleDeletion(row)"
+                    />
                 </template>
                 <template #row-detail-rows="{ row, visibleColumns, hasActionCell }">
                     <tr

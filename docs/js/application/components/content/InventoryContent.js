@@ -2,7 +2,7 @@ import { html, InventoryTableComponent, hamburgerMenuRegistry, NavigationRegistr
 import { ShowInventoryReport } from './ShowInventoryReport.js';
 import { InventoryItemReport } from './InventoryItemReport.js';
 import { InventoryItemTimeline } from './InventoryItemTimeline.js';
-import { getProposalsStore, PROPOSALS_PATH, reloadProposals, proposalPath } from '../../utils/inventoryProposals.js';
+import { getProposalsStore, PROPOSALS_PATH, proposalPath, proposalItemsFromStore, saveToProposal } from '../../utils/inventoryProposals.js';
 import { InventorySaveModal, INVENTORY_DETAIL_TOGGLES } from './InventoryTable.js';
 
 /** Route key of the per-category history page: inventory/<category>/edit-history */
@@ -518,20 +518,16 @@ export const InventoryContent = {
                 }
             }, 'Save Changes');
         },
+        // Send a category's edits to a proposal (saveToProposal: the proposal's store, under its lock)
         async handleCategoryProposal(categoryTitle, store, name, isNew) {
-            const savedByItem = new Map((store.originalData || []).map(row => [row.itemNumber, row]));
-            const updates = (store.data || [])
-                .filter(row => row.itemNumber)
-                .map(row => ({
-                    itemNumber: row.itemNumber,
-                    changes: ProposalUtils.diffRow(savedByItem.get(row.itemNumber) || { ...row, quantity: '0' }, row)
-                }))
-                .filter(update => update.changes.length > 0);
-            if (updates.length > 0) {
-                await Requests.updateInventoryProposal(name, categoryTitle, updates);
+            const items = proposalItemsFromStore(store);
+            try {
+                if (items.length > 0) await saveToProposal(name, categoryTitle, items);
+            } catch (error) {
+                this.$modal.alert(`Could not update the proposal: ${error.message}`, 'Error');
+                return;
             }
             await store.load('Loading...');
-            await reloadProposals();
             if (isNew && this.appContext?.navigateToPath) {
                 this.appContext.navigateToPath(proposalPath(name));
             }

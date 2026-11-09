@@ -33,9 +33,9 @@ import { FakeGoogleSheetsAuth, FakeGoogleSheetsService, FakeGoogleState, setFake
 import { refreshAppData } from './fakeGoogleDevTools.js';
 import { isCheckedValue } from '../data_management/utils/checkbox-values.js';
 import { useBatchEdits, useInstantEdits } from '../application/utils/cellEdits.js';
-import { CacheInvalidationBus, ApplicationUtils, ProductionUtils, triggerCachePoll, stampDataChange, Database, DEFAULT_INVENTORY_MAPPING, EditHistoryUtils, InventoryUtils, ProposalUtils, resolveInventoryNoteMaxLength, checkDateRollover, clearCache, invalidateCache, resolveSheetMapping, parseThumbnails, parseThumbnailEntries, serializeThumbnailEntries, addThumbnails, removeThumbnailAt, setPrimaryThumbnail, setThumbnailNote, setThumbnailCrop, primaryThumbnailValue, thumbnailKey } from '../data_management/index.js';
+import { CacheInvalidationBus, ApplicationUtils, ProductionUtils, triggerCachePoll, stampDataChange, Database, DEFAULT_INVENTORY_MAPPING, EditHistoryUtils, InventoryUtils, ProposalUtils, PROPOSAL_LOCK_NAMESPACE, resolveInventoryNoteMaxLength, checkDateRollover, clearCache, invalidateCache, resolveSheetMapping, parseThumbnails, parseThumbnailEntries, serializeThumbnailEntries, addThumbnails, removeThumbnailAt, setPrimaryThumbnail, setThumbnailNote, setThumbnailCrop, primaryThumbnailValue, thumbnailKey } from '../data_management/index.js';
 import { authState } from '../application/utils/auth.js';
-import { commitInventoryProposal } from '../application/utils/inventoryProposals.js';
+import { commitInventoryProposal, saveToProposal, proposalTableStore } from '../application/utils/inventoryProposals.js';
 import { resolveView, resolveAction, pickView, mergeView, matchesKeyPattern, setViewWarningHandler, withRegistryDefaults, searchTiers } from '../application/utils/views/resolveView.js';
 import { SEARCH_LIMITS, searchWords, matchRow, matchRows, makeHighlighter } from '../application/utils/views/searchMatch.js';
 import { formatValue, formatText } from '../application/utils/views/fieldFormat.js';
@@ -2922,19 +2922,60 @@ test('INVENTORY PROPOSALS', 'applyChanges adds quantity deltas but sets text lit
     assertEqual(row.description, '-5 ft pole', 'signed text is not a delta');
 });
 
-test('INVENTORY PROPOSALS', 'mergeIntoProposal overwrites listed fields and keeps everything else', async () => {
-    const entries = ProposalUtils.parseRows([
-        { proposal: 'Spring buy', category: 'FURNITURE', itemNumber: 'CHAIR-003', changes: JSON.stringify([{ n: 'quantity', ne: '+4' }, { n: 'notes', ne: 'legs' }]), updated: '1' },
-        { proposal: 'Spring buy', category: 'FURNITURE', itemNumber: 'CHAIR-001', changes: JSON.stringify([{ n: 'quantity', ne: '+8' }]), updated: '1' }
-    ]);
-    const merged = ProposalUtils.mergeIntoProposal(entries, 'spring BUY', 'FURNITURE', [
-        { itemNumber: 'CHAIR-003', changes: [{ n: 'quantity', ne: '+2' }] },
-        { itemNumber: 'TABLE-001', changes: [{ n: 'quantity', ne: '+1' }] }
-    ], 'sam', 99);
-    const chair3 = merged.find(e => e.itemNumber === 'CHAIR-003');
-    assertEqual(chair3.changes, [{ n: 'notes', ne: 'legs' }, { n: 'quantity', ne: '+2' }], 'quantity replaced, notes kept');
-    assertEqual(merged.find(e => e.itemNumber === 'CHAIR-001').changes, [{ n: 'quantity', ne: '+8' }], 'untouched item kept');
-    assertEqual(merged.find(e => e.itemNumber === 'TABLE-001').proposal, 'Spring buy', 'new item uses the stored name');
+test('INVENTORY PROPOSALS', 'mergeChanges replaces the same field and keeps the others', async () => {
+    const merged = ProposalUtils.mergeChanges([{ n: 'quantity', ne: '+4' }, { n: 'notes', ne: 'legs' }], [{ n: 'quantity', ne: '+2' }, { n: 'description', ne: 'Chair' }]);
+    assertEqual(merged, [{ n: 'notes', ne: 'legs' }, { n: 'quantity', ne: '+2' }, { n: 'description', ne: 'Chair' }], 'quantity replaced, notes kept, description added');
+});
+
+// Every proposal write is a save of the proposal's table store. saveToProposal (the save dialog's
+// Proposal button) loads the store, takes the proposal lock, merges each item into its row (one row
+// per item) and saves. The tests make their own proposals and empty them afterwards.
+const _furnitureItem = async (itemNumber, changes) => ({
+    inventoryRow: (await Requests.getInventoryTabData('FURNITURE')).find(row => row.itemNumber === itemNumber),
+    changes
+});
+
+test('INVENTORY PROPOSALS', 'saveToProposal creates a proposal, then merges into it one row per item', async () => {
+    const name = 'Store test';
+    try {
+        await _asUser(async () => saveToProposal(name, 'FURNITURE', [await _furnitureItem('CHAIR-003', [{ n: 'quantity', ne: '+4' }, { n: 'notes', ne: 'legs' }])]));
+        await _asUser(async () => saveToProposal(name, 'FURNITURE', [
+            await _furnitureItem('CHAIR-003', [{ n: 'quantity', ne: '+2' }]),
+            await _furnitureItem('STOOL-002', [{ n: 'quantity', ne: '+1' }])
+        ]));
+        // Compare n/ne only: the proposals store (reloaded by saveToProposal) adds runtime AppData to the cached entries
+        assertEqual((await _proposalRows(name)).filter(e => !e.committed).map(e => [e.itemNumber, e.changes.map(({ n, ne }) => ({ n, ne }))]), [
+            ['CHAIR-003', [{ n: 'quantity', ne: '+2' }, { n: 'notes', ne: 'legs' }]],
+            ['STOOL-002', [{ n: 'quantity', ne: '+1' }]]
+        ], 'CHAIR-003 merged (quantity replaced, notes kept), STOOL-002 added');
+        assertEqual(await ApplicationUtils.getSheetLock(PROPOSAL_LOCK_NAMESPACE, name, 'other@example.com'), null, 'lock released');
+    } finally {
+        await _asUser(() => Requests.saveInventoryProposalTable([], name));
+    }
+});
+
+test('INVENTORY PROPOSALS', 'saveToProposal refuses while the proposal is locked or has unsaved edits', async () => {
+    const name = 'Lock test';
+    const added = async (itemNumber) => {
+        try { await _asUser(async () => saveToProposal(name, 'FURNITURE', [await _furnitureItem(itemNumber, [{ n: 'quantity', ne: '+1' }])])); return null; }
+        catch (e) { return e.message; }
+    };
+    try {
+        assertEqual(await added('CHAIR-001'), null, 'created');
+        await ApplicationUtils.lockSheet(PROPOSAL_LOCK_NAMESPACE, name, 'other@example.com');
+        assertEqual(/is locked/.test(await added('CHAIR-002') || ''), true, 'refused while another user holds the lock');
+        await ApplicationUtils.unlockSheet(PROPOSAL_LOCK_NAMESPACE, name, 'other@example.com');
+        const store = proposalTableStore(name);
+        for (let i = 0; i < 100 && (store.isLoading || store.initialLoad); i++) await new Promise(r => setTimeout(r, 50));
+        store.data[0].notes = 'unsaved edit';
+        const refused = await added('CHAIR-002');
+        store.setData(store.originalData);
+        assertEqual(/unsaved changes/.test(refused || ''), true, `refused with unsaved edits: ${refused}`);
+        assertEqual((await _proposalRows(name)).map(e => e.itemNumber), ['CHAIR-001'], 'nothing added either time');
+    } finally {
+        await ApplicationUtils.unlockSheet(PROPOSAL_LOCK_NAMESPACE, name, 'other@example.com').catch(() => {});
+        await _asUser(() => Requests.saveInventoryProposalTable([], name));
+    }
 });
 
 test('INVENTORY PROPOSALS', 'replaceActiveEntries and markCommitted only touch the named proposal', async () => {
@@ -2983,6 +3024,63 @@ test('INVENTORY PROPOSALS', 'saving the proposal table replaces its rows and dro
     await _asUser(() => Requests.saveInventoryProposalTable(rows, 'Cabinet fix'));
     assertEqual((await _proposalRows('Cabinet fix'))[0].changes, [{ n: 'quantity', ne: '-2' }, { n: 'description', ne: 'Curved counter' }], 'changes saved');
     assertEqual((await _proposalRows('Spring buy')).length, 3, 'other proposals untouched');
+});
+
+// Removing an item from a proposal follows the delete design: the remove button marks the row
+// (store.toggleRowDeletion) and saving takes the marked rows out. The test makes a two-item
+// proposal (CHAIR-001, CHAIR-002) and empties it afterwards.
+test('INVENTORY PROPOSALS', 'removing an item marks it; saving takes it out of the proposal', async () => {
+    const name = 'Removal test';
+    await _asUser(async () => saveToProposal(name, 'FURNITURE', [
+        await _furnitureItem('CHAIR-001', [{ n: 'quantity', ne: '+1' }]),
+        await _furnitureItem('CHAIR-002', [{ n: 'quantity', ne: '+2' }])
+    ]));
+    const store = await _loadedStore(Requests.getInventoryProposalTable, Requests.saveInventoryProposalTable, [name]);
+    try {
+        const row = store.data.find(r => r.itemNumber === 'CHAIR-001');
+        assertEqual(store.indexOfRow({ AppData: { _rowId: row.AppData._rowId } }), store.data.indexOf(row), 'found by row id');
+        assertEqual([store.toggleRowDeletion(row), store.toggleRowDeletion(row), isMarkedForDeletion(row)], [true, true, false], 'toggles back');
+        store.toggleRowDeletion(row);
+        assertEqual([store.data.length, (await _proposalRows(name)).length], [2, 2], 'marked: still in the proposal until saved');
+        await _asUser(() => store.save('Saving proposal...'));
+        assertEqual((await _proposalRows(name)).filter(e => !e.committed).map(e => e.itemNumber), ['CHAIR-002'], 'saved: the marked item is out');
+    } finally {
+        await _asUser(() => Requests.saveInventoryProposalTable([], name));
+    }
+});
+
+// New Item adds an item picked from inventory (InventorySelectorModal) as a row with no changes,
+// built as the proposal page builds it (ProposalUtils.toTableRow). A row saves an entry once it has
+// a change. The test empties the proposal afterwards.
+test('INVENTORY PROPOSALS', 'an item added from inventory joins the proposal once it has a change', async () => {
+    const name = 'Add test';
+    await _asUser(async () => saveToProposal(name, 'FURNITURE', [await _furnitureItem('CHAIR-001', [{ n: 'quantity', ne: '+1' }])]));
+    const store = await _loadedStore(Requests.getInventoryProposalTable, Requests.saveInventoryProposalTable, [name]);
+    try {
+        const inventory = await Requests.getAllInventoryData(todayISOString());
+        const picked = ['STOOL-002', 'COUCH-001'].map(itemNumber => inventory.find(row => row.itemNumber === itemNumber));
+        for (const item of picked) {
+            store.addRow(ProposalUtils.toTableRow({ category: item.tab, itemNumber: item.itemNumber, changes: [] }, item));
+        }
+        assertEqual(store.data.slice(1).map(row => [row.category, row.itemNumber, row.currentQuantity, row.quantityChange]),
+            picked.map(item => ['FURNITURE', item.itemNumber, item.quantity, '0']), "added with the item's current values, no change");
+        store.data.find(row => row.itemNumber === 'STOOL-002').quantityChange = '3';
+        await _asUser(() => store.save('Saving proposal...'));
+        assertEqual((await _proposalRows(name)).filter(e => !e.committed).map(e => [e.itemNumber, e.changes]),
+            [['CHAIR-001', [{ n: 'quantity', ne: '+1' }]], ['STOOL-002', [{ n: 'quantity', ne: '+3' }]]], 'the changed item joined; the unchanged one saved nothing');
+    } finally {
+        await _asUser(() => Requests.saveInventoryProposalTable([], name));
+    }
+});
+
+// One entry per item whatever the rows: saving keeps the last row for an item (two entries would
+// apply its change twice at commit).
+test('INVENTORY PROPOSALS', 'a repeated item saves one entry, from the last row', async () => {
+    const row = (itemNumber, quantityChange) => ({ category: 'FURNITURE', itemNumber, quantityChange, description: '', currentDescription: '', notes: '', currentNotes: '' });
+    const saved = ProposalUtils.replaceActiveEntries([], 'Paste test', [row('CHAIR-001', '2'), row('CHAIR-002', '1'), row('CHAIR-001', '5')], 'test', 100);
+    assertEqual(saved.map(e => [e.itemNumber, e.changes]), [['CHAIR-002', [{ n: 'quantity', ne: '+1' }]], ['CHAIR-001', [{ n: 'quantity', ne: '+5' }]]], 'one entry per item');
+    const cleared = ProposalUtils.replaceActiveEntries([], 'Paste test', [row('CHAIR-001', '2'), row('CHAIR-001', '0')], 'test', 100);
+    assertEqual(cleared, [], 'the last row has no change: no entry');
 });
 
 test('INVENTORY PROPOSALS', 'committed proposals cannot be edited', async () => {

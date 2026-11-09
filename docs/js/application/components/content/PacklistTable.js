@@ -1,6 +1,6 @@
-import { html, TableComponent, DataView, Requests, getReactiveStore, NavigationRegistry, createAnalysisConfig, invalidateCache, Priority, tableRowSelectionState, EditHistoryUtils, authState, undoRegistry, todayISOString, statusColor, severityColor, SEVERITY, getInventoryTabList, INVENTORY_TAB_PREFERENCES, THUMBNAIL_FIELD } from '../../index.js';
+import { html, TableComponent, Requests, getReactiveStore, NavigationRegistry, createAnalysisConfig, invalidateCache, Priority, tableRowSelectionState, EditHistoryUtils, authState, undoRegistry, statusColor, severityColor, SEVERITY, getInventoryTabList, INVENTORY_TAB_PREFERENCES } from '../../index.js';
 import { resolveView } from '../../utils/views/resolveView.js';
-import { thumbnailStyle } from '../../utils/views/viewStyles.js';
+import { InventorySelectorModal } from './InventorySelectorModal.js';
 import { escapeHtml } from '../../utils/views/fieldFormat.js';
 import { sheetLockMixin } from '../../utils/sheetLockMixin.js';
 import { packlistIndexResolutionMixin } from '../interface/IndexResolutionModal.js';
@@ -747,150 +747,19 @@ export const PacklistTable = {
             }
         },
         
-        async showInventorySelector(crateIdx, position = null) {
-            // Create inventory selector modal component - show immediately, load data inside
-            // position: { position: 'above'|'below', targetIndex: number } or null
-            const tabName = this.tabName; // Capture for use inside modal
-            const InventorySelectorModal = {
-                components: { DataView },
-                props: ['onAddEmpty', 'onItemSelected', 'tabName'],
-                data() {
-                    return {
-                        inventoryStore: null,
-                        referenceDate: null,
-                        error: null,
-                        selectedCategory: null
-                    };
-                },
-                computed: {
-                    // Rows from Requests.getAllInventoryData (inventory rows carry their thumbnail)
-                    fields() {
-                        return [
-                            THUMBNAIL_FIELD,
-                            { key: 'itemNumber', label: 'Item#', type: 'item' },
-                            { key: 'description', label: 'Description' },
-                            { key: 'quantity', label: 'Available' }
-                        ];
-                    },
-                    // Single-view registry in a modal (no URL); adding the item is the primary action (a row click)
-                    registry() {
-                        return {
-                            id: 'packlist-inventory-selector',
-                            default: 'table',
-                            theme: 'purple',
-                            views: [{
-                                id: 'table', name: 'Inventory', layout: 'table',
-                                columns: ['thumbnail', 'itemNumber', 'description', 'quantity'],
-                                sortable: ['itemNumber', 'description', 'quantity'],
-                                style: { thumbnail: thumbnailStyle('itemNumber'), itemNumber: { width: 120 }, quantity: { width: 100 } },
-                                table: { sticky: { start: ['thumbnail'] } },
-                                sort: { key: 'itemNumber', dir: 'asc' },
-                                // Clicking a row adds the item
-                                action: 'row'
-                            }]
-                        };
-                    },
-                    addAction() {
-                        return { run: (row) => this.selectItem(row), label: '+ Add Item' };
-                    },
-                    allInventoryData() {
-                        return this.inventoryStore ? this.inventoryStore.data : [];
-                    },
-                    availableCategories() {
-                        const tabs = [...new Set(this.allInventoryData.map(item => item.tab).filter(Boolean))];
-                        return tabs.sort();
-                    },
-                    inventoryData() {
-                        if (!this.selectedCategory) return this.allInventoryData;
-                        return this.allInventoryData.filter(item => item.tab === this.selectedCategory);
-                    },
-                    originalData() {
-                        return this.inventoryStore && Array.isArray(this.inventoryStore.originalData)
-                            ? JSON.parse(JSON.stringify(this.inventoryStore.originalData))
-                            : [];
-                    },
-                    // Combine local loading state with store loading state
-                    isLoading() {
-                        return !this.inventoryStore || this.inventoryStore.isLoading;
-                    }
-                },
-                async mounted() {
-                    // Fetch the show's ship date so inventory quantities reflect state at time of packing
-                    const shipDate = await Requests.getProjectShipDate(this.tabName);
-                    this.referenceDate = shipDate || todayISOString();
-                    
-                    await this.loadStore();
-                },
-                methods: {
-                    async loadStore() {
-                        try {
-                            this.error = null;
-                            
-                            // Initialize reactive store using the new API method
-                            // Note: autoLoad is true by default, so data will load automatically
-                            // Don't set isLoading to false - let the computed property track store.isLoading
-                            this.inventoryStore = getReactiveStore(
-                                Requests.getAllInventoryData,
-                                null, // No save function (read-only)
-                                [this.referenceDate || todayISOString()] // Apply pending changes as of reference date
-                            );
-                        } catch (error) {
-                            console.error('Failed to load inventory data:', error);
-                            this.error = 'Failed to load inventory data';
-                        }
-                    },
-                    selectItem(item) {
-                        if (this.onItemSelected) {
-                            this.onItemSelected(item);
-                        }
-                        this.$emit('close-modal');
-                    },
-                    addEmpty() {
-                        if (this.onAddEmpty) {
-                            this.onAddEmpty();
-                        }
-                        this.$emit('close-modal');
-                    }
-                },
-                template: html`
-                    <div v-if="error" class="error-message">{{ error }}</div>
-                    <DataView
-                        v-else
-                        :fields="fields"
-                        :rows="inventoryData"
-                        :registry="registry"
-                        :action="addAction"
-                        :original-data="originalData"
-                        :isLoading="isLoading"
-                        :isAnalyzing="inventoryStore && inventoryStore.isAnalyzing"
-                        :showSearch="true"
-                        :showRefresh="false"
-                        :showFooter="true"
-                        :emptyMessage="'No inventory items found'"
-                        :loadingMessage="inventoryStore && inventoryStore.isAnalyzing ? 'Loading images...' : 'Loading inventory...'"
-                    >
-                        <template #header-area>
-                            <button @click="addEmpty" class="large">+ Empty Row</button>
-                            <p style="margin-left: 1em;">Or add from inventory below...</p>
-                            <select :value="selectedCategory" @change="e => selectedCategory = e.target.value || null" style="margin-left: auto;">
-                                <option value="">All Categories</option>
-                                <option v-for="cat in availableCategories" :key="cat" :value="cat">{{ cat.charAt(0) + cat.slice(1).toLowerCase() }}</option>
-                            </select>
-                        </template>
-                    </DataView>
-                `
-            };
-
-            // Show the inventory selector modal
+        // Pick an item from inventory (or an empty row) for a crate; quantities as of the ship date
+        // position: { position: 'above'|'below', targetIndex: number } or null
+        showInventorySelector(crateIdx, position = null) {
+            const tabName = this.tabName;
             this.$modal.custom(InventorySelectorModal, {
                 onItemSelected: (item) => this.addItemFromInventory(crateIdx, item, position),
-                size: 'page',
-                tall: true,
                 onAddEmpty: () => this.addEmptyItem(crateIdx, position),
-                tabName
+                loadReferenceDate: () => Requests.getProjectShipDate(tabName),
+                size: 'page',
+                tall: true
             }, 'Add Item');
         },
-        
+
         async addItemFromInventory(crateIdx, inventoryItem, position = null) {
             // Capture state for undo before adding item from inventory
             const routeKey = this.appContext?.currentPath?.split('?')[0];

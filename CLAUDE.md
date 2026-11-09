@@ -38,6 +38,13 @@ Fields describe what the data is. Views describe how it looks and behaves. Read 
 
 ## Editing patterns
 
+- **Deleting rows: mark, then save.** Never remove a row from a store on click.
+  - Draggable tables (pack lists) have the table's own tools: select rows by their drag handle and press Delete to mark them; cut and paste move rows. Only turn on `draggable` where row order means something that saves.
+  - Other tables (the history page's admin delete, the proposal page) draw a per-row button: toggle the mark with `store.toggleRowDeletion(row)` after `acquireLockForEdit()` and an undo capture, and draw `RowDeletionButton` (`cells.js`: a trash icon, then restore-from-trash while marked).
+  - The row shows as marked. `save()` removes marked rows, and Database archives inventory rows it removes. Discard or undo cancels.
+  - The save modal takes `deletionCount`: marked rows can't be scheduled or sent to a proposal.
+  - Find a store's row with `store.indexOfRow(row)`. Item numbers can repeat or be blank.
+- **Adding inventory items: `InventorySelectorModal`.** A table that adds rows from inventory sets `showNewRowButton` (a New Item button; `newRow` adds the row-level add buttons on draggable tables) and opens this modal from `@new-row`. It takes `onItemSelected`, an optional `onAddEmpty` (shows "+ Empty Row") and an optional `loadReferenceDate` (the date whose quantities to show; today when omitted). The pack list and proposal pages use it.
 - **Page options in the URL: `ParamToggles`.** An on/off option a page reads goes in its container's URL parameters, so links and dashboard cards keep it.
   - Declare the toggles as `[{ param, label, default }]`, and render `ParamToggles` in the page's hamburger menu.
   - Read a toggle with `paramToggleValue(NavigationRegistry.getParametersForContainer(containerPath, currentPath), toggle)`.

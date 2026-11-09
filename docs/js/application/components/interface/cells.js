@@ -384,6 +384,27 @@ export const CellRenderer = {
 };
 
 /**
+ * The button that marks a row for deletion and unmarks it (CLAUDE.md "Deleting rows"): a trash
+ * icon, then restore-from-trash while marked. The page toggles the mark (store.toggleRowDeletion).
+ */
+export const RowDeletionButton = {
+    name: 'RowDeletionButton',
+    props: {
+        marked: { type: Boolean, default: false },
+        title: { type: String, default: 'Mark for deletion; saving removes it' },
+        markedTitle: { type: String, default: 'Keep (unmark for deletion)' }
+    },
+    emits: ['toggle'],
+    template: html`
+        <button
+            :class="['button-symbol', marked ? 'white' : 'red']"
+            :title="marked ? markedTitle : title"
+            @click.stop="$emit('toggle')"
+        ><span class="material-symbols-outlined">{{ marked ? 'restore_from_trash' : 'delete' }}</span></button>
+    `
+};
+
+/**
  * Decoration cards (§4.14): { message (HTML), severity|class, title|hoverMessage, action, disabled, button, end }.
  * A status card sets `severity` (its colour comes from severity.js); other cards set `class`.
  * `button: true` renders a <button> (e.g. "View Packlist"); otherwise a div/span card.
