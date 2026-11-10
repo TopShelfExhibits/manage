@@ -37,6 +37,7 @@ import { CacheInvalidationBus, ApplicationUtils, ProductionUtils, triggerCachePo
 import { authState } from '../application/utils/auth.js';
 import { commitInventoryProposal, saveToProposal, proposalTableStore, sendEditsToProposal } from '../application/utils/inventoryProposals.js';
 import { hasQuantityChanges } from '../application/components/content/InventoryTable.js';
+import { evaluateArithmetic } from '../application/components/interface/cells.js';
 import { balancedSplit } from '../application/components/interface/buttonBar.js';
 import { resolveView, resolveAction, pickView, mergeView, matchesKeyPattern, setViewWarningHandler, withRegistryDefaults, searchTiers } from '../application/utils/views/resolveView.js';
 import { SEARCH_LIMITS, searchWords, matchRow, matchRows, makeHighlighter } from '../application/utils/views/searchMatch.js';
@@ -3871,6 +3872,15 @@ function batchHarness(rowKey = null) {
     });
     return { rows, emitted, edits };
 }
+
+// Typing + or - in a number cell starts a calculation (NumberCellInput); the cell holds its result
+test('CELL EDITS', 'number calculation: evaluateArithmetic adds and subtracts, without float noise', async () => {
+    assertEqual(['+3', '-5', '-24', '+3-5', ' + 3 - 1 '].map(terms => evaluateArithmetic(20, terms)), [23, 15, -4, 18, 22], 'add, subtract, chains, spaces');
+    assertEqual([evaluateArithmetic(0.1, '+0.2'), evaluateArithmetic(1.5, '-.25'), evaluateArithmetic(-5, '+2')], [0.3, 1.25, -3], 'decimals and a negative start');
+    assertEqual(['', '+', '-', '+3-'].map(terms => evaluateArithmetic(12, terms)), [12, 12, 12, 15], 'no terms yet, or a trailing sign while typing');
+    assertEqual(['3', '*3', '++3', '+x', '+1.2.3'].map(terms => evaluateArithmetic(12, terms)), [null, null, null, null, null], 'not a calculation');
+    assertEqual(evaluateArithmetic(NaN, '+3'), null, 'no start');
+});
 
 // A long ButtonBar splits where the wider of its two lines is narrowest; ties go to the middle
 test('CELL EDITS', 'button bars: balancedSplit balances the two lines by width', async () => {

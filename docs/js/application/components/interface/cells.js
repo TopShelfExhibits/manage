@@ -384,6 +384,202 @@ export const CellRenderer = {
 };
 
 /**
+ * A calculation's result: start, then the typed terms, each "+ number" or "- number", rounded off
+ * float noise (0.1+0.2 is 0.3). A trailing sign is allowed while typing ("+3-" is +3).
+ * @param {number} start - The value the calculation starts from
+ * @param {string} terms - e.g. "+3-5"
+ * @returns {number|null} The result, or null when the terms aren't such a calculation
+ */
+export function evaluateArithmetic(start, terms) {
+    const number = String.raw`(?:\d+\.?\d*|\.\d+)`;
+    if (!Number.isFinite(start) || !new RegExp(String.raw`^(?:\s*[+-]\s*${number})*\s*[+-]?\s*$`).test(String(terms ?? ''))) return null;
+    let result = start;
+    for (const [, sign, amount] of String(terms).matchAll(new RegExp(String.raw`([+-])\s*(${number})`, 'g'))) {
+        result += sign === '-' ? -parseFloat(amount) : parseFloat(amount);
+    }
+    return Math.round(result * 1e9) / 1e9;
+}
+
+// Calculations typed into number cells: row → { [key]: { start, terms, valid, base, result } }.
+// Keyed by the row object, so Save, Refresh and Discard (which load new rows) drop them.
+const cellCalculations = Vue.reactive(new WeakMap());
+
+function setCalculation(row, key, calculation) {
+    const calculations = cellCalculations.get(row) || {};
+    if (calculation) calculations[key] = calculation;
+    else delete calculations[key];
+    cellCalculations.set(row, calculations);
+}
+
+/**
+ * The calculation a number cell shows, while the cell still holds its result (an undo or another
+ * edit that changes the value hides it).
+ * @param {Object} row
+ * @param {string} key
+ * @returns {{start: number, terms: string, valid: string, base: number, result: number}|null}
+ */
+export function cellCalculation(row, key) {
+    const calculation = row ? cellCalculations.get(row)?.[key] : null;
+    return calculation && calculation.result === parseFloat(row[key]) ? calculation : null;
+}
+
+/**
+ * NumberCellInput — the table's editable number cell: the saved value (click to revert) while the
+ * cell is changed, then the input.
+ *
+ * Typing + or - after a value starts a calculation from the saved value: the saved value stays in
+ * front (read only, click to revert), the box holds the signs and numbers ("+3-1", any number of
+ * terms), and the result follows it, read only ("= 22"). A value already changed by typing becomes
+ * the first term (20 changed to 22, then +, reads "20 [+2+]"). The cell holds the result as it
+ * changes (commit), so Save saves the result, and the calculation stays in the cell until the
+ * sheet is saved. Leaving the box puts back the last complete terms (without a dangling sign) and
+ * drops a calculation that changes nothing; emptying the box returns to the plain input; Escape
+ * puts back the value from before. With the input empty, - types a negative number as usual. The calculation is wider than
+ * the plain input, so its column widens (styles.css .number-arithmetic).
+ *
+ * Props: row, field (the cell's key), commit(value) (report the new value, as a string),
+ * original (the saved value; undefined when there is none, e.g. instant edits or a new row),
+ * originalLabel (it, formatted), changed (the cell differs from its saved value),
+ * revert(event) (put back the saved value; null when the cell can't revert).
+ */
+export const NumberCellInput = {
+    name: 'NumberCellInput',
+    props: {
+        row: { type: Object, required: true },
+        field: { type: String, required: true },
+        commit: { type: Function, required: true },
+        original: { default: undefined },
+        originalLabel: { type: [String, Number], default: '' },
+        changed: { type: Boolean, default: false },
+        revert: { type: Function, default: null }
+    },
+    data() {
+        return { focused: false };
+    },
+    computed: {
+        number() {
+            const value = parseFloat(this.row[this.field]);
+            return Number.isFinite(value) ? value : null;
+        },
+        calculation() {
+            return cellCalculation(this.row, this.field);
+        },
+        // Shown while typed, then while its result is unsaved
+        calculating() {
+            return !!this.calculation && (this.focused || this.changed);
+        },
+        // The calculation's start is the saved value, which reverting puts back
+        startIsOriginal() {
+            return this.calculation?.start === parseFloat(this.original);
+        },
+        revertTitle() {
+            return 'Click to revert to: ' + (this.originalLabel || '(empty)');
+        }
+    },
+    methods: {
+        onKeydown(event) {
+            if ((event.key !== '+' && event.key !== '-') || this.number === null) return;
+            event.preventDefault();
+            const original = parseFloat(this.original);
+            const start = Number.isFinite(original) ? original : this.number;
+            const offset = Math.round((this.number - start) * 1e9) / 1e9;
+            const terms = (offset ? (offset > 0 ? '+' : '-') + Math.abs(offset) : '') + event.key;
+            setCalculation(this.row, this.field, { start, terms, valid: terms, base: this.number, result: this.number });
+            this.focused = true;
+            this.$nextTick(() => {
+                const input = this.$refs.terms;
+                input?.focus();
+                input?.setSelectionRange(terms.length, terms.length);
+            });
+        },
+        onInput(event) {
+            const terms = event.target.value;
+            const { start } = this.calculation;
+            // An empty box: back to the plain input, at the start value
+            if (!terms.trim()) {
+                setCalculation(this.row, this.field, null);
+                this.commit(String(start));
+                this.$nextTick(() => this.$refs.plain?.focus());
+                return;
+            }
+            const result = evaluateArithmetic(start, terms);
+            // Unfinished terms keep the last result
+            setCalculation(this.row, this.field, result === null
+                ? { ...this.calculation, terms }
+                : { ...this.calculation, terms, valid: terms, result });
+            if (result !== null) this.commit(String(result));
+        },
+        onTermsKeydown(event) {
+            if (event.key === 'Enter' || event.key === '=') {
+                event.preventDefault();
+                event.target.blur();
+            } else if (event.key === 'Escape') {
+                event.preventDefault();
+                const { base } = this.calculation;
+                setCalculation(this.row, this.field, null);
+                this.commit(String(base));
+                this.$nextTick(() => this.$refs.plain?.focus());
+            }
+        },
+        // Focus leaving the calculation: it keeps its last complete terms, and one that changes
+        // nothing is dropped
+        onFocusout(event) {
+            if (event.currentTarget.contains(event.relatedTarget)) return;
+            this.focused = false;
+            const calculation = this.calculation;
+            if (!calculation) return;
+            if (calculation.result === calculation.start) {
+                setCalculation(this.row, this.field, null);
+                return;
+            }
+            const terms = calculation.valid.replace(/\s*[+-]\s*$/, '');
+            if (terms !== calculation.terms) setCalculation(this.row, this.field, { ...calculation, terms, valid: terms });
+        },
+        onRevert(event) {
+            if (!this.revert) return;
+            setCalculation(this.row, this.field, null);
+            this.revert(event);
+        }
+    },
+    template: html`
+        <span v-if="calculating" class="number-arithmetic" @focusin="focused = true" @focusout="onFocusout">
+            <span
+                v-if="startIsOriginal && revert"
+                class="original-value clickable"
+                :title="revertTitle"
+                @click="onRevert"
+            >{{ originalLabel }}</span>
+            <span v-else class="original-value">{{ calculation.start }}</span>
+            <input
+                ref="terms"
+                type="text"
+                inputmode="decimal"
+                :value="calculation.terms"
+                @input="onInput"
+                @keydown="onTermsKeydown"
+                :aria-label="'Calculation from ' + calculation.start"
+            />
+            <output :title="'Saves as ' + calculation.result">= {{ calculation.result }}</output>
+        </span>
+        <template v-else>
+            <span
+                v-if="changed && revert"
+                class="original-value clickable"
+                :title="revertTitle"
+                @click="onRevert"
+            >{{ originalLabel }} →</span>
+            <input
+                ref="plain"
+                type="number"
+                :value="number === null ? '' : number"
+                @input="commit($event.target.value)"
+                @keydown="onKeydown"
+            />
+        </template>
+    `
+};
+
+/**
  * The button that marks a row for deletion and unmarks it (CLAUDE.md "Deleting rows"): a trash
  * icon, then restore-from-trash while marked. The page toggles the mark (store.toggleRowDeletion).
  */

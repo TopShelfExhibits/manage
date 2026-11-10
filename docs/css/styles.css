@@ -1614,7 +1614,7 @@ td.col-sticky-start, td.col-sticky-end {
 /* ── Editable cells (batch and instant edit modes) ── */
 
 /* Text editor (contenteditable text cell) and number input */
-.table-edit-textarea, td input[type="number"] {
+.table-edit-textarea, td input[type="number"], td .number-arithmetic input {
     width: 100%;
     display: inline-block;
     min-width: 64px;
@@ -1636,7 +1636,8 @@ td.col-sticky-start, td.col-sticky-end {
     opacity: 0.25;
     font-style: italic;
 }
-td:hover:has(.table-cell-container > .table-edit-textarea), td:hover:has(.table-cell-container > input[type="number"]) {
+td:hover:has(.table-cell-container > .table-edit-textarea), td:hover:has(.table-cell-container > input[type="number"]),
+td:hover:has(.table-cell-container > .number-arithmetic) {
     background-color: var(--color-blue-bg-transparent);
     cursor: text;
 }
@@ -1646,6 +1647,28 @@ td:hover:has(.table-cell-container > .table-edit-textarea), td:hover:has(.table-
     justify-content: space-between;
     gap: var(--padding-sm);
     align-items: center;
+}
+
+/* Number cell calculation (NumberCellInput): the saved value, the typed terms, then = result, on
+   one line. Every part has a fixed width (a percentage-width input counts as zero toward the
+   column's minimum), so the column widens to fit while it shows. */
+.number-arithmetic {
+    display: flex;
+    flex: none;
+    align-items: center;
+    gap: var(--padding-sm);
+    white-space: nowrap;
+}
+.number-arithmetic > * {
+    flex: none;
+}
+td .number-arithmetic input {
+    width: 5em;
+    min-width: 5em;
+    background-color: var(--color-blue-bg-transparent);
+}
+.number-arithmetic output {
+    font-weight: bold;
 }
 
 /* Checkbox and select cells */
@@ -2366,6 +2389,14 @@ td .cell-button-list > .card {
     button, input[type="submit"], input[type="button"], input[type="text"], input[type="date"], input[type="number"], input[type="email"], select, .input-container {
         width: 100%;
         flex-grow: 1;
+    }
+    /* In a bar (already full width) the children keep their own widths and grow to fill it, rather
+       than taking a whole line each: ButtonBar measures these widths to split a long bar */
+    .button-bar > :is(button:not(.button-symbol), input, select) {
+        width: 120px;
+    }
+    .button-bar > .input-container {
+        width: auto;
     }
 }
 

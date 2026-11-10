@@ -6,7 +6,7 @@ import { colorFor, rowColorFor } from '../../utils/views/viewColor.js';
 import { searchWords as toSearchWords, matchRows, matchRow, valueContains, valueMatchesAny, makeHighlighter } from '../../utils/views/searchMatch.js';
 import { ContentHeaderComponent } from './contentHeaderComponent.js';
 import { RowDetailsComponent } from './rowDetailsComponent.js';
-import { CellRenderer, DecorationCards, sanitizeCellText } from './cells.js';
+import { CellRenderer, DecorationCards, NumberCellInput, sanitizeCellText } from './cells.js';
 import { placeDecorations } from '../../utils/views/decorations.js';
 import { useBatchEdits } from '../../utils/cellEdits.js';
 import { isOpaqueType } from '../../../data_management/utils/column-types.js';
@@ -1410,7 +1410,7 @@ document.addEventListener('mousemove', (e) => {
 
 export const TableComponent = {
     name: 'TableComponent',
-    components: { LoadingBarComponent, SearchBoxComponent, ContentHeaderComponent, RowDetailsComponent, CellRenderer, DecorationCards },
+    components: { LoadingBarComponent, SearchBoxComponent, ContentHeaderComponent, RowDetailsComponent, CellRenderer, DecorationCards, NumberCellInput },
     inject: ['appContext', '$modal'],
     props: {
         data: {
@@ -3021,6 +3021,11 @@ export const TableComponent = {
                 && this.batchEdits.originalRow(row, rowIndex) !== undefined
                 && this.batchEdits.originalValue(row, rowIndex, column.key) !== row[column.key];
         },
+        // A batch cell's loaded value; undefined outside batch edits and on new rows
+        savedCellValue(row, rowIndex, column) {
+            if (!this.isBatchEditing || this.batchEdits.originalRow(row, rowIndex) === undefined) return undefined;
+            return this.batchEdits.originalValue(row, rowIndex, column.key);
+        },
         revertCellToOriginal(rowIndex, column, event) {
             if (!this.isBatchEditing) return;
             // Stop propagation to prevent cell focus
@@ -3035,7 +3040,7 @@ export const TableComponent = {
             if (!column?.editable) return;
             const target = event?.target;
             if (target?.isContentEditable || target?.closest?.('input, select, button, label')) return;
-            const editor = event.currentTarget?.querySelector?.('[contenteditable], input[type="number"]');
+            const editor = event.currentTarget?.querySelector?.('[contenteditable], input[type="number"], .number-arithmetic input');
             editor?.focus({ preventScroll: true });
         },
         // Leaving a batch cell ends its undo step
@@ -4451,23 +4456,19 @@ export const TableComponent = {
                                     @focusout="handleCellBlur"
                                 >
                                     <div :class="['table-cell-container', { 'search-match': hasSearchMatch(row[column.key], column), 'search-active-result': hasSearchMatch(row[column.key], column) && searchMatchIndexMap.get(idx) === search.searchIndex.value - 1 }]">
-                                        <!-- Editable number: the original value (click to revert) while changed, then the input -->
+                                        <!-- Editable number: the saved value (click to revert) while changed, then the input (+ or - starts a calculation) -->
                                         <slot
                                             v-if="column.editable && column.format === 'number'"
                                             :row="row"
                                             :column="column">
-                                            <span
-                                                v-if="showRevert(row, idx, column)"
-                                                class="original-value clickable"
-                                                :title="'Click to revert to: ' + formatCellValue(batchEdits.originalValue(row, idx, column.key), column)"
-                                                @click="revertCellToOriginal(idx, column, $event)"
-                                            >
-                                                {{ formatCellValue(batchEdits.originalValue(row, idx, column.key), column) }} →
-                                            </span>
-                                            <input
-                                                type="number"
-                                                :value="Number.isFinite(parseFloat(row[column.key])) ? parseFloat(row[column.key]) : ''"
-                                                @input="commitCellValue(idx, column, $event.target.value)"
+                                            <NumberCellInput
+                                                :row="row"
+                                                :field="column.key"
+                                                :commit="(value) => commitCellValue(idx, column, value)"
+                                                :original="savedCellValue(row, idx, column)"
+                                                :original-label="formatCellValue(savedCellValue(row, idx, column), column)"
+                                                :changed="showRevert(row, idx, column)"
+                                                :revert="isBatchEditing ? (event) => revertCellToOriginal(idx, column, event) : null"
                                             />
                                         </slot>
                                         <!-- Registry or page cell (editable text fields use the text cell) -->
