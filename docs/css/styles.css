@@ -565,6 +565,57 @@ button.card {
     height: auto;
     min-height: 28px;
 }
+
+/* ButtonBar (buttonBar.js): a long bar takes a second line instead of overflowing.
+   Measuring: the children on one line at their natural width, the bar no wider than its space.
+   Split: a line break (::before) after the first line, the data-bar-line="2" children after it,
+   and only the four outer corners rounded (data-bar-corners). */
+.button-bar[data-measuring] {
+    flex-wrap: nowrap;
+    min-width: 0;
+    max-width: 100%;
+}
+.button-bar[data-measuring] > * {
+    flex: none;
+}
+.button-bar[data-split] {
+    flex-wrap: wrap;
+    row-gap: 0;
+}
+.button-bar[data-split]::before {
+    content: '';
+    flex-basis: 100%;
+    order: 1;
+}
+.button-bar[data-split] > [data-bar-line="2"] {
+    order: 2;
+    margin-top: var(--padding-sm);
+}
+/* Each line shares its width in proportion to the children's measured widths (--bar-basis), and
+   shrinks rather than wrapping again, so a split bar is always two lines */
+.button-bar[data-split] > [data-bar-corners]:not(.button-symbol) {
+    flex: var(--bar-basis, 1) 1 0px;
+    width: auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.button-bar[data-split] > [data-bar-corners], .button-bar[data-split] > [data-bar-corners] > input {
+    border-radius: 0;
+}
+.button-bar[data-split] > [data-bar-corners~="top-left"], .button-bar[data-split] > [data-bar-corners~="top-left"] > input {
+    border-top-left-radius: var(--radius-md);
+}
+.button-bar[data-split] > [data-bar-corners~="top-right"], .button-bar[data-split] > [data-bar-corners~="top-right"] > input {
+    border-top-right-radius: var(--radius-md);
+}
+.button-bar[data-split] > [data-bar-corners~="bottom-left"], .button-bar[data-split] > [data-bar-corners~="bottom-left"] > input {
+    border-bottom-left-radius: var(--radius-md);
+}
+.button-bar[data-split] > [data-bar-corners~="bottom-right"], .button-bar[data-split] > [data-bar-corners~="bottom-right"] > input {
+    border-bottom-right-radius: var(--radius-md);
+}
 .material-icons-outlined, .material-symbols-outlined {
     font-size: 1em;
 }

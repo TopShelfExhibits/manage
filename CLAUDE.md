@@ -58,7 +58,7 @@ Style through shared classes, and adapt them to a context with one scoped rule.
 
 - **Shared structural classes, one job each:**
   - `.content`: a padded column with a gap. It is the modal body and the table's row-details panel.
-  - `.button-bar`: a joined row of controls.
+  - `.button-bar`: a joined row of controls. Where a bar can get long, draw it as `ButtonBar` (`buttonBar.js`) instead of `<div class="button-bar">`: with more than three children it moves the later ones to a second line rather than overflow (never a third line), so templates stay as they are. The shared table header (`ContentHeaderComponent`) already uses it.
   - `.card`: a small labelled block or button.
   - `.details-grid` with `.detail-item`: labelled values.
   - `.cell-button-list`: stacked, full-width buttons in one cell.

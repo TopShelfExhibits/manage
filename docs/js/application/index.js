@@ -38,6 +38,7 @@ export { CalendarComponent } from './components/interface/calendarComponent.js';
 // Views system (see docs/notes/views-and-renderers-plan.md)
 export { DataView } from './components/interface/dataViewComponent.js';
 export { ViewSelectComponent } from './components/interface/viewSelectComponent.js';
+export { ButtonBar } from './components/interface/buttonBar.js';
 export { ContentHeaderComponent } from './components/interface/contentHeaderComponent.js';
 export { RowDetailsComponent, RowDetailsModal } from './components/interface/rowDetailsComponent.js';
 export { DashboardToggleComponent } from './components/interface/navigationComponents.js';

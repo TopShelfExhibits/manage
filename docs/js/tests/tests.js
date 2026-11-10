@@ -37,6 +37,7 @@ import { CacheInvalidationBus, ApplicationUtils, ProductionUtils, triggerCachePo
 import { authState } from '../application/utils/auth.js';
 import { commitInventoryProposal, saveToProposal, proposalTableStore, sendEditsToProposal } from '../application/utils/inventoryProposals.js';
 import { hasQuantityChanges } from '../application/components/content/InventoryTable.js';
+import { balancedSplit } from '../application/components/interface/buttonBar.js';
 import { resolveView, resolveAction, pickView, mergeView, matchesKeyPattern, setViewWarningHandler, withRegistryDefaults, searchTiers } from '../application/utils/views/resolveView.js';
 import { SEARCH_LIMITS, searchWords, matchRow, matchRows, makeHighlighter } from '../application/utils/views/searchMatch.js';
 import { formatValue, formatText } from '../application/utils/views/fieldFormat.js';
@@ -3870,6 +3871,15 @@ function batchHarness(rowKey = null) {
     });
     return { rows, emitted, edits };
 }
+
+// A long ButtonBar splits where the wider of its two lines is narrowest; ties go to the middle
+test('CELL EDITS', 'button bars: balancedSplit balances the two lines by width', async () => {
+    assertEqual(balancedSplit([50, 50, 50, 50]), 2, 'equal widths: half each');
+    assertEqual(balancedSplit([200, 40, 40, 40, 40]), 1, 'one wide control: alone on the first line');
+    assertEqual(balancedSplit([40, 40, 40, 40, 200]), 4, 'a wide last control: alone on the second line');
+    assertEqual(balancedSplit([60, 30, 30, 60, 30]), 3, 'mixed widths, a tie: 120 over 90 (the longer line first)');
+    assertEqual(balancedSplit([30, 30, 30, 30, 30]), 3, 'odd count, equal widths: the longer line first');
+});
 
 test('CELL EDITS', 'batch: an edit marks the cell unsaved until it is back to the loaded value', async () => {
     const { edits, emitted } = batchHarness();

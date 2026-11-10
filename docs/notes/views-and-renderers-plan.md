@@ -693,7 +693,7 @@ This replaces the `hiddenColumns` mutation and the 100 ms restore.
 
 ### 4.13 Shared header
 
-`ContentHeaderComponent` contains `header-area`, a spacer, search, refresh/discard, `ViewSelectComponent`, the loading bar, and an `#actions` slot (table: New Item, Save, Undo/Redo; cards: sort). Sticky positioning stays in each renderer.
+`ContentHeaderComponent` contains `header-area`, a spacer, search, refresh/discard, `ViewSelectComponent`, the loading bar, and an `#actions` slot (table: New Item, Save, Undo/Redo; cards: sort). Sticky positioning stays in each renderer. The controls sit in a `ButtonBar` (`buttonBar.js`): when more than three don't fit on one line, the later ones move to a second line, split where the two lines are closest in width. A split bar stays at two lines; its controls shrink in proportion to their widths rather than wrap again.
 
 ### 4.14 Modularity: cells, decorations, slots
 
