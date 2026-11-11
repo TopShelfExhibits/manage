@@ -219,8 +219,11 @@ const App = {
                 if (savedRaw) {
                     try {
                         const saved = JSON.parse(savedRaw);
+                        // Bookmarks are info banners. Ones saved before the severity was kept have
+                        // neither severity nor color: they get info back (an old color still wins).
                         const restored = saved.map(b => ({
                             ...b,
+                            severity: b.severity || SEVERITY.info,
                             visible: true,
                             action: { label: 'Return', fn: () => this.navigateToPath(b.bookmarkTarget) }
                         }));
@@ -263,7 +266,7 @@ const App = {
             if (authState.user?.email) {
                 const bookmarks = (newBanners || [])
                     .filter(b => b.key?.startsWith('bookmark-') && b.bookmarkTarget)
-                    .map(({ key, color, message, dismissible, bookmarkTarget }) => ({ key, color, message, dismissible, bookmarkTarget }));
+                    .map(({ key, severity, color, message, dismissible, bookmarkTarget }) => ({ key, severity, color, message, dismissible, bookmarkTarget }));
                 localStorage.setItem(`bookmarks_${authState.user.email}`, JSON.stringify(bookmarks));
             }
         }, { deep: true });
