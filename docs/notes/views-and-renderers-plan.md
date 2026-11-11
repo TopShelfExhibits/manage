@@ -9,7 +9,7 @@ All six phases are implemented in the working tree. The in-browser suite passes 
 **Before deploying**
 
 - **Live data for Phase 2.** Add the `InstantWriteTables`, `DesignQueueFields` and `DesignQueueAssignees` preference rows (values in §4.16), the `Assignee` column on the Production Schedule, and a `CACHE/ShowNotes` tab with headers `Identifier | Note | EditHistory`. Until then the design queue shows its cells read-only with a "write disabled" hint, and notes can't be saved.
-- **Manual testing period (R3.11)** on the dev site, using the §9 checklist. Not yet exercised by hand: dashboard cards (view switch rewriting the card path, double-wide cards at the medium tier), print, drag/drop and clipboard in edit mode, and the §4.17 audit of the formerly content-sized modals at `card` width.
+- **Manual testing period (R3.11)** on the dev site, using the §9 checklist. Not yet exercised by hand: dashboard cards (view switch rewriting the card path; the single-screen grid, miniatures and Arrange mode on a real phone and tablet, §4.11), print, drag/drop and clipboard in edit mode, and the §4.17 audit of the formerly content-sized modals at `card` width.
 
 **Where things live**
 
@@ -632,25 +632,26 @@ There are two scopes, each with the same three tiers.
 | Tier     | Container width | Typical container                                                                 |
 | -------- | --------------- | --------------------------------------------------------------------------------- |
 | `wide`   | ≥ 1000px        | full page on a monitor, `page` modal                                              |
-| `medium` | 600–999px       | portrait tablet page, double-wide dashboard card (750px, by design), `wide` modal |
-| `narrow` | < 600px         | phone page, 360px dashboard card, `card` modal                                    |
+| `medium` | 600–999px       | portrait tablet page, a dashboard card 2–3 cells wide on a monitor, `wide` modal  |
+| `narrow` | < 600px         | phone page, a one-cell dashboard card or miniature (360px), `card` modal          |
 
 **Container scope** (`useContainerSize()`, CSS `@container`) covers all content and views. `DataView` passes a fixed `wide` until Phase 6, then switches to `useContainerSize()` in the same change as the CSS (R6.4).
 
 - It observes the nearest `container-type: inline-size` ancestor (`.container`, `.modal > .content`) with the same thresholds as CSS. JS and CSS therefore agree, and there is no hysteresis.
 - Structural changes use `variants.medium` and `variants.narrow`. Visual changes (`hide-when-narrow`, a new `hide-when-medium`, font, grid) use CSS.
-- **Padding:** a container query measures the container's content box. `.container` has no padding, so a page or dashboard card measures its full width (1000, 750, 360). `.modal > .content` has `--padding-md` padding, so modal widths add it back (§4.17).
+- **Padding:** a container query measures the container's content box. `.container` has no padding, so a page or dashboard card measures its full width. `.modal > .content` has `--padding-md` padding, so modal widths add it back (§4.17).
+- **Dashboard cards** take the width of their grid cells (§4.11). A miniature is scaled with a transform, which leaves its layout width alone: it measures its unscaled width (360px per column), so it shows the view a card that size would.
 
 **Viewport scope** (`useViewportSize()`, CSS `@media`) covers app chrome, dashboard layout and default CSS variables: primary nav (`isMobileView`, today 800), root font size, the dashboard grid, `--padding-*`, `--navbar-height`, `--page-width-*`.
 
-| Viewport tier | Chrome (R4.4)                                                 | Dashboard                                                                                       |
-| ------------- | ------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| `wide`        | full: 80px navbar, `--padding-md` 12px, `--padding-lg` 30px   | 360px card grid; double-wide cards span 2                                                       |
-| `medium`      | compact: 50px navbar, `--padding-md` 8px, `--padding-lg` 16px | 360px card grid; double-wide cards are `min(750px, 100%)` and span 2 when they fit              |
-| `narrow`      | compact                                                       | full-width cards (`--page-width-card: calc(100vw - 16px)`); double-wide collapses to one column |
+| Viewport tier | Chrome (R4.4)                                                 |
+| ------------- | ------------------------------------------------------------- |
+| `wide`        | full: 80px navbar, `--padding-md` 12px, `--padding-lg` 30px   |
+| `medium`      | compact: 50px navbar, `--padding-md` 8px, `--padding-lg` 16px |
+| `narrow`      | compact                                                       |
 
 - **Compact chrome** covers medium and narrow (R4.4). It replaces today's ≤ 800px block, so portrait tablets and small laptop windows up to 1023px get the compact navbar.
-- **Full-width dashboard cards** stay narrow-only, so medium screens keep the card grid.
+- **The dashboard doesn't follow the viewport tiers.** Its grid follows orientation, and miniature mode follows the measured cell size (§4.11).
 - **Viewport thresholds include the page gutter**, so a viewport tier matches the tier of a full-width page container. `#app-content` has `--padding-md` on each side, and the gutter is the one in effect on the larger side of each boundary:
   - narrow: `width < calc(600px + 2 * 8px)` (616px). Compact chrome is on both sides, so this boundary matches the container exactly.
   - wide: `width >= calc(1000px + 2 * 12px)` (1024px).
@@ -681,6 +682,27 @@ There are two scopes, each with the same three tiers.
 - **Dashboard:** one card per page path stays.
   - Switching views inside a dashboard card rewrites that card's stored path, so the card remembers its last view. This stays until a "set as primary view" action exists (R3.3).
   - Views that are truly unique get their own page.
+
+**Dashboard grid** ([dashboardLayout.js](../js/application/utils/dashboardLayout.js), [dashboardComponents.js](../js/application/components/interface/dashboardComponents.js))
+
+- **One screen.** The dashboard is a fixed grid of 4 × 2 cells in landscape and 2 × 4 in portrait. It doesn't scroll. Each card's content scrolls by itself.
+- **One layout.** A card covers a rect `{ x, y, w, h }` in landscape cells: at most 4 wide and 2 tall. Portrait draws the transpose: CSS swaps the axes (`@media (orientation: portrait)`), and the pointer math uses `transpose`. The user arranges cards once.
+- **Stored data.** Entries in `dashboard_containers` are `{ path, classes, x, y, w, h }`. There is no migration:
+  - `normalizeLayout` reads older entries (`{ path, classes }` or a plain path) first-fit in list order, sized from `wide` / `tall`. It shrinks a card to 1 × 1 when its size has no room, and leaves the card unplaced when even that doesn't fit.
+  - Unplaced cards stay in the list but aren't drawn. Their page menu says so, and Arrange mode offers them in free cells.
+  - The first layout change writes every placed card's rect (`_commit`), so one card's move never shifts the others.
+  - `classes` is still written from the size, so sessions on an older deploy draw something close.
+- **Full.** "Add to Dashboard" is disabled when no 1 × 1 cell is free. A new card takes the first free cell.
+- **Miniatures.** When a cell is smaller than `MINI_MIN_CELL` (300 × 200px), cards stop being interactive. A miniature renders its page 360px wide per column, scaled down to fit, and `inert`. Clicking it opens the page.
+- **Arrange mode** (the page menu or the settings menu on the dashboard; Escape or Done ends it) draws every card as a miniature with a drag handle, a remove button and a resize corner.
+  - Dropping a card into free space moves it. Dropping it onto exactly one other card swaps the two (`planMove`). The other card goes to the moved card's old position at its own size, when it fits there.
+  - Resizing keeps the top-left cell (`planResize`). Free cells offer the notices card and unplaced cards.
+- **Cells on every page.** Every page container is wrapped in a `DashboardCell`, which is `display: contents` off the dashboard. A card expanded to its page therefore keeps its component and doesn't reload.
+- **Notices.** The `notices` route (not a main section, so it isn't in the primary navigation) draws the app banners as a page (`NoticesContent`).
+  - While it's on the grid, the banners live in that card. Banners that scroll out of the card's view go to the corner tray, as on any page.
+  - Without it, the dashboard's top-of-page `BannerNotifications` is `collapsed`: it draws nothing and reports every banner to the corner tray.
+  - Each `BannerNotifications` reports to the tray under its own key, so two instances of the `app` scope never overwrite each other. Dismissals of static banners are kept per scope in `notificationBus`, so they hold everywhere.
+- **Sticky headers in cards.** `useStickyHeader` checks on every update whether the sticky element is in a dashboard card. In one, it uses the card content's top as the edge and writes it to `--navbar-sticky-offset` on the card content.
 
 ### 4.12 Print
 
@@ -1085,7 +1107,7 @@ Legend: ✅ today · 🟢 this refactor · 🔵 later · — not applicable
 
 ## 9. No-feature-loss verification checklist
 
-Run per migrated page at desktop width, in a 360px dashboard card, in a double-width card, in a modal where applicable, and in print where applicable.
+Run per migrated page at desktop width, in a one-cell dashboard card, in a dashboard miniature, in a modal where applicable, and in print where applicable.
 
 **All renderers**
 

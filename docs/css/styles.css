@@ -113,9 +113,9 @@ footer {
     margin-top: var(--padding-lg);
     opacity: .6;
 }
+/* The dashboard is one screen: no footer */
 div#app-content.dashboard:not(:has(> div.empty-message)) footer {
-    grid-column: 1 / -1;
-    align-self: end;
+    display: none;
 }
 footer a, footer p {
     color: var(--color-text);
@@ -154,15 +154,31 @@ div#app-content {
     scrollbar-gutter: stable both-edges;
 }
 
+/* Dashboard: one screen, a 4 x 2 grid of cards, 2 x 4 in portrait (dashboardComponents.js).
+   Keep the grid sizes in step with GRID in js/application/utils/dashboardLayout.js and the
+   orientation query with PORTRAIT_QUERY in dashboardComponents.js. */
 div#app-content.dashboard:not(:has(> div.empty-message)) {
     display: grid;
-    justify-content: center;
-    align-items: start;
-    grid-template-columns: repeat(auto-fit, var(--page-width-card));
-    gap: var(--padding-lg);
-    /* padding-left: calc((100vw - (var(--page-width-card) * 4 + var(--padding-lg) * 3))/2 - 8px);
-    padding-right: calc((100vw - (var(--page-width-card) * 4 + var(--padding-lg) * 3))/2 - 8px); */
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-rows: repeat(2, minmax(0, 1fr));
+    align-items: stretch;
+    justify-items: stretch;
+    gap: var(--padding-md);
     width: auto;
+    overflow: hidden;
+    scrollbar-gutter: auto;
+}
+@media (orientation: portrait) {
+    div#app-content.dashboard:not(:has(> div.empty-message)) {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        grid-template-rows: repeat(4, minmax(0, 1fr));
+    }
+}
+/* The loading card fills the dashboard */
+div#app-content.dashboard > .container {
+    grid-column: 1 / -1;
+    grid-row: 1 / -1;
+    max-width: none;
 }
 
 div#app-content > div.empty-message {
@@ -221,28 +237,141 @@ div#app-content > div.empty-message {
     box-shadow: 0 12px 14px -18px var(--color-shadow);
 }
 
+/* A page container's cell (DashboardCell). Off the dashboard it adds no box. On the dashboard it
+   covers its rect, set in landscape terms; portrait swaps the axes. */
+.dashboard-cell {
+    display: contents;
+}
+#app-content.dashboard > .dashboard-cell {
+    display: block;
+}
+#app-content.dashboard > .dashboard-cell,
+#app-content.dashboard > .dashboard-slot,
+#app-content.dashboard > .dashboard-drop-preview {
+    position: relative;
+    min-width: 0;
+    min-height: 0;
+    grid-column: var(--col-start) / span var(--col-span);
+    grid-row: var(--row-start) / span var(--row-span);
+}
+@media (orientation: portrait) {
+    #app-content.dashboard > .dashboard-cell,
+    #app-content.dashboard > .dashboard-slot,
+    #app-content.dashboard > .dashboard-drop-preview {
+        grid-column: var(--row-start) / span var(--row-span);
+        grid-row: var(--col-start) / span var(--col-span);
+    }
+}
+
+/* An interactive card fills its cell; its content scrolls by itself */
 .container.dashboard-card {
-    width: var(--page-width-card);
-    height: var(--page-height-card);
-    min-height: var(--page-height-card);
+    width: 100%;
+    height: 100%;
+    max-width: none;
     overflow: hidden;
     display: flex;
     flex-direction: column;
 }
 
-.container.dashboard-card.wide {
-    width: calc(var(--padding-lg) + var(--page-width-card) * 2);
-    grid-column: span 2;
-}
-
-.container.dashboard-card.tall {
-    height: calc(var(--padding-lg) + var(--page-height-card) * 2);
-    grid-row: span 2;
-}
-
 .container.dashboard-card > .content {
     flex: 1;
-    /*overflow: auto;*/
+    min-height: 0;
+    overflow: auto;
+}
+/* The content scrolls instead of squeezing its children */
+.container.dashboard-card > .content > * {
+    flex-shrink: 0;
+}
+
+/* Miniature: the page rendered at --mini-width x --mini-height, scaled down to the cell */
+.dashboard-cell.miniature > .container.dashboard-card {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: var(--mini-width);
+    height: var(--mini-height);
+    transform: scale(var(--mini-scale));
+    transform-origin: 0 0;
+}
+
+/* Arrange mode: a handle over each card to drag it, a remove button and a resize corner */
+.dashboard-cell-handle {
+    position: absolute;
+    inset: 0;
+    z-index: 1010;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 2px dashed var(--color-primary);
+    border-radius: var(--radius-lg);
+    background: var(--color-blue-bg-transparent);
+    cursor: grab;
+    touch-action: none;
+    user-select: none;
+}
+.dashboard-cell.dragging .dashboard-cell-handle {
+    cursor: grabbing;
+    opacity: .6;
+}
+.dashboard-cell-remove,
+.dashboard-cell-resize {
+    position: absolute;
+    right: var(--padding-md);
+    z-index: 1020;
+}
+.dashboard-cell-remove {
+    top: var(--padding-md);
+}
+.dashboard-cell-resize {
+    bottom: var(--padding-md);
+    cursor: nwse-resize;
+    touch-action: none;
+}
+#app-content.dashboard > .dashboard-slot {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: var(--padding-md);
+    box-sizing: border-box;
+    border: 2px dashed var(--color-gray-bg-transparent);
+    border-radius: var(--radius-lg);
+}
+#app-content.dashboard > .dashboard-drop-preview {
+    z-index: 1030;
+    pointer-events: none;
+    border: 3px solid var(--color-green);
+    border-radius: var(--radius-lg);
+    background: var(--color-green-bg-transparent);
+}
+#app-content.dashboard > .dashboard-drop-preview.invalid {
+    border-color: var(--color-red);
+    background: var(--color-red-bg-transparent);
+}
+/* Room below the grid for the arrange bar, so it never covers a card's corner buttons */
+div#app-content.dashboard.arranging {
+    padding-bottom: calc(var(--control-height) + var(--padding-md) * 3);
+}
+/* Card content is blurred while arranging: the header and the handles stay sharp */
+.dashboard-cell.arranging > .container > .content {
+    filter: blur(2px);
+}
+.dashboard-arrange-bar {
+    position: fixed;
+    bottom: var(--padding-md);
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 5000;
+    box-shadow: 0 4px 8px var(--color-shadow);
+}
+/* Labels in arrange mode: the card's name on its handle, the hint in the bar */
+.dashboard-cell-handle > span,
+.dashboard-arrange-bar > span {
+    display: flex;
+    align-items: center;
+    padding: var(--padding-sm) var(--padding-md);
+    background: var(--background-color);
+    color: var(--color-text);
+    border-radius: var(--radius-md);
 }
 
 .container.dashboard-card .container-header {
@@ -256,15 +385,23 @@ div#app-content > div.empty-message {
     font-size: 1.2rem;
     color: var(--color-text);
 }
-.container.dashboard-card .container-expand-overlay {
+/* A miniature card opens its page on click */
+.dashboard-cell > .container-expand-overlay {
     z-index: 1000;
     position: absolute;
     display: flex;
     justify-content: center;
     align-items: center;
-    inset: var(--padding-sm);
+    inset: 0;
     border-radius: var(--radius-lg);
     background: var(--color-modal-bg-gradient);
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity .2s ease-in-out;
+}
+.dashboard-cell > .container-expand-overlay:hover,
+.dashboard-cell > .container-expand-overlay:focus-visible {
+    opacity: 1;
 }
 .container-expand-overlay span.material-icons-outlined, .container-expand-overlay span.material-symbols-outlined {
     color: var(--color-text-inverted);
@@ -2338,20 +2475,6 @@ td .cell-button-list > .card {
         flex-grow: 1;
     }
 
-    /* Dashboard (medium): double-wide cards are min(750px, 100%) and span every column that fits */
-    .container.dashboard-card.wide {
-        width: min(calc(var(--padding-lg) + var(--page-width-card) * 2), 100%);
-        grid-column: 1 / -1;
-    }
-}
-
-/* Narrow viewport: width < calc(BREAKPOINTS.narrow + 2 * gutterCompact). Full-width dashboard
-   cards; double-wide cards collapse to one column. */
-@media (width < calc(600px + 2 * 8px)) {
-    .container.dashboard-card.wide {
-        width: var(--page-width-card);
-        grid-column: span 1;
-    }
 }
 
 /* Medium container tier (width < BREAKPOINTS.wide): visual changes for medium and narrow content.

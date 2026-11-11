@@ -15,7 +15,6 @@
     --navbar-height: 80px;
     --navbar-sticky-offset: var(--navbar-height); /* Offset for sticky headers; changes when nav hidden */
     --page-width-card: 360px;
-    --page-height-card: 360px;
     --page-width-large: 1000px;
 
     --control-height: 38px;
@@ -114,13 +113,6 @@
         --padding-lg: 16px;
         --navbar-height: 50px;
         --navbar-sticky-offset: var(--navbar-height);
-    }
-}
-
-/* Narrow viewport: full-width dashboard cards (BREAKPOINTS.narrow + 2 * gutterCompact) */
-@media (width < calc(600px + 2 * 8px)) {
-    :root {
-        --page-width-card: calc(100vw - 16px);
     }
 }
 

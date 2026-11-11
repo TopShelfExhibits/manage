@@ -54,6 +54,8 @@ import { severityColor, statusColor } from '../application/utils/severity.js';
 import { getAutoColorClass } from '../application/utils/autoColor.js';
 import { getReactiveStore, createAnalysisConfig, itemVariantCards, itemShortageCards, NavigationRegistry, isMarkedForDeletion, paramToggleValue, isTemporaryAdmin } from '../application/index.js';
 import { calculateStoreDiff, applyDiffToData } from '../application/utils/reactiveStores.js';
+import { notificationBus } from '../application/utils/notificationBus.js';
+import { normalizeLayout, freeCells, isFull, firstFreeSlot, planMove, planResize, transpose, clampRect, classesForSize, sizeFromClasses } from '../application/utils/dashboardLayout.js';
 import { checkSheetHealth } from './sheetHealth.js';
 import { guessColumnType, columnTypesEntry, columnTypeMap, columnTypeOf, isOpaqueType } from '../data_management/utils/column-types.js';
 import { migrateThumbnails } from '../data_management/migrations/thumbnail-column.js';
@@ -995,6 +997,102 @@ test('USER DATA', 'hasUserDataKey returns false for nonexistent key', async () =
 test('USER DATA', 'getUserDataByPrefix returns entry for dashboard prefix', async () => {
     const result = await Requests.getUserDataByPrefix('test@example.com', 'dashboard');
     if (result === null || result === undefined) throw new Error('expected match for prefix "dashboard"');
+});
+
+// ── Group 24b: Dashboard Layout ───────────────────────────────────────────────
+// The single-screen dashboard grid (4 x 2 cells, utils/dashboardLayout.js). FakeGoogle's
+// test@example.com 'dashboard_containers' is old-format data with no rects:
+//   [{schedule, wide}, {inventory, tall}, {packlist, wide}]
+// read first-fit in list order:
+//   schedule  (0,0) 2x1    inventory (2,0) 1x2    packlist (0,1) 2x1    free: (3,0), (3,1)
+// In landscape terms; portrait draws the transpose.
+
+const _rects = placed => placed.map(({ path, x, y, w, h }) => ({ path, x, y, w, h }));
+const _ones = n => Array.from({ length: n }, (_, i) => ({ path: `inventory/T${i}`, classes: '' }));
+
+test('DASHBOARD LAYOUT', 'old-format fixture dashboard is placed first-fit from its classes', async () => {
+    const entries = await Requests.getUserData('test@example.com', 'dashboard_containers');
+    const { placed, unplaced } = normalizeLayout(entries);
+    assertEqual(_rects(placed), [
+        { path: 'schedule', x: 0, y: 0, w: 2, h: 1 },
+        { path: 'inventory', x: 2, y: 0, w: 1, h: 2 },
+        { path: 'packlist', x: 0, y: 1, w: 2, h: 1 }
+    ], 'fixture layout');
+    assertEqual(unplaced, [], 'nothing unplaced');
+    assertEqual(freeCells(placed), [{ x: 3, y: 0, w: 1, h: 1 }, { x: 3, y: 1, w: 1, h: 1 }], 'free cells');
+    assertEqual(isFull(placed), false, 'not full');
+});
+
+test('DASHBOARD LAYOUT', 'stored rects keep their place; overlapping and old entries fill around them', () => {
+    const { placed } = normalizeLayout([
+        'reports',                                                   // plain string, old format
+        { path: 'schedule', classes: 'wide', x: 2, y: 1, w: 2, h: 1 },
+        { path: 'packlist', classes: '', x: 3, y: 1, w: 1, h: 1 },   // overlaps schedule
+        { path: 'schedule?{"view":"calendar"}', classes: '' }        // same page twice: dropped
+    ]);
+    assertEqual(_rects(placed), [
+        { path: 'reports', x: 0, y: 0, w: 1, h: 1 },
+        { path: 'schedule', x: 2, y: 1, w: 2, h: 1 },
+        { path: 'packlist', x: 1, y: 0, w: 1, h: 1 }
+    ], 'stored first, then first-fit');
+});
+
+test('DASHBOARD LAYOUT', 'a dashboard with more than 8 cells of cards leaves the rest unplaced', () => {
+    // A 2x2 and five 1x1: 9 cells of cards
+    const { placed, unplaced } = normalizeLayout([{ path: 'schedule', classes: 'wide tall' }, ..._ones(5)]);
+    assertEqual(placed.length, 5, 'placed: the 2x2 and four 1x1');
+    assertEqual(_rects(placed)[0], { path: 'schedule', x: 0, y: 0, w: 2, h: 2 }, 'the 2x2');
+    assertEqual(unplaced.map(c => c.path), ['inventory/T4'], 'unplaced');
+    assertEqual(isFull(placed), true, 'full');
+    assertEqual(firstFreeSlot(placed, 1, 1), null, 'no free slot');
+});
+
+test('DASHBOARD LAYOUT', 'an old card too big for the room left shrinks to one cell', () => {
+    const { placed } = normalizeLayout([..._ones(7), { path: 'schedule', classes: 'wide' }]);
+    assertEqual(_rects(placed)[7], { path: 'schedule', x: 3, y: 1, w: 1, h: 1 }, 'shrunk to 1x1');
+});
+
+test('DASHBOARD LAYOUT', 'planMove moves into free space, swaps with one card, refuses two', async () => {
+    const { placed } = normalizeLayout(await Requests.getUserData('test@example.com', 'dashboard_containers'));
+    assertEqual(planMove(placed, 'inventory', { x: 3, y: 0, w: 1, h: 2 }),
+        [{ path: 'inventory', x: 3, y: 0, w: 1, h: 2 }], 'free space');
+    assertEqual(planMove(placed, 'packlist', { x: 0, y: 0, w: 2, h: 1 }), [
+        { path: 'packlist', x: 0, y: 0, w: 2, h: 1 },
+        { path: 'schedule', x: 0, y: 1, w: 2, h: 1 }
+    ], 'swap with schedule');
+    assertEqual(planMove(placed, 'inventory', { x: 1, y: 0, w: 1, h: 2 }), null, 'onto schedule and packlist');
+    assertEqual(planMove(placed, 'inventory', { x: 3, y: 1, w: 1, h: 2 }), null, 'outside the grid');
+});
+
+test('DASHBOARD LAYOUT', 'planResize grows into free cells only', async () => {
+    const { placed } = normalizeLayout(await Requests.getUserData('test@example.com', 'dashboard_containers'));
+    assertEqual(planResize(placed, 'inventory', 2, 2), [{ path: 'inventory', x: 2, y: 0, w: 2, h: 2 }], 'grow right');
+    assertEqual(planResize(placed, 'schedule', 2, 2), null, 'grow onto packlist');
+    assertEqual(planResize(placed, 'schedule', 1, 1), [{ path: 'schedule', x: 0, y: 0, w: 1, h: 1 }], 'shrink');
+});
+
+test('DASHBOARD LAYOUT', 'transpose, clampRect and classesForSize', () => {
+    assertEqual(transpose({ x: 3, y: 1, w: 1, h: 2 }), { x: 1, y: 3, w: 2, h: 1 }, 'transpose');
+    assertEqual(clampRect({ x: 3, y: 1, w: 3, h: 3 }), { x: 1, y: 0, w: 3, h: 2 }, 'clamp size, then position');
+    assertEqual(clampRect({ x: -2, y: 5, w: 0, h: 1 }), { x: 0, y: 1, w: 1, h: 1 }, 'clamp into the grid');
+    assertEqual(classesForSize(2, 1, 'tall highlight'), 'highlight wide', 'keeps other classes');
+    assertEqual(sizeFromClasses('wide tall'), { w: 2, h: 2 }, 'legacy size');
+});
+
+test('DASHBOARD LAYOUT', 'banner tray reports are per instance; dismissals are shared per scope', () => {
+    const banner = { key: 'test-tray', message: 'x', visible: true };
+    notificationBus.setScrolledOut('test-scope#1', 'test-scope', true, [banner]);
+    notificationBus.setScrolledOut('test-scope#2', 'test-scope', false, [banner]);
+    try {
+        const out = notificationBus.getAllScrolledOutBanners().filter(b => b.key === 'test-tray');
+        assertEqual(out.map(b => b._scope), ['test-scope'], 'second instance does not clear the first');
+        notificationBus.dismiss('test-scope', 'test-tray');
+        assertEqual(notificationBus.isDismissed('test-scope', 'test-tray'), true, 'dismissed');
+        notificationBus.undismiss('test-scope', 'test-tray');
+        assertEqual(notificationBus.isDismissed('test-scope', 'test-tray'), false, 'undismissed');
+    } finally {
+        notificationBus.setScrolledOut('test-scope#1', 'test-scope', false);
+    }
 });
 
 // ── Group 25: Hardware Inventory Resolution ───────────────────────────────────

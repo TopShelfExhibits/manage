@@ -30,16 +30,8 @@ export const ContainerComponent = {
             type: Boolean,
             default: false
         },
-        cardClasses: {
-            type: String,
-            default: ''
-        },
         // Show expand button to open in full page
         showExpandButton: {
-            type: Boolean,
-            default: false
-        },
-        pinnedToDashboard: {
             type: Boolean,
             default: false
         }
@@ -53,29 +45,8 @@ export const ContainerComponent = {
     },
     data() {
         return {
-            isLoading: false, // now managed reactively by this component
-            isScrolling: false,
-            _scrollTimeout: null
+            isLoading: false // now managed reactively by this component
         };
-    },
-    mounted() {
-        // Listen for wheel events on the container
-        const container = this.$el;
-        if (container) {
-            container.addEventListener('wheel', this.handleWheel, { passive: true });
-        }
-    },
-
-    beforeUnmount() {
-        // Clean up event listener and timeout
-        const container = this.$el;
-        if (container) {
-            container.removeEventListener('wheel', this.handleWheel);
-        }
-        if (this._scrollTimeout) {
-            clearTimeout(this._scrollTimeout);
-            this._scrollTimeout = null;
-        }
     },
     computed: {
         // Get hamburger menu component from registry
@@ -88,9 +59,6 @@ export const ContainerComponent = {
         },
         containerBanners() {
             return this.$notify.getBanners(this.containerPath);
-        },
-        isScrollingEnabled() {
-            return appSettings.enableDashboardCardScrolling;
         },
         shouldShowHeader() {
             // Dashboard cards respect the header visibility setting
@@ -117,12 +85,6 @@ export const ContainerComponent = {
                     this.title
                 );
             }
-        },
-        toggleDashboardState() {
-            this.$emit('toggle-dashboard-state', {
-                containerPath: this.containerPath,
-                pinned: !this.pinnedToDashboard
-            });
         },
         expandContainer() {
             this.$emit('expand-container', {
@@ -235,30 +197,10 @@ export const ContainerComponent = {
             // Push to app-level notification bus (scope: 'app')
             const currentBanners = this.$notify.getBanners('app') || [];
             this.$notify.setBanners('app', [...currentBanners, bookmarkBanner]);
-        },
-        handleWheel() {
-            // Only set isScrolling if container is clipping content
-            const container = this.$el;
-            // Check for vertical or horizontal overflow
-            const isClipping = (
-                container.scrollHeight > container.clientHeight ||
-                container.scrollWidth > container.clientWidth
-            );
-            if (isClipping) {
-                this.isScrolling = true;
-                if (this._scrollTimeout) {
-                    clearTimeout(this._scrollTimeout);
-                }
-                // After 500ms of no wheel events, set isScrolling to false
-                this._scrollTimeout = setTimeout(() => {
-                    this.isScrolling = false;
-                    this._scrollTimeout = null;
-                }, 500);
-            }
         }
     },
     template: html `
-        <div class="container" :class="(cardStyle ? 'dashboard-card' + cardClasses + (isScrollingEnabled ? ' scrolling-enabled' : '') : '')">
+        <div class="container" :class="{ 'dashboard-card': cardStyle }">
             <div v-if="shouldShowHeader" class="container-header">
                 <BreadcrumbComponent
                     :container-path="containerPath"
@@ -268,12 +210,6 @@ export const ContainerComponent = {
                     @navigate-to-path="(path) => $emit('navigate-to-path', path)" />
                 <div style="flex-grow: 1;"></div>
                 <div v-if="hamburgerMenuComponent || showExpandButton || !cardStyle" class="button-group">
-                    <!-- <button v-if="!cardStyle"
-                            class="button-symbol white"
-                            @click="toggleDashboardState" 
-                            title="Pin to dashboard">
-                        <span class="material-symbols-outlined">{{ pinnedToDashboard ? 'keep_off' : 'keep' }}</span>
-                    </button> -->
                     <button v-if="hamburgerMenuComponent"
                             class="button-symbol white" 
                             @click="openHamburgerMenu" 
@@ -318,11 +254,6 @@ export const ContainerComponent = {
                     </div>
                 </slot>
             </div>
-            <transition name="longfade">
-                <div v-if="cardStyle && isScrolling && !isScrollingEnabled" class="container-expand-overlay" @click="expandContainer">
-                    <span class="material-symbols-outlined">expand_content</span>
-                </div>
-            </transition>
         </div>
     `
 };

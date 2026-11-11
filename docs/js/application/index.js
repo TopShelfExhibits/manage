@@ -32,6 +32,7 @@ export { PreferencesMenuComponent } from './components/interface/preferencesComp
 export { OverlappingShowsModal } from './components/interface/OverlappingShowsModal.js';
 export { LoadingBarComponent } from './components/interface/loadingBarComponent.js';
 export { BannerNotifications, NotificationBubbleOverlay } from './components/interface/bannerNotifications.js';
+export { DashboardCell, DashboardArrangeLayer, observeDashboardGrid, stopObservingDashboardGrid, measureDashboardGrid, noticesOnDashboard, NOTICES_PATH } from './components/interface/dashboardComponents.js';
 export { TableComponent, tableRowSelectionState } from './components/interface/tableComponent.js';
 export { CardsComponent } from './components/interface/cardsComponent.js';
 export { CalendarComponent } from './components/interface/calendarComponent.js';
@@ -62,3 +63,4 @@ export { ScheduleTableComponent } from './components/content/ScheduleTable.js';
 export { ScheduleAdvancedFilter } from './components/interface/filterComponents.js';
 export { ScheduleContent, ScheduleMenuComponent } from './components/content/ScheduleContent.js';
 export { ReportsContent } from './components/content/ReportsContent.js';
+export { NoticesContent } from './components/content/NoticesContent.js';

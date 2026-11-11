@@ -170,22 +170,24 @@ routes: {
 - Compares clean paths (without params) for matching
 - Auto-saves changes with 5-second debounce
 - Integrated with NavigationRegistry
+- Places cards on the single-screen 4 × 2 grid (`layout`, from `normalizeLayout` in `dashboardLayout.js`; see "Dashboard grid" in views-and-renderers-plan.md §4.11)
 
 **Key Methods**:
 
 - `has(containerPathWithParams)` - Check if container is on dashboard (compares clean paths)
 - `getContainer(containerPathWithParams)` - Get container with its stored path (compares clean paths)
-- `add(containerPathWithParams)` - Add container to dashboard with parameters
+- `add(containerPathWithParams)` - Add container at the first free cell (false when the dashboard is full)
 - `updatePath(cleanPath, newPathWithParams)` - Update container's path with new parameters
 - `remove(containerPathWithParams)` - Remove container from dashboard
-- `toggleClass(containerPathWithParams, className)` - Toggle CSS class (wide/tall)
+- `getPlaced(path)`, `layout`, `isFull` - The grid: placed cards with their rects, unplaced cards
+- `move(path, rect)`, `resize(path, w, h)`, `placeAt(path, rect)` - Arrange mode's changes (`arranging` turns it on)
 
 **Data Structure**:
 
 ```javascript
 containers: [
-  { path: 'schedule?{"dateFilter":"0,30"}', classes: "wide" },
-  { path: "inventory", classes: "" },
+  { path: 'schedule?{"dateFilter":"0,30"}', classes: "wide", x: 0, y: 0, w: 2, h: 1 },
+  { path: "inventory", classes: "" }, // older entry: placed first-fit when read
 ];
 ```
 

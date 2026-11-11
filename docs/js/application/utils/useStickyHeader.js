@@ -35,6 +35,11 @@
  *   navbar-height (80px/50px), so sticky headers appear below it. This real-time DOM reading
  *   prevents timing issues with CSS variable updates during scroll events.
  *
+ * DASHBOARD CARDS — a dashboard card's content scrolls by itself. Inside one, the top edge is the
+ *   card content's top instead of the navbar, written to --navbar-sticky-offset on the card content
+ *   so the fixed wrapper's CSS top follows. The context is checked on every update: a page keeps
+ *   its component when a card is expanded to the full page and back.
+ *
  * @param {Object}   options
  * @param {Function} options.getStickyEl    () => the element to make sticky (used for height/top measurement)
  * @param {Function} [options.getAnchorEl]  () => stable reference element whose top is used for the activation
@@ -69,6 +74,18 @@ export function useStickyHeader({
     // oscillation at the table bottom (deactivate → shrink → check passes → re-activate → grow →
     // check fails → deactivate again…). Caching the maximum seen height keeps the threshold stable.
     let _peakStickyHeight = 0;
+    // The dashboard card content the sticky element was last measured in (holds the offset property)
+    let _cardEl = null;
+
+    function _getTopOffsetPx(stickyEl) {
+        const cardEl = stickyEl.closest('.dashboard-card > .content');
+        if (_cardEl && _cardEl !== cardEl) _cardEl.style.removeProperty('--navbar-sticky-offset');
+        _cardEl = cardEl;
+        if (!cardEl) return _getNavbarOffsetPx();
+        const top = Math.max(0, cardEl.getBoundingClientRect().top);
+        cardEl.style.setProperty('--navbar-sticky-offset', `${top}px`);
+        return top;
+    }
 
     function _getNavbarOffsetPx() {
         // Get actual navbar bottom position from the DOM to handle nav.hidden state correctly.
@@ -95,7 +112,8 @@ export function useStickyHeader({
         if (!stickyEl) return;
 
         // Get navbar offset from actual DOM position — accounts for nav.hidden state in real-time
-        const navHeightPx = _getNavbarOffsetPx();
+        // (in a dashboard card, the card content's top)
+        const navHeightPx = _getTopOffsetPx(stickyEl);
 
         // Determine "flow top" for the activation check.
         // Prefer a stable anchor element whose position is invariant with respect to sticky state
@@ -151,10 +169,15 @@ export function useStickyHeader({
 
     function setup() {
         _peakStickyHeight = 0;
-        _scrollEl = document.querySelector('#app-content');
-        if (!_scrollEl) return;
-        _fn = () => _update();
-        _scrollEl.addEventListener('scroll', _fn, { passive: true });
+        // Scrolls of #app-content or of the dashboard card holding the sticky element. Scroll events
+        // don't bubble, so listen in the capture phase.
+        _scrollEl = document;
+        _fn = (event) => {
+            const target = event?.target;
+            if (target instanceof Element && !target.contains(getStickyEl?.() || null)) return;
+            _update();
+        };
+        _scrollEl.addEventListener('scroll', _fn, { capture: true, passive: true });
         window.addEventListener('resize', _fn, { passive: true });
 
         // Re-evaluate sticky position after navbar height animation completes
@@ -174,9 +197,11 @@ export function useStickyHeader({
 
     function teardown() {
         if (_scrollEl && _fn) {
-            _scrollEl.removeEventListener('scroll', _fn);
+            _scrollEl.removeEventListener('scroll', _fn, { capture: true });
             window.removeEventListener('resize', _fn);
         }
+        if (_cardEl) _cardEl.style.removeProperty('--navbar-sticky-offset');
+        _cardEl = null;
         if (_navEl && _navTransitionFn) {
             _navEl.removeEventListener('transitionend', _navTransitionFn);
         }

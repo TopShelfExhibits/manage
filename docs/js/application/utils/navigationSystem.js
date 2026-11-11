@@ -56,6 +56,15 @@ export const NavigationRegistry = {
             icon: 'assessment',
             isMainSection: true,
             children: {}
+        },
+
+        // Notices: the app banners as a page, for the dashboard's notices card. Not a main
+        // section, so it stays out of the primary navigation (NoticesContent).
+        notices: {
+            path: 'notices',
+            displayName: 'Notices',
+            icon: 'notifications',
+            children: {}
         }
     },
 

@@ -13,6 +13,7 @@ const SettingsMenuComponent = {
         toggleEssentialAnalysis: { type: Function, required: true },
         toggleDashboardHeaders: { type: Function, required: true },
         openPageMenu: { type: Function, default: null },
+        arrangeDashboard: { type: Function, default: null },
         isAuthenticated: { type: Boolean, default: false }
     },
     emits: ['close-modal'],
@@ -32,6 +33,10 @@ const SettingsMenuComponent = {
         handleOpenPageMenu() {
             this.$emit('close-modal');
             this.openPageMenu?.();
+        },
+        handleArrangeDashboard() {
+            this.$emit('close-modal');
+            this.arrangeDashboard?.();
         }
     },
     template: html`
@@ -47,6 +52,9 @@ const SettingsMenuComponent = {
             <button @click="handleToggleDashboardHeaders" 
                     :class="['page-menu-item', { 'red': !showDashboardHeaders }]">
                 {{ showDashboardHeaders ? 'Hide' : 'Show' }} Dashboard Headers
+            </button>
+            <button v-if="arrangeDashboard" @click="handleArrangeDashboard" class="page-menu-item">
+                Arrange Dashboard
             </button>
             <button v-if="openPageMenu" @click="handleOpenPageMenu" class="page-menu-item" :disabled="!isAuthenticated">
                 Open Page Menu
@@ -145,6 +153,9 @@ export const PrimaryNavComponent = {
                 toggleEssentialAnalysis: this.toggleEssentialAnalysis,
                 toggleDashboardHeaders: this.toggleDashboardHeaders,
                 openPageMenu: this.openCurrentPageMenu,
+                arrangeDashboard: this.currentPage === 'dashboard' && this.isAuthenticated
+                    ? () => { NavigationRegistry.dashboardRegistry.arranging = true; }
+                    : null,
                 isAuthenticated: this.isAuthenticated
             }, 'Application Settings');
         },
@@ -501,7 +512,8 @@ export const BreadcrumbComponent = {
 
 
 /**
- * Standard Vue component for dashboard toggle functionality
+ * Standard Vue component for dashboard toggle functionality: add or remove the page, and on the
+ * dashboard, open arrange mode (cards are moved and resized there, dashboardComponents.js).
  */
 export const DashboardToggleComponent = {
     props: {
@@ -511,92 +523,53 @@ export const DashboardToggleComponent = {
         title: String
     },
     inject: ['appContext'],
+    emits: ['close-modal'],
     computed: {
+        registry() {
+            return NavigationRegistry.dashboardRegistry;
+        },
         isOnDashboard() {
-            return NavigationRegistry.dashboardRegistry.has(this.containerPath);
+            return this.registry.has(this.containerPath);
         },
-        isLoading() {
-            return NavigationRegistry.dashboardRegistry.isLoading;
+        // On the dashboard but not drawn: no room when it was read (older, larger dashboards)
+        isHidden() {
+            return this.isOnDashboard && !this.registry.getPlaced(this.containerPath);
         },
-        loadingMessage() {
-            return NavigationRegistry.dashboardRegistry.loadingMessage;
+        canAdd() {
+            return !this.registry.isFull;
         },
-        containerClasses() {
-            const classes = NavigationRegistry.dashboardRegistry.getClasses(this.containerPath);
-            return new Set(classes ? classes.split(' ').filter(c => c.length > 0) : []);
-        },
-        canMoveLeft() {
-            if (!this.isOnDashboard) return false;
-            const containers = NavigationRegistry.dashboardRegistry.containers;
-            const index = containers.findIndex(container => 
-                (typeof container === 'string' ? container : container.path) === this.containerPath
-            );
-            return index > 0;
-        },
-        canMoveRight() {
-            if (!this.isOnDashboard) return false;
-            const containers = NavigationRegistry.dashboardRegistry.containers;
-            const index = containers.findIndex(container => 
-                (typeof container === 'string' ? container : container.path) === this.containerPath
-            );
-            return index > -1 && index < containers.length - 1;
+        onDashboardPage() {
+            return this.appContext.currentPath?.split('?')[0].split('/')[0] === 'dashboard';
         }
     },
     methods: {
         async toggleDashboardPresence() {
             if (this.isOnDashboard) {
-                await NavigationRegistry.dashboardRegistry.remove(this.containerPath);
-            } else {
-                await NavigationRegistry.dashboardRegistry.add(this.containerPath);
+                await this.registry.remove(this.containerPath);
+            } else if (this.canAdd) {
+                await this.registry.add(this.containerPath);
             }
         },
-        async toggleDashboardClass(className) {
-            if (this.isOnDashboard) {
-                await NavigationRegistry.dashboardRegistry.toggleClass(this.containerPath, className);
-            }
-        },
-        async moveLeft() {
-            if (this.canMoveLeft) {
-                await NavigationRegistry.dashboardRegistry.moveLeft(this.containerPath);
-            }
-        },
-        async moveRight() {
-            if (this.canMoveRight) {
-                await NavigationRegistry.dashboardRegistry.moveRight(this.containerPath);
-            }
+        arrange() {
+            this.registry.arranging = true;
+            this.$emit('close-modal');
         }
     },
     template: html`
         <div>
-            <!-- Dashboard card styling controls (only show on dashboard page) -->
-            <div v-if="(this.appContext.currentPath?.split('/')[0] === 'dashboard') && isOnDashboard" class="button-bar">
-                <button @click="toggleDashboardClass('wide');" 
-                        :class="{ 'green': containerClasses.has('wide'), 'blue': !containerClasses.has('wide') }">
-                    Wide
-                </button>
-                <button @click="toggleDashboardClass('tall');" 
-                        :class="{ 'green': containerClasses.has('tall'), 'blue': !containerClasses.has('tall') }">
-                    Tall
-                </button>
-            </div>
-            
-            <!-- Dashboard ordering controls (only show on dashboard page) -->
-            <div v-if="(this.appContext.currentPath?.split('/')[0] === 'dashboard') && isOnDashboard" class="button-bar">
-                <button @click="moveLeft" :disabled="!canMoveLeft" 
-                        :class="{ 'blue': canMoveLeft, 'disabled': !canMoveLeft }">
-                    ← Move Left
-                </button>
-                <button @click="moveRight" :disabled="!canMoveRight" 
-                        :class="{ 'blue': canMoveRight, 'disabled': !canMoveRight }">
-                    Move Right →
-                </button>
-            </div>
-            
+            <button v-if="onDashboardPage" @click="arrange" class="blue">
+                Arrange Dashboard
+            </button>
+            <p v-if="isHidden" class="card yellow">
+                Not shown: the dashboard is full. Make room in Arrange Dashboard to show it.
+            </p>
             <!-- Add/Remove from dashboard -->
             <button 
                 @click="toggleDashboardPresence"
-                :class="{ 'red': isOnDashboard, 'green': !isOnDashboard }">
-                {{ isOnDashboard ? 'Remove from Dashboard' : 'Add to Dashboard' }}
+                :disabled="!isOnDashboard && !canAdd"
+                :title="!isOnDashboard && !canAdd ? 'The dashboard is full: remove or shrink a card first' : ''"
+                :class="{ 'red': isOnDashboard, 'green': !isOnDashboard && canAdd }">
+                {{ isOnDashboard ? 'Remove from Dashboard' : (canAdd ? 'Add to Dashboard' : 'Dashboard Full') }}
             </button>
         </div>
     `
