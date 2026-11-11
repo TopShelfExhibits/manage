@@ -11,11 +11,14 @@
  * with the same thresholds as the CSS, so JS and CSS agree and there is no hysteresis.
  * Viewport scope (useViewportSize, CSS @media) covers app chrome and dashboard layout.
  *
+ * Short tier (CSS only): a height container under BREAKPOINTS.short px tall. The height
+ * containers (`container-name: height-container`) are dashboard cards and #app-content.
+ *
  * CSS cannot read these constants: every @media / @container rule repeats the literals as
  * calc(600px + 2 * 8px) etc. with a comment pointing here. Keep them in sync with theme.css.
  */
 
-export const BREAKPOINTS = Object.freeze({ narrow: 600, wide: 1000, gutterCompact: 8, gutterFull: 12 });
+export const BREAKPOINTS = Object.freeze({ narrow: 600, wide: 1000, short: 500, gutterCompact: 8, gutterFull: 12 });
 
 /** Tier for a container content-box width. */
 export function containerTier(width) {

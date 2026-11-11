@@ -101,6 +101,8 @@
  *   container (@container, useContainerSize): narrow < 600px · medium 600–999px · wide ≥ 1000px
  *   viewport  (@media, useViewportSize): the same tiers with the #app-content gutter added on the
  *             larger side of each boundary: narrow < 600 + 2*8 = 616px · wide ≥ 1000 + 2*12 = 1024px
+ *   short     (@container height-container): height < 500px — a dashboard card, or #app-content
+ *             on a full page
  * CSS can't read variables in media conditions, so the numbers repeat here as calc() literals.
  * Keep them in sync with BREAKPOINTS in js/application/utils/useContainerSize.js.
  */

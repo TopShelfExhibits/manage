@@ -659,7 +659,9 @@ There are two scopes, each with the same three tiers.
   - Between 1016 and 1023px the viewport is medium (8px gutter) while a full-width container already measures at least 1000px (wide). That is an 8px band.
   - On desktop Windows the `#app-content` scrollbar (about 17px) adds a band of that width. Overlay scrollbars on mobile and macOS add none.
   - Both bands are harmless because views follow the container, not the viewport.
-- **Height:** there is no height tier (R6.6). The `short` flag was dropped because compact chrome now covers medium and nothing else needed it. Add it if a height-bound rule appears.
+- **Height:** one CSS-only tier, `short`: height < 500px (`BREAKPOINTS.short`, the R3.1 threshold). The `short` view flag stays dropped (R6.6): it changes styles, not views.
+  - The height containers are named `height-container`: each dashboard card (`container-type: size`; its size comes from its grid cell) and `#app-content` (its size comes from its fixed insets), so on a full page it is the viewport below the navbar. Modals have no height container and are never short.
+  - Short containers draw table headers compact: `.content-header` and `thead th` lose most of their top and bottom padding.
 
 **Constants**
 

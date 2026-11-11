@@ -3611,7 +3611,7 @@ test('VIEWS COLOR', 'colour rules: sign and differs (the proposal table)', async
 test('VIEWS SIZE', 'container and viewport tiers use the shared breakpoints', async () => {
     assertEqual([containerTier(360), containerTier(599), containerTier(600), containerTier(999), containerTier(1000)], ['narrow', 'narrow', 'medium', 'medium', 'wide'], 'container');
     assertEqual([viewportTier(615), viewportTier(616), viewportTier(1023), viewportTier(1024)], ['narrow', 'medium', 'medium', 'wide'], 'viewport');
-    assertEqual(BREAKPOINTS, { narrow: 600, wide: 1000, gutterCompact: 8, gutterFull: 12 }, 'constants');
+    assertEqual(BREAKPOINTS, { narrow: 600, wide: 1000, short: 500, gutterCompact: 8, gutterFull: 12 }, 'constants');
 });
 
 test('VIEWS CARDS', 'rowsToCards: title, escaped content lines, footer, rowColor, decorations', async () => {
