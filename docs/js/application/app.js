@@ -5,7 +5,7 @@ import { PrimaryNavComponent } from './index.js';
 import { Auth, authState } from './index.js';
 import { NavigationRegistry } from './index.js';
 import { PacklistContent, InventoryContent, ScheduleContent, ReportsContent, NoticesContent } from './index.js';
-import { DashboardCell, DashboardArrangeLayer, observeDashboardGrid, stopObservingDashboardGrid, measureDashboardGrid, noticesOnDashboard, NOTICES_PATH } from './index.js';
+import { DashboardCell, DashboardArrangeLayer, observeDashboardGrid, stopObservingDashboardGrid, measureDashboardGrid, noticesOnDashboard, NOTICES_PATH, gridAreaStyle, DASHBOARD_CELLS } from './index.js';
 import { hamburgerMenuRegistry } from './index.js';
 import { undoRegistry } from './index.js';
 import { Requests, getReactiveStore, appSettings, saveDirtyStoresToUserData, getShortageAlertsStore, getShortageAlertDays, shortageBanner } from './index.js';
@@ -135,6 +135,17 @@ const App = {
         isDashboard() {
             return this.currentPage === 'dashboard';
         },
+        // The dashboard's first load: signing in, then reading the user's cards. Placeholder cards
+        // cover the grid meanwhile and fade out when it's ready.
+        dashboardLoading() {
+            if (!this.isDashboard) return false;
+            if (this.appLoading || this.isAuthLoading) return true;
+            return this.isAuthenticated && (!NavigationRegistry.dashboardRegistry.store || this.isDashboardInitialLoad);
+        },
+        // One placeholder per grid cell while the dashboard loads (none afterwards, so they fade out)
+        loadingCells() {
+            return this.dashboardLoading ? DASHBOARD_CELLS : [];
+        },
         // Arrange mode: dashboard cards drawn as miniatures that can be moved and resized
         arranging() {
             return this.isDashboard && NavigationRegistry.dashboardRegistry.arranging;
@@ -147,7 +158,7 @@ const App = {
         },
         // A dashboard without a notices card keeps the screen for cards: banners go to the corner tray
         collapseTopBanners() {
-            return this.isDashboard && this.isAuthenticated;
+            return this.isDashboard && (this.isAuthenticated || this.dashboardLoading);
         },
         // Reactive containers based on current page and authentication state
         containers() {
@@ -366,6 +377,7 @@ const App = {
         arrangeDashboard() {
             NavigationRegistry.dashboardRegistry.arranging = true;
         },
+        gridAreaStyle,
 
         handleGlobalKeyDown(event) {
             // Escape ends arrange mode (when no modal is open to take it)
@@ -409,21 +421,21 @@ const App = {
             <div id="app-content" :class="{ 'dashboard': isDashboard, 'arranging': arranging }">
                 <BannerNotifications v-if="showTopBanners" :banners="appBanners" scope="app" :collapsed="collapseTopBanners" />
 
-                <div v-if="!isAuthenticated" class="empty-message">
+                <div v-if="!isAuthenticated && !dashboardLoading" class="empty-message">
                     please log in to view content
                 </div>
-                
-                
-                <!-- App loading indicator -->
-                <div v-else-if="appLoading || (isDashboardInitialLoad && isDashboard)" class="container" style="display:flex; align-items: center; justify-content: center;">
+
+
+                <!-- App loading indicator (the dashboard shows placeholder cards instead, below) -->
+                <div v-else-if="appLoading && !isDashboard" class="container" style="display:flex; align-items: center; justify-content: center;">
                     <div class="loading-message">
                         <img src="assets/loading.gif" alt="..."/>
-                        <p>{{ isDashboardInitialLoad ? 'Loading dashboard...' : appLoadingMessage }}</p>
+                        <p>{{ appLoadingMessage }}</p>
                     </div>
                 </div>
 
                 <!-- No containers message -->
-                <div v-else-if="containers.length === 0 && !arranging" class="empty-message">
+                <div v-else-if="containers.length === 0 && !arranging && !dashboardLoading" class="empty-message">
                     <template v-if="isDashboard">
                         <p>add pages to the dashboard from their page menus</p>
                         <button class="white" @click="arrangeDashboard">Arrange Dashboard</button>
@@ -489,6 +501,14 @@ const App = {
                     </DashboardCell>
                     <DashboardArrangeLayer v-if="arranging" />
                 </template>
+
+                <!-- Dashboard first load: placeholder cards over the grid, fading out to reveal it -->
+                <transition-group name="longfade">
+                    <div v-for="cell in loadingCells"
+                         :key="cell.x + '-' + cell.y"
+                         class="dashboard-loading-card"
+                         :style="gridAreaStyle(cell)"></div>
+                </transition-group>
 
                 <footer>
                     <p>

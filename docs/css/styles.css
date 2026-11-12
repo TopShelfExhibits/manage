@@ -250,7 +250,8 @@ div#app-content > div.empty-message {
 }
 #app-content.dashboard > .dashboard-cell,
 #app-content.dashboard > .dashboard-slot,
-#app-content.dashboard > .dashboard-drop-preview {
+#app-content.dashboard > .dashboard-drop-preview,
+#app-content.dashboard > .dashboard-loading-card {
     position: relative;
     min-width: 0;
     min-height: 0;
@@ -260,10 +261,35 @@ div#app-content > div.empty-message {
 @media (orientation: portrait) {
     #app-content.dashboard > .dashboard-cell,
     #app-content.dashboard > .dashboard-slot,
-    #app-content.dashboard > .dashboard-drop-preview {
+    #app-content.dashboard > .dashboard-drop-preview,
+    #app-content.dashboard > .dashboard-loading-card {
         grid-column: var(--row-start) / span var(--row-span);
         grid-row: var(--col-start) / span var(--col-span);
     }
+}
+
+/* Dashboard first load: a transparent blue card over every cell, with the loading bar's sweep.
+   They sit above the cards (which arrive underneath) and fade out (longfade) when it's ready. */
+#app-content.dashboard > .dashboard-loading-card {
+    z-index: 2000;
+    overflow: hidden;
+    pointer-events: none;
+    border-radius: var(--radius-lg);
+    background: color-mix(in srgb, var(--color-primary) 30%, transparent);
+    box-shadow: 0 4px 8px var(--color-shadow);
+}
+#app-content.dashboard > .dashboard-loading-card::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: 25%;
+    background: linear-gradient(90deg,
+            transparent,
+            color-mix(in srgb, var(--color-primary-light) 40%, transparent),
+            transparent);
+    animation: loading-bar-slide 2s infinite linear;
 }
 
 /* An interactive card fills its cell; its content scrolls by itself. It is a height container

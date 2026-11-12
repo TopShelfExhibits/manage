@@ -32,7 +32,7 @@ export { PreferencesMenuComponent } from './components/interface/preferencesComp
 export { OverlappingShowsModal } from './components/interface/OverlappingShowsModal.js';
 export { LoadingBarComponent } from './components/interface/loadingBarComponent.js';
 export { BannerNotifications, NotificationBubbleOverlay } from './components/interface/bannerNotifications.js';
-export { DashboardCell, DashboardArrangeLayer, observeDashboardGrid, stopObservingDashboardGrid, measureDashboardGrid, noticesOnDashboard, NOTICES_PATH } from './components/interface/dashboardComponents.js';
+export { DashboardCell, DashboardArrangeLayer, observeDashboardGrid, stopObservingDashboardGrid, measureDashboardGrid, noticesOnDashboard, NOTICES_PATH, gridAreaStyle, DASHBOARD_CELLS } from './components/interface/dashboardComponents.js';
 export { TableComponent, tableRowSelectionState } from './components/interface/tableComponent.js';
 export { CardsComponent } from './components/interface/cardsComponent.js';
 export { CalendarComponent } from './components/interface/calendarComponent.js';

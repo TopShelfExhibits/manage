@@ -86,6 +86,9 @@ export function stopObservingDashboardGrid() {
     _gridEl = null;
 }
 
+/** Every 1 x 1 cell of the grid, row by row (the loading placeholders) */
+export const DASHBOARD_CELLS = Object.freeze(freeCells([]));
+
 /** CSS variables placing a stored (landscape) rect on the grid */
 export function gridAreaStyle({ x, y, w, h }) {
     return { '--col-start': x + 1, '--row-start': y + 1, '--col-span': w, '--row-span': h };
