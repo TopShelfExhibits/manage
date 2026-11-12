@@ -55,6 +55,7 @@ import { getAutoColorClass } from '../application/utils/autoColor.js';
 import { getReactiveStore, createAnalysisConfig, itemVariantCards, itemShortageCards, NavigationRegistry, isMarkedForDeletion, paramToggleValue, isTemporaryAdmin } from '../application/index.js';
 import { calculateStoreDiff, applyDiffToData } from '../application/utils/reactiveStores.js';
 import { notificationBus } from '../application/utils/notificationBus.js';
+import { findScope, carriesSearch, withoutSearch } from '../application/utils/findScopes.js';
 import { normalizeLayout, freeCells, isFull, firstFreeSlot, planMove, planResize, transpose, clampRect, classesForSize, sizeFromClasses } from '../application/utils/dashboardLayout.js';
 import { checkSheetHealth } from './sheetHealth.js';
 import { guessColumnType, columnTypesEntry, columnTypeMap, columnTypeOf, isOpaqueType } from '../data_management/utils/column-types.js';
@@ -997,6 +998,88 @@ test('USER DATA', 'hasUserDataKey returns false for nonexistent key', async () =
 test('USER DATA', 'getUserDataByPrefix returns entry for dashboard prefix', async () => {
     const result = await Requests.getUserDataByPrefix('test@example.com', 'dashboard');
     if (result === null || result === undefined) throw new Error('expected match for prefix "dashboard"');
+});
+
+// ── Group 24a: Find Scopes ────────────────────────────────────────────────────
+// Which pages share a search (application/utils/findScopes.js). Expected scopes:
+//   inventory, inventory/categories, inventory/<cat>, inventory/<cat>/edit-history → inventory-items
+//   inventory/<cat>/<item#> (timeline)                                     → its own path
+//   schedule, schedule/design-queue, packlist, packlist/pins|unlinked      → shows
+//   packlist/<tab>, packlist/<tab>/details                                 → packlist:<tab>
+//   reports/*                                                              → each its own path
+// A search left in a scope is offered again for 5 minutes (SEARCH_MEMORY_MS).
+
+test('FIND SCOPES', 'pages map to the scope of what they search', () => {
+    assertEqual([
+        'inventory', 'inventory/categories', 'inventory/furniture?{"searchTerm":"chair"}',
+        'inventory/furniture/edit-history', 'inventory/furniture/CHAIR-001',
+        'packlist', 'packlist/pins', 'packlist/unlinked', 'packlist/ATSC+2025+NAB', 'packlist/ATSC+2025+NAB/details',
+        'schedule', 'schedule/design-queue', 'reports/item-shortages'
+    ].map(p => findScope(p)), [
+        'inventory-items', 'inventory-items', 'inventory-items',
+        'inventory-items', 'inventory/furniture/CHAIR-001',
+        'shows', 'shows', 'shows', 'packlist:ATSC+2025+NAB', 'packlist:ATSC+2025+NAB',
+        'shows', 'shows', 'reports/item-shortages'
+    ], 'scopes');
+});
+
+test('FIND SCOPES', 'a search carries within a scope only', () => {
+    assertEqual(carriesSearch('inventory/furniture', 'inventory/cabinets'), true, 'category to category');
+    assertEqual(carriesSearch('inventory/furniture', 'inventory'), true, 'category to overview');
+    assertEqual(carriesSearch('inventory/furniture', 'inventory/furniture/edit-history'), true, 'to edit history');
+    assertEqual(carriesSearch('inventory/furniture', 'inventory/furniture/CHAIR-001'), false, 'to an item timeline');
+    assertEqual(carriesSearch('schedule', 'packlist'), true, 'schedule to the pack list list');
+    assertEqual(carriesSearch('packlist/pins', 'packlist/ATSC+2025+NAB'), false, 'pack list list to one pack list');
+    assertEqual(carriesSearch('packlist/A', 'packlist/A/details'), true, 'crates to item summary');
+    assertEqual(carriesSearch('packlist/A', 'packlist/B'), false, 'another pack list');
+    assertEqual(carriesSearch('schedule', 'inventory'), false, 'another section');
+    assertEqual(carriesSearch('reports/show-usage', 'reports/item-shortages'), false, 'another report');
+    assertEqual(withoutSearch({ view: 'cards', searchTerm: 'x', searchIndex: '2' }), { view: 'cards' }, 'withoutSearch');
+});
+
+test('FIND SCOPES', 'a search left in a scope comes back for 5 minutes', () => {
+    const savedMemory = NavigationRegistry.recentSearches;
+    NavigationRegistry.recentSearches = new Map();
+    const t0 = 1_000_000;
+    const minutes = m => t0 + m * 60 * 1000;
+    try {
+        NavigationRegistry.resolveTargetPath('schedule', 'inventory/furniture?{"searchTerm":"chair"}', { now: t0 });
+        const back = (now, label, expected) => {
+            const opened = NavigationRegistry.resolveTargetPath('inventory/cabinets', 'schedule', { now });
+            assertEqual(NavigationRegistry.parsePath(opened).parameters.searchTerm, expected, label);
+        };
+        back(minutes(4), 'back within 5 minutes: the search returns', 'chair');
+        NavigationRegistry.resolveTargetPath('schedule', 'inventory/cabinets', { now: minutes(4) });
+        back(minutes(5), 'left again without a search: forgotten', undefined);
+        NavigationRegistry.resolveTargetPath('schedule', 'inventory?{"searchTerm":"table"}', { now: minutes(10) });
+        back(minutes(16), 'back after 5 minutes: cleared', undefined);
+    } finally {
+        NavigationRegistry.recentSearches = savedMemory;
+    }
+});
+
+test('FIND SCOPES', 'a bare navigation keeps route parameters, drops their old search, carries in scope', () => {
+    const route = NavigationRegistry.getRoute('schedule');
+    const saved = route.lastParameters;
+    const savedMemory = NavigationRegistry.recentSearches;
+    NavigationRegistry.recentSearches = new Map();
+    try {
+        route.lastParameters = { view: 'calendar', searchTerm: 'old', searchIndex: '3' };
+        assertEqual(NavigationRegistry.resolveTargetPath('schedule', 'inventory/furniture?{"searchTerm":"chair"}'),
+            'schedule?{"view":"calendar"}', 'other scope: view kept, old search dropped, chair not carried');
+        assertEqual(NavigationRegistry.resolveTargetPath('schedule', 'schedule/design-queue?{"searchTerm":"acme"}'),
+            'schedule?{"view":"calendar","searchTerm":"acme"}', 'same scope: the current search carries');
+        assertEqual(NavigationRegistry.resolveTargetPath('schedule', 'schedule/design-queue?{"searchTerm":"acme"}', { carry: false }),
+            'schedule?{"view":"calendar"}', 'browser back/forward: no carry');
+        assertEqual(NavigationRegistry.resolveTargetPath('schedule?{"searchTerm":"link"}', 'inventory'),
+            'schedule?{"searchTerm":"link"}', 'a link with parameters opens as given');
+        assertEqual(NavigationRegistry.resolveTargetPath('inventory', 'inventory/furniture?{"searchTerm":"chair"}'),
+            NavigationRegistry.buildPath('inventory', { ...withoutSearch(NavigationRegistry.getRoute('inventory')?.lastParameters || {}), searchTerm: 'chair' }),
+            'inventory category to overview carries');
+    } finally {
+        route.lastParameters = saved;
+        NavigationRegistry.recentSearches = savedMemory;
+    }
 });
 
 // ── Group 24b: Dashboard Layout ───────────────────────────────────────────────

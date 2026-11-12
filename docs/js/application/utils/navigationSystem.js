@@ -3,6 +3,7 @@ import { authState, Auth } from '../index.js';
 import { URLRouter } from './urlRouter.js';
 import { DashboardRegistry } from './DashboardRegistry.js';
 import { parseSearchParameters } from '../../data_management/utils/helpers.js';
+import { carriesSearch, withoutSearch, rememberSearch, recallSearch } from './findScopes.js';
 
 // Vue is available globally, destructure ref from it
 const { ref } = Vue;
@@ -473,48 +474,49 @@ export const NavigationRegistry = {
         return segments[segments.length - 1];
     },
 
+    // The search last left in each find scope, offered again for SEARCH_MEMORY_MS (findScopes.js)
+    recentSearches: new Map(),
+
+    /** Note a page's search as the one last left in its scope (an empty term forgets it) */
+    rememberSearch(path, term, now = Date.now()) {
+        rememberSearch(this.recentSearches, path, term, now);
+    },
+
     /**
-     * Navigation handlers - consolidated
+     * The path a navigation opens. The current page's search is noted first, as the one last left
+     * in its scope. A target with explicit parameters ('?') then opens as given. A bare target gets
+     * the route's last parameters (view, filters) without their search, plus:
+     *   - the current search, when both pages share a find scope;
+     *   - otherwise the search last left in the target's scope, if that was under
+     *     SEARCH_MEMORY_MS ago.
+     * Browser back/forward passes carry = false: a history entry opens with the search it had.
+     * @param {string} targetPath
+     * @param {string} currentPath - the app's current path
+     * @param {{carry?: boolean, now?: number}} [options]
+     * @returns {string}
      */
+    resolveTargetPath(targetPath, currentPath, { carry = true, now = Date.now() } = {}) {
+        const currentSearch = this.parsePath(currentPath || '').parameters.searchTerm;
+        if (currentPath) this.rememberSearch(currentPath, currentSearch, now);
+        if (targetPath.includes('?')) return targetPath;
+        const cleanTarget = this.parsePath(targetPath).path;
+        const params = withoutSearch(this.getRoute(cleanTarget)?.lastParameters || {});
+        if (carry) {
+            const search = carriesSearch(currentPath, cleanTarget)
+                ? currentSearch
+                : recallSearch(this.recentSearches, cleanTarget, now);
+            if (search) params.searchTerm = search;
+        }
+        return this.buildPath(cleanTarget, params);
+    },
+
     async handleNavigateToPath(navigationData, appContext) {
         let { targetPath, isBrowserNavigation, replaceHistory } = navigationData;
-        
-        // Parse the target path to get the clean path
-        let pathInfo = this.parsePath(targetPath);
-        
-        // Check if targetPath had explicit parameters (indicated by ? in the original path).
-        // This distinguishes between: "path with explicit params" vs "path with no params specified".
-        // When params are explicitly provided but then filtered to empty (e.g., searchTerm removed),
-        // we should NOT auto-preserve searchTerm.
-        const hadExplicitParams = targetPath.includes('?');
-        
-        // Special handling for inventory routes: preserve searchTerm from current path
-        // ONLY if no explicit parameters were provided to this navigation call
-        if (!hadExplicitParams && (!pathInfo.hasParameters || !pathInfo.parameters.searchTerm)) {
-            const currentPathInfo = this.parsePath(appContext.currentPath || '');
-            const isNavigatingToInventory = pathInfo.path.startsWith('inventory');
-            const isComingFromInventory = currentPathInfo.path.startsWith('inventory');
-            
-            // If navigating within inventory space and current path has searchTerm, preserve it
-            if (isNavigatingToInventory && isComingFromInventory && currentPathInfo.parameters.searchTerm) {
-                pathInfo.parameters.searchTerm = currentPathInfo.parameters.searchTerm;
-                pathInfo.hasParameters = true;
-                targetPath = this.buildPath(pathInfo.path, pathInfo.parameters);
-                pathInfo = this.parsePath(targetPath); // Re-parse with updated params
-            }
-        }
-        
-        // Apply cached parameters if no explicit parameters provided
-        if (!pathInfo.hasParameters) {
-            const route = this.getRoute(pathInfo.path);
-            if (route?.lastParameters && Object.keys(route.lastParameters).length > 0) {
-                // Build path with cached parameters
-                targetPath = this.buildPath(pathInfo.path, route.lastParameters);
-                pathInfo = this.parsePath(targetPath); // Re-parse with cached params
-                //console.log('[NavigationRegistry] Applied cached parameters:', route.lastParameters);
-            }
-        }
-        
+
+        // Which parameters (view, filters, search) the page opens with
+        targetPath = this.resolveTargetPath(targetPath, appContext.currentPath, { carry: !isBrowserNavigation });
+        const pathInfo = this.parsePath(targetPath);
+
         const currentPathInfo = this.parsePath(appContext.currentPath || '');
         
         // Check if we're navigating to the same base path (just parameter change)

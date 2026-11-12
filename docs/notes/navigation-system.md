@@ -368,6 +368,30 @@ appContext.currentPath = pathFromURL
 Components react to currentPath change
 ```
 
+### What a Page Opens With (search and remembered parameters)
+
+`resolveTargetPath(targetPath, currentPath)` decides the parameters of every navigation:
+
+- **A target with parameters** (`?` in the path) opens exactly as given. This covers links that name a search (an item number into inventory), dashboard cards opening their page, and shared links.
+- **A bare target** gets the route's remembered parameters (`lastParameters`: view, filters, toggles) **without their search**. It gets a search in one of two ways:
+  - **The current page's search**, when both pages share a **find scope** ([findScopes.js](../js/application/utils/findScopes.js)).
+  - **The search last left in the target's scope**, when that was under 5 minutes ago (`SEARCH_MEMORY_MS`). Every navigation notes the page it leaves (`rememberSearch`). Leaving with an empty box forgets the scope's search.
+
+  | Find scope | Pages |
+  | --- | --- |
+  | `inventory-items` | `inventory`, `inventory/categories`, `inventory/<category>`, `inventory/<category>/edit-history` |
+  | `shows` | `schedule`, `schedule/design-queue`, and the pack list lists `packlist`, `packlist/pins`, `packlist/unlinked` |
+  | `packlist:<tab>` | `packlist/<tab>` and its subpages (`details`): each pack list separately |
+  | its own path | everything else (item timelines, each report) |
+
+- **Browser back/forward** opens the history entry as it was and carries nothing.
+- **Search box blur** (`useSearch.handleBlur`) writes a typed search that isn't in the URL yet.
+  - If the blur came from a click that navigated, the search goes to the new page only when that page shares the scope and opened without a search of its own.
+  - Otherwise the search is noted as the one last left in its scope.
+- **Item timelines** (`inventory/<category>/<item#>`) have the standard search box. A table's details button opens the timeline with the table's search (`DataView.performAction`). The item details above the timeline highlight the same words, read from the URL.
+
+Only `searchTerm` carries. `searchIndex` (the selected result) belongs to one page's results.
+
 ## Parameter Handling
 
 ### JSON Parameter Format

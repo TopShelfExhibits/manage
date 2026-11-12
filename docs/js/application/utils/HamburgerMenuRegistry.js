@@ -198,7 +198,7 @@ export class HamburgerMenuRegistry {
     
     filterPacklistMenuComponents(components, containerPath) {
         // Reserved packlist routes that are NOT table views
-        const reservedRoutes = new Set(['active', 'archived', 'templates', 'pins', 'details']);
+        const reservedRoutes = new Set(['pins', 'unlinked', 'details']);
         
         // Strip query parameters and split path
         const cleanPath = containerPath.split('?')[0];
