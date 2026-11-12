@@ -76,7 +76,13 @@ Style through shared classes, and adapt them to a context with one scoped rule.
 
 ## Tests
 
-- **Where they run.** On localhost the app loads `docs/js/tests/tests.js` after it mounts. Results appear in the browser console, grouped, with ✓/✗ per test and a summary line. Tests call `Requests.*` against the FakeGoogle data, with no mocks and no framework. They never run in production.
+- **Where they run.** On localhost, only on command: run `fakeGoogle.runTests()` in the browser console (`docs/js/tests/fakeGoogleDevTools.js`). A page load never runs them.
+  - Results appear in the console, grouped, with ✓/✗ per test and a summary line. The command also returns `{ passed, failed }`.
+  - Tests call `Requests.*` against the FakeGoogle data, with no mocks and no framework. They run against pristine fixtures, and local data is restored afterwards. They never run in production.
+- **Run what you changed, then everything.** `fakeGoogle.runTests('find scopes')` or `fakeGoogle.runTests(['dashboard', 'user data'])` runs only the groups whose name contains the text.
+  - Groups in one section can depend on the groups before them. For example, PERSISTED RESULTS needs SHORTAGE ALERTS, so run them together: `['shortage', 'persisted', 'rollover']`.
+  - Run the whole suite before committing.
+- **The suite owns the app while it runs.** It signs in, and its AUTH tests sign out, so sign in again afterwards. It holds the app's scheduled cache polls (`holdScheduledPolls`, `caching.js`); a test that needs a poll calls `triggerCachePoll()`.
 - **When to add tests:**
   - Add a test group for every new cross-layer feature, such as a new analysis type or a new pack list operation.
   - Add a regression test for any bug whose cause spans more than one file.

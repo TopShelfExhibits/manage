@@ -1015,10 +1015,17 @@ export async function assertAppCurrent() {
 let _lastPollAt = 0;
 if (typeof document !== 'undefined') {
     document.addEventListener('visibilitychange', () => {
-        if (!document.hidden && _cacheTimestampPollerInterval && Date.now() - _lastPollAt >= _pollerIntervalMs) {
+        if (!document.hidden && !_scheduledPollsHeld && _cacheTimestampPollerInterval && Date.now() - _lastPollAt >= _pollerIntervalMs) {
             _pollCacheTimestamps();
         }
     });
+}
+
+// The test suite holds the scheduled polls while it runs: a poll landing mid-test would reload data
+// a test is arranging. Its tests poll when they mean to (triggerCachePoll runs regardless).
+let _scheduledPollsHeld = false;
+export function holdScheduledPolls(held) {
+    _scheduledPollsHeld = !!held;
 }
 
 export function startCacheTimestampPoller(readFn, intervalMs = 60 * 1000) {
@@ -1026,6 +1033,7 @@ export function startCacheTimestampPoller(readFn, intervalMs = 60 * 1000) {
     _pollerReadFn = readFn;
     _pollerIntervalMs = intervalMs;
     _cacheTimestampPollerInterval = setInterval(() => {
+        if (_scheduledPollsHeld) return;
         if (typeof document === 'undefined' || !document.hidden) _pollCacheTimestamps();
     }, intervalMs);
 }

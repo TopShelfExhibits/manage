@@ -284,13 +284,10 @@ const App = {
 
         this.appLoading = false;
 
+        // Local dev tools (window.fakeGoogle). The test suite runs only on command:
+        // fakeGoogle.runTests() in the console.
         if (isLocalhost()) {
-            import('../tests/fakeGoogleDevTools.js').then(devTools => {
-                devTools.installFakeGoogleDevTools();
-                if (devTools.autoTestsEnabled()) {
-                    import('../tests/tests.js').then(m => m.runTests());
-                }
-            });
+            import('../tests/fakeGoogleDevTools.js').then(devTools => devTools.installFakeGoogleDevTools());
         }
     },
     beforeUnmount() {

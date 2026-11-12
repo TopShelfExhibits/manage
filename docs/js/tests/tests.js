@@ -1,5 +1,6 @@
 /**
- * Console test suite — runs automatically on localhost against FakeGoogle test data.
+ * Console test suite — runs on command on localhost against FakeGoogle test data:
+ * fakeGoogle.runTests() in the browser console (fakeGoogleDevTools.js), optionally with group names.
  * Add new tests here when building features that depend on existing behavior.
  * Each test group covers a distinct layer of the stack; cross-group tests intentionally
  * exercise multiple layers together to catch integration regressions.
@@ -28,7 +29,7 @@
  */
 
 import { Requests } from '../data_management/api.js';
-import { isAppOutdated, checkAppVersion } from '../data_management/index.js';
+import { isAppOutdated, checkAppVersion, holdScheduledPolls } from '../data_management/index.js';
 import { FakeGoogleSheetsAuth, FakeGoogleSheetsService, FakeGoogleState, setFakeDelaysEnabled } from '../google_sheets_services/FakeGoogle.js';
 import { refreshAppData } from './fakeGoogleDevTools.js';
 import { isCheckedValue } from '../data_management/utils/checkbox-values.js';
@@ -4792,8 +4793,18 @@ test('SHEET HEALTH', 'ShowNotes has one row per show identifier', async () => {
     assertEqual(health.issues.map(i => i.message), [], 'no issues');
 });
 
-export async function runTests() {
+/**
+ * Run the suite, or only the groups whose name contains one of `groups` (any case).
+ * @param {string|string[]} [groups]
+ */
+export async function runTests(groups) {
+    const filters = (Array.isArray(groups) ? groups : (groups ? [groups] : [])).map(g => String(g).toLowerCase());
+    const selected = filters.length
+        ? _tests.filter(t => filters.some(f => t.group.toLowerCase().includes(f)))
+        : _tests;
     setFakeDelaysEnabled(false);
+    // The app's scheduled cache polls wait until the suite ends; tests poll when they mean to
+    holdScheduledPolls(true);
     // Run against pristine fixtures; local data (saved across reloads) is restored afterwards
     const endSandbox = FakeGoogleState.beginSandbox();
     refreshAppData();
@@ -4807,7 +4818,9 @@ export async function runTests() {
         let lastGroup = null;
         const failed = [];
 
-        for (const { group, name, fn } of _tests) {
+        if (filters.length) console.log(`Groups matching ${JSON.stringify(filters)}: ${selected.length} of ${_tests.length} tests`);
+
+        for (const { group, name, fn } of selected) {
             if (group !== lastGroup) {
                 if (lastGroup !== null) console.groupEnd();
                 console.group(`[${group}]`);
@@ -4824,7 +4837,7 @@ export async function runTests() {
 
         if (lastGroup !== null) console.groupEnd();
 
-        const passed = _tests.length - failed.length;
+        const passed = selected.length - failed.length;
         const style = failed.length ? 'color:#ef4444;font-weight:bold' : 'color:#22c55e;font-weight:bold';
         console.log(`%c ${passed} passed, ${failed.length} failed`, style);
         console.groupEnd();
@@ -4834,5 +4847,6 @@ export async function runTests() {
         endSandbox();
         refreshAppData();
         setFakeDelaysEnabled(true);
+        holdScheduledPolls(false);
     }
 }
