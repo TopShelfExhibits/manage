@@ -186,8 +186,7 @@ const App = {
                     type,
                     title: NavigationRegistry.getDisplayName(path, !!card),
                     containerPath: path,
-                    card, // the placed card on the dashboard grid ({ path, x, y, w, h }), null on a page
-                    bare: !!card && type === NOTICES_PATH // the notices card: its banners straight on the grid
+                    card // the placed card on the dashboard grid ({ path, x, y, w, h }), null on a page
                 };
             };
             if (this.isDashboard) {
@@ -455,9 +454,8 @@ const App = {
                         :key="container.key"
                         :card="container.card"
                         :title="container.title"
-                        :bare="container.bare"
                         @expand="expandContainer(container)"
-                        v-slot="{ miniature, header }">
+                        v-slot="{ miniature, header, bare }">
                     <app-container
                         :data-container-id="container.key"
                         :container-id="container.key"
@@ -465,9 +463,8 @@ const App = {
                         :title="container.title"
                         :container-path="container.containerPath"
                         :card-style="!!container.card"
-                        :show-expand-button="!!container.card"
                         :show-header="header"
-                        :bare="container.bare"
+                        :bare="bare"
                         :inert="miniature"
                         @navigate-to-path="navigateToPath"
                         @expand-container="expandContainer"

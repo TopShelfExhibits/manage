@@ -32,6 +32,12 @@ export function cleanPath(path) {
     return String(path || '').split('?')[0];
 }
 
+/** The card (placed card or stored entry) for a page path, ignoring URL parameters, or undefined. */
+export function findCard(cards, path) {
+    const key = cleanPath(path);
+    return cards.find(card => cleanPath(entryPath(card)) === key);
+}
+
 /** Size from legacy classes: 'wide' spans 2 columns, 'tall' spans 2 rows. */
 export function sizeFromClasses(classes) {
     const set = new Set(String(classes || '').split(' ').filter(Boolean));
@@ -88,8 +94,8 @@ export function transpose({ x, y, w, h }) {
  */
 export function fits(placed, rect, ignorePath = null) {
     if (!isValidRect(rect)) return false;
-    const ignore = ignorePath == null ? null : cleanPath(ignorePath);
-    return placed.every(card => cleanPath(card.path) === ignore || !rectsOverlap(card, rect));
+    const ignored = ignorePath == null ? null : findCard(placed, ignorePath);
+    return placed.every(card => card === ignored || !rectsOverlap(card, rect));
 }
 
 /** The first free rect of size w x h, scanning rows then columns, or null. */
@@ -167,12 +173,11 @@ export function normalizeLayout(entries) {
  * @returns {Array<{path,x,y,w,h}>|null} the rects to store, or null when the move isn't possible
  */
 export function planMove(placed, path, rect) {
-    const key = cleanPath(path);
-    const card = placed.find(c => cleanPath(c.path) === key);
+    const card = findCard(placed, path);
     if (!card || !isValidRect(rect)) return null;
     if (fits(placed, rect, path)) return [{ path: card.path, ...rect }];
 
-    const others = placed.filter(c => cleanPath(c.path) !== key);
+    const others = placed.filter(c => c !== card);
     const hit = others.filter(c => rectsOverlap(c, rect));
     if (hit.length !== 1) return null;
     const target = hit[0];
@@ -208,9 +213,6 @@ export function resizeRect(rect, edges, cell) {
  * @returns {Array<{path,x,y,w,h}>|null} - null when the rect leaves the grid or covers another card
  */
 export function planResize(placed, path, rect) {
-    const key = cleanPath(path);
-    const card = placed.find(c => cleanPath(c.path) === key);
-    if (!card) return null;
-    const { x, y, w, h } = rect;
-    return fits(placed, { x, y, w, h }, path) ? [{ path: card.path, x, y, w, h }] : null;
+    const card = findCard(placed, path);
+    return card && fits(placed, rect, path) ? [{ path: card.path, ...rect }] : null;
 }

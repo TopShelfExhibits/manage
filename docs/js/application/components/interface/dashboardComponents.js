@@ -1,5 +1,5 @@
 import { html, NavigationRegistry, appSettings } from '../../index.js';
-import { GRID, MINI_MIN_CELL, MINI_BASE_WIDTH, transpose, clampRect, planMove, planResize, resizeRect, freeCells, sameRect } from '../../utils/dashboardLayout.js';
+import { GRID, MINI_MIN_CELL, MINI_BASE_WIDTH, transpose, clampRect, planMove, planResize, resizeRect, freeCells, sameRect, cleanPath } from '../../utils/dashboardLayout.js';
 
 /**
  * Dashboard grid (single screen, 4 x 2 landscape / 2 x 4 portrait; layout rules in
@@ -136,15 +136,14 @@ export const dashboardDrag = Vue.reactive({
  * scales it as a miniature, and draws the expand overlay and the arrange handles. In arrange mode
  * the card's header names it (its buttons give way to the remove button); a card without a header
  * (a bare card, or any card while headers are hidden) has its name on its handle instead.
- * Slot props: { miniature (the page is inert while true), header (draw the container header) }.
+ * Slot props, for the container: miniature (the page is inert), header (draw the container
+ * header) and bare (no box of its own: the notices card's banners stand straight on the grid).
  */
 export const DashboardCell = {
     props: {
         // The placed card ({ path, x, y, w, h }), or null off the dashboard
         card: { type: Object, default: null },
-        title: { type: String, default: '' },
-        // The card has no box or header of its own (the notices card)
-        bare: { type: Boolean, default: false }
+        title: { type: String, default: '' }
     },
     emits: ['expand'],
     created() {
@@ -163,6 +162,9 @@ export const DashboardCell = {
         },
         dragging() {
             return this.onDashboard && dashboardDrag.path === this.card.path;
+        },
+        bare() {
+            return this.onDashboard && cleanPath(this.card.path) === NOTICES_PATH;
         },
         // Pages always have a header; cards unless bare or headers are hidden
         header() {
@@ -235,7 +237,7 @@ export const DashboardCell = {
     },
     template: html`
         <div class="dashboard-cell" :class="{ miniature, arranging, dragging }" :style="cellStyle">
-            <slot :miniature="miniature" :header="header"></slot>
+            <slot :miniature="miniature" :header="header" :bare="bare"></slot>
             <div v-if="miniature && !arranging"
                  class="container-expand-overlay"
                  role="button"

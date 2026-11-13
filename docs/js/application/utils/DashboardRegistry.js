@@ -3,7 +3,7 @@
 import { authState } from './auth.js';
 import { getReactiveStore } from './reactiveStores.js';
 import { Requests } from '../../data_management/api.js';
-import { entryPath, cleanPath, normalizeLayout, firstFreeSlot, isFull, classesForSize, planMove, planResize, fits } from './dashboardLayout.js';
+import { entryPath, cleanPath, findCard, normalizeLayout, firstFreeSlot, isFull, classesForSize, planMove, planResize, fits } from './dashboardLayout.js';
 
 export const DashboardRegistry = Vue.reactive({
     store: null,
@@ -63,13 +63,6 @@ export const DashboardRegistry = Vue.reactive({
     },
 
     /**
-     * Check if dashboard is loading for the first time
-     */
-    get isLoading() {
-        return this.store?.isLoading;
-    },
-
-    /**
      * Check if this is the initial load (first time loading dashboard data)
      */
     get isInitialLoad() {
@@ -77,24 +70,10 @@ export const DashboardRegistry = Vue.reactive({
     },
 
     /**
-     * Get loading message (only shown during initial load)
-     */
-    get loadingMessage() {
-        return this.isLoading ? (this.store?.loadingMessage || 'Loading dashboard...') : '';
-    },
-
-    /**
      * All stored dashboard entries, placed or not
      */
     get containers() {
         return Array.isArray(this.store?.data) ? this.store.data : [];
-    },
-
-    /**
-     * Get container IDs in order
-     */
-    get containerIds() {
-        return this.containers.map(entryPath);
     },
 
     /**
@@ -116,16 +95,14 @@ export const DashboardRegistry = Vue.reactive({
      * Compares clean paths (without parameters) for matching
      */
     has(containerPathWithParams) {
-        const key = cleanPath(containerPathWithParams);
-        return this.containerIds.some(id => cleanPath(id) === key);
+        return !!this.getContainer(containerPathWithParams);
     },
 
     /**
      * The placed card for a path, with its rect, or null (not on the dashboard, or doesn't fit)
      */
     getPlaced(containerPathWithParams) {
-        const key = cleanPath(containerPathWithParams);
-        return this.layout.placed.find(card => cleanPath(card.path) === key) || null;
+        return findCard(this.layout.placed, containerPathWithParams) || null;
     },
 
     /**
@@ -133,8 +110,7 @@ export const DashboardRegistry = Vue.reactive({
      * Compares clean paths (without parameters) for matching
      */
     getContainer(containerPathWithParams) {
-        const key = cleanPath(containerPathWithParams);
-        return this.containers.find(container => cleanPath(entryPath(container)) === key);
+        return findCard(this.containers, containerPathWithParams);
     },
 
     /**
@@ -157,28 +133,27 @@ export const DashboardRegistry = Vue.reactive({
      * Put a card that's on the dashboard but not shown (no room) into a free rect
      */
     async placeAt(containerPathWithParams, rect) {
-        if (!this.has(containerPathWithParams) || !fits(this.layout.placed, rect, containerPathWithParams)) return false;
-        this._commit([{ path: entryPath(this.getContainer(containerPathWithParams)), ...rect }]);
-        await this.save();
-        return true;
+        const entry = this.getContainer(containerPathWithParams);
+        const fitsThere = entry && fits(this.layout.placed, rect, containerPathWithParams);
+        return this._apply(fitsThere ? [{ path: entryPath(entry), ...rect }] : null);
     },
 
     /**
      * Move a card; onto exactly one other card it swaps the two. Returns false when not possible.
      */
     async move(containerPathWithParams, rect) {
-        const rects = planMove(this.layout.placed, containerPathWithParams, rect);
-        if (!rects) return false;
-        this._commit(rects);
-        await this.save();
-        return true;
+        return this._apply(planMove(this.layout.placed, containerPathWithParams, rect));
     },
 
     /**
      * Resize a card to a new rect (from any edge). Returns false when it doesn't fit.
      */
     async resize(containerPathWithParams, rect) {
-        const rects = planResize(this.layout.placed, containerPathWithParams, rect);
+        return this._apply(planResize(this.layout.placed, containerPathWithParams, rect));
+    },
+
+    /** Store a plan's rects and save. Returns false for no plan (the change isn't possible). */
+    async _apply(rects) {
         if (!rects) return false;
         this._commit(rects);
         await this.save();
@@ -221,8 +196,7 @@ export const DashboardRegistry = Vue.reactive({
      * This allows dashboard containers to preserve parameter state
      */
     async updatePath(cleanPathToUpdate, newPathWithParams) {
-        const key = cleanPath(cleanPathToUpdate);
-        const index = this.containers.findIndex(container => cleanPath(entryPath(container)) === key);
+        const index = this.containers.indexOf(this.getContainer(cleanPathToUpdate));
 
         if (index > -1) {
             const oldPath = entryPath(this.store.data[index]);
@@ -246,14 +220,12 @@ export const DashboardRegistry = Vue.reactive({
      * Compares clean paths (without parameters) for matching
      */
     async remove(containerPathWithParams) {
-        const key = cleanPath(containerPathWithParams);
-        if (!this.has(key)) return;
+        if (!this.has(containerPathWithParams)) return;
         this._commit([]);
-        const index = this.containers.findIndex(container => cleanPath(entryPath(container)) === key);
-        if (index > -1) {
-            this.store.data.splice(index, 1);
-            await this.save();
-        }
+        // After the commit: it rewrites entries, so find the entry again
+        const index = this.containers.indexOf(this.getContainer(containerPathWithParams));
+        this.store.data.splice(index, 1);
+        await this.save();
     },
 
     /**

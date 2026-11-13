@@ -26,12 +26,9 @@ export const ContainerComponent = {
             type: String,
             default: ''
         },
+        // A dashboard card: fills its cell, and its header has an expand button instead of the
+        // bookmark and share buttons
         cardStyle: {
-            type: Boolean,
-            default: false
-        },
-        // Show expand button to open in full page
-        showExpandButton: {
             type: Boolean,
             default: false
         },
@@ -53,11 +50,6 @@ export const ContainerComponent = {
             navigationParameters: () => this.navigationParameters
         };
     },
-    data() {
-        return {
-            isLoading: false // now managed reactively by this component
-        };
-    },
     computed: {
         // Get hamburger menu component from registry
         hamburgerMenuComponent() {
@@ -72,12 +64,6 @@ export const ContainerComponent = {
         }
     },
     methods: {
-        setLoading(val) {
-            this.isLoading = val;
-        },
-        closeContainer() {
-            this.$emit('navigate-to-path', 'dashboard');
-        },
         openHamburgerMenu() {
             if (this.hamburgerMenuComponent) {
                 this.$modal.custom(
@@ -210,12 +196,12 @@ export const ContainerComponent = {
                     :container-id="containerId"
                     @navigate-to-path="(path) => $emit('navigate-to-path', path)" />
                 <div style="flex-grow: 1;"></div>
-                <div v-if="hamburgerMenuComponent || showExpandButton || !cardStyle" class="button-group">
+                <div class="button-group">
                     <button v-if="hamburgerMenuComponent"
-                            class="button-symbol white" 
-                            @click="openHamburgerMenu" 
+                            class="button-symbol white"
+                            @click="openHamburgerMenu"
                             title="Page Menu">☰</button>
-                    <button v-if="showExpandButton" 
+                    <button v-if="cardStyle"
                             class="button-symbol white" 
                             @click="expandContainer" 
                             title="Expand to page">
@@ -233,21 +219,13 @@ export const ContainerComponent = {
                             title="Share Page Link">
                         <span class="material-symbols-outlined">share</span>
                     </button>
-                    <!-- <button v-if="!cardStyle" 
-                            class="button-symbol white" 
-                            @click="closeContainer" 
-                            title="Close"><span class="material-symbols-outlined">close</span></button> -->
                 </div>
             </div>
             
             <div class="content">
                 <PageNoteComponent v-if="containerPath" :container-path="containerPath" />
                 <BannerNotifications :banners="containerBanners" :scope="containerPath" />
-                <div v-if="isLoading" class="loading-message" style="text-align:center; padding:2rem;">
-                    <img src="assets/loading.gif" alt="..."/>
-                    <p>Loading data...</p>
-                </div>
-                <slot v-else name="content">
+                <slot name="content">
                     <div class="content">
                         <div class="card red">
                             <p>nothing found at "{{ containerPath }}"</p>
