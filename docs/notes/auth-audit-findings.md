@@ -107,6 +107,52 @@ The account that owns the script runs every request. If it is suspended or delet
 
 ---
 
+## Dropbox (read only, through the service)
+
+The app reads the company Dropbox project folder through the sign-in service. The service holds one Dropbox connection, made once by an admin. Users never see a Dropbox screen, and no Dropbox token reaches a browser.
+
+**How it works:**
+
+- The app (`DropboxFiles.js`, faked by `FakeDropboxFiles` in `FakeGoogle.js`) asks the service with the user's Google access token, which the service checks with Google's tokeninfo. The token must be issued to the app's `CLIENT_ID` for a verified `ALLOWED_DOMAIN` account. A good token is remembered by its hash for up to ten minutes. These reads take no lock and never touch sessions, so they work with or without the service's sign-in.
+- **Actions:**
+  - `dropbox_list`: up to 25 folders, listed in parallel. A listing is shared by everyone asking within a minute.
+  - `dropbox_link`: a temporary link to one file, valid for four hours. The app fetches the file from the link into a local `blob:` URL, so a PDF opens in the browser's viewer even if Dropbox sends it as a download. Each open asks for a new link, and the service logs who opened which path, never the link.
+- **First use:** a show's details on the schedule page list its PDFs from `CLIENT/YEAR/SHOW/OUTPUT`, grouped by subfolder, each opening in a new tab. `DropboxUtils.findProjectFolders` matches the client and show folder names through the Clients and Shows index (`computeIdentifier`), so a client folder named by an abbreviation matches.
+- It needs `AUTH_BROKER_URL`. Without it, or before an admin connects Dropbox, the panel doesn't show.
+
+**What keeps it read only and inside the folder.** Each safeguard holds on its own:
+
+1. **The token has only the read scopes.** `connectDropbox` asks for `files.metadata.read` and `files.content.read` (plus `account_info.read`), and refuses and revokes any grant with more.
+2. **The Dropbox account has view-only access** to the company folder, and to nothing else.
+3. **Every call is pinned to the folder's namespace** (`Dropbox-API-Path-Root`). Dropbox resolves every path inside it. The service also refuses `..`, empty or `.` path parts and control characters before calling Dropbox.
+4. **The service offers only listings and links,** and only to company accounts.
+
+**What remains:**
+
+- A temporary link opens its one file for up to four hours, for anyone who has the link.
+- A stolen Google token can list and read the folder until it expires (an hour). The same token already reads the sheets.
+- The script's editors can read the Dropbox refresh token, as they can the Google ones.
+
+### Dropbox setup
+
+1. **A Dropbox account for the app**, for example `liveinventory@topshelfexhibits.com`. Share the company project folder with it as **Can view**, and nothing else. It needs a team seat, or the team's sharing policy must allow a view-only outside member.
+2. **A Dropbox app** at [dropbox.com/developers/apps](https://www.dropbox.com/developers/apps), created as the admin:
+   - **Scoped access, Full Dropbox.** The namespace pin and the account's view-only access keep it to the one folder.
+   - Under **Permissions**, tick only `files.metadata.read` and `files.content.read`, then **Submit**.
+   - Copy the **App key** and **App secret**. The secret goes only into Script Properties.
+3. **Script Properties** on the sign-in service:
+   - `DROPBOX_APP_KEY`, `DROPBOX_APP_SECRET`
+   - `DROPBOX_FOLDER` (optional): the shared folder's path as the app's account sees it, for example `/Top Shelf Projects`. Leave it empty when the account's whole Dropbox is the company folder.
+4. **Connect, in the script editor:**
+   - Paste the new `Code.gs` and **Deploy → Manage deployments → Edit → New version**.
+   - Run `dropboxApprovalUrl`. Open the logged URL signed in to Dropbox as the app's account, and approve.
+   - Put the code Dropbox shows into Script Property `DROPBOX_AUTH_CODE`, then run `connectDropbox`. It logs the account and folder, and uses up the code.
+5. Open a 2025 show's details on the schedule page. Its OUTPUT PDFs should be listed.
+
+**Turning it off:** run `disconnectDropbox`, which revokes the token at Dropbox.
+
+---
+
 ## Security
 
 **What protects what:**
@@ -140,6 +186,7 @@ The account that owns the script runs every request. If it is suspended or delet
 
 - **AUTH group** in `tests/tests.js` (12 tests, FakeGoogle): signed-out requests, sign-in, silent renewal, one shared renewal, 401 handling, an ended session (needs-user, no window, the poller pauses), renew, an unreachable service, `classifyError`, and sign-out.
 - **Not covered by the suite:** the real `GoogleSheetsAuth` service paths (renew, rotation, 401, unreachable, PKCE URL, popup and redirect finishing, other-tab pickup, sign-out) and `Code.gs`. The suite runs only against FakeGoogle, so both were checked on 2026-11-10 against stand-ins for `fetch`, `gapi` and the Apps Script services.
+- **DROPBOX group** (7 tests, `FakeDropboxFiles`): output PDFs grouped by subfolder, folder matching through the index, a missing OUTPUT or project folder, batched and cached listings, fresh links, no Dropbox connected, and no answer. `Code.gs`'s Dropbox actions were checked on 2026-11-13 against stand-ins for Google's tokeninfo and the Dropbox API. Covered: the token and account checks, the scope refusal, the namespace pin, path refusal, paging, the shared listing cache, access-token renewal and disconnecting. The real `DropboxFiles.js`, and whether Dropbox's temporary links allow the `blob:` fetch (it falls back to opening the link), wait for the deployed site.
 
 **After deploying with the service:**
 
@@ -149,6 +196,8 @@ The account that owns the script runs every request. If it is suspended or delet
 - [ ] Remove the app's access in Google Account → Security → Third-party access. The next renewal shows "Your sign-in has ended"; Sign in opens a popup, and unsaved edits are still there.
 - [ ] Block popups and click Sign in: the banner says the browser blocked the window.
 - [ ] Log out: the page reloads signed out, and a second tab shows the sign-in banner with its edits kept.
+- [ ] Dropbox: a show's details list its OUTPUT PDFs, and one opens in a new tab in the browser's PDF viewer, not as a download.
+- [ ] Dropbox: the service's log names who opened the file, with no link or token in it.
 
 ---
 

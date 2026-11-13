@@ -24,12 +24,26 @@
  * A session is "<id>.<secret>". Every renewal replaces the secret (the app stores the new one).
  * The previous secret still works for two minutes, for an answer lost on the way; after that it
  * means a copy is in someone else's hands, and the session ends.
+ *
+ * Dropbox (optional): read-only access to the company project folder, through one dedicated
+ * Dropbox account the script holds. The browser never gets a Dropbox token: it asks for a folder
+ * listing or a file's temporary link with the user's Google access token, which the script checks
+ * with Google. Setup: docs/notes/auth-audit-findings.md, "Dropbox setup".
+ * Script Properties you set:
+ *   DROPBOX_APP_KEY, DROPBOX_APP_SECRET  the Dropbox app's key and secret (scoped, read only)
+ *   DROPBOX_FOLDER   optional: the shared folder's path in the Dropbox account. Empty: the account's
+ *                    whole Dropbox (an account that sees only the company folder)
+ *   DROPBOX_AUTH_CODE  briefly: the code Dropbox shows when approving; connectDropbox uses it up
+ * Script Properties the script writes:
+ *   DROPBOX_REFRESH_TOKEN, DROPBOX_NAMESPACE_ID  (connectDropbox)
  */
 
 var GRACE_MS = 2 * 60 * 1000;
+var MAX_BODY = 16384;
 var TOKEN_URL = 'https://oauth2.googleapis.com/token';
 var REVOKE_URL = 'https://oauth2.googleapis.com/revoke';
 var USERINFO_URL = 'https://www.googleapis.com/oauth2/v3/userinfo';
+var TOKENINFO_URL = 'https://oauth2.googleapis.com/tokeninfo';
 
 // ── Web app ───────────────────────────────────────────────────────────────────
 
@@ -37,13 +51,13 @@ function doGet() {
   return ContentService.createTextOutput('TopShelf sign-in service is running.');
 }
 
-/** The app POSTs plain-text JSON: { action: 'exchange' | 'refresh' | 'signout', ... } */
+/** The app POSTs plain-text JSON: { action: 'exchange' | 'refresh' | 'signout' | 'dropbox_list' | 'dropbox_link', ... } */
 function doPost(e) {
   // Junk is turned away here, before any lock, Google call or property write, so a flood of it
   // can't hold up real renewals. The URL is public: only well-formed requests for a session that
-  // exists, or carrying a Google code, go further.
+  // exists, carrying a Google code, or (Dropbox) carrying a Google token go further.
   var contents = e && e.postData && e.postData.contents;
-  if (!contents || contents.length > 4096) return reply_({ ok: false, error: 'BAD_REQUEST' });
+  if (!contents || contents.length > MAX_BODY) return reply_({ ok: false, error: 'BAD_REQUEST' });
   var request;
   try {
     request = JSON.parse(contents);
@@ -63,6 +77,14 @@ function doPost(e) {
       return reply_(withLock_(function () {
         return request.action === 'refresh' ? refresh_(request) : signOut_(request);
       }));
+    }
+    if (request.action === 'dropbox_list' || request.action === 'dropbox_link') {
+      // Reads only, so no lock: they never touch sessions or properties
+      if (!isWellFormedDropbox_(request)) return reply_({ ok: false, error: 'BAD_REQUEST' });
+      var caller = verifyGoogleToken_(request.token);
+      if (caller.error) return reply_({ ok: false, error: caller.error });
+      if (!dropboxConnected_()) return reply_({ ok: false, error: 'DROPBOX_NOT_CONNECTED' });
+      return reply_(request.action === 'dropbox_list' ? dropboxList_(request) : dropboxLink_(request, caller.email));
     }
     return reply_({ ok: false, error: 'BAD_REQUEST' });
   } catch (err) {
@@ -192,7 +214,251 @@ function signOut_(request) {
   return { ok: true };
 }
 
+// ── Dropbox: read-only access to the company project folder ──────────────────
+//
+// What keeps it read-only and inside the folder, each on its own:
+//   1. The token has only the read scopes (connectDropbox refuses any other grant).
+//   2. The Dropbox account the script holds has view-only access to the folder (set up in Dropbox).
+//   3. Every call is pinned to the folder's namespace (Dropbox-API-Path-Root): Dropbox resolves
+//      every path inside it, so no path can reach outside.
+//   4. This script offers only listings and temporary links, to company accounts.
+
+var DROPBOX_API = 'https://api.dropboxapi.com/2/';
+var DROPBOX_TOKEN_URL = 'https://api.dropboxapi.com/oauth2/token';
+var DROPBOX_READ_SCOPES = ['account_info.read', 'files.metadata.read', 'files.content.read'];
+var DROPBOX_MAX_PATHS = 25;      // folders per listing request (fetched in parallel)
+var DROPBOX_MAX_ENTRIES = 2000;  // entries per folder; more comes back marked truncated
+var DROPBOX_LISTING_S = 60;      // a listing is shared by everyone asking within this time
+
+function isWellFormedDropbox_(request) {
+  if (typeof request.token !== 'string' || !/^[A-Za-z0-9._~+\/=-]{20,2048}$/.test(request.token)) return false;
+  if (request.action === 'dropbox_link') return isDropboxPath_(request.path) && request.path !== '';
+  return Array.isArray(request.paths) && request.paths.length > 0 && request.paths.length <= DROPBOX_MAX_PATHS &&
+    request.paths.every(isDropboxPath_) && (request.recursive === undefined || typeof request.recursive === 'boolean');
+}
+
+/** '' (the folder itself) or '/A/B': no empty, '.' or '..' parts, no control characters */
+function isDropboxPath_(path) {
+  if (path === '') return true;
+  if (typeof path !== 'string' || path.length > 1000 || path.charAt(0) !== '/' || /[\u0000-\u001f\\]/.test(path)) return false;
+  return path.slice(1).split('/').every(function (part) { return part !== '' && part !== '.' && part !== '..'; });
+}
+
+/**
+ * The caller's Google access token, checked with Google: issued to this app's client, for a
+ * verified company account. { email } or { error }. A good token is remembered (by its hash) for
+ * up to ten minutes, so a page's requests cost one check.
+ */
+function verifyGoogleToken_(token) {
+  var cache = CacheService.getScriptCache();
+  var key = 'gtok:' + hash_(token);
+  var known = cache.get(key);
+  if (known) return { email: known };
+  // POST keeps the token out of URLs
+  var response = UrlFetchApp.fetch(TOKENINFO_URL, { method: 'post', payload: { access_token: token }, muteHttpExceptions: true });
+  if (response.getResponseCode() >= 500) throw new Error('Google tokeninfo answered ' + response.getResponseCode());
+  if (response.getResponseCode() !== 200) return { error: 'TOKEN_REJECTED' };
+  var info = JSON.parse(response.getContentText());
+  var email = info.email ? String(info.email).toLowerCase() : '';
+  if (info.aud !== config_('CLIENT_ID')) return { error: 'TOKEN_REJECTED' };
+  if (String(info.email_verified) !== 'true' || !email || !isAllowed_(email)) return { error: 'ACCOUNT_NOT_ALLOWED' };
+  var seconds = Math.min(Number(info.expires_in) || 0, 600) - 30;
+  if (seconds > 0) cache.put(key, email, seconds);
+  return { email: email };
+}
+
+function dropboxConnected_() {
+  var props = PropertiesService.getScriptProperties();
+  return !!(props.getProperty('DROPBOX_REFRESH_TOKEN') && props.getProperty('DROPBOX_NAMESPACE_ID'));
+}
+
+/** Folder listings: { ok, folders: { path: { entries: [{ name, path, folder, size, modified }], missing?, truncated? } } } */
+function dropboxList_(request) {
+  var recursive = !!request.recursive;
+  var cache = CacheService.getScriptCache();
+  var cacheKey = function (path) { return 'dbx:' + (recursive ? 'r:' : 'l:') + hash_(path.toLowerCase()); };
+  var cached = cache.getAll(request.paths.map(cacheKey));
+  var folders = {};
+  var toList = [];
+  request.paths.forEach(function (path) {
+    var hit = cached[cacheKey(path)];
+    if (hit) folders[path] = JSON.parse(hit);
+    else if (toList.indexOf(path) === -1) toList.push(path);
+  });
+  if (toList.length) {
+    var listings = listDropboxFolders_(toList, recursive);
+    var keep = {};
+    toList.forEach(function (path, i) {
+      folders[path] = listings[i];
+      var text = JSON.stringify(listings[i]);
+      if (text.length < 90000) keep[cacheKey(path)] = text;   // CacheService holds 100 KB a value
+    });
+    cache.putAll(keep, DROPBOX_LISTING_S);
+  }
+  return { ok: true, folders: folders };
+}
+
+function listDropboxFolders_(paths, recursive) {
+  var results = paths.map(function () { return { entries: [] }; });
+  var calls = paths.map(function (path, i) {
+    return { i: i, endpoint: 'files/list_folder', body: { path: path, recursive: recursive, include_non_downloadable_files: false, limit: 2000 } };
+  });
+  while (calls.length) {
+    var answers = dropboxCalls_(calls);
+    var more = [];
+    answers.forEach(function (answer, k) {
+      var result = results[calls[k].i];
+      if (!answer.ok) {
+        if (/^path\/(not_found|not_folder)/.test(answer.summary)) { result.missing = true; return; }
+        throw new Error('Dropbox refused a listing: ' + answer.summary);
+      }
+      answer.body.entries.forEach(function (entry) {
+        if (result.entries.length >= DROPBOX_MAX_ENTRIES) { result.truncated = true; return; }
+        var out = { name: entry.name, path: entry.path_display || entry.path_lower, folder: entry['.tag'] === 'folder' };
+        if (!out.folder) { out.size = entry.size; out.modified = entry.server_modified; }
+        result.entries.push(out);
+      });
+      if (answer.body.has_more && !result.truncated) more.push({ i: calls[k].i, endpoint: 'files/list_folder/continue', body: { cursor: answer.body.cursor } });
+    });
+    calls = more;
+  }
+  return results;
+}
+
+/** A link that downloads one file, valid for four hours: { ok, link } */
+function dropboxLink_(request, email) {
+  var answer = dropboxCalls_([{ endpoint: 'files/get_temporary_link', body: { path: request.path } }])[0];
+  if (!answer.ok) return { ok: false, error: 'NOT_FOUND' };
+  console.log('Dropbox file opened by ' + email + ': ' + request.path);   // the link itself is never logged
+  return { ok: true, link: answer.body.link };
+}
+
+/**
+ * Dropbox API calls, in parallel, pinned to the folder's namespace. Each answer: { ok, body } or,
+ * for Dropbox's "can't do that" (409), { ok: false, summary }. Anything else throws (the app retries).
+ */
+function dropboxCalls_(calls) {
+  var send = function (accessToken) {
+    return UrlFetchApp.fetchAll(calls.map(function (call) {
+      return {
+        url: DROPBOX_API + call.endpoint,
+        method: 'post',
+        contentType: 'application/json',
+        payload: JSON.stringify(call.body),
+        headers: {
+          Authorization: 'Bearer ' + accessToken,
+          'Dropbox-API-Path-Root': JSON.stringify({ '.tag': 'namespace_id', namespace_id: config_('DROPBOX_NAMESPACE_ID') })
+        },
+        muteHttpExceptions: true
+      };
+    }));
+  };
+  var responses = send(dropboxAccessToken_());
+  if (responses.some(function (r) { return r.getResponseCode() === 401; })) {
+    // The remembered access token stopped working: one fresh one, once
+    CacheService.getScriptCache().remove('dropbox_access');
+    responses = send(dropboxAccessToken_());
+  }
+  return responses.map(function (response) {
+    var code = response.getResponseCode();
+    var body = {};
+    try { body = JSON.parse(response.getContentText() || '{}'); } catch (err) { body = {}; }
+    if (code === 200) return { ok: true, body: body };
+    if (code === 409) return { ok: false, summary: String(body.error_summary || '') };
+    throw new Error('Dropbox answered ' + code + (body.error_summary ? ': ' + body.error_summary : ''));
+  });
+}
+
+/** A Dropbox access token (four hours), remembered in the script cache until shortly before it ends */
+function dropboxAccessToken_() {
+  var cache = CacheService.getScriptCache();
+  var token = cache.get('dropbox_access');
+  if (token) return token;
+  var tokens = dropboxToken_({ grant_type: 'refresh_token', refresh_token: config_('DROPBOX_REFRESH_TOKEN') });
+  if (tokens.error) throw new Error('Dropbox refused the refresh: ' + tokens.error);
+  cache.put('dropbox_access', tokens.access_token, Math.max(60, Math.min(21600, (Number(tokens.expires_in) || 14400) - 300)));
+  return tokens.access_token;
+}
+
+/** POST to Dropbox's token endpoint with the app key and secret. 4xx: { error }. 5xx throws. */
+function dropboxToken_(params) {
+  var response = UrlFetchApp.fetch(DROPBOX_TOKEN_URL, {
+    method: 'post',
+    payload: params,
+    headers: { Authorization: 'Basic ' + Utilities.base64Encode(config_('DROPBOX_APP_KEY') + ':' + config_('DROPBOX_APP_SECRET')) },
+    muteHttpExceptions: true
+  });
+  if (response.getResponseCode() >= 500) throw new Error('Dropbox token endpoint answered ' + response.getResponseCode());
+  var body = {};
+  try { body = JSON.parse(response.getContentText() || '{}'); } catch (err) { body = { error: 'unreadable' }; }
+  if (response.getResponseCode() >= 400 && !body.error) body.error = 'http_' + response.getResponseCode();
+  return body;
+}
+
+function revokeDropbox_(accessToken) {
+  // Revoking an access token also ends the refresh token it came from
+  UrlFetchApp.fetch(DROPBOX_API + 'auth/token/revoke', { method: 'post', headers: { Authorization: 'Bearer ' + accessToken }, muteHttpExceptions: true });
+}
+
+/** The namespace every call is pinned to: DROPBOX_FOLDER's shared folder, or the account's root */
+function findDropboxNamespace_(accessToken) {
+  var call = function (endpoint, body, root) {
+    var headers = { Authorization: 'Bearer ' + accessToken };
+    if (root) headers['Dropbox-API-Path-Root'] = JSON.stringify({ '.tag': 'root', root: root });
+    var response = UrlFetchApp.fetch(DROPBOX_API + endpoint, { method: 'post', contentType: 'application/json', payload: JSON.stringify(body), headers: headers, muteHttpExceptions: true });
+    if (response.getResponseCode() !== 200) throw new Error('Dropbox ' + endpoint + ' answered ' + response.getResponseCode() + ': ' + response.getContentText().slice(0, 300));
+    return JSON.parse(response.getContentText());
+  };
+  var account = call('users/get_current_account', null);
+  var root = account.root_info.root_namespace_id;
+  var folder = (PropertiesService.getScriptProperties().getProperty('DROPBOX_FOLDER') || '').trim();
+  if (!folder) return { id: root, name: 'the whole Dropbox', account: account.email };
+  var meta = call('files/get_metadata', { path: folder }, root);
+  var sharing = meta.sharing_info || {};
+  var id = meta['.tag'] === 'folder' && (sharing.shared_folder_id || meta.shared_folder_id);
+  if (!id) throw new Error('DROPBOX_FOLDER "' + folder + '" is not a shared folder. Share it with this Dropbox account (can view), or leave DROPBOX_FOLDER empty to use the account\'s whole Dropbox.');
+  if (sharing.read_only === false) console.warn('This Dropbox account can edit "' + meta.path_display + '". Give it view-only access: the token can\'t write either way, but view-only is a second lock.');
+  return { id: id, name: meta.path_display, account: account.email };
+}
+
 // ── Admin: run these from the editor (Run ▸ function) ────────────────────────
+
+/** Dropbox step 1: logs the approval page. Open it signed in as the app's Dropbox account. */
+function dropboxApprovalUrl() {
+  console.log('https://www.dropbox.com/oauth2/authorize?response_type=code&token_access_type=offline' +
+    '&client_id=' + encodeURIComponent(config_('DROPBOX_APP_KEY')) +
+    '&scope=' + encodeURIComponent(DROPBOX_READ_SCOPES.join(' ')));
+}
+
+/** Dropbox step 2: put the code Dropbox showed into Script Property DROPBOX_AUTH_CODE, then run this */
+function connectDropbox() {
+  var props = PropertiesService.getScriptProperties();
+  var code = config_('DROPBOX_AUTH_CODE').trim();
+  props.deleteProperty('DROPBOX_AUTH_CODE');   // single-use either way
+  var tokens = dropboxToken_({ grant_type: 'authorization_code', code: code });
+  if (tokens.error) throw new Error('Dropbox refused the code (' + tokens.error + '). Run dropboxApprovalUrl for a new one.');
+  var extra = String(tokens.scope || '').split(' ').filter(function (s) { return s && DROPBOX_READ_SCOPES.indexOf(s) === -1; });
+  if (extra.length) {
+    revokeDropbox_(tokens.access_token);
+    throw new Error('Dropbox granted more than reading (' + extra.join(', ') + '). Turn those permissions off in the Dropbox app, then start again.');
+  }
+  var namespace = findDropboxNamespace_(tokens.access_token);
+  props.setProperties({ DROPBOX_REFRESH_TOKEN: tokens.refresh_token, DROPBOX_NAMESPACE_ID: String(namespace.id) });
+  CacheService.getScriptCache().remove('dropbox_access');
+  console.log('Dropbox connected, read only: ' + namespace.account + ', ' + namespace.name + '.');
+}
+
+/** Ends the script's Dropbox access (revokes it at Dropbox) */
+function disconnectDropbox() {
+  var props = PropertiesService.getScriptProperties();
+  if (props.getProperty('DROPBOX_REFRESH_TOKEN')) {
+    try { revokeDropbox_(dropboxAccessToken_()); } catch (err) { console.warn('Revoking at Dropbox failed: ' + err.message); }
+  }
+  props.deleteProperty('DROPBOX_REFRESH_TOKEN');
+  props.deleteProperty('DROPBOX_NAMESPACE_ID');
+  CacheService.getScriptCache().remove('dropbox_access');
+  console.log('Dropbox disconnected');
+}
 
 /** Logs every session: account, started, last used. No secrets. */
 function listSessions() {
