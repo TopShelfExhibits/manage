@@ -166,7 +166,7 @@ div#app-content.dashboard:not(:has(> div.empty-message)) {
     grid-template-rows: repeat(2, minmax(0, 1fr));
     align-items: stretch;
     justify-items: stretch;
-    gap: var(--padding-md);
+    gap: var(--padding-lg);
     width: auto;
     overflow: hidden;
     scrollbar-gutter: auto;
@@ -177,11 +177,10 @@ div#app-content.dashboard:not(:has(> div.empty-message)) {
         grid-template-rows: repeat(4, minmax(0, 1fr));
     }
 }
-/* The loading card fills the dashboard */
-div#app-content.dashboard > .container {
-    grid-column: 1 / -1;
-    grid-row: 1 / -1;
-    max-width: none;
+/* Room around the cards (the arrange bar's room below wins while arranging) */
+div#app-content.dashboard {
+    padding-inline: var(--padding-lg);
+    padding-bottom: var(--padding-lg);
 }
 
 div#app-content > div.empty-message {
@@ -251,7 +250,7 @@ div#app-content > div.empty-message {
 #app-content.dashboard > .dashboard-cell,
 #app-content.dashboard > .dashboard-slot,
 #app-content.dashboard > .dashboard-drop-preview,
-#app-content.dashboard > .dashboard-loading-card {
+#app-content.dashboard > .loading-card {
     position: relative;
     min-width: 0;
     min-height: 0;
@@ -262,23 +261,24 @@ div#app-content > div.empty-message {
     #app-content.dashboard > .dashboard-cell,
     #app-content.dashboard > .dashboard-slot,
     #app-content.dashboard > .dashboard-drop-preview,
-    #app-content.dashboard > .dashboard-loading-card {
+    #app-content.dashboard > .loading-card {
         grid-column: var(--row-start) / span var(--row-span);
         grid-row: var(--col-start) / span var(--col-span);
     }
 }
 
-/* Dashboard first load: a transparent blue card over every cell, with the loading bar's sweep.
-   They sit above the cards (which arrive underneath) and fade out (longfade) when it's ready. */
-#app-content.dashboard > .dashboard-loading-card {
+/* Dashboard first load (app.js loadingCards): a translucent card over each cell, with the loading
+   bar's sweep. They sit above the cards (which arrive underneath) and fade out (longfade) when
+   it's ready. */
+#app-content.dashboard > .loading-card {
     z-index: 2000;
     overflow: hidden;
     pointer-events: none;
     border-radius: var(--radius-lg);
-    background: color-mix(in srgb, var(--color-primary) 30%, transparent);
+    background: color-mix(in srgb, var(--background-color) 50%, transparent);
     box-shadow: 0 4px 8px var(--color-shadow);
 }
-#app-content.dashboard > .dashboard-loading-card::after {
+#app-content.dashboard > .loading-card::after {
     content: "";
     position: absolute;
     top: 0;

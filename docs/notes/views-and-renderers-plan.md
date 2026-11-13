@@ -699,7 +699,10 @@ There are two scopes, each with the same three tiers.
 - **Arrange mode** (the page menu or the settings menu on the dashboard; Escape or Done ends it) draws every card as a miniature with a drag handle, a remove button and a resize corner.
   - Dropping a card into free space moves it. Dropping it onto exactly one other card swaps the two (`planMove`). The other card goes to the moved card's old position at its own size, when it fits there.
   - Resizing keeps the top-left cell (`planResize`). Free cells offer the notices card and unplaced cards.
-- **First load.** While the app signs in and reads the user's cards (`dashboardLoading` in `app.js`), a transparent blue placeholder covers every cell, with the loading bar's sweep (`loading-bar-slide`). The placeholders sit above the grid. When it's ready they fade out (`longfade`) over the cards arriving underneath, so the dashboard fades in.
+- **Spacing.** The grid has `--padding-lg` around the cards and between them.
+- **First load.** Once signed in, while the dashboard reads the user's cards (`dashboardLoading` in `app.js`), a loading card covers every cell: the background colour at 50%, with the loading bar's sweep (`loading-bar-slide`). Signed out, nothing shows but the sign-in message.
+  - The loading cards fade in, sit above the grid, and fade out (`longfade`) over the cards arriving underneath, so the dashboard fades in.
+  - An address naming a page (`startingOnPage`) never draws the dashboard or its loading cards on the way there. Pages have no loading animation: they open at once, and their content shows its own loading.
 - **Cells on every page.** Every page container is wrapped in a `DashboardCell`, which is `display: contents` off the dashboard. A card expanded to its page therefore keeps its component and doesn't reload.
 - **Notices.** The `notices` route (not a main section, so it isn't in the primary navigation) draws the app banners as a page (`NoticesContent`).
   - While it's on the grid, the banners live in that card. Banners that scroll out of the card's view go to the corner tray, as on any page.

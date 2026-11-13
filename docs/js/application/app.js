@@ -15,6 +15,13 @@ import { isLocalhost } from '../data_management/utils/helpers.js';
 
 const { createApp } = Vue;
 
+// Whether the address the app opened with names a page rather than the dashboard (a short link
+// counts as a page until it resolves)
+function addressNamesPage() {
+    const page = window.location.hash.slice(1).split(/[?/]/)[0];
+    return !!page && page !== 'dashboard';
+}
+
 // Vue app with inline template
 const App = {
     components: {
@@ -43,7 +50,8 @@ const App = {
     data() {
         return {
             appLoading: true,
-            appLoadingMessage: 'Loading application...',
+            // Opened on a page's address: true until the app has signed in and opened that page
+            startingOnPage: addressNamesPage(),
             isMenuOpen: false,
             navigationItems: NavigationRegistry.primaryNavigation,
             currentPath: 'dashboard',
@@ -132,19 +140,21 @@ const App = {
         isDashboardInitialLoad() {
             return NavigationRegistry.dashboardRegistry.isInitialLoad;
         },
+        // (Opened on a page's address, the dashboard is never drawn on the way there)
         isDashboard() {
-            return this.currentPage === 'dashboard';
+            return this.currentPage === 'dashboard' && !this.startingOnPage;
         },
-        // The dashboard's first load: signing in, then reading the user's cards. Placeholder cards
-        // cover the grid meanwhile and fade out when it's ready.
+        // The dashboard's first load, once signed in: reading the user's cards
         dashboardLoading() {
-            if (!this.isDashboard) return false;
-            if (this.appLoading || this.isAuthLoading) return true;
-            return this.isAuthenticated && (!NavigationRegistry.dashboardRegistry.store || this.isDashboardInitialLoad);
+            if (!this.isDashboard || !this.isAuthenticated) return false;
+            return this.appLoading || !NavigationRegistry.dashboardRegistry.store || this.isDashboardInitialLoad;
         },
-        // One placeholder per grid cell while the dashboard loads (none afterwards, so they fade out)
-        loadingCells() {
-            return this.dashboardLoading ? DASHBOARD_CELLS : [];
+        // A loading card over each dashboard cell while it loads. They fade in, sit above the
+        // cards arriving underneath, and fade out when it's ready. (Pages open at once: their
+        // content shows its own loading.)
+        loadingCards() {
+            if (!this.dashboardLoading) return [];
+            return DASHBOARD_CELLS.map(cell => ({ key: `${cell.x}-${cell.y}`, style: gridAreaStyle(cell) }));
         },
         // Arrange mode: dashboard cards drawn as miniatures that can be moved and resized
         arranging() {
@@ -158,11 +168,11 @@ const App = {
         },
         // A dashboard without a notices card keeps the screen for cards: banners go to the corner tray
         collapseTopBanners() {
-            return this.isDashboard && (this.isAuthenticated || this.dashboardLoading);
+            return this.isDashboard && this.isAuthenticated;
         },
         // Reactive containers based on current page and authentication state
         containers() {
-            if (!authState.isAuthenticated) {
+            if (!authState.isAuthenticated || this.startingOnPage) {
                 return [];
             }
 
@@ -209,15 +219,7 @@ const App = {
             
             this.initializeGlobalStores();
             
-            // Apply current URL state if user is already authenticated
-            // Use resolvePathFromURL to expand short hashes since we're authenticated
-            const currentUrl = await NavigationRegistry.urlRouter.resolvePathFromURL();
-            if (currentUrl && currentUrl !== 'dashboard') {
-                await NavigationRegistry.handleNavigateToPath({ 
-                    targetPath: currentUrl, 
-                    isBrowserNavigation: true 
-                }, this);
-            }
+            await this.openStartingPath();
         }
         
         // Watch for auth state changes
@@ -246,14 +248,7 @@ const App = {
                 
                 this.initializeGlobalStores();
                 
-                // Apply current URL when user logs in — resolve short hashes now that we are authenticated
-                const currentUrl = await NavigationRegistry.urlRouter.resolvePathFromURL();
-                if (currentUrl && currentUrl !== 'dashboard') {
-                    await NavigationRegistry.handleNavigateToPath({ 
-                        targetPath: currentUrl, 
-                        isBrowserNavigation: true 
-                    }, this);
-                }
+                await this.openStartingPath();
             }
         });
 
@@ -264,6 +259,7 @@ const App = {
             this.$nextTick(() => measureDashboardGrid());
         });
         this.$watch(() => this.currentPath, () => {
+            this.startingOnPage = false;
             this.$nextTick(() => {
                 const appContent = document.querySelector('#app-content');
                 if (appContent) appContent.scrollTop = 0;
@@ -374,7 +370,22 @@ const App = {
         arrangeDashboard() {
             NavigationRegistry.dashboardRegistry.arranging = true;
         },
-        gridAreaStyle,
+
+        // Open the page the address names, once signed in (a short link resolves now). Until then
+        // an address naming a page draws nothing (startingOnPage), rather than the dashboard.
+        async openStartingPath() {
+            try {
+                const currentUrl = await NavigationRegistry.urlRouter.resolvePathFromURL();
+                if (currentUrl && currentUrl !== 'dashboard') {
+                    await NavigationRegistry.handleNavigateToPath({
+                        targetPath: currentUrl,
+                        isBrowserNavigation: true
+                    }, this);
+                }
+            } finally {
+                this.startingOnPage = false;
+            }
+        },
 
         handleGlobalKeyDown(event) {
             // Escape ends arrange mode (when no modal is open to take it)
@@ -418,21 +429,17 @@ const App = {
             <div id="app-content" :class="{ 'dashboard': isDashboard, 'arranging': arranging }">
                 <BannerNotifications v-if="showTopBanners" :banners="appBanners" scope="app" :collapsed="collapseTopBanners" />
 
-                <div v-if="!isAuthenticated && !dashboardLoading" class="empty-message">
+                <!-- Dashboard first load: loading cards over the grid's cells -->
+                <transition-group name="longfade" appear>
+                    <div v-for="card in loadingCards" :key="card.key" class="loading-card" :style="card.style"></div>
+                </transition-group>
+
+                <div v-if="!isAuthenticated" class="empty-message">
                     please log in to view content
                 </div>
 
-
-                <!-- App loading indicator (the dashboard shows placeholder cards instead, below) -->
-                <div v-else-if="appLoading && !isDashboard" class="container" style="display:flex; align-items: center; justify-content: center;">
-                    <div class="loading-message">
-                        <img src="assets/loading.gif" alt="..."/>
-                        <p>{{ appLoadingMessage }}</p>
-                    </div>
-                </div>
-
                 <!-- No containers message -->
-                <div v-else-if="containers.length === 0 && !arranging && !dashboardLoading" class="empty-message">
+                <div v-else-if="containers.length === 0 && !arranging && !loadingCards.length && !startingOnPage" class="empty-message">
                     <template v-if="isDashboard">
                         <p>add pages to the dashboard from their page menus</p>
                         <button class="white" @click="arrangeDashboard">Arrange Dashboard</button>
@@ -498,14 +505,6 @@ const App = {
                     </DashboardCell>
                     <DashboardArrangeLayer v-if="arranging" />
                 </template>
-
-                <!-- Dashboard first load: placeholder cards over the grid, fading out to reveal it -->
-                <transition-group name="longfade">
-                    <div v-for="cell in loadingCells"
-                         :key="cell.x + '-' + cell.y"
-                         class="dashboard-loading-card"
-                         :style="gridAreaStyle(cell)"></div>
-                </transition-group>
 
                 <footer>
                     <p>
