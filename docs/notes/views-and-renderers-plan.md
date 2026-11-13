@@ -697,6 +697,8 @@ There are two scopes, each with the same three tiers.
 - **Full.** "Add to Dashboard" is disabled when no 1 × 1 cell is free. A new card takes the first free cell.
 - **Miniatures.** When a cell is smaller than `MINI_MIN_CELL` (300 × 200px), cards stop being interactive. A miniature renders its page 360px wide per column, scaled down to fit, and `inert`. Clicking it opens the page.
 - **Arrange mode** (the page menu or the settings menu on the dashboard; Escape or Done ends it) draws every card as a miniature with a drag handle, a remove button and a resize corner.
+  - The card's header names it: its page-menu and expand buttons hide, and the remove button takes their place. A card without a header (a bare card, or any card while dashboard headers are hidden) shows its name on the handle instead. `DashboardCell` decides whether a card has a header and passes it to the container (slot prop `header`).
+  - Arrange mode is the only place a bare card can be removed; a card with a header can also be removed from its page menu.
   - Dropping a card into free space moves it. Dropping it onto exactly one other card swaps the two (`planMove`). The other card goes to the moved card's old position at its own size, when it fits there.
   - A card resizes from any edge or corner (zones along its edges, and a button in its corner). The dragged edges follow the pointer's cell and the opposite edges stay put (`resizeRect`); the new rect must fit (`planResize`). Free cells offer the notices card and unplaced cards.
 - **Spacing.** The grid has `--padding-lg` around the cards and between them.
@@ -706,6 +708,7 @@ There are two scopes, each with the same three tiers.
 - **Cells on every page.** Every page container is wrapped in a `DashboardCell`, which is `display: contents` off the dashboard. A card expanded to its page therefore keeps its component and doesn't reload.
 - **Notices.** The `notices` route (not a main section, so it isn't in the primary navigation) draws the app banners as a page (`NoticesContent`).
   - While it's on the grid, the banners live in that card. Banners that scroll out of the card's view go to the corner tray, as on any page.
+  - The card is bare (`bare` on `DashboardCell` and `ContainerComponent`, set in `app.js` for the notices card only): no header, background or padding, so its banners stand in a column straight on the grid. With no banners, "No notices" is drawn like the page's sign-in message: large, faint and centered in the cell. Expanded to its page it is an ordinary container.
   - Without it, the dashboard's top-of-page `BannerNotifications` is `collapsed`: it draws nothing and reports every banner to the corner tray.
   - Each `BannerNotifications` reports to the tray under its own key, so two instances of the `app` scope never overwrite each other. Dismissals of static banners are kept per scope in `notificationBus`, so they hold everywhere.
 - **Sticky headers in cards.** `useStickyHeader` checks on every update whether the sticky element is in a dashboard card. In one, it uses the card content's top as the edge and writes it to `--navbar-sticky-offset` on the card content.

@@ -183,7 +183,9 @@ div#app-content.dashboard {
     padding-bottom: var(--padding-lg);
 }
 
-div#app-content > div.empty-message {
+/* The page's messages (sign in, no cards), and the bare notices card's "No notices" in its cell */
+div#app-content > div.empty-message,
+.container.dashboard-card.bare > .content > .empty-message {
     color: var(--color-gray-bg-transparent);
     text-align: center;
     align-content: center;
@@ -314,6 +316,15 @@ div#app-content > div.empty-message {
 .container.dashboard-card > .content > * {
     flex-shrink: 0;
 }
+/* A bare card (the notices card): no box, its content (the banners) straight in its cell */
+.container.dashboard-card.bare {
+    background: none;
+    box-shadow: none;
+    border-radius: 0;
+}
+.container.dashboard-card.bare > .content {
+    padding: 0;
+}
 
 /* Miniature: the page rendered at --mini-width x --mini-height, scaled down to the cell */
 .dashboard-cell.miniature > .container.dashboard-card {
@@ -354,6 +365,10 @@ div#app-content > div.empty-message {
 }
 .dashboard-cell-remove {
     top: var(--padding-md);
+}
+/* The header names the card while arranging: its buttons give way to the remove button */
+.dashboard-cell.arranging .container-header .button-group {
+    visibility: hidden;
 }
 .dashboard-cell-resize {
     bottom: var(--padding-md);

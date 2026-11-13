@@ -1,4 +1,4 @@
-import { html, BreadcrumbComponent, NavigationRegistry, BannerNotifications, appSettings, SEVERITY } from '../../index.js';
+import { html, BreadcrumbComponent, NavigationRegistry, BannerNotifications, SEVERITY } from '../../index.js';
 import { PageNoteComponent } from './pageNoteComponent.js';
 import { URLRouter } from '../../utils/urlRouter.js';
 
@@ -34,6 +34,16 @@ export const ContainerComponent = {
         showExpandButton: {
             type: Boolean,
             default: false
+        },
+        // Off for a dashboard card without a header (DashboardCell decides)
+        showHeader: {
+            type: Boolean,
+            default: true
+        },
+        // No box of its own: the content sits straight in its place (the notices card)
+        bare: {
+            type: Boolean,
+            default: false
         }
     },
     inject: ['hamburgerMenuRegistry', '$modal', '$notify', 'appContext'],
@@ -59,15 +69,6 @@ export const ContainerComponent = {
         },
         containerBanners() {
             return this.$notify.getBanners(this.containerPath);
-        },
-        shouldShowHeader() {
-            // Dashboard cards respect the header visibility setting
-            // Non-dashboard containers always show headers
-            if (this.cardStyle) {
-                return appSettings.showDashboardHeaders;
-            }
-            // Always show headers on non-dashboard pages
-            return this.containerPath || this.title || this.cardStyle;
         }
     },
     methods: {
@@ -200,8 +201,8 @@ export const ContainerComponent = {
         }
     },
     template: html `
-        <div class="container" :class="{ 'dashboard-card': cardStyle }">
-            <div v-if="shouldShowHeader" class="container-header">
+        <div class="container" :class="{ 'dashboard-card': cardStyle, bare }">
+            <div v-if="showHeader" class="container-header">
                 <BreadcrumbComponent
                     :container-path="containerPath"
                     :title="title"

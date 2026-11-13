@@ -1,4 +1,4 @@
-import { html, NavigationRegistry } from '../../index.js';
+import { html, NavigationRegistry, appSettings } from '../../index.js';
 import { GRID, MINI_MIN_CELL, MINI_BASE_WIDTH, transpose, clampRect, planMove, planResize, resizeRect, freeCells, sameRect } from '../../utils/dashboardLayout.js';
 
 /**
@@ -133,14 +133,18 @@ export const dashboardDrag = Vue.reactive({
 
 /**
  * Wraps one page container. On the dashboard it is the card's grid cell: it places the card,
- * scales it as a miniature, and draws the expand overlay and the arrange handles.
- * Slot props: { miniature } (the page is inert while true).
+ * scales it as a miniature, and draws the expand overlay and the arrange handles. In arrange mode
+ * the card's header names it (its buttons give way to the remove button); a card without a header
+ * (a bare card, or any card while headers are hidden) has its name on its handle instead.
+ * Slot props: { miniature (the page is inert while true), header (draw the container header) }.
  */
 export const DashboardCell = {
     props: {
         // The placed card ({ path, x, y, w, h }), or null off the dashboard
         card: { type: Object, default: null },
-        title: { type: String, default: '' }
+        title: { type: String, default: '' },
+        // The card has no box or header of its own (the notices card)
+        bare: { type: Boolean, default: false }
     },
     emits: ['expand'],
     created() {
@@ -159,6 +163,10 @@ export const DashboardCell = {
         },
         dragging() {
             return this.onDashboard && dashboardDrag.path === this.card.path;
+        },
+        // Pages always have a header; cards unless bare or headers are hidden
+        header() {
+            return !this.onDashboard || (!this.bare && appSettings.showDashboardHeaders);
         },
         cellStyle() {
             if (!this.onDashboard) return null;
@@ -227,7 +235,7 @@ export const DashboardCell = {
     },
     template: html`
         <div class="dashboard-cell" :class="{ miniature, arranging, dragging }" :style="cellStyle">
-            <slot :miniature="miniature"></slot>
+            <slot :miniature="miniature" :header="header"></slot>
             <div v-if="miniature && !arranging"
                  class="container-expand-overlay"
                  role="button"
@@ -245,7 +253,7 @@ export const DashboardCell = {
                      @pointermove="onDrag"
                      @pointerup="endDrag(true)"
                      @pointercancel="endDrag(false)">
-                    <span>{{ title }}</span>
+                    <span v-if="!header">{{ title }}</span>
                 </div>
                 <button class="button-symbol red dashboard-cell-remove"
                         :title="'Remove ' + title + ' from the dashboard'"
