@@ -1,7 +1,7 @@
 import { html } from '../../utils/template-helpers.js';
 
 // A bar splits only with more children than this
-const MIN_SPLIT_ITEMS = 3;
+const MIN_SPLIT_ITEMS = 2;
 
 /**
  * Where to start a bar's second line: the split that makes the wider of the two lines narrowest
@@ -33,7 +33,7 @@ export function balancedSplit(widths) {
  * <div class="button-bar"> where a bar can get long (CLAUDE.md "Styling"); children go in the
  * slot as before.
  *
- * With more than three children, when they don't fit on one line the bar moves the later ones
+ * With three or more children, when they don't fit on one line the bar moves the later ones
  * underneath (balancedSplit) and grows in height; when there is room again it goes back to one
  * line. A split bar is always two lines: each line shares its width in proportion to the
  * children's measured widths, shrinking rather than wrapping again. It measures with observers and
