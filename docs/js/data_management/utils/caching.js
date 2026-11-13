@@ -386,8 +386,10 @@ class CacheManager {
             return;
         }
 
+        const dependents = CacheManager._dependentsOf(key);
+
         // A cutoff key is verified first: its dependents are invalidated only if its value changed
-        if (CacheManager._deferCascade(key)) {
+        if (CacheManager._deferCascade(key, dependents.length > 0)) {
             return;
         }
 
@@ -395,11 +397,8 @@ class CacheManager {
         invalidationStack.add(key);
 
         // Remove the cache entry and its fill-time record
-        CacheManager.cache.delete(key);
-        CacheManager.filledAt.delete(key);
-        CacheManager.valueHashes.delete(key);
+        CacheManager._dropValue(key);
         CacheManager._cutoffCalls.delete(key);
-        CacheManager.invalidatedAt.set(key, ++CacheManager._generation);
 
         // Also clean up any pending calls for this key DO NOT CLEAR PENDING CALLS HERE
         //if (CacheManager.pendingCalls.has(key)) {
@@ -407,7 +406,7 @@ class CacheManager {
         //}
 
         // Recursively invalidate dependents with the same invalidation stack
-        for (const depKey of CacheManager._dependentsOf(key)) {
+        for (const depKey of dependents) {
             CacheManager.invalidate(depKey, invalidationStack);
         }
 
@@ -422,6 +421,14 @@ class CacheManager {
 
         // Remove from invalidation stack when done
         invalidationStack.delete(key);
+    }
+
+    /** Drop a key's value, fill time and hash, and mark it changed (generations). */
+    static _dropValue(key) {
+        CacheManager.cache.delete(key);
+        CacheManager.filledAt.delete(key);
+        CacheManager.valueHashes.delete(key);
+        CacheManager.invalidatedAt.set(key, ++CacheManager._generation);
     }
 
     /** The keys whose recorded dependencies include `key`. */
@@ -453,17 +460,16 @@ class CacheManager {
      * Applies to a cutoff key with a value to compare and something computed from it; any other key
      * cascades at once. The key's value and its own dependency records go, as in invalidate (the
      * recomputation records them again); its dependents keep theirs and their values.
+     * @param {string} key
+     * @param {boolean} hasDependents - Whether anything was computed from the key
      * @returns {boolean} True when the cascade waits for the verification
      */
-    static _deferCascade(key) {
+    static _deferCascade(key, hasDependents) {
         if (!EARLY_CUTOFF || !CacheManager._cutoffCalls.has(key)) return false;
         const running = CacheManager._verifying.get(key);
-        if (!running && (!CacheManager.valueHashes.has(key) || CacheManager._dependentsOf(key).length === 0)) return false;
+        if (!running && !(hasDependents && CacheManager.valueHashes.has(key))) return false;
         const oldHash = CacheManager.valueHashes.get(key);
-        CacheManager.cache.delete(key);
-        CacheManager.filledAt.delete(key);
-        CacheManager.valueHashes.delete(key);
-        CacheManager.invalidatedAt.set(key, ++CacheManager._generation);
+        CacheManager._dropValue(key);
         CacheManager.dependencies.delete(key);
         if (running) {
             // Changed again while being verified: verify again once the running computation ends
@@ -492,8 +498,8 @@ class CacheManager {
             } while (state.again);
             // No hash: the result wasn't kept, so it can't be trusted
             changed = !CacheManager.valueHashes.has(key) || CacheManager.valueHashes.get(key) !== state.oldHash;
-        } catch (err) {
-            changed = true;
+        } catch {
+            // Not verifiable: the held cascade runs
         } finally {
             CacheManager._verifying.delete(key);
         }

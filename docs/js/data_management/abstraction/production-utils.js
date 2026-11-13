@@ -83,38 +83,55 @@ class productionUtils_uncached {
      */
     static async getScheduleDateMap(deps, year) {
         const rows = await deps.call(ProductionUtils.getScheduleDateRows);
-        return _buildScheduleMap(deps, year, rows);
+        const byId = {};
+        const candidates = [];
+        for (const row of rows) {
+            if (!row.Show || !row.Client || !row.Year) continue;
+            if (year && String(parseInt(row.Year, 10)) !== year) continue;
+            const computed = await deps.call(ProductionUtils.computeIdentifier, row.Show, row.Client, row.Year);
+            if (computed && !Object.hasOwn(byId, computed)) {
+                byId[computed] = row;
+                candidates.push(computed);
+            }
+        }
+        return { byId, candidates };
     }
 
     /**
-     * The date and identity columns of the show an identifier names (a canonical schedule id or a
-     * pack list tab title, as getShowDetails takes), with the dates given full years; null when no
-     * row matches. The date logic reads shows through this. Early cutoff: an edit to another show
-     * leaves this value equal.
+     * Direction 2 (pack list → schedule): the date and identity columns of the show an identifier
+     * names, a canonical schedule id or a pack list tab title, with the dates given full years; null
+     * when no row matches. NameOverrides link a title to a schedule id; otherwise the title's year
+     * narrows the schedule, so a title never matches another year's show, and the title is matched
+     * against that year's identifiers. The date logic reads shows through this. Early cutoff: an edit
+     * to another show leaves this value equal.
      * @param {Object} deps
      * @param {string} identifier
      * @returns {Promise<Object|null>}
      */
     static async getShowDates(deps, identifier) {
         if (!identifier) return null;
-        const rows = await _findScheduleRows(deps, identifier, { narrow: true });
-        return rows[0] ? _withFullYearDates(rows[0]) : null;
+        const row = await _matchScheduleDateRow(deps, identifier);
+        return row ? _withFullYearDates(row) : null;
     }
 
     /**
-     * Canonical identifiers of the shows that pass the date filters, once each, in schedule order
-     * (all shows without filters). Reads only the date and identity columns. Early cutoff: a change
-     * that doesn't add or remove a show leaves this value equal.
+     * Canonical identifiers of the shows that pass the filters, once each, in schedule order (all
+     * shows without filters). Date filters on the date columns read only the date rows; text
+     * filters, and date filters on other columns, read the full rows (getOverlappingShows). Early
+     * cutoff: a change that doesn't add or remove a show leaves this value equal.
      * @param {Object} deps
      * @param {Object|null} parameters - { dateFilters }, as getOverlappingShows takes
+     * @param {Object|null} [searchParams] - Text filters, as getOverlappingShows takes
      * @returns {Promise<string[]>}
      */
-    static async getOverlappingShowIds(deps, parameters = null) {
-        const rows = await deps.call(ProductionUtils.getScheduleDateRows);
+    static async getOverlappingShowIds(deps, parameters = null, searchParams = null) {
         const dateFilters = parameters?.dateFilters || [];
-        const shows = dateFilters.length
-            ? await _filterRowsByDates(deps, rows, dateFilters, (identifier) => deps.call(ProductionUtils.getShowDates, identifier))
-            : rows;
+        const narrow = !(searchParams && Object.keys(searchParams).length)
+            && dateFilters.every(filter => filter.column === 'Return' || filter.column === 'Date' || Object.hasOwn(SCHEDULE_DATE_MAPPING, filter.column));
+        const shows = narrow
+            ? await _filterRowsByDates(deps, await deps.call(ProductionUtils.getScheduleDateRows), dateFilters,
+                (identifier) => deps.call(ProductionUtils.getShowDates, identifier))
+            : await deps.call(ProductionUtils.getOverlappingShows, parameters, searchParams);
         const ids = new Set();
         for (const row of shows) {
             const identifier = await deps.call(ProductionUtils.getCanonicalIdentifierForScheduleRow, row);
@@ -152,7 +169,7 @@ class productionUtils_uncached {
         }
 
         const filtered = await _filterRowsByDates(deps, data, parameters.dateFilters,
-            async (identifier) => (await deps.call(ProductionUtils.findScheduleRowsForPacklist, identifier, data))[0] ?? null);
+            (identifier) => deps.call(ProductionUtils.getShowDetails, identifier));
 
         //console.log(`[production-utils] Filtered ${data.length} shows to ${filtered.length} matching date filters`);
         
@@ -630,31 +647,14 @@ class productionUtils_uncached {
     }
 
     /**
-     * Direction 2: Packlist → Schedule.
-     * Find schedule row(s) matching a packlist tab title.
-     * Parses the year from the title to year-filter the schedule before matching,
-     * preventing cross-year mismatches. Strips suffix words (right of year) one at a
-     * time to handle suffix-variant tabs (e.g. "NGAUS MEETING ROOM" → "NGAUS").
-     * Always stops stripping before the year token would be removed.
-     * @param {Object} deps
-     * @param {string} packlistTitle - Packlist tab title (may include suffix)
-     * @param {Array} [scheduleData] - Pre-loaded schedule rows (optional; loaded if omitted)
-     * @returns {Promise<Array>} Matching schedule rows; first element is the canonical match
-     */
-    static async findScheduleRowsForPacklist(deps, packlistTitle, scheduleData = null) {
-        return _findScheduleRows(deps, packlistTitle, { scheduleData });
-    }
-
-    /**
-     * Check whether a packlist tab would match a schedule row if suffix words were stripped.
-     * Returns the matched row and its computed identifier without auto-linking.
-     * Called by diagnosePacklistAttachment to surface a suggestion for the user to confirm.
+     * The schedule identifier a pack list tab would match if suffix words (right of the year) were
+     * stripped one at a time, e.g. "NGAUS MEETING ROOM" → "NGAUS"; null when none would. Stripping
+     * always stops before the year. diagnosePacklistAttachment offers it for the user to confirm.
      * @param {Object} deps
      * @param {string} packlistTitle
-     * @param {Array} [scheduleData]
-     * @returns {Promise<{row:Object, computedIdentifier:string}|null>}
+     * @returns {Promise<string|null>}
      */
-    static async findSuffixVariantSuggestion(deps, packlistTitle, scheduleData = null) {
+    static async findSuffixVariantSuggestion(deps, packlistTitle) {
         if (!packlistTitle) return null;
 
         const words = packlistTitle.trim().split(/\s+/);
@@ -662,37 +662,36 @@ class productionUtils_uncached {
         const minWords = yearIndex >= 0 ? yearIndex + 2 : 1;
         if (words.length <= minWords) return null;
 
-        // Matching reads only the identity columns, so the date rows serve unless rows are given
         const year = _parseIdentifierParts(packlistTitle)?.year ?? null;
-        const { byId, candidates } = scheduleData
-            ? await _buildScheduleMap(deps, year, scheduleData)
-            : await deps.call(ProductionUtils.getScheduleDateMap, year);
+        const { candidates } = await deps.call(ProductionUtils.getScheduleDateMap, year);
         if (candidates.length === 0) return null;
 
         for (let count = words.length - 1; count >= minWords; count--) {
             const candidate = words.slice(0, count).join(' ');
             const match = await deps.call(ProductionUtils.findBestProjectIdentifierMatch, candidate, candidates);
-            if (match) {
-                const row = byId[match];
-                return row ? { row, computedIdentifier: match } : null;
-            }
+            if (match) return match;
         }
 
         return null;
     }
 
     /**
-     * Get show details by project identifier: the full schedule row, with the dates given full
-     * years. For the pages; the date logic reads getShowDates, which only date and identity edits
-     * change.
+     * Get show details by project identifier (as getShowDates matches it): the full schedule row,
+     * with the dates given full years. For the pages; the date logic reads getShowDates, which only
+     * date and identity edits change.
      * @param {Object} deps
      * @param {string} identifier - Packlist identifier (may include suffix variant)
      * @returns {Promise<Object|null>} Schedule row or null
      */
     static async getShowDetails(deps, identifier) {
-        if (!identifier) return null;
-        const rows = await deps.call(ProductionUtils.findScheduleRowsForPacklist, identifier);
-        return rows[0] ? _withFullYearDates(rows[0]) : null;
+        const show = await deps.call(ProductionUtils.getShowDates, identifier);
+        if (!show) return null;
+        // The first full row with the matched row's Show, Client and Year is that row: both reads
+        // keep every named row in sheet order, and dates don't change those three columns
+        const mapping = await deps.call(ProductionUtils.GetMappingFromProductionSchedule);
+        const rows = await deps.call(Database.getData, 'PROD_SCHED', SCHEDULE_TAB, mapping);
+        const row = rows.find(r => r.Show === show.Show && r.Client === show.Client && r.Year === show.Year);
+        return row ? _withFullYearDates(row) : null;
     }
 
     /**
@@ -726,7 +725,7 @@ class productionUtils_uncached {
             return {
                 attached: false,
                 hasIdentifierParts: true,
-                suggestedMatch: suggestion.computedIdentifier
+                suggestedMatch: suggestion
             };
         }
 
@@ -869,11 +868,6 @@ class productionUtils_uncached {
         const overrides = await deps.call(Database.getData, 'CACHE', 'ScheduleOverrides',
             { schedule: 'Schedule', override: 'Override' });
         return _resolveShipDate(deps, projectIdentifier, overrides, new Set());
-    }
-
-    static async getProjectShipDateFromRow(deps, row) {
-        if (!row) return null;
-        return toISODateString(_calculateShipDate(row));
     }
 
     static async getProjectReturnDateFromRow(deps, row) {
@@ -1368,6 +1362,7 @@ function _rowDate(row, column, filterType) {
  * @returns {Promise<Array<Object>>} The rows that pass every filter
  */
 async function _filterRowsByDates(deps, data, dateFilters, findRow) {
+    if (!dateFilters.length) return data;
     const resolveFilterValue = async (filter) => {
         const value = filter.value;
 
@@ -1722,64 +1717,29 @@ function _resolveIndexToken(value, names, abbrs, options = {}) {
     return _resolveRefPart(raw, safeNames, safeAbbrs, fuzzyThreshold);
 }
 
-// The rows of one year (all rows when year is null) by computed identifier, the first row winning,
-// with the identifiers in schedule order.
-async function _buildScheduleMap(deps, year, scheduleData) {
-    const filtered = year
-        ? scheduleData.filter(row => String(parseInt(row.Year, 10)) === year)
-        : scheduleData;
-    const byId = {};
-    const candidates = [];
-    for (const row of filtered) {
-        if (!row.Show || !row.Client || !row.Year) continue;
-        const computed = await deps.call(ProductionUtils.computeIdentifier, row.Show, row.Client, row.Year);
-        if (computed && !Object.hasOwn(byId, computed)) {
-            byId[computed] = row;
-            candidates.push(computed);
-        }
-    }
-    return { byId, candidates };
-}
-
-/**
- * Direction 2 (pack list title → schedule rows), as findScheduleRowsForPacklist documents it.
- * NameOverrides link a title to a schedule id; otherwise the title's year narrows the schedule and
- * the title is matched against that year's identifiers.
- * @param {Object} deps
- * @param {string} title - Pack list tab title or schedule identifier
- * @param {{scheduleData?: Array<Object>|null, narrow?: boolean}} [options] - scheduleData: the rows
- *        to search; otherwise narrow: the date rows (getScheduleDateRows), else the full rows
- * @returns {Promise<Array<Object>>} The matching row, or none
- */
-async function _findScheduleRows(deps, title, { scheduleData = null, narrow = false } = {}) {
-    if (!title) return [];
-    const loadRows = async () => scheduleData
-        || (narrow
-            ? await deps.call(ProductionUtils.getScheduleDateRows)
-            : await deps.call(Database.getData, 'PROD_SCHED', SCHEDULE_TAB, await deps.call(ProductionUtils.GetMappingFromProductionSchedule)));
-
+// The date row a pack list title or schedule identifier names, or null (getShowDates documents the
+// matching).
+async function _matchScheduleDateRow(deps, title) {
     const overrides = await deps.call(ProductionUtils.getNameOverrides);
     const override = _findOverride(overrides, normalizeText(title).toLowerCase());
     if (override) {
-        if (_isIgnoreOverride(override)) return [];
+        if (_isIgnoreOverride(override)) return null;
         const schedNorm = normalizeText(override.schedule).toLowerCase();
-        for (const row of await loadRows()) {
+        for (const row of await deps.call(ProductionUtils.getScheduleDateRows)) {
             if (!row.Show || !row.Client || !row.Year) continue;
             const raw = normalizeText([row.Client, row.Year, row.Show].join(' ')).toLowerCase();
-            if (raw === schedNorm) return [row];
+            if (raw === schedNorm) return row;
             const computed = await deps.call(ProductionUtils.computeIdentifier, row.Show, row.Client, row.Year);
-            if (computed && normalizeText(computed).toLowerCase() === schedNorm) return [row];
+            if (computed && normalizeText(computed).toLowerCase() === schedNorm) return row;
         }
-        return [];
+        return null;
     }
 
     const year = _parseIdentifierParts(title)?.year ?? null;
-    const { byId, candidates } = narrow && !scheduleData
-        ? await deps.call(ProductionUtils.getScheduleDateMap, year)
-        : await _buildScheduleMap(deps, year, await loadRows());
-    if (candidates.length === 0) return [];
+    const { byId, candidates } = await deps.call(ProductionUtils.getScheduleDateMap, year);
+    if (candidates.length === 0) return null;
     const match = await deps.call(ProductionUtils.findBestProjectIdentifierMatch, title, candidates);
-    return match && byId[match] ? [byId[match]] : [];
+    return match ? byId[match] ?? null : null;
 }
 
 // A copy of a schedule row with its Ship, S. Start, S. End and Recieved dates given full years

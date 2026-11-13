@@ -99,17 +99,24 @@ every edit. Narrowing the inputs is what avoids the recompute; cutoff is what st
   (`SCHEDULE_DATE_MAPPING`). A task-column edit stops here.
 - `getScheduleDateMap(year)`: a year's date rows by computed identifier. Not a cutoff method: it is
   the lookup table that makes each `getShowDates` recompute a lookup.
-- `getShowDates(id)`: one show's date row, with full-year dates (as `getShowDetails`). A date edit to
-  another show stops here.
-- `getOverlappingShowIds(filters)`: the canonical ids passing date filters, once each. A date edit
-  that doesn't move a show in or out of a window stops here.
+- `getShowDates(id)`: one show's date row, with full-year dates. It is the one Direction 2 match
+  (pack list title or schedule id → schedule row; it replaced `findScheduleRowsForPacklist`). A date
+  edit to another show stops here.
+- `getOverlappingShowIds(filters, searchParams)`: the canonical ids passing the filters, once each.
+  Date filters on the date columns read the date rows; text filters, and date filters on other
+  columns, read the full rows through `getOverlappingShows`. A change that doesn't move a show in or
+  out of a window stops here.
 - `getProjectShipDate`, `getProjectReturnDate`, `getTransshipSourceForShow` and
   `getTransshipDestinationsForShow` are cutoff methods too, now built on `getShowDates`.
 - The item timeline, `getOverlappingShowItems`, chain item extraction, `getMultipleShowsItemsSummary`
-  (date filters only; text filters may name any column) and `resolvePacklistIdentifier` use these.
-  `getOverlappingShows` and `getShowDetails` keep returning full rows for the pages. Both share
-  their date filtering and full-year dates with the narrow versions (`_filterRowsByDates`,
-  `_withFullYearDates`). `deduplicateScheduleByShow` is gone; the id list is deduplicated.
+  and `resolvePacklistIdentifier` use these. `getOverlappingShows` and `getShowDetails` keep
+  returning full rows for the pages: `getShowDetails` matches through `getShowDates` and returns that
+  row's full columns, and both share their date filtering and full-year dates with the narrow
+  versions (`_filterRowsByDates`, `_withFullYearDates`). `deduplicateScheduleByShow` is gone; the id
+  list is deduplicated.
+- A date filter whose value is a show (getOverlappingShows) finds that show through `getShowDetails`,
+  whatever the text filters. It used to search only the rows the text filters kept, so a text
+  filter that dropped the show emptied the result; and its cache key held the whole schedule.
 - `getMultipleShowsItemsSummary` now lists each show once. Before, a show with two booth rows was
   listed twice and its items were added to the total twice.
 
@@ -123,9 +130,12 @@ linked straight to the raw tab read, so the first hand edit after a restore stil
 after that recompute they depend on the cutoff methods.
 
 **Tests:** the EARLY CUTOFF group (a task-column edit announces no analysis; a date edit announces
-only the changed show's analysis; a new show reruns its window), and the CACHE INVALIDATION transship
-test (an unrelated link announces nothing; a real one announces the source and timeline). With
-`EARLY_CUTOFF = false` three of those tests fail; with it on, the suite passes (388 tests).
+only the changed show's analysis; a new show reruns its window; a date filter on another column
+reads the full rows; getShowDetails gives the full row of getShowDates' match). In CACHE
+INVALIDATION, the transship test (an unrelated link announces nothing; a real one announces the
+source and timeline) and the name override and abbreviation tests (an unrelated entry leaves
+getShowDetails unannounced and unchanged). With `EARLY_CUTOFF = false` the transship test and the
+first two EARLY CUTOFF tests fail; with it on, the suite passes (390 tests).
 
 ## Phase 2 — an immutability boundary (still needed)
 

@@ -1104,14 +1104,8 @@ class Requests_uncached {
         }
         
         // New signature: (deps, filterParams, searchParams, ctgFilter)
-        // The canonical ids of the shows matching the search criteria, once each. Date filters alone
-        // read only the schedule's date and identity columns; text filters may name any column.
-        const hasTextFilters = !!searchParams && typeof searchParams === 'object' && Object.keys(searchParams).length > 0;
-        const showIds = hasTextFilters
-            ? [...new Set(await mapWithConcurrency(
-                await deps.call(ProductionUtils.getOverlappingShows, filter, searchParams),
-                showRow => deps.call(ProductionUtils.getCanonicalIdentifierForScheduleRow, showRow), 8))].filter(Boolean)
-            : await deps.call(ProductionUtils.getOverlappingShowIds, filter);
+        // The canonical ids of the shows matching the search criteria, once each
+        const showIds = await deps.call(ProductionUtils.getOverlappingShowIds, filter, searchParams);
 
         const resolvedShows = (await mapWithConcurrency(
             showIds,

@@ -720,7 +720,7 @@ test('DEDUPLICATION', 'deduplicated count is less than raw schedule count', asyn
 });
 
 // ── Group 17: Cross-Year Matching ─────────────────────────────────────────────
-// findScheduleRowsForPacklist parses the year out of a packlist tab title and
+// getShowDates parses the year out of a packlist tab title and
 // year-filters the schedule before matching. This prevents AUSTAL 2026 SNA from
 // resolving to AUSTAL 2023 WORKBOAT despite both having similar client names.
 // FakeGoogle has both shows; the 2026 match uses the 'SNA' abbreviation for
@@ -1803,46 +1803,52 @@ test('CACHE INVALIDATION', 'a transship link change announces the sources and ti
     }
 });
 
-test('CACHE INVALIDATION', 'addNameOverride fires getPacklistScheduleAttachment and getShowDetails invalidation', async () => {
+test('CACHE INVALIDATION', 'addNameOverride fires getPacklistScheduleAttachment; an unrelated one leaves getShowDetails', async () => {
     // warm: getNameOverrides must return non-empty so database:getData result gets cached
     // (CacheManager skips caching empty arrays, which breaks the invalidation cascade).
     // The sentinel row in FakeGoogle.NameOverrides ensures this.
     await Requests.getNameOverrides();
     await Requests.getPacklistScheduleAttachment('CHAINCO 2026 SPRING EXPO');
-    await Requests.getShowDetails('CHAINCO 2026 SPRING EXPO');
+    const before = await Requests.getShowDetails('CHAINCO 2026 SPRING EXPO');
     const fired = new Set();
     const handler = (e) => fired.add(e.methodName);
     CacheInvalidationBus.on('api', handler);
     try {
         // fake identifiers — no real schedule/packlist row to match, safe to add
         await Requests.addNameOverride('FAKE SCHED 9999', 'FAKE PACK 9999');
+        await cutoffSettled();
     } finally {
         CacheInvalidationBus.off('api', handler);
     }
-    if (!fired.has('getPacklistScheduleAttachment'))
-        throw new Error(`addNameOverride did not invalidate getPacklistScheduleAttachment; fired: ${[...fired].join(', ')}`);
-    if (!fired.has('getShowDetails'))
-        throw new Error(`addNameOverride did not invalidate getShowDetails; fired: ${[...fired].join(', ')}`);
+    // getShowDetails reads the show through getShowDates, an early cutoff the fake override doesn't change
+    assertEqual(
+        [fired.has('getPacklistScheduleAttachment'), fired.has('getShowDetails'), await Requests.getShowDetails('CHAINCO 2026 SPRING EXPO')],
+        [true, false, before],
+        'the attachment reruns; the show details are unchanged and not announced'
+    );
 });
 
-test('CACHE INVALIDATION', 'appendScheduleReferenceAbbreviation fires computeIdentifier and getShowDetails invalidation', async () => {
+test('CACHE INVALIDATION', 'appendScheduleReferenceAbbreviation fires computeIdentifier; an unrelated one leaves getShowDetails', async () => {
     // warm: computeIdentifier calls computeIdentifierReferenceData which calls
     // deps.call(Database.getData, 'CACHE', 'Shows', ...) — registers Shows as dependency
     await Requests.computeIdentifier('Spring Expo', 'ChainCo', '2026');
-    await Requests.getShowDetails('CHAINCO 2026 SPRING EXPO');
+    const before = await Requests.getShowDetails('CHAINCO 2026 SPRING EXPO');
     const fired = new Set();
     const handler = (e) => fired.add(e.methodName);
     CacheInvalidationBus.on('api', handler);
     try {
         // isolated fake entry — distinct name/abbr ensures no collision with existing index entries
         await Requests.appendScheduleReferenceAbbreviation('show', 'FAKE SHOW FOR CACHE TEST 2099', 'FS2099');
+        await cutoffSettled();
     } finally {
         CacheInvalidationBus.off('api', handler);
     }
-    if (!fired.has('computeIdentifier'))
-        throw new Error(`appendScheduleReferenceAbbreviation did not invalidate computeIdentifier; fired: ${[...fired].join(', ')}`);
-    if (!fired.has('getShowDetails'))
-        throw new Error(`appendScheduleReferenceAbbreviation did not invalidate getShowDetails; fired: ${[...fired].join(', ')}`);
+    // getShowDetails reads the show through getShowDates, an early cutoff the new entry doesn't change
+    assertEqual(
+        [fired.has('computeIdentifier'), fired.has('getShowDetails'), await Requests.getShowDetails('CHAINCO 2026 SPRING EXPO')],
+        [true, false, before],
+        'identifiers rerun; the show details are unchanged and not announced'
+    );
 });
 
 test('CACHE INVALIDATION', 'remote Caching-tab timestamp for getTabs fires getPacklists via poller', async () => {
@@ -2167,6 +2173,28 @@ test('EARLY CUTOFF', 'a new show in a window reruns that window\'s analysis', as
         assertEqual(announced.some(key => key.startsWith('api:getItemTimeline:"TABLE-001"')), true, 'the timeline over that window reruns');
     });
 });
+
+test('EARLY CUTOFF', 'a date filter on a column outside the date rows reads the full rows', async () => {
+    // S/U IN SHOP is not one of the date columns: its value, not a ship/return estimate, decides
+    const filter = { dateFilters: [{ column: 'S/U IN SHOP', value: '2025-06-01', type: 'before' }] };
+    const fullRows = await Requests.getProductionScheduleData(filter);
+    const expected = [...new Set(await Promise.all(fullRows.map(row => ProductionUtils.getCanonicalIdentifierForScheduleRow(row))))].filter(Boolean);
+    const ids = await ProductionUtils.getOverlappingShowIds(filter);
+    assertEqual([ids.length > 0, ids], [true, expected], 'the ids of the full-row filter');
+});
+
+test('EARLY CUTOFF', 'getShowDetails gives the full row of the show getShowDates matches', async () => {
+    const [details, dates] = await Promise.all([
+        Requests.getShowDetails('AUSTAL 2026 SNA'),
+        ProductionUtils.getShowDates('AUSTAL 2026 SNA')
+    ]);
+    assertEqual(
+        [details?.Show, details?.Year, details?.Ship, 'City' in (details || {}), 'City' in (dates || {})],
+        [dates?.Show, '2026', dates?.Ship, true, false],
+        'the same show and dates; only the details have the other columns'
+    );
+});
+
 // ── Group: Change stamps ──────────────────────────────────────────────────────
 // Stamps for made-up tabs ("StampTest …") are added to CACHE/Caching and left there.
 
