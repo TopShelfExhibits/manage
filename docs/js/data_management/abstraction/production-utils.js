@@ -7,6 +7,19 @@ import { estimateShipDate as _calculateShipDate } from '../utils/ship-date.js'; 
  */
 const IGNORE_KEYWORD = '__IGNORE__';
 
+const SCHEDULE_TAB = 'Production Schedule';
+
+/**
+ * The Production Schedule columns that show dates and identities come from: Show, Client and Year
+ * name the show, Identifier is the fallback name, and the rest are the dates (ship-date.js,
+ * _calculateReturnDate). Quantity analysis reads only these (getScheduleDateRows), so edits to the
+ * other columns, the task columns, don't rerun it.
+ */
+const SCHEDULE_DATE_MAPPING = Object.fromEntries(
+    ['Show', 'Client', 'Year', 'Identifier', 'Ship', 'S. Install', 'S. Start', 'S. End', 'S. Dismantle', 'Recieved']
+        .map(header => [header, header])
+);
+
 /**
  * Utility functions for production schedule operations
  */
@@ -50,6 +63,67 @@ class productionUtils_uncached {
     }
 
     /**
+     * The schedule rows with only their date and identity columns (SCHEDULE_DATE_MAPPING), in sheet
+     * order. Early cutoff: an edit to any other column leaves this value equal, so nothing computed
+     * from it reruns.
+     * @param {Object} deps
+     * @returns {Promise<Array<Object>>}
+     */
+    static async getScheduleDateRows(deps) {
+        return deps.call(Database.getData, 'PROD_SCHED', SCHEDULE_TAB, SCHEDULE_DATE_MAPPING);
+    }
+
+    /**
+     * The schedule's date rows of one year (all rows when year is null) by computed identifier, the
+     * first row winning, with the identifiers in schedule order. Shared by every getShowDates of
+     * the year, so each is a lookup.
+     * @param {Object} deps
+     * @param {string|null} year
+     * @returns {Promise<{byId: Object<string, Object>, candidates: string[]}>}
+     */
+    static async getScheduleDateMap(deps, year) {
+        const rows = await deps.call(ProductionUtils.getScheduleDateRows);
+        return _buildScheduleMap(deps, year, rows);
+    }
+
+    /**
+     * The date and identity columns of the show an identifier names (a canonical schedule id or a
+     * pack list tab title, as getShowDetails takes), with the dates given full years; null when no
+     * row matches. The date logic reads shows through this. Early cutoff: an edit to another show
+     * leaves this value equal.
+     * @param {Object} deps
+     * @param {string} identifier
+     * @returns {Promise<Object|null>}
+     */
+    static async getShowDates(deps, identifier) {
+        if (!identifier) return null;
+        const rows = await _findScheduleRows(deps, identifier, { narrow: true });
+        return rows[0] ? _withFullYearDates(rows[0]) : null;
+    }
+
+    /**
+     * Canonical identifiers of the shows that pass the date filters, once each, in schedule order
+     * (all shows without filters). Reads only the date and identity columns. Early cutoff: a change
+     * that doesn't add or remove a show leaves this value equal.
+     * @param {Object} deps
+     * @param {Object|null} parameters - { dateFilters }, as getOverlappingShows takes
+     * @returns {Promise<string[]>}
+     */
+    static async getOverlappingShowIds(deps, parameters = null) {
+        const rows = await deps.call(ProductionUtils.getScheduleDateRows);
+        const dateFilters = parameters?.dateFilters || [];
+        const shows = dateFilters.length
+            ? await _filterRowsByDates(deps, rows, dateFilters, (identifier) => deps.call(ProductionUtils.getShowDates, identifier))
+            : rows;
+        const ids = new Set();
+        for (const row of shows) {
+            const identifier = await deps.call(ProductionUtils.getCanonicalIdentifierForScheduleRow, row);
+            if (identifier) ids.add(identifier);
+        }
+        return [...ids];
+    }
+
+    /**
      * Get overlapping shows based on parameters
      * @param {Object} deps - Dependency decorator for tracking calls
      * @param {Object} parameters - Filter parameters with dateFilters array
@@ -77,168 +151,8 @@ class productionUtils_uncached {
             return data;
         }
 
-        const dateFilters = parameters.dateFilters;
-        //console.log('[production-utils] Processing date filters:', dateFilters);
-
-        // Helper to get date from row based on column.
-        // Handles calculated columns (Ship, Return, Date) and any raw date column via parseDate.
-        // filterType ('after'|'before') controls which boundary fallback is used when a
-        // generic column is empty or unparseable — maximising recall over precision:
-        //   'before' → ship date  (earliest the show could be relevant)
-        //   'after'  → return date (latest  the show could be relevant)
-        const getRowDate = (row, column, filterType) => {
-            if (column === 'Ship') {
-                return _calculateShipDate(row);
-            } else if (column === 'Return') {
-                const ship = _calculateShipDate(row);
-                return _calculateReturnDate(row, ship);
-            } else if (column === 'Date') {
-                // Try to get date from S. Start field
-                let showDate = parseDate(row['S. Start'], true, row.Year);
-                
-                // If date not available, try other date fields to infer it
-                if (!showDate) {
-                    const ship = _calculateShipDate(row);
-                    if (ship) {
-                        // Typical show is ~7-14 days after ship
-                        showDate = new Date(ship.getTime() + 10 * 86400000);
-                    }
-                }
-                return showDate;
-            }
-            
-            // Generic date column: parse with Year context, then apply year-boundary
-            // correction if the date is more than 9 months from the show's start date.
-            const rawValue = row[column];
-            if (rawValue) {
-                let parsed = parseDate(rawValue, true, row.Year);
-                if (parsed) {
-                    const sStart = parseDate(row['S. Start'], true, row.Year);
-                    if (sStart) {
-                        const diffMs = parsed - sStart;
-                        const NINE_MONTHS_MS = 9 * 30 * 24 * 60 * 60 * 1000;
-                        if (diffMs > NINE_MONTHS_MS) {
-                            // Date is more than 9 months after show start — move back a year
-                            const corrected = new Date(parsed);
-                            corrected.setFullYear(corrected.getFullYear() - 1);
-                            parsed = corrected;
-                        } else if (diffMs < -NINE_MONTHS_MS) {
-                            // Date is more than 9 months before show start — move forward a year
-                            const corrected = new Date(parsed);
-                            corrected.setFullYear(corrected.getFullYear() + 1);
-                            parsed = corrected;
-                        }
-                    }
-                    return parsed;
-                }
-            }
-            
-            // Column is empty or unparseable — fall back to a show boundary estimate
-            // so rows without this field are not silently excluded.
-            if (filterType === 'before') {
-                // For "before" searches use ship date: the earliest the show is relevant
-                return _calculateShipDate(row);
-            }
-            // For "after" searches (including unknown type) use return date:
-            // the latest the show is relevant
-            const ship = _calculateShipDate(row);
-            return _calculateReturnDate(row, ship);
-        };
-
-        // Helper to resolve filter value to a date
-        const resolveFilterValue = async (filter, data) => {
-            const value = filter.value;
-            
-            // If it's a number, treat as a day offset from today (local noon, like the row dates)
-            if (typeof value === 'number') {
-                return parseDate(offsetToISO(value, await deps.call(ApplicationUtils.getToday)));
-            }
-            
-            // If it looks like a date string (YYYY-MM-DD), parse it
-            if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)) {
-                return new Date(value + 'T12:00:00');  // noon — matches _calculateShipDate/_calculateReturnDate
-            }
-            
-            // Otherwise, treat as identifier - find the show and get its date
-            if (typeof value === 'string') {
-                // Use year-aware Direction-2 match: parse year from identifier, filter schedule, then match
-                const rows = await deps.call(ProductionUtils.findScheduleRowsForPacklist, value, data);
-                const row = rows[0] ?? null;
-                if (!row) {
-                    console.warn('[production-utils] No show found for identifier:', value);
-                    return null;
-                }
-                // Use chain-aware dates so transship destinations use the full chain window
-                const shipIso = await deps.call(ProductionUtils.getProjectShipDate, value);
-                const retIso  = await deps.call(ProductionUtils.getProjectReturnDate, value);
-                if (filter.column === 'Return' && filter.type === 'after') {
-                    return shipIso ? parseDate(shipIso) : _calculateShipDate(row);
-                } else if (filter.column === 'Ship' && filter.type === 'before') {
-                    const rawShip = _calculateShipDate(row);
-                    return retIso ? parseDate(retIso) : _calculateReturnDate(row, rawShip);
-                }
-                return getRowDate(row, filter.column, filter.type);
-            }
-            
-            return null;
-        };
-
-        // Calculate year range to check (needed for year filter optimization)
-        const filterDates = await Promise.all(
-            dateFilters.map(f => resolveFilterValue(f, data))
-        );
-        const validDates = filterDates.filter(d => d !== null);
-        
-        if (validDates.length === 0) {
-            //console.log('[production-utils] Could not resolve any filter dates');
-            return [];
-        }
-
-        // Derive year bounds from filter directions so open-ended filters work correctly.
-        // 'after' filters only constrain the lower bound; 'before' filters only constrain the
-        // upper bound. A single 'after 2026' filter must include 2027, 2028, etc., and a
-        // single 'before 2025' filter must include 2024, 2023, etc.
-        let minYear = -Infinity;
-        let maxYear = Infinity;
-        dateFilters.forEach((filter, i) => {
-            const fd = filterDates[i];
-            if (!fd) return;
-            const y = fd.getFullYear();
-            if (filter.type === 'after' && y > minYear) minYear = y;
-            else if (filter.type === 'before' && y < maxYear) maxYear = y;
-        });
-
-        // Filter data
-        const filtered = data.filter(row => {
-            // Year optimization: quickly exclude rows outside the plausible year range
-            const rowYear = parseInt(row.Year);
-            if (!row.Year || (minYear !== -Infinity && rowYear < minYear) || (maxYear !== Infinity && rowYear > maxYear)) {
-                return false;
-            }
-
-            // Apply all date filters (AND logic - must pass all)
-            return dateFilters.every(filter => {
-                const rowDate = getRowDate(row, filter.column, filter.type);
-                if (!rowDate) {
-                    return false; // If we can't get the date, filter out the row
-                }
-
-                const filterDateIndex = dateFilters.indexOf(filter);
-                const filterDate = filterDates[filterDateIndex];
-                if (!filterDate) {
-                    return false; // If we can't resolve filter value, filter out the row
-                }
-
-                // Apply filter type
-                if (filter.type === 'after') {
-                    return rowDate >= filterDate;
-                } else if (filter.type === 'before') {
-                    return rowDate <= filterDate;
-                }
-                
-                return true;
-            });
-        });
+        const filtered = await _filterRowsByDates(deps, data, parameters.dateFilters,
+            async (identifier) => (await deps.call(ProductionUtils.findScheduleRowsForPacklist, identifier, data))[0] ?? null);
 
         //console.log(`[production-utils] Filtered ${data.length} shows to ${filtered.length} matching date filters`);
         
@@ -247,36 +161,13 @@ class productionUtils_uncached {
         // NOTE: work on shallow copies — the source objects live in the Database.getData cache
         // and mutating them would corrupt dates for every subsequent cache hit.
         const normalizedRows = await Promise.all(filtered.map(async (row) => {
-            const normalizedRow = { ...row };
+            const normalizedRow = _withFullYearDates(row);
 
             // Always publish canonical identifiers derived from (Client, Year, Show)
             // so stale/manual Identifier values cannot fork analytics keys.
             const canonicalIdentifier = await deps.call(ProductionUtils.getCanonicalIdentifierForScheduleRow, normalizedRow);
             if (canonicalIdentifier) {
                 normalizedRow.Identifier = canonicalIdentifier;
-            }
-
-            // Normalize Ship date using validation logic
-            const correctedShip = _calculateShipDate(normalizedRow);
-            if (correctedShip) {
-                normalizedRow.Ship = toUSDateString(correctedShip);
-            }
-            
-            // Normalize S. Start date
-            const sStart = parseDate(normalizedRow['S. Start'], true, normalizedRow.Year);
-            if (sStart) {
-                normalizedRow['S. Start'] = toUSDateString(sStart);
-            }
-            
-            // Normalize S. End date
-            const sEnd = parseDate(normalizedRow['S. End'], true, normalizedRow.Year);
-            if (sEnd) {
-                normalizedRow['S. End'] = toUSDateString(sEnd);
-            }
-            
-            const correctedReturn = _calculateReturnDate(normalizedRow, correctedShip);
-            if (correctedReturn && normalizedRow['Recieved']) {
-                normalizedRow['Recieved'] = toUSDateString(correctedReturn);
             }
 
             return normalizedRow;
@@ -670,47 +561,6 @@ class productionUtils_uncached {
     }
 
     /**
-     * Deduplicate schedule data by show identifier (for clients with multiple booths).
-     * Use this when you need unique shows for overlap calculations or counts.
-     * @param {Object} deps - Dependency decorator for tracking calls
-     * @param {Array} scheduleData - Array of schedule rows from getOverlappingShows
-     * @returns {Promise<Array>} Deduplicated array with one row per unique show
-     */
-    static async deduplicateScheduleByShow(deps, scheduleData) {
-        if (!Array.isArray(scheduleData)) {
-            return [];
-        }
-        
-        const seen = new Map();
-        const deduplicated = [];
-        
-        for (const row of scheduleData) {
-            // Use existing Identifier or compute one
-            const identifier = await deps.call(ProductionUtils.getCanonicalIdentifierForScheduleRow, row);
-            
-            // Skip rows without valid identifier
-            if (!identifier) {
-                deduplicated.push(row);
-                continue;
-            }
-            
-            // Skip if we've already seen this show
-            if (seen.has(identifier)) {
-                continue;
-            }
-            
-            seen.set(identifier, true);
-            deduplicated.push(row);
-        }
-        
-        if (deduplicated.length < scheduleData.length) {
-            //console.log(`[production-utils] Deduplicated ${scheduleData.length} rows to ${deduplicated.length} unique shows`);
-        }
-        
-        return deduplicated;
-    }
-
-    /**
      * Get all shows deduplicated with their earliest ship and latest return dates.
      * Used to populate the show overlap selector modal.
      * Deduplicates by show name (using abbreviation matching) + year, ignoring client differences.
@@ -792,38 +642,7 @@ class productionUtils_uncached {
      * @returns {Promise<Array>} Matching schedule rows; first element is the canonical match
      */
     static async findScheduleRowsForPacklist(deps, packlistTitle, scheduleData = null) {
-        if (!packlistTitle) return [];
-
-        const overrides = await deps.call(ProductionUtils.getNameOverrides);
-        const override = _findOverride(overrides, normalizeText(packlistTitle).toLowerCase());
-        if (override) {
-            if (_isIgnoreOverride(override)) return [];
-            let overrideData = scheduleData;
-            if (!overrideData) {
-                const overrideMapping = await deps.call(ProductionUtils.GetMappingFromProductionSchedule);
-                overrideData = await deps.call(Database.getData, 'PROD_SCHED', 'Production Schedule', overrideMapping);
-            }
-            const schedNorm = normalizeText(override.schedule).toLowerCase();
-            for (const row of overrideData) {
-                if (!row.Show || !row.Client || !row.Year) continue;
-                const raw = normalizeText([row.Client, row.Year, row.Show].join(' ')).toLowerCase();
-                if (raw === schedNorm) return [row];
-                const computed = await deps.call(ProductionUtils.computeIdentifier, row.Show, row.Client, row.Year);
-                if (computed && normalizeText(computed).toLowerCase() === schedNorm) return [row];
-            }
-            return [];
-        }
-
-        let data = scheduleData;
-        if (!data) {
-            const mapping = await deps.call(ProductionUtils.GetMappingFromProductionSchedule);
-            data = await deps.call(Database.getData, 'PROD_SCHED', 'Production Schedule', mapping);
-        }
-
-        const { scheduleMap, candidates } = await _buildYearFilteredScheduleMap(deps, packlistTitle, data);
-        if (candidates.length === 0) return [];
-        const match = await deps.call(ProductionUtils.findBestProjectIdentifierMatch, packlistTitle, candidates);
-        return match ? [scheduleMap.get(match)].filter(Boolean) : [];
+        return _findScheduleRows(deps, packlistTitle, { scheduleData });
     }
 
     /**
@@ -843,20 +662,18 @@ class productionUtils_uncached {
         const minWords = yearIndex >= 0 ? yearIndex + 2 : 1;
         if (words.length <= minWords) return null;
 
-        let data = scheduleData;
-        if (!data) {
-            const mapping = await deps.call(ProductionUtils.GetMappingFromProductionSchedule);
-            data = await deps.call(Database.getData, 'PROD_SCHED', 'Production Schedule', mapping);
-        }
-
-        const { scheduleMap, candidates } = await _buildYearFilteredScheduleMap(deps, packlistTitle, data);
+        // Matching reads only the identity columns, so the date rows serve unless rows are given
+        const year = _parseIdentifierParts(packlistTitle)?.year ?? null;
+        const { byId, candidates } = scheduleData
+            ? await _buildScheduleMap(deps, year, scheduleData)
+            : await deps.call(ProductionUtils.getScheduleDateMap, year);
         if (candidates.length === 0) return null;
 
         for (let count = words.length - 1; count >= minWords; count--) {
             const candidate = words.slice(0, count).join(' ');
             const match = await deps.call(ProductionUtils.findBestProjectIdentifierMatch, candidate, candidates);
             if (match) {
-                const row = scheduleMap.get(match);
+                const row = byId[match];
                 return row ? { row, computedIdentifier: match } : null;
             }
         }
@@ -865,7 +682,9 @@ class productionUtils_uncached {
     }
 
     /**
-     * Get show details by project identifier. Delegates to findScheduleRowsForPacklist.
+     * Get show details by project identifier: the full schedule row, with the dates given full
+     * years. For the pages; the date logic reads getShowDates, which only date and identity edits
+     * change.
      * @param {Object} deps
      * @param {string} identifier - Packlist identifier (may include suffix variant)
      * @returns {Promise<Object|null>} Schedule row or null
@@ -873,25 +692,7 @@ class productionUtils_uncached {
     static async getShowDetails(deps, identifier) {
         if (!identifier) return null;
         const rows = await deps.call(ProductionUtils.findScheduleRowsForPacklist, identifier);
-        const row = rows[0] ? { ...rows[0] } : null;
-        if (!row) return null;
-
-        // Normalize date columns before returning to ensure correct years
-        const correctedShip = _calculateShipDate(row);
-        if (correctedShip) row.Ship = toUSDateString(correctedShip);
-
-        const sStart = parseDate(row['S. Start'], true, row.Year);
-        if (sStart) row['S. Start'] = toUSDateString(sStart);
-
-        const sEnd = parseDate(row['S. End'], true, row.Year);
-        if (sEnd) row['S. End'] = toUSDateString(sEnd);
-
-        const correctedReturn = _calculateReturnDate(row, correctedShip);
-        if (correctedReturn && row['Recieved']) {
-            row['Recieved'] = toUSDateString(correctedReturn);
-        }
-
-        return row;
+        return rows[0] ? _withFullYearDates(rows[0]) : null;
     }
 
     /**
@@ -913,7 +714,7 @@ class productionUtils_uncached {
             return { attached: true, hasIdentifierParts: true };
         }
 
-        const row = await deps.call(ProductionUtils.getShowDetails, identifier);
+        const row = await deps.call(ProductionUtils.getShowDates, identifier);
         if (row) return { attached: true, hasIdentifierParts: true };
 
         const parts = _parseIdentifierParts(identifier);
@@ -992,8 +793,8 @@ class productionUtils_uncached {
         if (!link?.override) return null;
         // Validate ordering using show start dates (not ship dates, which are often missing/guessed)
         const [destRow, sourceRow] = await Promise.all([
-            deps.call(ProductionUtils.getShowDetails, identifier),
-            deps.call(ProductionUtils.getShowDetails, link.override)
+            deps.call(ProductionUtils.getShowDates, identifier),
+            deps.call(ProductionUtils.getShowDates, link.override)
         ]);
         const destOrder   = _getShowOrderDate(destRow);
         const sourceOrder = _getShowOrderDate(sourceRow);
@@ -1021,10 +822,10 @@ class productionUtils_uncached {
             o => normalizeText(o.override || '').toLowerCase() === normalizeText(identifier).toLowerCase()
         );
         if (!links.length) return null;
-        const sourceRow = await deps.call(ProductionUtils.getShowDetails, identifier);
+        const sourceRow = await deps.call(ProductionUtils.getShowDates, identifier);
         const sourceOrder = _getShowOrderDate(sourceRow);
         for (const link of links) {
-            const destRow = await deps.call(ProductionUtils.getShowDetails, link.schedule);
+            const destRow = await deps.call(ProductionUtils.getShowDates, link.schedule);
             const destOrder = _getShowOrderDate(destRow);
             if (sourceOrder && destOrder && sourceOrder < destOrder) return link.schedule;
         }
@@ -1052,7 +853,7 @@ class productionUtils_uncached {
         if (!identifier) return null;
         const sourceIdentifier = await deps.call(ProductionUtils.getTransshipSourceForShow, identifier);
         if (!sourceIdentifier) return null;
-        const sourceRow = await deps.call(ProductionUtils.getShowDetails, sourceIdentifier);
+        const sourceRow = await deps.call(ProductionUtils.getShowDates, sourceIdentifier);
         return sourceRow?.['S. End'] ?? null;
     }
 
@@ -1329,8 +1130,8 @@ class productionUtils_uncached {
         // guessed date that is earlier than an explicit ship date on a prior show.
         try {
             const [destRow, srcRow] = await Promise.all([
-                ProductionUtils.getShowDetails(destinationIdentifier),
-                ProductionUtils.getShowDetails(sourceIdentifier)
+                ProductionUtils.getShowDates(destinationIdentifier),
+                ProductionUtils.getShowDates(sourceIdentifier)
             ]);
             if (destRow && srcRow) {
                 const destOrder = _getShowOrderDate(destRow);
@@ -1467,8 +1268,20 @@ export const ProductionUtils = wrapMethods(
         'setTransshipLink',
         'removeTransshipLink'
     ],
-    ['computeIdentifier']
-    // findScheduleRowsForPacklist and findPacklistTabsForScheduleRow are cacheable read-only methods
+    ['computeIdentifier'],
+    {},
+    [],
+    // Early cutoff: the narrow values quantity analysis reads the schedule through. A task-column
+    // edit stops at getScheduleDateRows; a date edit stops at the shows and windows it didn't change.
+    [
+        'getScheduleDateRows',
+        'getShowDates',
+        'getOverlappingShowIds',
+        'getProjectShipDate',
+        'getProjectReturnDate',
+        'getTransshipSourceForShow',
+        'getTransshipDestinationsForShow'
+    ]
 );
 
 
@@ -1476,6 +1289,156 @@ export const ProductionUtils = wrapMethods(
 
 
 // Helper functions not exposed via API
+
+/**
+ * A schedule row's date for a date filter's column. Handles the calculated columns (Ship, Return,
+ * Date) and any raw date column via parseDate. filterType ('after'|'before') picks the fallback
+ * when a raw column is empty or unparseable, maximising recall over precision:
+ *   'before' → ship date  (earliest the show could be relevant)
+ *   'after'  → return date (latest  the show could be relevant)
+ */
+function _rowDate(row, column, filterType) {
+    if (column === 'Ship') {
+        return _calculateShipDate(row);
+    } else if (column === 'Return') {
+        const ship = _calculateShipDate(row);
+        return _calculateReturnDate(row, ship);
+    } else if (column === 'Date') {
+        // Try to get date from S. Start field
+        let showDate = parseDate(row['S. Start'], true, row.Year);
+
+        // If date not available, try other date fields to infer it
+        if (!showDate) {
+            const ship = _calculateShipDate(row);
+            if (ship) {
+                // Typical show is ~7-14 days after ship
+                showDate = new Date(ship.getTime() + 10 * 86400000);
+            }
+        }
+        return showDate;
+    }
+
+    // Generic date column: parse with Year context, then apply year-boundary
+    // correction if the date is more than 9 months from the show's start date.
+    const rawValue = row[column];
+    if (rawValue) {
+        let parsed = parseDate(rawValue, true, row.Year);
+        if (parsed) {
+            const sStart = parseDate(row['S. Start'], true, row.Year);
+            if (sStart) {
+                const diffMs = parsed - sStart;
+                const NINE_MONTHS_MS = 9 * 30 * 24 * 60 * 60 * 1000;
+                if (diffMs > NINE_MONTHS_MS) {
+                    // Date is more than 9 months after show start — move back a year
+                    const corrected = new Date(parsed);
+                    corrected.setFullYear(corrected.getFullYear() - 1);
+                    parsed = corrected;
+                } else if (diffMs < -NINE_MONTHS_MS) {
+                    // Date is more than 9 months before show start — move forward a year
+                    const corrected = new Date(parsed);
+                    corrected.setFullYear(corrected.getFullYear() + 1);
+                    parsed = corrected;
+                }
+            }
+            return parsed;
+        }
+    }
+
+    // Column is empty or unparseable — fall back to a show boundary estimate
+    // so rows without this field are not silently excluded.
+    if (filterType === 'before') {
+        // For "before" searches use ship date: the earliest the show is relevant
+        return _calculateShipDate(row);
+    }
+    // For "after" searches (including unknown type) use return date:
+    // the latest the show is relevant
+    const ship = _calculateShipDate(row);
+    return _calculateReturnDate(row, ship);
+}
+
+/**
+ * Apply date filters ([{ column, value, type }], all must pass) to schedule rows, as
+ * getOverlappingShows and getOverlappingShowIds do. A filter value is a day offset from today, an
+ * ISO date, or a show identifier: findRow gives that show's row, and its chain dates apply where
+ * they matter (a transship destination uses the whole chain's window).
+ * @param {Object} deps
+ * @param {Array<Object>} data - Schedule rows, full or date columns only
+ * @param {Array<Object>} dateFilters
+ * @param {function(string): Promise<Object|null>} findRow - The row a show identifier names
+ * @returns {Promise<Array<Object>>} The rows that pass every filter
+ */
+async function _filterRowsByDates(deps, data, dateFilters, findRow) {
+    const resolveFilterValue = async (filter) => {
+        const value = filter.value;
+
+        // If it's a number, treat as a day offset from today (local noon, like the row dates)
+        if (typeof value === 'number') {
+            return parseDate(offsetToISO(value, await deps.call(ApplicationUtils.getToday)));
+        }
+
+        // If it looks like a date string (YYYY-MM-DD), parse it
+        if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)) {
+            return new Date(value + 'T12:00:00');  // noon — matches _calculateShipDate/_calculateReturnDate
+        }
+
+        // Otherwise, treat as identifier - find the show and get its date
+        if (typeof value === 'string') {
+            const row = await findRow(value);
+            if (!row) {
+                console.warn('[production-utils] No show found for identifier:', value);
+                return null;
+            }
+            // Use chain-aware dates so transship destinations use the full chain window
+            const shipIso = await deps.call(ProductionUtils.getProjectShipDate, value);
+            const retIso  = await deps.call(ProductionUtils.getProjectReturnDate, value);
+            if (filter.column === 'Return' && filter.type === 'after') {
+                return shipIso ? parseDate(shipIso) : _calculateShipDate(row);
+            } else if (filter.column === 'Ship' && filter.type === 'before') {
+                const rawShip = _calculateShipDate(row);
+                return retIso ? parseDate(retIso) : _calculateReturnDate(row, rawShip);
+            }
+            return _rowDate(row, filter.column, filter.type);
+        }
+
+        return null;
+    };
+
+    const filterDates = await Promise.all(dateFilters.map(resolveFilterValue));
+    if (!filterDates.some(d => d !== null)) return [];
+
+    // Derive year bounds from filter directions so open-ended filters work correctly.
+    // 'after' filters only constrain the lower bound; 'before' filters only constrain the
+    // upper bound. A single 'after 2026' filter must include 2027, 2028, etc., and a
+    // single 'before 2025' filter must include 2024, 2023, etc.
+    let minYear = -Infinity;
+    let maxYear = Infinity;
+    dateFilters.forEach((filter, i) => {
+        const fd = filterDates[i];
+        if (!fd) return;
+        const y = fd.getFullYear();
+        if (filter.type === 'after' && y > minYear) minYear = y;
+        else if (filter.type === 'before' && y < maxYear) maxYear = y;
+    });
+
+    return data.filter(row => {
+        // Year optimization: quickly exclude rows outside the plausible year range
+        const rowYear = parseInt(row.Year);
+        if (!row.Year || (minYear !== -Infinity && rowYear < minYear) || (maxYear !== Infinity && rowYear > maxYear)) {
+            return false;
+        }
+
+        // Apply all date filters (AND logic - must pass all)
+        return dateFilters.every((filter, i) => {
+            const rowDate = _rowDate(row, filter.column, filter.type);
+            const filterDate = filterDates[i];
+            // A date that can't be found, on either side, filters the row out
+            if (!rowDate || !filterDate) return false;
+            if (filter.type === 'after') return rowDate >= filterDate;
+            if (filter.type === 'before') return rowDate <= filterDate;
+            return true;
+        });
+    });
+}
 
 // Returns the date used for ordering shows relative to each other.
 // S.Start is used instead of ship date because ship dates are often missing and
@@ -1493,13 +1456,13 @@ function _getShowOrderDate(row) {
 async function _resolveShipDate(deps, identifier, overrides, visited) {
     if (!identifier || visited.has(identifier)) return null;
     visited.add(identifier);
-    const row = await deps.call(ProductionUtils.getShowDetails, identifier);
+    const row = await deps.call(ProductionUtils.getShowDates, identifier);
     if (!row) return null;
     const link = overrides.find(
         o => normalizeText(o.schedule || '').toLowerCase() === normalizeText(identifier).toLowerCase()
     );
     if (link?.override) {
-        const sourceRow   = await deps.call(ProductionUtils.getShowDetails, link.override);
+        const sourceRow   = await deps.call(ProductionUtils.getShowDates, link.override);
         const destOrder   = _getShowOrderDate(row);
         const sourceOrder = sourceRow ? _getShowOrderDate(sourceRow) : null;
         if (sourceOrder && destOrder && sourceOrder < destOrder) {
@@ -1514,7 +1477,7 @@ async function _resolveShipDate(deps, identifier, overrides, visited) {
 async function _resolveReturnDate(deps, identifier, overrides, visited) {
     if (!identifier || visited.has(identifier)) return null;
     visited.add(identifier);
-    const row = await deps.call(ProductionUtils.getShowDetails, identifier);
+    const row = await deps.call(ProductionUtils.getShowDates, identifier);
     if (!row) return null;
     const destinations = overrides.filter(
         o => normalizeText(o.override || '').toLowerCase() === normalizeText(identifier).toLowerCase()
@@ -1523,7 +1486,7 @@ async function _resolveReturnDate(deps, identifier, overrides, visited) {
         const thisOrder = _getShowOrderDate(row);
         const destReturns = await Promise.all(
             destinations.map(async d => {
-                const destRow   = await deps.call(ProductionUtils.getShowDetails, d.schedule);
+                const destRow   = await deps.call(ProductionUtils.getShowDates, d.schedule);
                 const destOrder = _getShowOrderDate(destRow);
                 if (!thisOrder || !destOrder || destOrder <= thisOrder) return null;
                 return _resolveReturnDate(deps, d.schedule, overrides, visited);
@@ -1759,19 +1722,81 @@ function _resolveIndexToken(value, names, abbrs, options = {}) {
     return _resolveRefPart(raw, safeNames, safeAbbrs, fuzzyThreshold);
 }
 
-// Builds a year-filtered identifier→row map from schedule data, using the year parsed from title.
-async function _buildYearFilteredScheduleMap(deps, title, scheduleData) {
-    const parts = _parseIdentifierParts(title);
-    const targetYear = parts ? parts.year : null;
-    const filtered = targetYear
-        ? scheduleData.filter(row => String(parseInt(row.Year, 10)) === targetYear)
+// The rows of one year (all rows when year is null) by computed identifier, the first row winning,
+// with the identifiers in schedule order.
+async function _buildScheduleMap(deps, year, scheduleData) {
+    const filtered = year
+        ? scheduleData.filter(row => String(parseInt(row.Year, 10)) === year)
         : scheduleData;
-    const scheduleMap = new Map();
+    const byId = {};
+    const candidates = [];
     for (const row of filtered) {
         if (!row.Show || !row.Client || !row.Year) continue;
         const computed = await deps.call(ProductionUtils.computeIdentifier, row.Show, row.Client, row.Year);
-        if (computed && !scheduleMap.has(computed)) scheduleMap.set(computed, row);
+        if (computed && !Object.hasOwn(byId, computed)) {
+            byId[computed] = row;
+            candidates.push(computed);
+        }
     }
-    return { scheduleMap, candidates: Array.from(scheduleMap.keys()) };
+    return { byId, candidates };
+}
+
+/**
+ * Direction 2 (pack list title → schedule rows), as findScheduleRowsForPacklist documents it.
+ * NameOverrides link a title to a schedule id; otherwise the title's year narrows the schedule and
+ * the title is matched against that year's identifiers.
+ * @param {Object} deps
+ * @param {string} title - Pack list tab title or schedule identifier
+ * @param {{scheduleData?: Array<Object>|null, narrow?: boolean}} [options] - scheduleData: the rows
+ *        to search; otherwise narrow: the date rows (getScheduleDateRows), else the full rows
+ * @returns {Promise<Array<Object>>} The matching row, or none
+ */
+async function _findScheduleRows(deps, title, { scheduleData = null, narrow = false } = {}) {
+    if (!title) return [];
+    const loadRows = async () => scheduleData
+        || (narrow
+            ? await deps.call(ProductionUtils.getScheduleDateRows)
+            : await deps.call(Database.getData, 'PROD_SCHED', SCHEDULE_TAB, await deps.call(ProductionUtils.GetMappingFromProductionSchedule)));
+
+    const overrides = await deps.call(ProductionUtils.getNameOverrides);
+    const override = _findOverride(overrides, normalizeText(title).toLowerCase());
+    if (override) {
+        if (_isIgnoreOverride(override)) return [];
+        const schedNorm = normalizeText(override.schedule).toLowerCase();
+        for (const row of await loadRows()) {
+            if (!row.Show || !row.Client || !row.Year) continue;
+            const raw = normalizeText([row.Client, row.Year, row.Show].join(' ')).toLowerCase();
+            if (raw === schedNorm) return [row];
+            const computed = await deps.call(ProductionUtils.computeIdentifier, row.Show, row.Client, row.Year);
+            if (computed && normalizeText(computed).toLowerCase() === schedNorm) return [row];
+        }
+        return [];
+    }
+
+    const year = _parseIdentifierParts(title)?.year ?? null;
+    const { byId, candidates } = narrow && !scheduleData
+        ? await deps.call(ProductionUtils.getScheduleDateMap, year)
+        : await _buildScheduleMap(deps, year, await loadRows());
+    if (candidates.length === 0) return [];
+    const match = await deps.call(ProductionUtils.findBestProjectIdentifierMatch, title, candidates);
+    return match && byId[match] ? [byId[match]] : [];
+}
+
+// A copy of a schedule row with its Ship, S. Start, S. End and Recieved dates given full years
+// (user entries often leave the year out, or give December ship dates for January shows).
+function _withFullYearDates(row) {
+    const copy = { ...row };
+    const correctedShip = _calculateShipDate(copy);
+    if (correctedShip) copy.Ship = toUSDateString(correctedShip);
+
+    const sStart = parseDate(copy['S. Start'], true, copy.Year);
+    if (sStart) copy['S. Start'] = toUSDateString(sStart);
+
+    const sEnd = parseDate(copy['S. End'], true, copy.Year);
+    if (sEnd) copy['S. End'] = toUSDateString(sEnd);
+
+    const correctedReturn = _calculateReturnDate(copy, correctedShip);
+    if (correctedReturn && copy['Recieved']) copy['Recieved'] = toUSDateString(correctedReturn);
+    return copy;
 }
 

@@ -33,7 +33,7 @@ import { FakeGoogleSheetsAuth, FakeGoogleSheetsService, FakeGoogleState, setFake
 import { refreshAppData } from './fakeGoogleDevTools.js';
 import { isCheckedValue } from '../data_management/utils/checkbox-values.js';
 import { useBatchEdits, useInstantEdits } from '../application/utils/cellEdits.js';
-import { CacheInvalidationBus, ApplicationUtils, ProductionUtils, triggerCachePoll, stampDataChange, Database, DEFAULT_INVENTORY_MAPPING, EditHistoryUtils, InventoryUtils, ProposalUtils, PROPOSAL_LOCK_NAMESPACE, resolveInventoryNoteMaxLength, readRowMetadata, writeRowMetadata, checkDateRollover, clearCache, invalidateCache, resolveSheetMapping, parseThumbnails, parseThumbnailEntries, serializeThumbnailEntries, addThumbnails, removeThumbnailAt, setPrimaryThumbnail, setThumbnailNote, setThumbnailCrop, primaryThumbnailValue, thumbnailKey } from '../data_management/index.js';
+import { CacheInvalidationBus, ApplicationUtils, ProductionUtils, triggerCachePoll, cutoffSettled, stampDataChange, Database, DEFAULT_INVENTORY_MAPPING, EditHistoryUtils, InventoryUtils, ProposalUtils, PROPOSAL_LOCK_NAMESPACE, resolveInventoryNoteMaxLength, readRowMetadata, writeRowMetadata, checkDateRollover, clearCache, invalidateCache, resolveSheetMapping, parseThumbnails, parseThumbnailEntries, serializeThumbnailEntries, addThumbnails, removeThumbnailAt, setPrimaryThumbnail, setThumbnailNote, setThumbnailCrop, primaryThumbnailValue, thumbnailKey } from '../data_management/index.js';
 import { authState } from '../application/utils/auth.js';
 import { commitInventoryProposal, saveToProposal, proposalTableStore, sendEditsToProposal } from '../application/utils/inventoryProposals.js';
 import { hasQuantityChanges } from '../application/components/content/InventoryTable.js';
@@ -813,7 +813,7 @@ test('IDENTIFIER SAFETY', 'checkPacklistExists ignores stale row.Identifier and 
     assertEqual(result.identifier, 'CHAINCO 2026 SPRING EXPO', 'checkPacklistExists should return canonical tab title');
 });
 
-test('IDENTIFIER SAFETY', 'deduplicateScheduleByShow uses canonical identifiers, not stale Identifier fields', async () => {
+test('IDENTIFIER SAFETY', 'show identifiers are canonical, so a stale Identifier field does not fork a show', async () => {
     const rows = [
         {
             Show: 'Spring Expo',
@@ -828,8 +828,9 @@ test('IDENTIFIER SAFETY', 'deduplicateScheduleByShow uses canonical identifiers,
             Identifier: 'CHAINCO 2026 SPRING EXPO TYPO'
         }
     ];
-    const deduped = await ProductionUtils.deduplicateScheduleByShow(rows);
-    assertEqual(deduped.length, 1, 'deduplicateScheduleByShow should collapse stale-identifier duplicates');
+    // getOverlappingShowIds lists each show once by this identifier
+    const ids = await Promise.all(rows.map(row => ProductionUtils.getCanonicalIdentifierForScheduleRow(row)));
+    assertEqual(ids, ['CHAINCO 2026 SPRING EXPO', 'CHAINCO 2026 SPRING EXPO'], 'both rows give the canonical identifier');
 });
 
 // ── Group 20: Item Quantities Summary ─────────────────────────────────────────
@@ -1774,7 +1775,7 @@ test('CACHE INVALIDATION', 'createNewTab (tab mutation) fires getItemTimeline in
         throw new Error(`createNewTab did not invalidate getAvailableTabs; fired: ${[...fired].join(', ')}`);
 });
 
-test('CACHE INVALIDATION', 'setTransshipLink fires getTransshipSourceForShow and getItemTimeline invalidation', async () => {
+test('CACHE INVALIDATION', 'a transship link change announces the sources and timelines it changes, and only those', async () => {
     // warm: Phase 4 calls getTransshipSourceForShow via deps, registering ScheduleOverrides dependency
     await Requests.getTransshipSourceForShow('CHAINCO 2026 SUMMER SHOW');
     await Requests.getItemTimeline('TABLE-001', '2026-02-15', '2026-06-30');
@@ -1782,16 +1783,24 @@ test('CACHE INVALIDATION', 'setTransshipLink fires getTransshipSourceForShow and
     const handler = (e) => fired.add(e.methodName);
     CacheInvalidationBus.on('api', handler);
     try {
-        // fake identifiers — no real show rows, safe to create and remove
-        await Requests.setTransshipLink('FAKE CACHE TEST DEST 9999', 'FAKE CACHE TEST SRC 9999');
+        await _withRestoredTabs([['CACHE', 'ScheduleOverrides']], async () => {
+            // Shows that don't exist: no cached source or timeline changes (early cutoff)
+            await Requests.setTransshipLink('FAKE CACHE TEST DEST 9999', 'FAKE CACHE TEST SRC 9999');
+            await cutoffSettled();
+            const unrelated = ['getTransshipSourceForShow', 'getItemTimeline'].filter(method => fired.has(method));
+            // The Summer Show loses its source, and TABLE-001 ships from it on its own
+            await Requests.removeTransshipLink('CHAINCO 2026 SUMMER SHOW');
+            await cutoffSettled();
+            assertEqual(
+                [unrelated, fired.has('getTransshipSourceForShow'), fired.has('getItemTimeline')],
+                [[], true, true],
+                'nothing for the unrelated link; the source and the timeline for the real one'
+            );
+        });
     } finally {
         CacheInvalidationBus.off('api', handler);
-        await Requests.removeTransshipLink('FAKE CACHE TEST DEST 9999').catch(() => {});
+        await cutoffSettled();
     }
-    if (!fired.has('getTransshipSourceForShow'))
-        throw new Error(`setTransshipLink did not invalidate getTransshipSourceForShow; fired: ${[...fired].join(', ')}`);
-    if (!fired.has('getItemTimeline'))
-        throw new Error(`setTransshipLink did not invalidate getItemTimeline; fired: ${[...fired].join(', ')}`);
 });
 
 test('CACHE INVALIDATION', 'addNameOverride fires getPacklistScheduleAttachment and getShowDetails invalidation', async () => {
@@ -2044,6 +2053,120 @@ test('SPREADSHEET WATCH', 'the Caching tab is read only when it may hold new sta
     });
 });
 
+// ── Group: Early cutoff ───────────────────────────────────────────────────────
+// Quantity analysis reads the Production Schedule only through cutoff methods
+// (getScheduleDateRows, getShowDates, getOverlappingShowIds, the chain dates): when a hand edit
+// invalidates the schedule, they are recomputed and compared first, and what was computed from an
+// unchanged one is neither rerun nor announced.
+// FakeGoogle PROD_SCHED/Production Schedule: column 4 is City (a task-side column), column 9 is
+// Ship. CHAINCO 2026 SPRING EXPO ships 3/1/2026 (ISO 2026-03-01); TRICHAIN 2026 STAGE A ships
+// 4/1/2026. The TABLE-001 timeline for 2026-02-15..2026-06-30 ships 3 on 2026-03-01 (chain max).
+
+/** The api: keys announced while fn runs a hand edit and the poll that sees it. */
+async function _announcedDuringHandEdit(edit) {
+    const announced = [];
+    const handler = (e) => announced.push(e.key);
+    CacheInvalidationBus.on('api', handler);
+    try {
+        edit(_rawTab('PROD_SCHED', 'Production Schedule'));
+        FakeGoogleSheetsService.touch('PROD_SCHED');
+        await triggerCachePoll();
+        await cutoffSettled();
+    } finally {
+        CacheInvalidationBus.off('api', handler);
+    }
+    return announced;
+}
+const _scheduleRow = (sheet, show, client) => sheet.find(row => row[0] === show && row[1] === client);
+/** Run fn, then put the schedule back and wait for the verifications that starts. */
+async function _withRestoredSchedule(fn) {
+    await _withRestoredTabs([['PROD_SCHED', 'Production Schedule']], fn);
+    await cutoffSettled();
+}
+/**
+ * Warm the caches until a poll that reads the Caching tab announces nothing: earlier tests'
+ * changes have then all landed (their stamps are dated a second ahead, and a poll reads the stamps
+ * only when a spreadsheet changed, so touching CACHE makes it read them).
+ */
+async function _warm(fn) {
+    for (let attempt = 0; attempt < 20; attempt++) {
+        const result = await fn();
+        let announced = 0;
+        const count = () => announced++;
+        CacheInvalidationBus.on('api', count);
+        try {
+            FakeGoogleSheetsService.touch('CACHE');
+            await triggerCachePoll();
+            await cutoffSettled();
+        } finally {
+            CacheInvalidationBus.off('api', count);
+        }
+        if (!announced) return result;
+        await new Promise(resolve => setTimeout(resolve, 250));
+    }
+    throw new Error('the caches never settled');
+}
+const TIMELINE_ARGS = ['TABLE-001', '2026-02-15', '2026-06-30'];
+
+test('EARLY CUTOFF', 'a task-column edit reruns no quantity analysis; the schedule itself reloads', async () => {
+    await _withRestoredSchedule(async () => {
+        const before = await _warm(async () => {
+            await Requests.getProjectShipDate('CHAINCO 2026 SPRING EXPO');
+            await Requests.getProductionScheduleData();
+            return Requests.getItemTimeline(...TIMELINE_ARGS);
+        });
+        const announced = await _announcedDuringHandEdit(sheet => {
+            _scheduleRow(sheet, 'Spring Expo', 'ChainCo')[4] = 'Reno, NV';
+        });
+        const methods = new Set(announced.map(key => key.split(':')[1]));
+        assertEqual(
+            [methods.has('getProductionScheduleData'), methods.has('getItemTimeline'), methods.has('getProjectShipDate')],
+            [true, false, false],
+            'announced: the schedule, not the timeline or the ship date'
+        );
+        assertEqual(await Requests.getItemTimeline(...TIMELINE_ARGS), before, 'the timeline is unchanged');
+    });
+});
+
+test('EARLY CUTOFF', 'a date edit reruns the analysis of the show it changed, not of other shows', async () => {
+    await _withRestoredSchedule(async () => {
+        await _warm(async () => {
+            await Requests.getItemTimeline(...TIMELINE_ARGS);
+            await Requests.getProjectShipDate('CHAINCO 2026 SPRING EXPO');
+            await Requests.getProjectShipDate('TRICHAIN 2026 STAGE A');
+        });
+        const announced = await _announcedDuringHandEdit(sheet => {
+            _scheduleRow(sheet, 'Spring Expo', 'ChainCo')[9] = '2/27/2026';
+        });
+        const has = (method, firstArg) => announced.some(key => key.startsWith(`api:${method}:${JSON.stringify(firstArg)}`));
+        assertEqual(
+            [has('getProjectShipDate', 'CHAINCO 2026 SPRING EXPO'), has('getItemTimeline', 'TABLE-001'), has('getProjectShipDate', 'TRICHAIN 2026 STAGE A')],
+            [true, true, false],
+            'announced: Spring Expo\'s ship date and the timeline it is in, not Stage A\'s ship date'
+        );
+        const ship = (await Requests.getItemTimeline(...TIMELINE_ARGS)).find(e => e.event === 'Ships' && e.note === 'CHAINCO 2026 SPRING EXPO');
+        assertEqual([await Requests.getProjectShipDate('CHAINCO 2026 SPRING EXPO'), ship?.date], ['2026-02-27', '2026-02-27'], 'the new ship date');
+    });
+});
+
+test('EARLY CUTOFF', 'a new show in a window reruns that window\'s analysis', async () => {
+    await _withRestoredSchedule(async () => {
+        const filter = { dateFilters: [{ column: 'Ship', value: '2026-03-31', type: 'before' }, { column: 'Return', value: '2026-03-01', type: 'after' }] };
+        const before = await _warm(async () => {
+            await Requests.getItemTimeline(...TIMELINE_ARGS);
+            return ProductionUtils.getOverlappingShowIds(filter);
+        });
+        const announced = await _announcedDuringHandEdit(sheet => {
+            const row = [..._scheduleRow(sheet, 'Spring Expo', 'ChainCo')];
+            row[0] = 'Window Test';
+            row[3] = '';
+            sheet.push(row);
+        });
+        const after = await ProductionUtils.getOverlappingShowIds(filter);
+        assertEqual(after.length, before.length + 1, 'the window gains the new show');
+        assertEqual(announced.some(key => key.startsWith('api:getItemTimeline:"TABLE-001"')), true, 'the timeline over that window reruns');
+    });
+});
 // ── Group: Change stamps ──────────────────────────────────────────────────────
 // Stamps for made-up tabs ("StampTest …") are added to CACHE/Caching and left there.
 

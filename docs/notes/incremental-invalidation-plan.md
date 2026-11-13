@@ -1,8 +1,10 @@
 # Incremental Invalidation Plan
 
-**Branch:** api-separation (main merged in at 91da36b)
-**Status:** Phase 1 done (commit 28a87dd) and passing with main's caching work. Phases 2–4 have been
-re-assessed against main. The questions at the end need answers first.
+**Branch:** api-separation (main merged in again at 718ab08)
+**Status:** Phase 1 done (commit 28a87dd). The first, opt-in slice of phase 3b is done: early cutoff
+for listed methods, applied to how quantity analysis reads the Production Schedule (see "Phase 3b,
+first slice" below). Phase 2, 3a, the rest of 3b and phase 4 remain. The questions at the end still
+need answers before those.
 
 ## Goal
 
@@ -69,6 +71,62 @@ still needed. Main makes phase 3 both more valuable and cheaper, as described be
 Schedule page this is now the common case: any hand edit anywhere in the Production Schedule
 spreadsheet invalidates every read of it.
 
+## Phase 3b, first slice — opt-in early cutoff on the schedule (done)
+
+Before this, every Production Schedule hand edit, a task checkbox included, reran all quantity
+analysis: item timelines, remaining quantities, overlap checks, shortage alerts. That analysis read
+the schedule as full rows (44 columns), even though it uses 10. Even under the full 3b, which cuts
+off unchanged values, the analysis would still recompute, because its inputs (full rows) change on
+every edit. Narrowing the inputs is what avoids the recompute; cutoff is what stops the cascade.
+
+**Mechanism** (caching.js, `EARLY_CUTOFF`):
+
+- `wrapMethods` takes `cutoffMethods`. A cutoff key records its recomputation and a hash of each
+  value it keeps. The hash is kept apart from the entry, so null and empty results compare too, and
+  a hash survives `expire()` (this is phase 2's item 4, for cutoff keys only).
+- When a cutoff key with dependents is invalidated, its own value and dependency records go as
+  usual. Its dependents keep theirs, and nothing is announced (`_deferCascade`).
+- After the current invalidation (a `setTimeout`, so a save's `fillCache` lands first), the key is
+  recomputed and its hash compared (`_verify`). Equal: done. Changed, unverifiable (an error) or not
+  kept (generations): the held cascade runs and the key is announced, as before.
+- A key that changes again while it is being verified is verified again. Generations guard joins
+  and caching exactly as before. `cutoffSettled()` resolves once no verification is running (tests).
+- `EARLY_CUTOFF = false` restores the plain cascade (question 6: a code constant for now).
+
+**Applied to the schedule** (production-utils.js):
+
+- `getScheduleDateRows`: the schedule's Show, Client, Year, Identifier and date columns
+  (`SCHEDULE_DATE_MAPPING`). A task-column edit stops here.
+- `getScheduleDateMap(year)`: a year's date rows by computed identifier. Not a cutoff method: it is
+  the lookup table that makes each `getShowDates` recompute a lookup.
+- `getShowDates(id)`: one show's date row, with full-year dates (as `getShowDetails`). A date edit to
+  another show stops here.
+- `getOverlappingShowIds(filters)`: the canonical ids passing date filters, once each. A date edit
+  that doesn't move a show in or out of a window stops here.
+- `getProjectShipDate`, `getProjectReturnDate`, `getTransshipSourceForShow` and
+  `getTransshipDestinationsForShow` are cutoff methods too, now built on `getShowDates`.
+- The item timeline, `getOverlappingShowItems`, chain item extraction, `getMultipleShowsItemsSummary`
+  (date filters only; text filters may name any column) and `resolvePacklistIdentifier` use these.
+  `getOverlappingShows` and `getShowDetails` keep returning full rows for the pages. Both share
+  their date filtering and full-year dates with the narrow versions (`_filterRowsByDates`,
+  `_withFullYearDates`). `deduplicateScheduleByShow` is gone; the id list is deduplicated.
+- `getMultipleShowsItemsSummary` now lists each show once. Before, a show with two booth rows was
+  listed twice and its items were added to the total twice.
+
+**Cost per hand edit:** the tab re-read already happened. Recomputing the 10-column rows and hashing
+them is a few ms. A date edit also rebuilds the year maps and re-verifies each cached show, one
+lookup each. Memory: one more cached copy of the schedule's date columns, and a number per cutoff key.
+
+**Not covered:** stores built on full rows (the Schedule page) still reload and re-analyze on every
+hand edit; phase 3a and phase 4 address that. Persisted results restored from CACHE/Analytics are
+linked straight to the raw tab read, so the first hand edit after a restore still recomputes them;
+after that recompute they depend on the cutoff methods.
+
+**Tests:** the EARLY CUTOFF group (a task-column edit announces no analysis; a date edit announces
+only the changed show's analysis; a new show reruns its window), and the CACHE INVALIDATION transship
+test (an unrelated link announces nothing; a real one announces the source and timeline). With
+`EARLY_CUTOFF = false` three of those tests fail; with it on, the suite passes (388 tests).
+
 ## Phase 2 — an immutability boundary (still needed)
 
 Early cutoff compares a recomputed value with the cached one, so cached values must not be
@@ -112,6 +170,10 @@ runs today's cascade. An unchanged source announces nothing.
   its own.
 
 ### 3b. Cutoff through the graph
+
+The first slice is done ("Phase 3b, first slice" above): listed methods verify before they
+cascade. The rest of 3b widens that from listed methods to every key, and needs phase 2 first,
+since an unlisted key's value may be mutated after it is cached.
 
 1. **Mark, don't delete.** A changed source marks its transitive dependents stale (the
    `expire()` idea: keep dependency records, don't announce) and keeps their values for
