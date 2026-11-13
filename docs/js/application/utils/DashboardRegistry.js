@@ -175,10 +175,10 @@ export const DashboardRegistry = Vue.reactive({
     },
 
     /**
-     * Resize a card from its top-left cell. Returns false when the new size doesn't fit.
+     * Resize a card to a new rect (from any edge). Returns false when it doesn't fit.
      */
-    async resize(containerPathWithParams, w, h) {
-        const rects = planResize(this.layout.placed, containerPathWithParams, w, h);
+    async resize(containerPathWithParams, rect) {
+        const rects = planResize(this.layout.placed, containerPathWithParams, rect);
         if (!rects) return false;
         this._commit(rects);
         await this.save();

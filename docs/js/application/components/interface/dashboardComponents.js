@@ -1,5 +1,5 @@
 import { html, NavigationRegistry } from '../../index.js';
-import { GRID, MINI_MIN_CELL, MINI_BASE_WIDTH, transpose, clampRect, planMove, planResize, freeCells, sameRect } from '../../utils/dashboardLayout.js';
+import { GRID, MINI_MIN_CELL, MINI_BASE_WIDTH, transpose, clampRect, planMove, planResize, resizeRect, freeCells, sameRect } from '../../utils/dashboardLayout.js';
 
 /**
  * Dashboard grid (single screen, 4 x 2 landscape / 2 x 4 portrait; layout rules in
@@ -14,7 +14,7 @@ import { GRID, MINI_MIN_CELL, MINI_BASE_WIDTH, transpose, clampRect, planMove, p
  *   renders its page MINI_BASE_WIDTH px wide per column, scaled down to fit, and inert. Clicking a
  *   miniature expands it.
  * - Arrange mode (DashboardRegistry.arranging): cards are dragged to move (onto one card swaps them)
- *   and resized from their corner; free cells offer the notices card and cards with no room.
+ *   and resized from any edge or corner; free cells offer the notices card and cards with no room.
  */
 
 /** The notices page: the app banners as a dashboard card (see NoticesContent) */
@@ -110,6 +110,19 @@ function cellAt(clientX, clientY) {
     };
 }
 
+/** A card's resize zones along its edges and corners, as drawn: each drags the edges it names */
+const RESIZE_ZONES = [
+    { name: 'n', edges: { top: true } },
+    { name: 's', edges: { bottom: true } },
+    { name: 'e', edges: { right: true } },
+    { name: 'w', edges: { left: true } },
+    { name: 'nw', edges: { top: true, left: true } },
+    { name: 'ne', edges: { top: true, right: true } },
+    { name: 'sw', edges: { bottom: true, left: true } },
+    { name: 'se', edges: { bottom: true, right: true } }
+];
+const CORNER_EDGES = { bottom: true, right: true };
+
 /** The drag in progress, shared by the dragged cell and the arrange layer's drop preview */
 export const dashboardDrag = Vue.reactive({
     path: null,
@@ -130,6 +143,10 @@ export const DashboardCell = {
         title: { type: String, default: '' }
     },
     emits: ['expand'],
+    created() {
+        this.resizeZones = RESIZE_ZONES;
+        this.cornerEdges = CORNER_EDGES;
+    },
     computed: {
         onDashboard() {
             return !!this.card;
@@ -167,13 +184,15 @@ export const DashboardCell = {
         }
     },
     methods: {
-        startDrag(mode, event) {
+        // mode 'move' or 'resize'; a resize drags the given edges (as drawn)
+        startDrag(mode, event, edges = null) {
             if (event.button !== undefined && event.button !== 0) return;
             event.preventDefault();
             event.currentTarget.setPointerCapture?.(event.pointerId);
             const shown = toDisplay(this.card);
             const cell = cellAt(event.clientX, event.clientY);
             this._grab = { col: cell.col - shown.x, row: cell.row - shown.y };
+            this._edges = edges;
             Object.assign(dashboardDrag, { path: this.card.path, mode, rect: { ...this.card }, valid: true });
         },
         onDrag(event) {
@@ -187,9 +206,8 @@ export const DashboardCell = {
                 rect = clampRect(toDisplay({ x: cell.col - this._grab.col, y: cell.row - this._grab.row, w: shown.w, h: shown.h }));
                 plan = planMove(placed, this.card.path, rect);
             } else {
-                const size = toDisplay({ x: shown.x, y: shown.y, w: Math.max(1, cell.col - shown.x + 1), h: Math.max(1, cell.row - shown.y + 1) });
-                rect = { x: this.card.x, y: this.card.y, w: Math.min(size.w, GRID.cols - this.card.x), h: Math.min(size.h, GRID.rows - this.card.y) };
-                plan = planResize(placed, this.card.path, rect.w, rect.h);
+                rect = toDisplay(resizeRect(shown, this._edges, cell));
+                plan = planResize(placed, this.card.path, rect);
             }
             dashboardDrag.rect = rect;
             dashboardDrag.valid = !!plan;
@@ -201,7 +219,7 @@ export const DashboardCell = {
             if (!commit || !valid || !rect || sameRect(rect, this.card)) return;
             const registry = NavigationRegistry.dashboardRegistry;
             if (mode === 'move') await registry.move(this.card.path, rect);
-            else await registry.resize(this.card.path, rect.w, rect.h);
+            else await registry.resize(this.card.path, rect);
         },
         remove() {
             NavigationRegistry.dashboardRegistry.remove(this.card.path);
@@ -234,9 +252,18 @@ export const DashboardCell = {
                         @click="remove">
                     <span class="material-symbols-outlined">close</span>
                 </button>
+                <div v-for="zone in resizeZones"
+                     :key="zone.name"
+                     class="dashboard-cell-resize-zone"
+                     :data-edge="zone.name"
+                     title="Drag to resize"
+                     @pointerdown="startDrag('resize', $event, zone.edges)"
+                     @pointermove="onDrag"
+                     @pointerup="endDrag(true)"
+                     @pointercancel="endDrag(false)"></div>
                 <button class="button-symbol white dashboard-cell-resize"
                         title="Drag to resize"
-                        @pointerdown="startDrag('resize', $event)"
+                        @pointerdown="startDrag('resize', $event, cornerEdges)"
                         @pointermove="onDrag"
                         @pointerup="endDrag(true)"
                         @pointercancel="endDrag(false)">
@@ -306,7 +333,7 @@ export const DashboardArrangeLayer = {
              :class="preview.valid ? 'valid' : 'invalid'"
              :style="gridAreaStyle(preview.rect)"></div>
         <div class="button-bar dashboard-arrange-bar">
-            <span>Drag a card to move it, its corner to resize it</span>
+            <span>Drag a card to move it, an edge or corner to resize it</span>
             <button class="green" @click="done">Done</button>
         </div>
     `

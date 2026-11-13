@@ -57,7 +57,7 @@ import { getReactiveStore, createAnalysisConfig, itemVariantCards, itemShortageC
 import { calculateStoreDiff, applyDiffToData } from '../application/utils/reactiveStores.js';
 import { notificationBus } from '../application/utils/notificationBus.js';
 import { findScope, carriesSearch, withoutSearch } from '../application/utils/findScopes.js';
-import { normalizeLayout, freeCells, isFull, firstFreeSlot, planMove, planResize, transpose, clampRect, classesForSize, sizeFromClasses } from '../application/utils/dashboardLayout.js';
+import { normalizeLayout, freeCells, isFull, firstFreeSlot, planMove, planResize, resizeRect, transpose, clampRect, classesForSize, sizeFromClasses } from '../application/utils/dashboardLayout.js';
 import { checkSheetHealth } from './sheetHealth.js';
 import { guessColumnType, columnTypesEntry, columnTypeMap, columnTypeOf, isOpaqueType } from '../data_management/utils/column-types.js';
 import { migrateThumbnails } from '../data_management/migrations/thumbnail-column.js';
@@ -1150,9 +1150,22 @@ test('DASHBOARD LAYOUT', 'planMove moves into free space, swaps with one card, r
 
 test('DASHBOARD LAYOUT', 'planResize grows into free cells only', async () => {
     const { placed } = normalizeLayout(await Requests.getUserData('test@example.com', 'dashboard_containers'));
-    assertEqual(planResize(placed, 'inventory', 2, 2), [{ path: 'inventory', x: 2, y: 0, w: 2, h: 2 }], 'grow right');
-    assertEqual(planResize(placed, 'schedule', 2, 2), null, 'grow onto packlist');
-    assertEqual(planResize(placed, 'schedule', 1, 1), [{ path: 'schedule', x: 0, y: 0, w: 1, h: 1 }], 'shrink');
+    assertEqual(planResize(placed, 'inventory', { x: 2, y: 0, w: 2, h: 2 }), [{ path: 'inventory', x: 2, y: 0, w: 2, h: 2 }], 'grow right');
+    assertEqual(planResize(placed, 'inventory', { x: 1, y: 0, w: 2, h: 2 }), null, 'grow left onto schedule and packlist');
+    assertEqual(planResize(placed, 'inventory', { x: 2, y: 1, w: 1, h: 1 }), [{ path: 'inventory', x: 2, y: 1, w: 1, h: 1 }], 'shrink from the top');
+    assertEqual(planResize(placed, 'schedule', { x: 0, y: 0, w: 2, h: 2 }), null, 'grow onto packlist');
+    assertEqual(planResize(placed, 'schedule', { x: 0, y: 0, w: 1, h: 1 }), [{ path: 'schedule', x: 0, y: 0, w: 1, h: 1 }], 'shrink');
+    const lone = [{ path: 'notices', x: 3, y: 1, w: 1, h: 1 }];
+    assertEqual(planResize(lone, 'notices', { x: 1, y: 0, w: 3, h: 2 }), [{ path: 'notices', x: 1, y: 0, w: 3, h: 2 }], 'grow up and left');
+});
+
+test('DASHBOARD LAYOUT', 'resizeRect: dragged edges follow the pointer, the others stay', () => {
+    const card = { x: 2, y: 0, w: 1, h: 2 };
+    assertEqual(resizeRect(card, { left: true }, { col: 0, row: 1 }), { x: 0, y: 0, w: 3, h: 2 }, 'left edge, out to column 0');
+    assertEqual(resizeRect(card, { right: true }, { col: 3, row: 0 }), { x: 2, y: 0, w: 2, h: 2 }, 'right edge (the row is ignored)');
+    assertEqual(resizeRect(card, { top: true, left: true }, { col: 1, row: 1 }), { x: 1, y: 1, w: 2, h: 1 }, 'top-left corner, in and out');
+    assertEqual(resizeRect({ x: 1, y: 0, w: 2, h: 1 }, { right: true }, { col: 0, row: 0 }), { x: 0, y: 0, w: 2, h: 1 }, 'right edge past the left one: turns over it');
+    assertEqual(resizeRect({ x: 0, y: 1, w: 1, h: 1 }, { top: true }, { col: 3, row: 0 }), { x: 0, y: 0, w: 1, h: 2 }, 'top edge up');
 });
 
 test('DASHBOARD LAYOUT', 'transpose, clampRect and classesForSize', () => {

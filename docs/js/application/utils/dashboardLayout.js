@@ -184,13 +184,33 @@ export function planMove(placed, path, rect) {
 }
 
 /**
- * Plan a resize of one card to w x h, keeping its top-left cell.
- * @returns {Array<{path,x,y,w,h}>|null}
+ * The rect a resize drag makes, in one set of terms (display or stored): the dragged edges follow
+ * the cell under the pointer and the opposite edges stay put. Dragging an edge past its opposite
+ * one turns the card over that edge.
+ * @param {{x,y,w,h}} rect - the card before the drag
+ * @param {{left?:boolean,right?:boolean,top?:boolean,bottom?:boolean}} edges - the dragged edges
+ * @param {{col:number,row:number}} cell - the cell under the pointer
  */
-export function planResize(placed, path, w, h) {
+export function resizeRect(rect, edges, cell) {
+    const span = (start, size, low, high, at) => {
+        if (!low && !high) return [start, size];
+        const anchor = low ? start + size - 1 : start;
+        const from = Math.min(anchor, at);
+        return [from, Math.max(anchor, at) - from + 1];
+    };
+    const [x, w] = span(rect.x, rect.w, edges.left, edges.right, cell.col);
+    const [y, h] = span(rect.y, rect.h, edges.top, edges.bottom, cell.row);
+    return { x, y, w, h };
+}
+
+/**
+ * Plan a resize of one card to a new rect (from any edge, so its position can change too).
+ * @returns {Array<{path,x,y,w,h}>|null} - null when the rect leaves the grid or covers another card
+ */
+export function planResize(placed, path, rect) {
     const key = cleanPath(path);
     const card = placed.find(c => cleanPath(c.path) === key);
     if (!card) return null;
-    const rect = { x: card.x, y: card.y, w, h };
-    return fits(placed, rect, path) ? [{ path: card.path, ...rect }] : null;
+    const { x, y, w, h } = rect;
+    return fits(placed, { x, y, w, h }, path) ? [{ path: card.path, x, y, w, h }] : null;
 }

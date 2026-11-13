@@ -698,7 +698,7 @@ There are two scopes, each with the same three tiers.
 - **Miniatures.** When a cell is smaller than `MINI_MIN_CELL` (300 × 200px), cards stop being interactive. A miniature renders its page 360px wide per column, scaled down to fit, and `inert`. Clicking it opens the page.
 - **Arrange mode** (the page menu or the settings menu on the dashboard; Escape or Done ends it) draws every card as a miniature with a drag handle, a remove button and a resize corner.
   - Dropping a card into free space moves it. Dropping it onto exactly one other card swaps the two (`planMove`). The other card goes to the moved card's old position at its own size, when it fits there.
-  - Resizing keeps the top-left cell (`planResize`). Free cells offer the notices card and unplaced cards.
+  - A card resizes from any edge or corner (zones along its edges, and a button in its corner). The dragged edges follow the pointer's cell and the opposite edges stay put (`resizeRect`); the new rect must fit (`planResize`). Free cells offer the notices card and unplaced cards.
 - **Spacing.** The grid has `--padding-lg` around the cards and between them.
 - **First load.** Once signed in, while the dashboard reads the user's cards (`dashboardLoading` in `app.js`), a loading card covers every cell: the background colour at 50%, with the loading bar's sweep (`loading-bar-slide`). Signed out, nothing shows but the sign-in message.
   - The loading cards fade in, sit above the grid, and fade out (`longfade`) over the cards arriving underneath, so the dashboard fades in.

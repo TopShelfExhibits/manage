@@ -326,7 +326,8 @@ div#app-content > div.empty-message {
     transform-origin: 0 0;
 }
 
-/* Arrange mode: a handle over each card to drag it, a remove button and a resize corner */
+/* Arrange mode: a handle over each card to drag it, a remove button, resize zones along its edges
+   and corners, and a resize button in its corner */
 .dashboard-cell-handle {
     position: absolute;
     inset: 0;
@@ -358,6 +359,51 @@ div#app-content > div.empty-message {
     bottom: var(--padding-md);
     cursor: nwse-resize;
     touch-action: none;
+}
+/* Above the move handle, below the buttons; they show when pointed at */
+.dashboard-cell-resize-zone {
+    --zone: 14px;
+    position: absolute;
+    z-index: 1015;
+    touch-action: none;
+    border-radius: var(--radius-lg);
+}
+.dashboard-cell-resize-zone:hover,
+.dashboard-cell.dragging .dashboard-cell-resize-zone:active {
+    background: color-mix(in srgb, var(--color-primary) 45%, transparent);
+}
+.dashboard-cell-resize-zone[data-edge="n"],
+.dashboard-cell-resize-zone[data-edge="s"] {
+    left: var(--zone);
+    right: var(--zone);
+    height: var(--zone);
+    cursor: ns-resize;
+}
+.dashboard-cell-resize-zone[data-edge="e"],
+.dashboard-cell-resize-zone[data-edge="w"] {
+    top: var(--zone);
+    bottom: var(--zone);
+    width: var(--zone);
+    cursor: ew-resize;
+}
+.dashboard-cell-resize-zone[data-edge*="n"] { top: 0; }
+.dashboard-cell-resize-zone[data-edge*="s"] { bottom: 0; }
+.dashboard-cell-resize-zone[data-edge*="e"] { right: 0; }
+.dashboard-cell-resize-zone[data-edge*="w"] { left: 0; }
+.dashboard-cell-resize-zone[data-edge="nw"],
+.dashboard-cell-resize-zone[data-edge="ne"],
+.dashboard-cell-resize-zone[data-edge="sw"],
+.dashboard-cell-resize-zone[data-edge="se"] {
+    width: var(--zone);
+    height: var(--zone);
+}
+.dashboard-cell-resize-zone[data-edge="nw"],
+.dashboard-cell-resize-zone[data-edge="se"] {
+    cursor: nwse-resize;
+}
+.dashboard-cell-resize-zone[data-edge="ne"],
+.dashboard-cell-resize-zone[data-edge="sw"] {
+    cursor: nesw-resize;
 }
 #app-content.dashboard > .dashboard-slot {
     display: flex;
