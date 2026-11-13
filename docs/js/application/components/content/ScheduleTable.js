@@ -1,6 +1,7 @@
 import { html, Requests, parseDate, toUSDateString, DataView, getReactiveStore, createAnalysisConfig, invalidateCache, Priority, runNonessentialAnalysisOnAllStores, SEVERITY } from '../../index.js';
 import { IndexResolutionComponent } from '../interface/IndexResolutionModal.js';
 import { TransshipmentModal } from '../interface/ScheduleModals.js';
+import { ShowOutputFiles } from './ShowOutputFiles.js';
 import { buildScheduleFields } from '../../../data_management/abstraction/scheduleFields.js';
 import { shipReturnAnalysis, withShipDate, estimatedShipText, shipReturnCards } from '../../utils/scheduleShipping.js';
 
@@ -76,7 +77,8 @@ const PacklistSelectModal = {
 
 export const ScheduleTableComponent = {
     components: {
-        DataView
+        DataView,
+        ShowOutputFiles
     },
     props: {
         filter: {
@@ -607,6 +609,7 @@ export const ScheduleTableComponent = {
                         {{ row.AppData?.transshipDestination ? 'Change To' : 'Set Transship To' }}
                     </button>
                 </div>
+                <ShowOutputFiles :show="row.Show" :client="row.Client" :year="row.Year" style="margin-top: var(--padding-sm)" />
             </template>
         </DataView>
     `

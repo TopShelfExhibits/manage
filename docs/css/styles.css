@@ -2178,7 +2178,8 @@ html.row-dragging * {
     padding: 0;
 }
 
-/* A list of buttons in one cell (the showList cell, the overlapping shows modal): stacked, full width */
+/* A list of buttons in one cell (the showList cell, the overlapping shows modal, a show's Dropbox
+   files): stacked, full width. Buttons fill it, over the generic fixed button widths (global.css) */
 .cell-button-list {
     display: flex;
     flex-direction: column;
@@ -2186,6 +2187,7 @@ html.row-dragging * {
     gap: 2px;
     width: 100%;
 }
+.cell-button-list > button,
 td .cell-button-list > .card {
     display: block;
     width: 100%;
