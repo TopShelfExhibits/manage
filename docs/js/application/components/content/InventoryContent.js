@@ -1,8 +1,9 @@
-import { html, InventoryTableComponent, hamburgerMenuRegistry, NavigationRegistry, Requests, DataView, DashboardToggleComponent, getReactiveStore, findMatchingStores, createAnalysisConfig, generateStoreKey, authState, invalidateCache, todayISOString, getInventoryTabList, INVENTORY_TAB_PREFERENCES, getShortageAlertsStore, getShortageAlertDays, shortagesByItem, itemShortageCards, categoryShortageCards, THUMBNAIL_FIELD } from '../../index.js';
+import { html, InventoryTableComponent, hamburgerMenuRegistry, NavigationRegistry, Requests, DataView, DashboardToggleComponent, getReactiveStore, findMatchingStores, createAnalysisConfig, generateStoreKey, authState, invalidateCache, todayISOString, getInventoryTabList, INVENTORY_TAB_PREFERENCES, getShortageAlertsStore, getShortageAlertDays, shortagesByItem, itemShortageCards, categoryShortageCards, itemVariantCards, itemVariantFamilies, THUMBNAIL_FIELD, ParamToggles } from '../../index.js';
 import { ShowInventoryReport } from './ShowInventoryReport.js';
 import { InventoryItemReport } from './InventoryItemReport.js';
 import { InventoryItemTimeline } from './InventoryItemTimeline.js';
 import { getProposalsStore, PROPOSALS_PATH } from '../../utils/inventoryProposals.js';
+import { openInventorySaveDialog, INVENTORY_DETAIL_TOGGLES } from './InventoryTable.js';
 
 /** Route key of the per-category history page: inventory/<category>/edit-history */
 export const EDIT_HISTORY_ROUTE = 'edit-history';
@@ -67,8 +68,10 @@ const INVENTORY_VIEWS = {
     ]
 };
 
-// Inventory Hamburger Menu Component (content only)
+// Inventory Hamburger Menu Component (content only). On a category table or its history page it
+// also holds the sub-row toggles (INVENTORY_DETAIL_TOGGLES), kept in the URL.
 export const InventoryMenuComponent = {
+    components: { ParamToggles },
     props: {
         containerPath: String,
         containerType: String, 
@@ -79,7 +82,7 @@ export const InventoryMenuComponent = {
     },
     inject: ['$modal', 'appContext'],
     data() {
-        return { proposalsStore: getProposalsStore() };
+        return { proposalsStore: getProposalsStore(), INVENTORY_DETAIL_TOGGLES };
     },
     computed: {
         hasActiveProposals() {
@@ -168,6 +171,9 @@ export const InventoryMenuComponent = {
     },
     template: html`
         <ul>
+            <li v-if="inventoryLocation.isCategoryTable || inventoryLocation.isEditHistory">
+                <ParamToggles :toggles="INVENTORY_DETAIL_TOGGLES" :container-path="containerPath" :navigate-to-path="navigateToPath" />
+            </li>
             <li v-for="item in menuItems" :key="item.action">
                 <button 
                     @click="handleAction(item.action)"
@@ -202,7 +208,7 @@ export const InventoryContent = {
             inventoryStore: null, // All inventory item rows (overview table and category card members)
             autoSavedCategories: new Set(), // Track which categories have auto-saved data
             shortageAlertsStore: getShortageAlertsStore(),
-            shortageDecorationKeys: ['itemNumber'],
+            itemDecorationKeys: ['itemNumber', 'description'],
             INVENTORY_FIELDS,
             INVENTORY_VIEWS,
             // Primary action: category cards → the category; overview rows → the item timeline (R3.8),
@@ -247,6 +253,10 @@ export const InventoryContent = {
         },
         allItemRows() {
             return this.inventoryStore?.data || [];
+        },
+        // Bases with a real letter variant item: their declared variants don't count
+        variantFamilies() {
+            return itemVariantFamilies(this.allItemRows.map(row => row.itemNumber));
         },
         // Description-only tabs (InventoryDescriptionOnly preference), hidden from the overview table
         descriptionOnlyTabs() {
@@ -427,10 +437,12 @@ export const InventoryContent = {
             cards.push(...categoryShortageCards(this.shortageAlertsStore?.data, key, getShortageAlertDays(), this.navigateToPath));
             return cards;
         },
-        // Decorations (§4.14): a shortage warning on the item number of overview items that run short
+        // Decorations (§4.14): a shortage warning on the item number of overview items that run
+        // short, and the variants declared in the description
         itemDecorations(row, key) {
+            if (key === 'description') return itemVariantCards(row, (message, title) => this.$modal.alert(message, title), this.variantFamilies);
             if (key !== 'itemNumber') return [];
-            return itemShortageCards(this.shortagesByItem.get(row.itemNumber), getShortageAlertDays());
+            return itemShortageCards(this.shortagesByItem.get(row.itemNumber), getShortageAlertDays(), this.navigateToPath);
         },
         categoryAppData(key) {
             return this.categoryList.find(c => c.originalTitle === key)?.AppData;
@@ -476,27 +488,15 @@ export const InventoryContent = {
             this.navigateToPath(newPath);
         },
         async saveCategory(categoryTitle) {
-            try {
-                // Find the reactive store for this inventory category
-                const matchingStores = findMatchingStores(
-                    Requests.getInventoryTabData,
-                    [categoryTitle, undefined, undefined, undefined]
-                );
-                if (matchingStores.length === 0) {
-                    this.$modal.alert('Category not found or no changes to save.', 'Save');
-                    return;
-                }
-                const storeMatch = matchingStores[0];
-                if (!storeMatch.isModified) {
-                    this.$modal.alert('No unsaved changes to save.', 'Save');
-                    return;
-                }
-                await storeMatch.store.save();
-                this.$modal.alert('Category saved successfully.', 'Success');
-            } catch (error) {
-                console.error('[InventoryContent] Failed to save category:', error);
-                this.$modal.error(`Failed to save category: ${error.message}`, 'Save Error');
+            const matchingStores = findMatchingStores(
+                Requests.getInventoryTabData,
+                [categoryTitle, undefined, undefined, undefined]
+            );
+            if (matchingStores.length === 0 || !matchingStores[0].isModified) {
+                this.$modal.alert('No unsaved changes to save.', 'Save');
+                return;
             }
+            openInventorySaveDialog(this, { store: matchingStores[0].store, category: categoryTitle });
         },
         navigateToCategoriesView() {
             this.navigateToPath(NavigationRegistry.buildPath('inventory', { view: 'categories' }));
@@ -568,7 +568,7 @@ export const InventoryContent = {
                 :navigate-to-path="navigateToPath"
                 :action="inventoryAction"
                 :decorations="itemDecorations"
-                :decoration-keys="shortageDecorationKeys"
+                :decoration-keys="itemDecorationKeys"
                 :bucket-keys="bucketKeys"
                 :bucket-decorations="categoryDecorations"
                 :bucket-label="formatCategoryLabel"

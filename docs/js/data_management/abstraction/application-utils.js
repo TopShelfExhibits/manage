@@ -276,14 +276,11 @@ class applicationUtils_uncached {
      */
     static async lockSheet(spreadsheet, tab, user, deviceId = null) {
         try {
-            //console.log(`[lockSheet] START: ${spreadsheet}/${tab} for ${user}`);
             const timestamp = new Date().toISOString();
             const lockKey = `${spreadsheet}:${tab}`;
             
             // Get current locks data
-            //console.log(`[lockSheet] Getting locks data...`);
             const locksGrid = await ApplicationUtils.getLocksData();
-            //console.log(`[lockSheet] Got locks data:`, locksGrid);
             
             // Resolve the effective lock: oldest active timestamp wins.
             const existingLock = getOldestActiveLock(locksGrid.locks, spreadsheet, tab);
@@ -295,42 +292,33 @@ class applicationUtils_uncached {
             
             // Find or create lock key row
             let lockRowIndex = locksGrid.lockKeys.indexOf(lockKey);
-            //console.log(`[lockSheet] lockRowIndex = ${lockRowIndex}, lockKeys =`, locksGrid.lockKeys);
             if (lockRowIndex === -1) {
                 // Add new lock key to the grid
                 lockRowIndex = locksGrid.lockKeys.length;
                 locksGrid.lockKeys.push(lockKey);
-                //console.log(`[lockSheet] Adding new lock key at row ${lockRowIndex + 2}`);
                 await this._writeLockKeyRow(lockKey, lockRowIndex + 2); // +2 for header row
-                //console.log(`[lockSheet] Lock key row written successfully`);
             }
             
             // Find or create user column
             let userColIndex = locksGrid.users.indexOf(user);
-            //console.log(`[lockSheet] userColIndex = ${userColIndex}, users =`, locksGrid.users);
             if (userColIndex === -1) {
                 // Add new user column
                 userColIndex = locksGrid.users.length;
                 locksGrid.users.push(user);
-                //console.log(`[lockSheet] Adding new user at col ${userColIndex + 2}`);
                 await this._writeUserColumn(user, userColIndex + 2); // +2 for "Lock Key" column (B=2)
-                //console.log(`[lockSheet] User column written successfully`);
             }
             
             // Write timestamp (with optional deviceId) to the specific cell (single cell write)
             const cellRow = lockRowIndex + 2; // +2 for header row (1-indexed)
             const cellCol = userColIndex + 2; // +2 for Lock Key column (1-indexed)
             const cellValue = deviceId ? `${timestamp}|${deviceId}` : timestamp;
-            //console.log(`[lockSheet] Writing timestamp to R${cellRow}C${cellCol}`);
             await this._writeLockCell(cellRow, cellCol, cellValue);
-            //console.log(`[lockSheet] Timestamp written successfully`);
             
             // Invalidate getSheetLock cache so UI components see the new lock
             stampDataChange('app_utils:getLocksData');
             invalidateCache([
                 { namespace: 'app_utils', methodName: 'getLocksData', args: [] }
             ]);
-            //console.log(`[lockSheet] Locked ${lockKey} for ${user} at cell R${cellRow}C${cellCol}`);
             return true;
             
         } catch (error) {
@@ -348,29 +336,22 @@ class applicationUtils_uncached {
      */
     static async unlockSheet(spreadsheet, tab, user) {
         try {
-            //console.log(`[unlockSheet] START: ${spreadsheet}/${tab} for ${user}`);
             const lockKey = `${spreadsheet}:${tab}`;
             
             // Get current locks data
-            //console.log(`[unlockSheet] Getting locks data...`);
             const locksGrid = await ApplicationUtils.getLocksData();
-            //console.log(`[unlockSheet] Got locks data:`, locksGrid);
             
             // Find lock key row
             const lockRowIndex = locksGrid.lockKeys.indexOf(lockKey);
-            //console.log(`[unlockSheet] lockRowIndex = ${lockRowIndex}`);
             if (lockRowIndex === -1) {
                 // Lock key not in grid, no lock to remove
-                //console.log(`[unlockSheet] Lock key not in grid, returning true`);
                 return true;
             }
             
             // Find user column
             const userColIndex = locksGrid.users.indexOf(user);
-            //console.log(`[unlockSheet] userColIndex = ${userColIndex}`);
             if (userColIndex === -1) {
                 // User not in grid, no lock to remove
-                //console.log(`[unlockSheet] User not in grid, returning true`);
                 return true;
             }
             
@@ -378,20 +359,16 @@ class applicationUtils_uncached {
             const lock = locksGrid.locks.find(lock => 
                 lock.spreadsheet === spreadsheet && lock.tab === tab && lock.user === user
             );
-            //console.log(`[unlockSheet] Found lock:`, lock);
             
             if (!lock || !lock.timestamp) {
                 // No lock exists for this user
-                //console.log(`[unlockSheet] No lock exists for this user, returning true`);
                 return true;
             }
             
             // Write "0" to the specific cell to unlock (single cell write)
             const cellRow = lockRowIndex + 2; // +2 for header row
             const cellCol = userColIndex + 2; // +2 for Lock Key column
-            //console.log(`[unlockSheet] Writing "0" to R${cellRow}C${cellCol}`);
             await this._writeLockCell(cellRow, cellCol, '0');
-            //console.log(`[unlockSheet] Unlock written successfully`);
             
             // Invalidate getSheetLock cache so UI components see the lock is gone
             // Must invalidate all possible argument combinations since cache includes optional currentUser
@@ -399,7 +376,6 @@ class applicationUtils_uncached {
             invalidateCache([
                 { namespace: 'app_utils', methodName: 'getLocksData', args: [] }
             ]);
-            //console.log(`[unlockSheet] Unlocked ${lockKey} for ${user} at cell R${cellRow}C${cellCol}`);
             return true;
             
         } catch (error) {
@@ -418,24 +394,20 @@ class applicationUtils_uncached {
      */
     static async getSheetLock(deps, spreadsheet, tab, currentUser = null) {
         const locksGrid = await deps.call(ApplicationUtils.getLocksData);
-        //console.log(`[ApplicationUtils.getSheetLock] Found ${locksGrid.locks.length} total locks`);
 
         // When multiple active locks exist, only the oldest timestamp is authoritative.
         const matchedLock = getOldestActiveLock(locksGrid.locks, spreadsheet, tab);
         
         // Filter out if locked by current user
         if (matchedLock && currentUser && matchedLock.user === currentUser) {
-            //console.log(`[ApplicationUtils.getSheetLock] Lock owned by current user (${currentUser}), returning null`);
             return null;
         }
         
         // Return lock details if found
         if (matchedLock) {
-            //console.log(`[ApplicationUtils.getSheetLock] Lock found for ${spreadsheet}/${tab}:`, matchedLock);
             return matchedLock;
         }
         
-        //console.log(`[ApplicationUtils.getSheetLock] No lock found for ${spreadsheet}/${tab}`);
         return null;
     }
     /**
@@ -448,7 +420,6 @@ class applicationUtils_uncached {
      * @returns {Promise<Object>} Result object { success, backupCount, deletedCount, lockOwner, message }
      */
     static async forceUnlockSheet(spreadsheet, tab, reason = '') {
-        //console.log(`[ApplicationUtils.forceUnlockSheet] Force unlocking ${spreadsheet}/${tab}. Reason: ${reason}`);
         
         try {
             const lockKey = `${spreadsheet}:${tab}`;
@@ -469,7 +440,6 @@ class applicationUtils_uncached {
             }
             
             const lockOwner = lockInfo.user;
-            //console.log(`[ApplicationUtils.forceUnlockSheet] Found lock owned by: ${lockOwner}`);
             
             // Get the owner's username from email
             const username = lockOwner.includes('@') ? lockOwner.split('@')[0] : lockOwner;
@@ -491,7 +461,6 @@ class applicationUtils_uncached {
                     Timestamp: 'Timestamp'
                 });
                 
-                //console.log(`[ApplicationUtils.forceUnlockSheet] Found ${allUserData.length} total autosave entries for user ${username}`);
                 
                 // Find matching autosave entries for this tab
                 // Store keys are generated like: '["getInventoryTabData",["FURNITURE",null,null]]'
@@ -501,7 +470,6 @@ class applicationUtils_uncached {
                     return entry.Store && entry.Store.includes(tabStoreKey);
                 });
                 
-                //console.log(`[ApplicationUtils.forceUnlockSheet] Found ${matchingEntries.length} autosave entries for tab ${tab}`);
                 
                 if (matchingEntries.length > 0) {
                     // Create backup entries and mark originals for deletion
@@ -535,25 +503,19 @@ class applicationUtils_uncached {
                         Timestamp: 'Timestamp'
                     }, { skipMetadata: true, bookkeeping: true });
                     
-                    //console.log(`[ApplicationUtils.forceUnlockSheet] Backed up ${backupCount} entries, deleted ${deletedCount} entries`);
                 }
             } else {
-                //console.log(`[ApplicationUtils.forceUnlockSheet] No user data tab found for ${username} - no autosave entries to backup`);
             }
             
             // Remove the lock (without user validation) - single cell write
             const lockRowIndex = locksGrid.lockKeys.indexOf(lockKey);
             const userColIndex = locksGrid.users.indexOf(lockOwner);
-            //console.log(`[forceUnlockSheet] lockRowIndex = ${lockRowIndex}, userColIndex = ${userColIndex}`);
             
             if (lockRowIndex !== -1 && userColIndex !== -1) {
                 const cellRow = lockRowIndex + 2; // +2 for header row
                 const cellCol = userColIndex + 2; // +2 for Lock Key column
-                //console.log(`[forceUnlockSheet] Writing "0" to R${cellRow}C${cellCol}`);
                 await this._writeLockCell(cellRow, cellCol, '0');
-                //console.log(`[forceUnlockSheet] Cleared lock at R${cellRow}C${cellCol}`);
             } else {
-                //console.log(`[forceUnlockSheet] Could not find lock key or user in grid, skipping cell write`);
             }
             
             // Invalidate getSheetLock cache so UI components see the lock is gone
@@ -567,7 +529,6 @@ class applicationUtils_uncached {
                 { namespace: 'database', methodName: 'getData', args: [spreadsheet, tab] }
             ], true);
             
-            //console.log(`[ApplicationUtils.forceUnlockSheet] Lock removed successfully`);
             
             return {
                 success: true,
@@ -618,7 +579,6 @@ class applicationUtils_uncached {
                 { namespace: 'app_utils', methodName: 'getLocksData', args: [] }
             ]);
             
-            //console.log(`[releaseAllUserLocks] Released all locks for ${user}`);
             return true;
             
         } catch (error) {
@@ -639,7 +599,6 @@ class applicationUtils_uncached {
         const colLetter = this._numberToColumnLetter(col);
         const range = `Locks!${colLetter}1:${colLetter}1`;
         await GoogleSheetsService.setSheetData('CACHE', range, [[user]], null);
-        //console.log(`[_writeUserColumn] Added user ${user} at ${range}`);
     }
     
     /**
@@ -652,7 +611,6 @@ class applicationUtils_uncached {
     static async _writeLockKeyRow(lockKey, row) {
         const range = `Locks!A${row}:A${row}`;
         await GoogleSheetsService.setSheetData('CACHE', range, [[lockKey]], null);
-        //console.log(`[_writeLockKeyRow] Added lock key ${lockKey} at ${range}`);
     }
     
     /**
@@ -667,7 +625,6 @@ class applicationUtils_uncached {
         const colLetter = this._numberToColumnLetter(col);
         const range = `Locks!${colLetter}${row}:${colLetter}${row}`;
         await GoogleSheetsService.setSheetData('CACHE', range, [[value]], null);
-        //console.log(`[_writeLockCell] Set ${range} to ${value}`);
     }
     
     /**
@@ -693,12 +650,10 @@ class applicationUtils_uncached {
      */
     static async _initializeLocksSheet() {
         try {
-            //console.log('[_initializeLocksSheet] Initializing Locks sheet structure');
             const sheetData = [
                 ['Lock Key'] // A1: "Lock Key" header, columns B+ will be added dynamically
             ];
             await GoogleSheetsService.setSheetData('CACHE', 'Locks', sheetData, null);
-            //console.log('[_initializeLocksSheet] Locks sheet initialized successfully');
         } catch (error) {
             console.error('[_initializeLocksSheet] Failed to initialize Locks sheet:', error);
             throw error;
@@ -715,10 +670,8 @@ class applicationUtils_uncached {
             // Read entire Locks sheet
             const rawData = await GoogleSheetsService.getSheetData('CACHE', 'Locks');
             
-            //console.log('[getLocksData] Raw data from Locks sheet:', rawData);
             
             if (!rawData || rawData.length === 0) {
-                //console.log('[getLocksData] No data found, returning empty grid');
                 return { users: [], lockKeys: [], locks: [] };
             }
             
@@ -764,7 +717,6 @@ class applicationUtils_uncached {
                 }
             }
             
-            //console.log(`[getLocksData] Found ${users.length} users, ${lockKeys.length} lock keys, ${locks.length} lock entries`);
             return { users, lockKeys, locks };
             
         } catch (error) {

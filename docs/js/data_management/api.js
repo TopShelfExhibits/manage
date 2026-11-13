@@ -1,4 +1,4 @@
-import { wrapMethods, normalizeHeaderName, Database, InventoryUtils, PackListUtils, ProductionUtils, ApplicationUtils, EditHistoryUtils, InstantWriteUtils, ARCHIVE_TAB_NAME, ARCHIVE_HEADERS, offsetToISO, resolveShortageAlertDays, shortageAlertDateFilters, PREFERENCES_MAPPING, INVENTORY_TAB_PREFERENCES, sanitizeTabName, mapWithConcurrency, ProgressBus, getRandomLoadingQuote, DEFAULT_INVENTORY_MAPPING, ProposalUtils, PROPOSALS_TAB_NAME, PROPOSAL_MAPPING, resolveInventoryNoteMaxLength, primaryThumbnailValue } from './index.js';
+import { wrapMethods, normalizeHeaderName, Database, InventoryUtils, PackListUtils, ProductionUtils, ApplicationUtils, EditHistoryUtils, InstantWriteUtils, ARCHIVE_TAB_NAME, ARCHIVE_HEADERS, offsetToISO, resolveShortageAlertDays, shortageAlertDateFilters, PREFERENCES_MAPPING, INVENTORY_TAB_PREFERENCES, sanitizeTabName, mapWithConcurrency, ProgressBus, getRandomLoadingQuote, DEFAULT_INVENTORY_MAPPING, ProposalUtils, PROPOSALS_TAB_NAME, PROPOSAL_MAPPING, resolveInventoryNoteMaxLength, primaryThumbnailValue, SEVERITY, remainingSeverity } from './index.js';
 import { authState } from '../application/utils/auth.js';
 import { instantWriteEntry, identityText, parseColoredName } from './utils/instant-write-config.js';
 import { columnTypesEntry } from './utils/column-types.js';
@@ -890,7 +890,7 @@ class Requests_uncached {
         if (!result.inventoryFound) {
             return {
                 type: 'item warning',
-                color: 'purple',
+                severity: SEVERITY.review,
                 clickable: true,
                 message: `No inventory description`,
                 score: 0,
@@ -898,22 +898,84 @@ class Requests_uncached {
             };
         }
 
-        const color = result.score < 0.5 ? 'purple' : 'white';
+        // A variant the base item's inventory description doesn't declare (it still counts as the base item)
+        if (result.undeclared) {
+            return {
+                type: 'undeclared variant',
+                severity: SEVERITY.attention,
+                clickable: true,
+                message: `Undeclared variant of ${itemNumber}`,
+                variant: result.variant,
+                details: `${result.variant} counts as ${itemNumber}. To describe it, add a line to ${itemNumber}'s inventory description, such as:\n(1) ${result.variant} with ...`
+            };
+        }
+
 
         // Return alert if match is less than 100%
         if (result.score < 1) {
             return {
                 type: 'description mismatch',
-                color: color,
+                severity: result.score < 0.5 ? SEVERITY.review : SEVERITY.note,
                 clickable: true,
                 message: `Description mismatch`,
                 score: result.score,
                 packlistDescription: result.packlistDescription,
-                inventoryDescription: result.inventoryDescription
+                inventoryDescription: result.inventoryDescription,
+                ...(result.variant ? { variant: result.variant } : {})
             };
         }
-        
+
         // Good match, no alert needed
+        return null;
+    }
+
+    /**
+     * Check a pack list line's variant quantities (PackListUtils.checkVariantLevel) and return an
+     * alert: a declared variant that runs short or has no spare, or a base line whose unmodified
+     * pieces run short (a soft warning). Tabs in InventorySuppressCategoryAnalysis are skipped.
+     * @param {Object} deps - Dependency decorator for tracking calls
+     * @param {Object} item - Item object from packlist
+     * @param {string} currentProjectId - Current project identifier
+     * @returns {Promise<Object|null>} Alert object, or null
+     */
+    static async checkVariantLevel(deps, item, currentProjectId) {
+        const itemNumber = item['Extracted Item'];
+        const text = item.Description || item['Packing/shop notes'] || '';
+        if (!itemNumber || !text || !currentProjectId) return null;
+
+        const tab = await deps.call(InventoryUtils.getTabNameForItem, itemNumber);
+        const skippedTabs = await deps.call(InventoryUtils.getPreferenceTabs, INVENTORY_TAB_PREFERENCES.skipAnalysis);
+        if (tab && skippedTabs.includes(tab)) return null;
+
+        const level = await deps.call(PackListUtils.checkVariantLevel, text, currentProjectId);
+        if (!level) return null;
+        const { kind, remaining } = level;
+        const name = kind === 'variant' ? level.itemNumber : `Unmodified ${level.itemNumber}`;
+        const details = [
+            `${name}: ${level.available} in inventory, ${level.needed} needed by this and overlapping shows.`,
+            ...level.shows.map(entry => `${entry.show}: ${entry.quantity}`)
+        ].join('\n');
+
+        if (remaining < 0) {
+            return {
+                type: 'variant shortage',
+                severity: kind === 'variant' ? SEVERITY.critical : SEVERITY.warning,
+                clickable: true,
+                message: `${name}: ${-remaining} short`,
+                details,
+                remaining
+            };
+        }
+        if (kind === 'variant' && remaining < 1) {
+            return {
+                type: 'variant shortage',
+                severity: SEVERITY.warning,
+                clickable: true,
+                message: `${name}: no buffer`,
+                details,
+                remaining
+            };
+        }
         return null;
     }
 
@@ -1000,7 +1062,7 @@ class Requests_uncached {
 
         return {
             type: 'cad-source-change',
-            color: 'yellow',
+            severity: SEVERITY.attention,
             clickable: true,
             message: `changed in cad by ${mostRecent?.u || 'unknown'}`,
             cadUser: mostRecent?.u || 'unknown',
@@ -1278,6 +1340,14 @@ class Requests_uncached {
      */
     static async resolvePacklistIdentifier(deps, identifier) {
         const tabs = await deps.call(Database.getTabs, 'PACK_LISTS');
+        // Use the same path the schedule does: look up the schedule row first so that
+        // NameOverrides (manual client-abbreviation links) are honoured.
+        const scheduleRow = await deps.call(ProductionUtils.getShowDetails, identifier);
+        if (scheduleRow) {
+            const results = await deps.call(ProductionUtils.findPacklistTabsForScheduleRow, scheduleRow, tabs);
+            if (results.length > 0) return results[0].title;
+        }
+        // Fallback for custom / unscheduled packlists that have no schedule row
         const resolvedTab = await deps.call(ProductionUtils.findPackListTab, identifier, tabs);
         return resolvedTab ? resolvedTab.title : null;
     }
@@ -1379,7 +1449,7 @@ class Requests_uncached {
             if (remaining === null) {
                 return {
                     type: 'item not found',
-                    color: 'yellow',
+                    severity: SEVERITY.attention,
                     clickable: true,
                     message: 'Not in inventory',
                     remaining: null
@@ -1387,10 +1457,11 @@ class Requests_uncached {
             }
             
             // Build alert object based on inventory level
-            // Universal autoColor rule: < 0 → red, < 1 → orange, >= 1 → no alert
+            // The remaining-quantity rule (remainingSeverity): < 0 critical, < 1 warning
             if (remaining < 0) {
                 return {
                     type: 'item shortage',
+                    severity: remainingSeverity(remaining),
                     clickable: true,
                     message: `Shortage: ${Math.abs(remaining)} units short`,
                     remaining
@@ -1398,6 +1469,7 @@ class Requests_uncached {
             } else if (remaining < 1) {
                 return {
                     type: 'item warning',
+                    severity: remainingSeverity(remaining),
                     clickable: true,
                     message: 'No inventory buffer',
                     remaining
@@ -1405,7 +1477,7 @@ class Requests_uncached {
             } else if (remaining <= 2) {
                 return {
                     type: 'low-inventory',
-                    color: 'white',
+                    severity: SEVERITY.note,
                     clickable: true,
                     message: `Low: ${remaining} remaining`,
                     remaining
@@ -1468,18 +1540,6 @@ class Requests_uncached {
         const username = authState.user?.email || null;
         const noteMaxLength = await Requests.getInventoryNoteMaxLength();
         return await InventoryUtils.savePendingChangeEntry(tabOrItemName, originalRows, editedRows, effectiveDateDeciseconds, note, username, undefined, noteMaxLength);
-    }
-
-    /**
-     * Delete a scheduled pending change entry by effectiveDateDeciseconds.
-     * Mutation — uncached.
-     * @param {string} tabOrItemName
-     * @param {number} effectiveDateDeciseconds
-     * @returns {Promise<boolean>}
-     */
-    static async deletePendingChangeEntry(tabOrItemName, effectiveDateDeciseconds) {
-        const username = authState.user?.email || null;
-        return await InventoryUtils.deletePendingChangeEntry(tabOrItemName, effectiveDateDeciseconds, username);
     }
 
     /**
@@ -1697,18 +1757,6 @@ class Requests_uncached {
     }
 
     /**
-     * Merge item changes from a category page into a proposal (created if new).
-     * MUTATION METHOD — excluded from caching.
-     * @param {string} name - Proposal name
-     * @param {string} category - Inventory tab
-     * @param {Array<{itemNumber: string, changes: Array<{n, ne}>}>} updates
-     */
-    static async updateInventoryProposal(name, category, updates) {
-        return await _updateProposalEntries((entries, user, now) =>
-            ProposalUtils.mergeIntoProposal(entries, name, category, updates, user, now));
-    }
-
-    /**
      * Save edits from the proposal page (see ProposalUtils.replaceActiveEntries). Signature matches
      * the reactive store save call: (data, ...apiArgs, options).
      * MUTATION METHOD — excluded from caching.
@@ -1777,7 +1825,7 @@ export const Requests = wrapMethods(
         'saveData', 'createNewTab', 'showTabs', 'hideTabs',
         'saveInventoryTabData', 'savePackList', 'storeUserData', 'uploadItemImage',
         'lockSheet', 'unlockSheet', 'forceUnlockSheet',
-        'checkAndApplyPendingChanges', 'savePendingChangeEntry', 'deletePendingChangeEntry',
+        'checkAndApplyPendingChanges', 'savePendingChangeEntry',
         'ensureScheduleReferenceRows',
         'addScheduleReferenceName', 'appendScheduleReferenceAbbreviation',
         'addCustomScheduleReferenceEntry',
@@ -1786,7 +1834,7 @@ export const Requests = wrapMethods(
         'removeTransshipLink',
         'savePageNotes',
         'savePreferences',
-        'updateInventoryProposal', 'saveInventoryProposalTable', 'markInventoryProposalCommitted',
+        'saveInventoryProposalTable', 'markInventoryProposalCommitted',
         'getDriveFileBlob', // Uncached read: callers own the Blob
         'writeCellsVerified',
         'saveShowNote'

@@ -1,4 +1,4 @@
-import { html, Requests, parseDate, toUSDateString, DataView, getReactiveStore, createAnalysisConfig, invalidateCache, Priority, runNonessentialAnalysisOnAllStores } from '../../index.js';
+import { html, Requests, parseDate, toUSDateString, DataView, getReactiveStore, createAnalysisConfig, invalidateCache, Priority, runNonessentialAnalysisOnAllStores, SEVERITY } from '../../index.js';
 import { IndexResolutionComponent } from '../interface/IndexResolutionModal.js';
 import { TransshipmentModal } from '../interface/ScheduleModals.js';
 import { buildScheduleFields } from '../../../data_management/abstraction/scheduleFields.js';
@@ -181,7 +181,7 @@ export const ScheduleTableComponent = {
                     case 'Show':
                         return this.getIndexIssueCards(row, key).map(c => ({
                             ...c,
-                            class: c.color || 'red',
+                            severity: c.severity || SEVERITY.critical,
                             title: 'Missing from index: ' + c.rawValue,
                             action: c.clickable ? c.action : null
                         }));

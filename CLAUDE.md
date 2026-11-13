@@ -36,13 +36,29 @@ Top Shelf Exhibits' live inventory web app. It is plain ES modules and Vue 3 (Op
 
 Fields describe what the data is. Views describe how it looks and behaves. Read "Principle: data or view?" in the plan notes before you change a page, a field, a view or a renderer. `resolveView` ignores presentation set on fields and warns on localhost.
 
+## Editing patterns
+
+- **Deleting rows: mark, then save.** Never remove a row from a store on click.
+  - Draggable tables (pack lists) have the table's own tools: select rows by their drag handle and press Delete to mark them; cut and paste move rows. Only turn on `draggable` where row order means something that saves.
+  - Other tables (the history page's admin delete, the proposal page) draw a per-row button: toggle the mark with `store.toggleRowDeletion(row)` through `editWithLock` with an undo step (see "Edits take the lock behind them"), and draw `RowDeletionButton` (`cells.js`: a trash icon, then restore-from-trash while marked).
+  - The row shows as marked. `save()` removes marked rows, and Database archives inventory rows it removes. Discard or undo cancels.
+  - The save modal takes `deletionCount`: marked rows can't be scheduled or sent to a proposal.
+  - Find a store's row with `store.indexOfRow(row)`. Item numbers can repeat or be blank.
+- **Edits take the lock behind them.** On a page with `sheetLockMixin`, make every user edit with `await this.editWithLock(apply, revert, { action, undo })`. It captures an undo step of type `undo` when given, applies the change at once and takes the lock in the background. If someone else holds the lock, it runs `revert`, drops the undo step, and, when `action` is given ("delete"), tells the user who holds it. Don't wait on `acquireLockForEdit()` before an edit: that makes the first click on a page take a second.
+- **Adding inventory items: `InventorySelectorModal`.** A table that adds rows from inventory sets `showNewRowButton` (a New Item button; `newRow` adds the row-level add buttons on draggable tables) and opens this modal from `@new-row`. It takes `onItemSelected`, an optional `onAddEmpty` (shows "+ Empty Row") and an optional `loadReferenceDate` (the date whose quantities to show; today when omitted). The pack list and proposal pages use it.
+- **Page options in the URL: `ParamToggles`.** An on/off option a page reads goes in its container's URL parameters, so links and dashboard cards keep it.
+  - Declare the toggles as `[{ param, label, default }]`, and render `ParamToggles` in the page's hamburger menu.
+  - Read a toggle with `paramToggleValue(NavigationRegistry.getParametersForContainer(containerPath, currentPath), toggle)`.
+  - Write container parameters only through `NavigationRegistry.updateContainerParams`, which also handles the dashboard.
+- **Admin-only UI is temporary.** `isTemporaryAdmin()` (`auth.js`) checks a hand-kept username list. It only shows or hides buttons until a real admin system with permissions replaces it, so don't build on it.
+
 ## Styling (docs/css/styles.css)
 
 Style through shared classes, and adapt them to a context with one scoped rule.
 
 - **Shared structural classes, one job each:**
   - `.content`: a padded column with a gap. It is the modal body and the table's row-details panel.
-  - `.button-bar`: a joined row of controls.
+  - `.button-bar`: a joined row of controls. Where a bar can get long, draw it as `ButtonBar` (`buttonBar.js`) instead of `<div class="button-bar">`: with more than three children it moves the later ones to a second line rather than overflow (never a third line), so templates stay as they are. The shared table header (`ContentHeaderComponent`) already uses it.
   - `.card`: a small labelled block or button.
   - `.details-grid` with `.detail-item`: labelled values.
   - `.cell-button-list`: stacked, full-width buttons in one cell.

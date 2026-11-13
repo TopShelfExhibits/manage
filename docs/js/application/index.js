@@ -1,20 +1,24 @@
 // API
 export { Requests } from '../data_management/api.js';
-export { parseDate, toISODateString, toUSDateString, todayISOString, offsetToISO, resolveShortageAlertDays, shortageAlertDateFilters, INVENTORY_TAB_PREFERENCES, resolveInventoryTabList, parseDateFilterParameters, buildDateFilterParameters, parseTextFilterParameters, buildTextFilterParameters, parseSearchParameters } from '../data_management/utils/helpers.js';
+export { parseDate, toISODateString, toUSDateString, todayISOString, offsetToISO, resolveShortageAlertDays, shortageAlertDateFilters, INVENTORY_TAB_PREFERENCES, resolveInventoryTabList, parseItemVariants, itemVariantFamilies, parseDateFilterParameters, buildDateFilterParameters, parseTextFilterParameters, buildTextFilterParameters, parseSearchParameters } from '../data_management/utils/helpers.js';
 export { CacheInvalidationBus, invalidateCache, ProgressBus } from '../data_management/utils/caching.js';
-export { EditHistoryUtils, DEFAULT_INVENTORY_NOTE_MAX_LENGTH, resolveInventoryNoteMaxLength } from '../data_management/utils/metadata-utils.js';
+export { EditHistoryUtils, DEFAULT_INVENTORY_NOTE_MAX_LENGTH, resolveInventoryNoteMaxLength, readRowMetadata, writeRowMetadata } from '../data_management/utils/metadata-utils.js';
 export { ProposalUtils, PROPOSAL_LOCK_NAMESPACE } from '../data_management/utils/proposal-utils.js';
 export { THUMBNAIL_FIELD } from '../data_management/utils/thumbnail-values.js';
 
 // Utils
 export { html } from './utils/template-helpers.js';
-export { Auth, authState, getDeviceId } from './utils/auth.js';
-export { getReactiveStore, createAnalysisConfig, findMatchingStores, clearAllReactiveStores, generateStoreKey, appSettings, runNonessentialAnalysisOnAllStores, getPreferencesStore, saveDirtyStoresToUserData, getInventoryNoteMaxLength, getInventoryTabList } from './utils/reactiveStores.js';
+export { Auth, authState, getDeviceId, isTemporaryAdmin } from './utils/auth.js';
+export { ParamToggles, paramToggleValue } from './components/interface/paramToggles.js';
+export { getReactiveStore, createAnalysisConfig, findMatchingStores, clearAllReactiveStores, generateStoreKey, appSettings, runNonessentialAnalysisOnAllStores, getPreferencesStore, saveDirtyStoresToUserData, getInventoryNoteMaxLength, getInventoryTabList, isMarkedForDeletion } from './utils/reactiveStores.js';
 export { Priority } from './utils/priorityQueue.js';
-export { getShortageAlertsStore, getShortageAlertDays, shortageBanner, shortagesByItem, itemShortageCards, categoryShortageCards } from './utils/shortageAlerts.js';
+export { getShortageAlertsStore, getShortageAlertDays, shortageBanner, shortagesByItem, itemShortageCards, categoryShortageCards, shortageTimelinePath } from './utils/shortageAlerts.js';
+export { itemVariantCards } from './utils/itemVariants.js';
 export { getItemThumbnailsStore, itemThumbnailMap, withItemThumbnails } from './utils/itemThumbnails.js';
 export { undoRegistry, setTableRowSelectionState } from './utils/undoRegistry.js';
-export { getAutoColorClass, shouldAutoColor } from './utils/autoColor.js';
+export { getAutoColorClass } from './utils/autoColor.js';
+export { SEVERITY } from '../data_management/utils/severity.js';
+export { SEVERITY_COLORS, severityColor, statusColor } from './utils/severity.js';
 
 // Navigation components
 export { BreadcrumbComponent, PrimaryNavComponent } from './components/interface/navigationComponents.js';
@@ -34,6 +38,7 @@ export { CalendarComponent } from './components/interface/calendarComponent.js';
 // Views system (see docs/notes/views-and-renderers-plan.md)
 export { DataView } from './components/interface/dataViewComponent.js';
 export { ViewSelectComponent } from './components/interface/viewSelectComponent.js';
+export { ButtonBar } from './components/interface/buttonBar.js';
 export { ContentHeaderComponent } from './components/interface/contentHeaderComponent.js';
 export { RowDetailsComponent, RowDetailsModal } from './components/interface/rowDetailsComponent.js';
 export { DashboardToggleComponent } from './components/interface/navigationComponents.js';

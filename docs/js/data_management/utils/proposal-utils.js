@@ -193,33 +193,15 @@ export class ProposalUtils {
     }
 
     /**
-     * Merge item changes into a proposal. A listed field overwrites the item's previous change for
-     * that field; other fields and other items are kept. Committed rows are never modified.
-     * @param {Array} entries - All entries (every proposal)
-     * @param {string} name - Proposal name (an existing proposal's stored casing wins)
-     * @param {string} category - Inventory tab
-     * @param {Array<{itemNumber, changes}>} updates
-     * @param {string} user - Short user name
-     * @param {number} now - Deciseconds since epoch
-     * @returns {Array} New entries array
+     * An item's proposal changes with new changes merged in: each new change replaces the change
+     * to the same field, and the item's other changes stay (one entry per item).
+     * @param {Array<{n, ne}>} existing
+     * @param {Array<{n, ne}>} incoming
+     * @returns {Array<{n, ne}>}
      */
-    static mergeIntoProposal(entries, name, category, updates, user, now) {
-        const result = entries.map(entry => ({ ...entry, changes: [...entry.changes] }));
-        const storedName = this.entriesOf(result, name)[0]?.proposal || String(name).trim();
-        const active = new Map(this.activeEntries(result, storedName).map(entry => [itemKey(entry), entry]));
-        for (const { itemNumber, changes } of updates) {
-            if (!changes?.length) continue;
-            const existing = active.get(itemKey({ category, itemNumber }));
-            if (existing) {
-                const replaced = new Set(changes.map(ch => ch.n));
-                existing.changes = [...existing.changes.filter(ch => !replaced.has(ch.n)), ...changes];
-                existing.updatedBy = user;
-                existing.updated = now;
-            } else {
-                result.push(newEntry(storedName, category, itemNumber, changes, user, now));
-            }
-        }
-        return result;
+    static mergeChanges(existing, incoming) {
+        const replaced = new Set((incoming || []).map(ch => ch.n));
+        return [...(existing || []).filter(ch => !replaced.has(ch.n)), ...(incoming || [])];
     }
 
     /**
@@ -233,19 +215,26 @@ export class ProposalUtils {
         if (this.isCommitted(own)) throw new Error(`Proposal "${name}" is committed and can no longer be edited`);
         const storedName = own[0]?.proposal || String(name).trim();
         const previous = new Map(this.activeEntries(own).map(entry => [itemKey(entry), entry]));
-        const replacements = [];
+        // One entry per item, whatever the rows: the last row for an item wins (two entries would
+        // apply its change twice at commit)
+        const replacements = new Map();
         for (const row of rows || []) {
             const changes = this.changesFromTableRow(row);
-            if (changes.length === 0) continue;
-            const before = previous.get(itemKey(row));
+            const key = itemKey(row);
+            if (changes.length === 0) {
+                replacements.delete(key);
+                continue;
+            }
+            const before = previous.get(key);
             const entry = newEntry(storedName, row.category, row.itemNumber, changes, user, now);
             if (before && JSON.stringify(before.changes) === JSON.stringify(changes)) {
                 entry.updatedBy = before.updatedBy;
                 entry.updated = before.updated;
             }
-            replacements.push(entry);
+            replacements.delete(key);
+            replacements.set(key, entry);
         }
-        return [...entries.filter(entry => entry.committed || !sameName(entry.proposal, name)), ...replacements];
+        return [...entries.filter(entry => entry.committed || !sameName(entry.proposal, name)), ...replacements.values()];
     }
 
     /** Mark a proposal's active rows in the given categories as committed */

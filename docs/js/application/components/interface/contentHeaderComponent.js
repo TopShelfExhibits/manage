@@ -2,11 +2,13 @@ import { html } from '../../utils/template-helpers.js';
 import { LoadingBarComponent } from '../../index.js';
 import { SearchBoxComponent } from '../../utils/useSearch.js';
 import { ViewSelectComponent } from './viewSelectComponent.js';
+import { ButtonBar } from './buttonBar.js';
 
 /**
  * ContentHeaderComponent — the shared renderer header (§4.13).
  *
  * Layout: #header-area · spacer · [ search · #actions · refresh/discard · #actions-end · view switch ] · loading bar
+ * The bracketed controls are a ButtonBar: when they don't fit on one line, the later ones wrap underneath.
  * Sticky positioning stays in each renderer; this component only draws the bar.
  *
  * View switching: `viewSelect` ({ views, currentId, defaultId, containerPath, navigateToPath }) renders
@@ -14,7 +16,7 @@ import { ViewSelectComponent } from './viewSelectComponent.js';
  */
 export const ContentHeaderComponent = {
     name: 'ContentHeaderComponent',
-    components: { LoadingBarComponent, SearchBoxComponent, ViewSelectComponent },
+    components: { LoadingBarComponent, SearchBoxComponent, ViewSelectComponent, ButtonBar },
     props: {
         theme: { type: String, default: '' },
         // Search
@@ -51,7 +53,7 @@ export const ContentHeaderComponent = {
         <div :class="['content-header', theme]">
             <slot name="header-area"></slot>
             <div class="spacer"></div>
-            <div v-if="hasButtons" class="button-bar">
+            <ButtonBar v-if="hasButtons">
                 <SearchBoxComponent
                     v-if="showSearch && search"
                     :search="search"
@@ -77,7 +79,7 @@ export const ContentHeaderComponent = {
                     :container-path="viewSelect.containerPath"
                     :navigate-to-path="viewSelect.navigateToPath"
                 />
-            </div>
+            </ButtonBar>
             <LoadingBarComponent
                 v-if="embeddedLoading"
                 :is-loading="isLoading"

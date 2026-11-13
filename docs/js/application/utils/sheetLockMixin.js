@@ -1,4 +1,4 @@
-import { Requests, authState, CacheInvalidationBus, getDeviceId } from '../index.js';
+import { Requests, authState, CacheInvalidationBus, getDeviceId, undoRegistry } from '../index.js';
 
 /**
  * sheetLockMixin — Vue Options API mixin for sheet-level write-lock management.
@@ -33,15 +33,43 @@ import { Requests, authState, CacheInvalidationBus, getDeviceId } from '../index
  *   onLockAcquireFailed(lockInfo)
  *     Called when a lock acquisition attempt in handleLockState() fails because
  *     another user already holds the lock.  Use this for component-specific
- *     recovery (e.g. InventoryTable prompting the user to refresh).
+ *     recovery of edits still in the store (e.g. InventoryTable and PacklistTable drop them).
  *
  * ─── PROVIDED ────────────────────────────────────────────────────────────────
  * data:    isLocked, lockingInProgress, lockedByOther, lockedBySelf, lockOwner, lockCheckComplete
  *            lockedBySelf — true when lockedByOther is true but the lock owner is the current user
  *            on a different device. Lets components show a device-specific message and Claim action.
  * computed: lockOwnerDisplay
- * methods: setLockState, checkLockStatus, handleLockState, claimLock
+ * methods: setLockState, checkLockStatus, handleLockState, claimLock, acquireLockForEdit,
+ *          editWithLock (an edit applied at once, the lock taken behind it; the way to edit)
  */
+/**
+ * Take a sheet's edit lock for an operation that runs outside the page that edits the sheet
+ * (adding to a proposal, committing one). Refuses when someone else holds the lock, or when this
+ * user holds it on another device: that session may have unsaved edits, and releasing its lock
+ * afterwards would leave them unguarded (pages hand a lock over with the Claim banner instead).
+ * @param {string} namespace - Lock namespace, e.g. 'INVENTORY'
+ * @param {string} key - Lock key, e.g. a tab name
+ * @param {string} what - What is locked, for the error, e.g. "The Spring buy proposal"
+ * @param {string} [consequence] - Appended to the error, e.g. "Nothing was added."
+ * @returns {Promise<Function>} release() — call it when done (it never throws)
+ * @throws {Error} When the lock can't be taken
+ */
+export async function acquireSheetLock(namespace, key, what, consequence = '') {
+    const user = authState.user?.email;
+    if (!user) throw new Error('Log in first');
+    const refuse = (holder) => new Error(`${what} is ${holder}.${consequence ? ' ' + consequence : ''}`);
+    const held = await Requests.getSheetLock(namespace, key);
+    if (held && held.user === user && held.deviceId && held.deviceId !== getDeviceId()) {
+        throw refuse('being edited on another of your devices');
+    }
+    if (!await Requests.lockSheet(namespace, key, user, getDeviceId())) {
+        const lockInfo = await Requests.getSheetLock(namespace, key, user);
+        throw refuse(`locked${lockInfo?.user ? ` by ${lockInfo.user}` : ''}`);
+    }
+    return () => Requests.unlockSheet(namespace, key, user).catch(() => {});
+}
+
 export const sheetLockMixin = {
     data() {
         return {
@@ -201,8 +229,8 @@ export const sheetLockMixin = {
          * - isDirty true  → acquire lock (if not already held).
          * - isDirty false → release lock (if held by this component).
          *
-         * On acquire failure (another user holds it), sets lockedByOther and calls
-         * onLockAcquireFailed(lockInfo) if the component defines it.
+         * On acquire failure (another user holds it), sets lockedByOther and, if edits are still
+         * in the store, calls onLockAcquireFailed({ user }) if the component defines it.
          *
          * Called from the component's isDirty watcher.
          */
@@ -216,21 +244,19 @@ export const sheetLockMixin = {
 
             try {
                 if (isDirty && !this.isLocked) {
-                    const lockAcquired = await Requests.lockSheet(this.lockNamespace, this.lockKey, user, getDeviceId());
-                    if (lockAcquired) {
-                        this.setLockState(true, user);
-                    } else {
-                        const lockInfo = await Requests.getSheetLock(this.lockNamespace, this.lockKey);
-                        if (lockInfo && lockInfo.user !== user) {
-                            this.setLockState(false, lockInfo.user);
-                            console.warn(`[sheetLockMixin] Sheet locked by ${lockInfo.user}`);
-                            this.onLockAcquireFailed?.(lockInfo);
-                        }
+                    // Shares an edit's request (editWithLock). That edit reverts itself on failure;
+                    // the hook handles edits still left without the lock.
+                    const lockAcquired = await this.acquireLockForEdit();
+                    if (!lockAcquired && this.lockedByOther && this.isDirty) {
+                        console.warn(`[sheetLockMixin] Sheet locked by ${this.lockOwner}`);
+                        this.onLockAcquireFailed?.({ user: this.lockOwner });
                     }
                 } else if (!isDirty && this.isLocked) {
                     const unlocked = await Requests.unlockSheet(this.lockNamespace, this.lockKey, user);
                     if (unlocked) {
                         this.setLockState(false, null);
+                        // An edit made while the release was out still needs the lock
+                        if (this.isDirty) Vue.nextTick(() => this.handleLockState(this.isDirty));
                     } else {
                         console.warn(`[sheetLockMixin] Failed to release lock for ${this.lockKey}`);
                     }
@@ -269,10 +295,48 @@ export const sheetLockMixin = {
             await this.checkLockStatus();
         },
 
-        async acquireLockForEdit() {
+        /**
+         * Take the edit lock, or confirm it's held. Calls made while a request is out (several
+         * quick edits, the isDirty watcher) share that one request.
+         * @returns {Promise<boolean>} whether this session holds the lock
+         */
+        acquireLockForEdit() {
+            if (this.isLocked) return Promise.resolve(true);
+            if (!this._lockRequest) {
+                this._lockRequest = this._requestLock().finally(() => { this._lockRequest = null; });
+            }
+            return this._lockRequest;
+        },
+
+        /**
+         * An optimistic edit: apply() changes the store at once and the lock is taken behind it,
+         * so an edit never waits on the lock. If the lock can't be had, revert() undoes the change.
+         * @param {Function} apply - Makes the edit
+         * @param {Function} revert - Undoes it
+         * @param {Object} [options]
+         * @param {string} [options.action] - What the edit does ("delete"): a refused edit then tells
+         *   the user who holds the lock (cell edits leave it out; the lock banner says so)
+         * @param {string} [options.undo] - Undo step type ("deletion"): the store's rows are captured
+         *   for undo first, and the step is dropped again if the edit is reverted
+         * @returns {Promise<boolean>} whether the edit stands
+         */
+        async editWithLock(apply, revert, { action = null, undo = null } = {}) {
+            const rows = this.activeStore?.data;
+            const routeKey = undo && rows ? this.appContext?.currentPath?.split('?')[0] : null;
+            if (routeKey) undoRegistry.capture(rows, routeKey, { type: undo });
+            apply();
+            if (await this.acquireLockForEdit()) return true;
+            revert();
+            if (routeKey) undoRegistry.discardLastSnapshotIfUnchanged(rows, routeKey);
+            if (action) {
+                this.$modal.alert(`Cannot ${action}: ${this.lockKey} is locked for editing by ${this.lockOwner ? this.lockOwnerDisplay : 'another user'}.`, 'Locked');
+            }
+            return false;
+        },
+
+        async _requestLock() {
             const user = authState.user?.email;
             if (!user || !this.lockKey) return false;
-            if (this.isLocked) return true;
 
             try {
                 const lockInfo = await Requests.getSheetLock(this.lockNamespace, this.lockKey, user);

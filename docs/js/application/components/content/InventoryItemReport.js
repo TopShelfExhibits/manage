@@ -1,4 +1,4 @@
-import { html, DataView, Requests, getReactiveStore, createAnalysisConfig, NavigationRegistry, THUMBNAIL_FIELD, getItemThumbnailsStore, itemThumbnailMap, withItemThumbnails, ScheduleFilterSelect, InventoryCategoryFilter, Priority, invalidateCache, toISODateString, todayISOString, offsetToISO } from '../../index.js';
+import { html, DataView, Requests, getReactiveStore, createAnalysisConfig, NavigationRegistry, THUMBNAIL_FIELD, readRowMetadata, getItemThumbnailsStore, itemThumbnailMap, withItemThumbnails, ScheduleFilterSelect, InventoryCategoryFilter, Priority, invalidateCache, toISODateString, todayISOString, offsetToISO } from '../../index.js';
 import { textFiltersToSearchParams } from '../../../data_management/utils/helpers.js';
 import { thumbnailStyle } from '../../utils/views/viewStyles.js';
 
@@ -188,17 +188,9 @@ export const InventoryItemReport = {
 
                     // Add original rows as group members, preserving any existing metadata
                     rows.forEach(row => {
-                        let existingMeta = {};
-                        try {
-                            existingMeta = JSON.parse(row.metadata || '{}');
-                        } catch (e) {}
-                        
                         result.push({
                             ...row,
-                            metadata: JSON.stringify({
-                                ...existingMeta,
-                                grouping: { groupId, isGroupMaster: false }
-                            })
+                            metadata: JSON.stringify({ ...readRowMetadata(row), grouping: { groupId, isGroupMaster: false } })
                         });
                     });
                 }

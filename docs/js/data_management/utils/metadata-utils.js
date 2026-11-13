@@ -66,6 +66,36 @@ export function resolveInventoryNoteMaxLength(preferences) {
     return Number.isInteger(value) && value > 0 ? value : DEFAULT_INVENTORY_NOTE_MAX_LENGTH;
 }
 
+/**
+ * A row's MetaData flags (deletion mark, highlight, grouping) as an object. The column holds JSON
+ * text, or the object itself once parsed; empty or unreadable metadata reads as {}. When the row
+ * holds an object, that same object is returned: change it, then writeRowMetadata.
+ * @param {Object} row
+ * @returns {Object}
+ */
+export function readRowMetadata(row) {
+    const raw = row?.metadata;
+    if (!raw) return {};
+    if (typeof raw === 'object') return raw;
+    try {
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch (e) {
+        return {};
+    }
+}
+
+/**
+ * Store a row's MetaData flags as JSON text. With no flags left the key goes, as rows load without
+ * flags (a pack list saves it as an empty cell), so clearing a flag leaves the row unchanged.
+ * @param {Object} row
+ * @param {Object} metadata
+ */
+export function writeRowMetadata(row, metadata) {
+    if (metadata && Object.keys(metadata).length > 0) row.metadata = JSON.stringify(metadata);
+    else delete row.metadata;
+}
+
 const DIFF_IGNORED_COLUMNS = [HISTORY_KEY, 'AppData'];
 
 export class EditHistoryUtils {
@@ -442,6 +472,62 @@ export class EditHistoryUtils {
             Operation: 'delete',
             RowData: JSON.stringify(rowData)
         };
+    }
+
+    /**
+     * The deleted rows to list for a tab: the newest archive entry of each key (an inventory tab's
+     * item number), except keys in the tab again (restored, or taken by another row: either way it
+     * can't be restored). The archive itself is never rewritten, so a row deleted, restored and
+     * deleted again lists its newest deletion (also when the older one was archived without an
+     * identity). A row without a key goes by its EditHistory identity instead (each one without
+     * either is listed).
+     * @param {Array<{RowData: Object, Timestamp: number}>} entries - Archive entries of the tab
+     *   (getArchivedRows: RowData parsed), newest first
+     * @param {Array<Object>} rows - The tab's rows now (unsaved restores included)
+     * @param {string|null} keyField - The field naming a row ('itemNumber'), or null to go by
+     *   identity only
+     * @returns {Array<Object>} The entries still deleted, newest first
+     */
+    static currentDeletions(entries, rows, keyField) {
+        const numberOf = (row) => (keyField ? String(row?.[keyField] ?? '').trim() : '');
+        const numbers = new Set((rows || []).map(numberOf).filter(Boolean));
+        const identities = new Set((rows || []).map(row => this.getRowIndex(row?.[HISTORY_KEY])).filter(i => i !== null));
+        const seen = new Set();
+        return (entries || []).filter(entry => {
+            const data = entry?.RowData || {};
+            const number = numberOf(data);
+            const i = this.getRowIndex(data[HISTORY_KEY]);
+            const key = number ? `item:${number}` : (i !== null ? `i:${i}` : null);
+            if (key) {
+                if (seen.has(key)) return false;
+                seen.add(key);
+            }
+            return number ? !numbers.has(number) : !(i !== null && identities.has(i));
+        });
+    }
+
+    /**
+     * A deleted row as it is put back: its archived values, identity and history, without a
+     * deletion mark. Its first save records a creation marker, as for any row new to the tab.
+     * When a row added since holds its identity (the tab's last one is reused), it gives the
+     * identity up and the save assigns a new one; its history stays.
+     * @param {Object} rowData - The archive entry's RowData (parsed)
+     * @param {Array<Object>} [rows] - The tab's rows now
+     * @returns {Object}
+     */
+    static restoredRow(rowData, rows = []) {
+        const { AppData, ...row } = rowData || {};
+        const i = this.getRowIndex(row[HISTORY_KEY]);
+        if (i !== null && rows.some(other => this.getRowIndex(other?.[HISTORY_KEY]) === i)) {
+            const history = this.parseEditHistory(row[HISTORY_KEY]) || {};
+            delete history.i;
+            row[HISTORY_KEY] = JSON.stringify(history);
+        }
+        // The archived row was marked for deletion: it comes back unmarked
+        const metadata = { ...readRowMetadata(row) };
+        delete metadata.deletion;
+        writeRowMetadata(row, metadata);
+        return row;
     }
 
     /**

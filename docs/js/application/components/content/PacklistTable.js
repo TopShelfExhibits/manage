@@ -1,6 +1,7 @@
-import { html, TableComponent, DataView, Requests, getReactiveStore, NavigationRegistry, createAnalysisConfig, invalidateCache, Priority, tableRowSelectionState, EditHistoryUtils, authState, undoRegistry, todayISOString, getAutoColorClass, getInventoryTabList, INVENTORY_TAB_PREFERENCES, THUMBNAIL_FIELD } from '../../index.js';
+import { html, TableComponent, Requests, getReactiveStore, NavigationRegistry, createAnalysisConfig, invalidateCache, Priority, undoRegistry, isMarkedForDeletion, readRowMetadata, writeRowMetadata, statusColor, severityColor, SEVERITY, getInventoryTabList, INVENTORY_TAB_PREFERENCES } from '../../index.js';
 import { resolveView } from '../../utils/views/resolveView.js';
-import { thumbnailStyle } from '../../utils/views/viewStyles.js';
+import { InventorySelectorModal } from './InventorySelectorModal.js';
+import { escapeHtml } from '../../utils/views/fieldFormat.js';
 import { sheetLockMixin } from '../../utils/sheetLockMixin.js';
 import { packlistIndexResolutionMixin } from '../interface/IndexResolutionModal.js';
 
@@ -80,15 +81,7 @@ const RowOptionsMenuComponent = {
     inject: ['$modal'],
     computed: {
         anyHighlighted() {
-            return this.selectedRows.some(({ row }) => {
-                if (!row || !row.metadata) return false;
-                try {
-                    const metadata = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata;
-                    return metadata?.highlight?.class === 'yellow';
-                } catch (e) {
-                    return false;
-                }
-            });
+            return this.selectedRows.some(({ row }) => readRowMetadata(row).highlight?.class === 'yellow');
         },
         menuItems() {
             const highlightLabel = this.anyHighlighted ? 'Unhighlight row(s)' : 'Highlight row(s)';
@@ -294,13 +287,12 @@ export const PacklistTable = {
             const banners = [
                 {
                     key: 'error',
-                    color: 'red',
+                    severity: SEVERITY.critical,
                     message: `Error: ${this.error}`,
                     visible: !!this.error
                 },
                 {
                     key: 'lock',
-                    color: '',
                     message: this.lockedBySelf
                         ? 'You have this pack list open for editing on another device.'
                         : `Locked for edit by: ${this.lockOwnerDisplay}`,
@@ -312,7 +304,7 @@ export const PacklistTable = {
                 },
                 {
                     key: 'conflict',
-                    color: 'red',
+                    severity: SEVERITY.critical,
                     message: 'Another session changed this data while you have unsaved edits. Save to keep your changes or discard them.',
                     visible: this.hasExternalConflict,
                     action: {
@@ -339,7 +331,7 @@ export const PacklistTable = {
                 if (clientIssue) {
                     banners.push({
                         key: 'client-missing',
-                        color: 'red',
+                        severity: SEVERITY.critical,
                         message: 'Client missing from production schedule index',
                         visible: true,
                         dismissible: true,
@@ -353,7 +345,7 @@ export const PacklistTable = {
                 if (showIssue) {
                     banners.push({
                         key: 'show-missing',
-                        color: 'red',
+                        severity: SEVERITY.critical,
                         message: 'Show missing from production schedule index',
                         visible: true,
                         dismissible: true,
@@ -369,7 +361,7 @@ export const PacklistTable = {
                 if (suggestedMatch) {
                     banners.push({
                         key: 'suggested-match',
-                        color: 'red',
+                        severity: SEVERITY.critical,
                         message: `Possible schedule match: "${suggestedMatch}"`,
                         visible: true,
                         dismissible: true,
@@ -381,7 +373,7 @@ export const PacklistTable = {
                 } else if (!clientIssue && !showIssue) {
                     banners.push({
                         key: 'not-on-schedule',
-                        color: 'red',
+                        severity: SEVERITY.critical,
                         message: 'Packlist not found on production schedule',
                         visible: true,
                         dismissible: true
@@ -487,6 +479,7 @@ export const PacklistTable = {
         });
     },
     methods: {
+        isMarkedForDeletion,
         onForeignLockWhileClean() {
             if (!this.tabName) return;
 
@@ -561,6 +554,20 @@ export const PacklistTable = {
                     false // nonessential
                 ),
 
+                // Check declared variant counts (inventory description) against this and overlapping shows
+                createAnalysisConfig(
+                    Requests.checkVariantLevel,
+                    'variantAlert',
+                    'Checking variant quantities...',
+                    ['Description', 'Packing/shop notes'],
+                    [this.tabName],
+                    null,
+                    true, // passFullItem
+                    Priority.ANALYSIS,
+                    false,
+                    false // nonessential
+                ),
+
                 // Check edit history source flow and flag rows changed in CAD after prior web/app edits
                 createAnalysisConfig(
                     Requests.checkCadSourceHistory,
@@ -601,7 +608,7 @@ export const PacklistTable = {
             const refreshData = async () => {
                 // Invalidate cache for database first, then API call for the current pack list in case it was empty
                 // Clear undo/redo history for this route
-                const routeKey = this.$route?.path;
+                const routeKey = this.appContext?.currentPath?.split('?')[0];
                 if (routeKey) {
                     undoRegistry.clearRouteHistory(routeKey);
                 }
@@ -656,34 +663,25 @@ export const PacklistTable = {
             this.$modal.alert(`Cannot edit: this pack list is locked by ${lockInfo?.user || 'another user'}`, 'Locked');
         },
         
-        // cell-edit contract: (rowIndex, columnKey, value)
-        async handleCellEdit(rowIdx, colKey, value, type = 'main') {
-            const user = authState.user?.email;
-            if (user && this.tabName) {
-                if (!await this.acquireLockForEdit()) {
-                    if (this.editMode && this.lockOwner) {
-                        const currentParams = NavigationRegistry.getParametersForContainer(
-                            `packlist/${this.tabName}`,
-                            this.appContext?.currentPath
-                        );
-                        const { edit, ...paramsWithoutEdit } = currentParams;
-                        this.$emit('navigate-to-path', {
-                            targetPath: NavigationRegistry.buildPath(`packlist/${this.tabName}`, paramsWithoutEdit),
-                            replaceHistory: true
-                        });
-                    }
-                    if (this.lockOwner) {
-                        this.$modal.alert(`Cannot edit: this pack list is locked by ${this.lockOwnerDisplay}`, 'Locked');
-                    }
-                    return;
-                }
+        // cell-edit contract: (rowIndex, columnKey, value). The value shows at once (editWithLock);
+        // if someone else holds the lock it's put back and the page leaves edit mode.
+        async handleCellEdit(rowIdx, colKey, value) {
+            const row = colKey && this.mainTableData[rowIdx];
+            if (!row) return;
+            const previous = row[colKey];
+            if (await this.editWithLock(() => { row[colKey] = value; }, () => { row[colKey] = previous; })) return;
+            if (!this.lockOwner) return;
+            if (this.editMode) {
+                const { edit, ...paramsWithoutEdit } = NavigationRegistry.getParametersForContainer(
+                    `packlist/${this.tabName}`,
+                    this.appContext?.currentPath
+                );
+                this.$emit('navigate-to-path', {
+                    targetPath: NavigationRegistry.buildPath(`packlist/${this.tabName}`, paramsWithoutEdit),
+                    replaceHistory: true
+                });
             }
-            
-            if (type === 'main') {
-                if (colKey && this.mainTableData[rowIdx]) {
-                    this.mainTableData[rowIdx][colKey] = value;
-                }
-            }
+            this.$modal.alert(`Cannot edit: this pack list is locked by ${this.lockOwnerDisplay}`, 'Locked');
         },
         handleAddCrate() {
             // Capture state for undo before adding crate
@@ -733,150 +731,19 @@ export const PacklistTable = {
             }
         },
         
-        async showInventorySelector(crateIdx, position = null) {
-            // Create inventory selector modal component - show immediately, load data inside
-            // position: { position: 'above'|'below', targetIndex: number } or null
-            const tabName = this.tabName; // Capture for use inside modal
-            const InventorySelectorModal = {
-                components: { DataView },
-                props: ['onAddEmpty', 'onItemSelected', 'tabName'],
-                data() {
-                    return {
-                        inventoryStore: null,
-                        referenceDate: null,
-                        error: null,
-                        selectedCategory: null
-                    };
-                },
-                computed: {
-                    // Rows from Requests.getAllInventoryData (inventory rows carry their thumbnail)
-                    fields() {
-                        return [
-                            THUMBNAIL_FIELD,
-                            { key: 'itemNumber', label: 'Item#', type: 'item' },
-                            { key: 'description', label: 'Description' },
-                            { key: 'quantity', label: 'Available' }
-                        ];
-                    },
-                    // Single-view registry in a modal (no URL); adding the item is the primary action (a row click)
-                    registry() {
-                        return {
-                            id: 'packlist-inventory-selector',
-                            default: 'table',
-                            theme: 'purple',
-                            views: [{
-                                id: 'table', name: 'Inventory', layout: 'table',
-                                columns: ['thumbnail', 'itemNumber', 'description', 'quantity'],
-                                sortable: ['itemNumber', 'description', 'quantity'],
-                                style: { thumbnail: thumbnailStyle('itemNumber'), itemNumber: { width: 120 }, quantity: { width: 100 } },
-                                table: { sticky: { start: ['thumbnail'] } },
-                                sort: { key: 'itemNumber', dir: 'asc' },
-                                // Clicking a row adds the item
-                                action: 'row'
-                            }]
-                        };
-                    },
-                    addAction() {
-                        return { run: (row) => this.selectItem(row), label: '+ Add Item' };
-                    },
-                    allInventoryData() {
-                        return this.inventoryStore ? this.inventoryStore.data : [];
-                    },
-                    availableCategories() {
-                        const tabs = [...new Set(this.allInventoryData.map(item => item.tab).filter(Boolean))];
-                        return tabs.sort();
-                    },
-                    inventoryData() {
-                        if (!this.selectedCategory) return this.allInventoryData;
-                        return this.allInventoryData.filter(item => item.tab === this.selectedCategory);
-                    },
-                    originalData() {
-                        return this.inventoryStore && Array.isArray(this.inventoryStore.originalData)
-                            ? JSON.parse(JSON.stringify(this.inventoryStore.originalData))
-                            : [];
-                    },
-                    // Combine local loading state with store loading state
-                    isLoading() {
-                        return !this.inventoryStore || this.inventoryStore.isLoading;
-                    }
-                },
-                async mounted() {
-                    // Fetch the show's ship date so inventory quantities reflect state at time of packing
-                    const shipDate = await Requests.getProjectShipDate(this.tabName);
-                    this.referenceDate = shipDate || todayISOString();
-                    
-                    await this.loadStore();
-                },
-                methods: {
-                    async loadStore() {
-                        try {
-                            this.error = null;
-                            
-                            // Initialize reactive store using the new API method
-                            // Note: autoLoad is true by default, so data will load automatically
-                            // Don't set isLoading to false - let the computed property track store.isLoading
-                            this.inventoryStore = getReactiveStore(
-                                Requests.getAllInventoryData,
-                                null, // No save function (read-only)
-                                [this.referenceDate || todayISOString()] // Apply pending changes as of reference date
-                            );
-                        } catch (error) {
-                            console.error('Failed to load inventory data:', error);
-                            this.error = 'Failed to load inventory data';
-                        }
-                    },
-                    selectItem(item) {
-                        if (this.onItemSelected) {
-                            this.onItemSelected(item);
-                        }
-                        this.$emit('close-modal');
-                    },
-                    addEmpty() {
-                        if (this.onAddEmpty) {
-                            this.onAddEmpty();
-                        }
-                        this.$emit('close-modal');
-                    }
-                },
-                template: html`
-                    <div v-if="error" class="error-message">{{ error }}</div>
-                    <DataView
-                        v-else
-                        :fields="fields"
-                        :rows="inventoryData"
-                        :registry="registry"
-                        :action="addAction"
-                        :original-data="originalData"
-                        :isLoading="isLoading"
-                        :isAnalyzing="inventoryStore && inventoryStore.isAnalyzing"
-                        :showSearch="true"
-                        :showRefresh="false"
-                        :showFooter="true"
-                        :emptyMessage="'No inventory items found'"
-                        :loadingMessage="inventoryStore && inventoryStore.isAnalyzing ? 'Loading images...' : 'Loading inventory...'"
-                    >
-                        <template #header-area>
-                            <button @click="addEmpty" class="large">+ Empty Row</button>
-                            <p style="margin-left: 1em;">Or add from inventory below...</p>
-                            <select :value="selectedCategory" @change="e => selectedCategory = e.target.value || null" style="margin-left: auto;">
-                                <option value="">All Categories</option>
-                                <option v-for="cat in availableCategories" :key="cat" :value="cat">{{ cat.charAt(0) + cat.slice(1).toLowerCase() }}</option>
-                            </select>
-                        </template>
-                    </DataView>
-                `
-            };
-
-            // Show the inventory selector modal
+        // Pick an item from inventory (or an empty row) for a crate; quantities as of the ship date
+        // position: { position: 'above'|'below', targetIndex: number } or null
+        showInventorySelector(crateIdx, position = null) {
+            const tabName = this.tabName;
             this.$modal.custom(InventorySelectorModal, {
                 onItemSelected: (item) => this.addItemFromInventory(crateIdx, item, position),
-                size: 'page',
-                tall: true,
                 onAddEmpty: () => this.addEmptyItem(crateIdx, position),
-                tabName
+                loadReferenceDate: () => Requests.getProjectShipDate(tabName),
+                size: 'page',
+                tall: true
             }, 'Add Item');
         },
-        
+
         async addItemFromInventory(crateIdx, inventoryItem, position = null) {
             // Capture state for undo before adding item from inventory
             const routeKey = this.appContext?.currentPath?.split('?')[0];
@@ -943,46 +810,17 @@ export const PacklistTable = {
 
 
         /**
-         * Get card color for an alert
-         * Prioritizes alert.color property, falls back to type-based mapping
-         * For inventory alerts, uses universal autoColor rule based on remaining quantity
-         * @param {Object|string} alert - Alert object or type string
+         * Card colour of an analysis alert: its severity's colour (application/utils/severity.js).
+         * An alert without a severity shows as critical.
+         * @param {Object} alert
          * @returns {string} Color class name for the card
          */
         getAlertColor(alert) {
-            // If alert is an object with a color property, use it
-            if (typeof alert === 'object' && alert.color) {
-                return alert.color;
-            }
-            
-            // For inventory alerts with remaining quantity, use unified autoColor rule
-            if (typeof alert === 'object' && 
-                ['item shortage', 'item warning', 'low-inventory'].includes(alert.type) && 
-                alert.remaining !== undefined && alert.remaining !== null) {
-                const autoColor = getAutoColorClass(alert.remaining);
-                if (autoColor) return autoColor;
-            }
-            
-            // Otherwise, map type to color
-            const type = typeof alert === 'object' ? alert.type : alert;
-            const colorMap = {
-                'error': 'red',
-                'description mismatch': 'yellow',
-                'warning': 'yellow',
-                'info': 'blue',
-                'success': 'green'
-            };
-            return colorMap[type] || 'red'; // Default to red if type is unknown
+            return statusColor(alert) || severityColor(SEVERITY.critical);
         },
 
         getRowGrouping(row) {
-            if (!row || !row.metadata) return null;
-            try {
-                const metadata = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata;
-                return metadata?.grouping || null;
-            } catch (e) {
-                return null;
-            }
+            return readRowMetadata(row).grouping || null;
         },
 
         isGroupMasterRow(row) {
@@ -1110,7 +948,20 @@ export const PacklistTable = {
          */
         handleAlertClick(item, alertKey, alert) {
             // Handle different types of alerts
-            if (alertKey === 'descriptionAlert' || alert.type === 'description mismatch') {
+            if (alert.details) {
+                // Variant alerts explain themselves, then lead to where they're resolved: an
+                // undeclared variant to its base item's row (to declare it), a shortage to the
+                // base item's timeline over this show
+                const undeclared = alert.type === 'undeclared variant';
+                this.$modal.confirm(
+                    escapeHtml(alert.details),
+                    () => undeclared ? this.navigateToInventoryItem(item) : this.navigateToInventoryDetails(item),
+                    null,
+                    alert.message,
+                    undeclared ? 'Open item' : 'View timeline',
+                    'Close'
+                );
+            } else if (alertKey === 'descriptionAlert' || alert.type === 'description mismatch') {
                 this.showDescriptionMismatchModal(item, alert);
             } else if (alertKey === 'inventoryAlert' || ['item shortage', 'item warning', 'low-inventory'].includes(alert.type)) {
                 this.navigateToInventoryDetails(item);
@@ -1130,7 +981,7 @@ export const PacklistTable = {
          * @param {string} alertKey - AppData key to clear after applying (e.g. 'cadSourceAlert')
          */
         applyItemChanges(item, changes, alertKey) {
-            const routeKey = this.$route?.path;
+            const routeKey = this.appContext?.currentPath?.split('?')[0];
             if (routeKey) {
                 undoRegistry.capture(this.packlistTableStore.data, routeKey, { type: 'restore' });
             }
@@ -1227,7 +1078,8 @@ export const PacklistTable = {
          * @param {Object} alert - The alert data
          */
         showDescriptionMismatchModal(item, alert) {
-            const itemNumber = item['Extracted Item'] || 'Unknown';
+            // A variant line keeps its variant (CAB-004b) when its description is updated
+            const itemNumber = alert.variant || item['Extracted Item'] || 'Unknown';
             const extractedQty = item['Extracted Qty'] || '1';
             const matchPercentage = alert.score ? Math.round(alert.score * 100) : 0;
             const inventoryDescription = alert.inventoryDescription || 'N/A';
@@ -1330,6 +1182,19 @@ export const PacklistTable = {
             this.$emit('navigate-to-path', finalPath);
         },
 
+        /**
+         * Navigate to the item's row in its inventory category (searched for), where its
+         * description can be edited
+         * @param {Object} item - The pack list item
+         */
+        async navigateToInventoryItem(item) {
+            const itemNumber = item['Extracted Item'];
+            if (!itemNumber) return;
+            const tabName = await Requests.getTabNameForItem(itemNumber).catch(() => null);
+            if (!tabName) return this.navigateToInventoryDetails(item);
+            this.$emit('navigate-to-path', NavigationRegistry.buildPath(`inventory/${tabName.toLowerCase()}`, { searchTerm: itemNumber }));
+        },
+
         async handlePrint() {
             //if not on the packlist page, navigate to the packlist page first
             this.$emit('navigate-to-path', this.containerPath);
@@ -1362,16 +1227,8 @@ export const PacklistTable = {
             // Toggle highlight class in metadata for selected rows
             selectedRows.forEach(({ row }) => {
                 if (row) {
-                    // Parse metadata (handle both string and object formats)
-                    let metadata = {};
-                    if (row.metadata) {
-                        try {
-                            metadata = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata;
-                        } catch (e) {
-                            metadata = {};
-                        }
-                    }
-                    
+                    const metadata = readRowMetadata(row);
+
                     if (shouldRemove) {
                         // Remove highlight
                         if (metadata.highlight) {
@@ -1389,8 +1246,7 @@ export const PacklistTable = {
                         metadata.highlight.class = 'yellow';
                     }
                     
-                    // Store back as JSON string
-                    row.metadata = JSON.stringify(metadata);
+                    writeRowMetadata(row, metadata);
                 }
             });
         },
@@ -1493,15 +1349,7 @@ export const PacklistTable = {
                             <!-- Only count visible (not marked-for-deletion) rows for Piece # -->
                             {{
                                 mainTableData
-                                    .filter(r => {
-                                        if (!r || !r.metadata) return true;
-                                        try {
-                                            const metadata = typeof r.metadata === 'string' ? JSON.parse(r.metadata) : r.metadata;
-                                            return metadata?.deletion?.marked !== true;
-                                        } catch (e) {
-                                            return true;
-                                        }
-                                    })
+                                    .filter(r => r && !isMarkedForDeletion(r))
                                     .findIndex(r => r === row) + 1
                             }}
                         </template>

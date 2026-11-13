@@ -441,6 +441,11 @@ td .card, .detail-item > span .card {
 td span:not(:empty):has(+ .card), .detail-item > span span:not(:empty):has(+ .card) {
     margin-right:var(--padding-sm);
 }
+/* A decoration card with end: true (DecorationCards) sits at the end of its cell */
+td .card-end, .detail-item > span .card-end {
+    float: right;
+    margin-left: var(--padding-sm);
+}
 
 .card:only-child,
 .card:first-child,
@@ -559,6 +564,57 @@ button.card {
 .button-bar .button-symbol {
     height: auto;
     min-height: 28px;
+}
+
+/* ButtonBar (buttonBar.js): a long bar takes a second line instead of overflowing.
+   Measuring: the children on one line at their natural width, the bar no wider than its space.
+   Split: a line break (::before) after the first line, the data-bar-line="2" children after it,
+   and only the four outer corners rounded (data-bar-corners). */
+.button-bar[data-measuring] {
+    flex-wrap: nowrap;
+    min-width: 0;
+    max-width: 100%;
+}
+.button-bar[data-measuring] > * {
+    flex: none;
+}
+.button-bar[data-split] {
+    flex-wrap: wrap;
+    row-gap: 0;
+}
+.button-bar[data-split]::before {
+    content: '';
+    flex-basis: 100%;
+    order: 1;
+}
+.button-bar[data-split] > [data-bar-line="2"] {
+    order: 2;
+    margin-top: var(--padding-sm);
+}
+/* Each line shares its width in proportion to the children's measured widths (--bar-basis), and
+   shrinks rather than wrapping again, so a split bar is always two lines */
+.button-bar[data-split] > [data-bar-corners]:not(.button-symbol) {
+    flex: var(--bar-basis, 1) 1 0px;
+    width: auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.button-bar[data-split] > [data-bar-corners], .button-bar[data-split] > [data-bar-corners] > input {
+    border-radius: 0;
+}
+.button-bar[data-split] > [data-bar-corners~="top-left"], .button-bar[data-split] > [data-bar-corners~="top-left"] > input {
+    border-top-left-radius: var(--radius-md);
+}
+.button-bar[data-split] > [data-bar-corners~="top-right"], .button-bar[data-split] > [data-bar-corners~="top-right"] > input {
+    border-top-right-radius: var(--radius-md);
+}
+.button-bar[data-split] > [data-bar-corners~="bottom-left"], .button-bar[data-split] > [data-bar-corners~="bottom-left"] > input {
+    border-bottom-left-radius: var(--radius-md);
+}
+.button-bar[data-split] > [data-bar-corners~="bottom-right"], .button-bar[data-split] > [data-bar-corners~="bottom-right"] > input {
+    border-bottom-right-radius: var(--radius-md);
 }
 .material-icons-outlined, .material-symbols-outlined {
     font-size: 1em;
@@ -722,7 +778,7 @@ button.card {
 
 .hamburger-menu ul {
     list-style: none;
-    min-width: calc(var(--page-width-card) - var(--padding-lg) * 2);
+    /* min-width: calc(var(--page-width-card) - var(--padding-lg) * 2); */
     padding: 0;
     margin:0;
 }
@@ -1479,6 +1535,7 @@ td.col-sticky-start, td.col-sticky-end {
 .thumbnail-gallery-strip .item-image-container {
     flex: none;
     cursor: pointer;
+    border-radius: var(--radius-md);
 }
 .thumbnail-gallery-strip .item-image-container.selected {
     outline: 2px solid var(--color-purple);
@@ -1489,9 +1546,12 @@ td.col-sticky-start, td.col-sticky-end {
 }
 
 /* Crop editor: the box is the largest the stage holds at the image's proportions (--crop-ratio),
-   so the crop rectangle's fractions are the image's */
+   so the crop rectangle's fractions are the image's. Corner handles live in .thumbnail-crop-handles,
+   an absolute layer that mirrors the box geometry without overflow clipping, so handles remain
+   visible and clickable even when the crop rect is flush with the image edge. */
 .thumbnail-crop-stage {
     container-type: size;
+    position: relative;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -1516,12 +1576,35 @@ td.col-sticky-start, td.col-sticky-end {
     box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.6);
     cursor: move;
 }
+/* Overlay that reproduces the box geometry above the overflow-hidden boundary */
+.thumbnail-crop-handles {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+}
+.thumbnail-crop-handles-box {
+    position: relative;
+    width: min(100cqw, 100cqh * var(--crop-ratio, 1));
+    height: min(100cqh, 100cqw / var(--crop-ratio, 1));
+    pointer-events: none;
+}
+.thumbnail-crop-handles-rect {
+    position: absolute;
+    pointer-events: none;
+}
 .thumbnail-crop-handle {
     position: absolute;
     width: 14px;
     height: 14px;
     background-color: var(--color-text-inverted);
-    border: 1px solid var(--color-purple);
+    border: 2px solid var(--color-purple);
+    border-radius: 50%;
+    pointer-events: all;
+    touch-action: none;
+    user-select: none;
 }
 .thumbnail-crop-handle.nw { left: -7px; top: -7px; cursor: nwse-resize; }
 .thumbnail-crop-handle.ne { right: -7px; top: -7px; cursor: nesw-resize; }
@@ -1531,7 +1614,7 @@ td.col-sticky-start, td.col-sticky-end {
 /* ── Editable cells (batch and instant edit modes) ── */
 
 /* Text editor (contenteditable text cell) and number input */
-.table-edit-textarea, td input[type="number"] {
+.table-edit-textarea, td input[type="number"], td .number-arithmetic input {
     width: 100%;
     display: inline-block;
     min-width: 64px;
@@ -1553,7 +1636,8 @@ td.col-sticky-start, td.col-sticky-end {
     opacity: 0.25;
     font-style: italic;
 }
-td:hover:has(.table-cell-container > .table-edit-textarea), td:hover:has(.table-cell-container > input[type="number"]) {
+td:hover:has(.table-cell-container > .table-edit-textarea), td:hover:has(.table-cell-container > input[type="number"]),
+td:hover:has(.table-cell-container > .number-arithmetic) {
     background-color: var(--color-blue-bg-transparent);
     cursor: text;
 }
@@ -1563,6 +1647,28 @@ td:hover:has(.table-cell-container > .table-edit-textarea), td:hover:has(.table-
     justify-content: space-between;
     gap: var(--padding-sm);
     align-items: center;
+}
+
+/* Number cell calculation (NumberCellInput): the saved value, the typed terms, then = result, on
+   one line. Every part has a fixed width (a percentage-width input counts as zero toward the
+   column's minimum), so the column widens to fit while it shows. */
+.number-arithmetic {
+    display: flex;
+    flex: none;
+    align-items: center;
+    gap: var(--padding-sm);
+    white-space: nowrap;
+}
+.number-arithmetic > * {
+    flex: none;
+}
+td .number-arithmetic input {
+    width: 5em;
+    min-width: 5em;
+    background-color: var(--color-blue-bg-transparent);
+}
+.number-arithmetic output {
+    font-weight: bold;
 }
 
 /* Checkbox and select cells */
@@ -1943,7 +2049,7 @@ html.row-dragging * {
     padding: var(--padding-sm);
     cursor: pointer;
     display: flex;
-    flex-direction: row;
+    flex-direction: row-reverse;
     align-items: center;
     gap: var(--padding-sm);
     overflow: hidden;
@@ -2022,13 +2128,14 @@ html.row-dragging * {
 }
 /* Chip end: one button bar (action cells, decoration cards, the primary action button last).
    Every control is the same height and font; the generic .button-bar sizing (28px symbol
-   buttons, growing buttons) doesn't apply inside a chip. */
+   buttons, growing buttons) doesn't apply inside a chip.
+   First in DOM and at the flex start (row-reverse right side), so overflow clips leftward
+   and the rightmost/primary action button is always visible on narrow chips. */
 .calendar-chip .chip-actions.button-bar {
     flex-shrink: 0;
     display: flex;
     align-items: stretch;
     gap: 0;
-    margin-left: auto;
 }
 .calendar-chip .chip-actions.button-bar > * {
     box-sizing: border-box;
@@ -2037,6 +2144,7 @@ html.row-dragging * {
     margin: 0;
     padding: 0 4px;
     flex: 0 0 auto;
+    width: auto;
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -2281,6 +2389,14 @@ td .cell-button-list > .card {
     button, input[type="submit"], input[type="button"], input[type="text"], input[type="date"], input[type="number"], input[type="email"], select, .input-container {
         width: 100%;
         flex-grow: 1;
+    }
+    /* In a bar (already full width) the children keep their own widths and grow to fill it, rather
+       than taking a whole line each: ButtonBar measures these widths to split a long bar */
+    .button-bar > :is(button:not(.button-symbol), input, select) {
+        width: 120px;
+    }
+    .button-bar > .input-container {
+        width: auto;
     }
 }
 

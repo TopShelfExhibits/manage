@@ -32,10 +32,10 @@ export const ThumbnailCropEditor = {
     name: 'ThumbnailCropEditor',
     props: {
         src: { type: String, required: true },
-        crop: { type: Object, default: null }
+        initialCrop: { type: Object, default: null }
     },
     data() {
-        const c = normalizeCrop(this.crop) || { x: 0, y: 0, w: 1, h: 1 };
+        const c = normalizeCrop(this.initialCrop) || { x: 0, y: 0, w: 1, h: 1 };
         return { rect: { ...c }, drag: null, ratio: null };
     },
     computed: {
@@ -95,8 +95,13 @@ export const ThumbnailCropEditor = {
         <div class="thumbnail-crop-stage" :style="ratio ? { '--crop-ratio': ratio } : null">
             <div ref="box" class="thumbnail-crop-box" :style="{ visibility: ratio ? 'visible' : 'hidden' }">
                 <img :src="src" alt="Image to crop" draggable="false" @load="onLoad" />
-                <div class="thumbnail-crop-rect" :style="rectStyle" @pointerdown="start('move', $event)">
-                    <span v-for="corner in ['nw', 'ne', 'sw', 'se']" :key="corner" :class="['thumbnail-crop-handle', corner]" @pointerdown.stop="start(corner, $event)"></span>
+                <div class="thumbnail-crop-rect" :style="rectStyle" @pointerdown="start('move', $event)"></div>
+            </div>
+            <div class="thumbnail-crop-handles" :style="{ visibility: ratio ? 'visible' : 'hidden' }">
+                <div class="thumbnail-crop-handles-box">
+                    <div class="thumbnail-crop-handles-rect" :style="rectStyle">
+                        <span v-for="corner in ['nw', 'ne', 'sw', 'se']" :key="corner" :class="['thumbnail-crop-handle', corner]" @pointerdown.stop="start(corner, $event)"></span>
+                    </div>
                 </div>
             </div>
         </div>
@@ -272,20 +277,27 @@ export const ThumbnailGalleryModal = {
             await this.loadUncropped();
         },
         async applyCrop() {
-            const crop = this.$refs.cropEditor?.crop() ?? null;
+            const crop = this.$refs.cropEditor && typeof this.$refs.cropEditor.crop === 'function'
+                ? this.$refs.cropEditor.crop()
+                : null;
             const e = this.entry;
             this.mode = 'view';
             this.change(setThumbnailCrop(this.current, this.index, crop));
             // Show the cropped icon in the table right away, from the file already downloaded
             const blob = await this.fileBlob(e.id);
             if (blob) ThumbnailCache.seed(e.id, blob, crop);
+        },
+        resetCrop() {
+            if (this.$refs.cropEditor && typeof this.$refs.cropEditor.reset === 'function') {
+                this.$refs.cropEditor.reset();
+            }
         }
     },
     template: html`
         <div class="thumbnail-gallery-stage">
             <button class="button-symbol" :disabled="entries.length < 2 || mode !== 'view'" title="Previous image (←)" @click="go(-1)"><span class="material-symbols-outlined">chevron_left</span></button>
             <template v-if="mode === 'crop'">
-                <ThumbnailCropEditor v-if="uncroppedUrl" ref="cropEditor" :src="uncroppedUrl" :crop="entry && entry.crop" />
+                <ThumbnailCropEditor v-if="uncroppedUrl" ref="cropEditor" :src="uncroppedUrl" :initialCrop="entry && entry.crop" />
                 <div v-else class="card gray">Loading the full image…</div>
             </template>
             <img v-else :src="displayUrl" :alt="'Image ' + (index + 1) + ' of ' + itemNumber" />
@@ -329,7 +341,7 @@ export const ThumbnailGalleryModal = {
             </div>
             <div v-else-if="mode === 'crop'" class="button-bar">
                 <button class="purple" :disabled="!uncroppedUrl" @click="applyCrop">Apply crop</button>
-                <button :disabled="!uncroppedUrl" @click="$refs.cropEditor.reset()">Whole image</button>
+                <button :disabled="!uncroppedUrl" @click="resetCrop">Whole image</button>
                 <button class="gray" @click="mode = 'view'">Cancel</button>
             </div>
             <div v-else class="button-bar">

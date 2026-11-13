@@ -1,4 +1,5 @@
-import { Requests, authState, getDeviceId, getReactiveStore, ProposalUtils, NavigationRegistry, todayISOString } from '../index.js';
+import { acquireSheetLock } from './sheetLockMixin.js';
+import { Requests, authState, getReactiveStore, getInventoryNoteMaxLength, ProposalUtils, PROPOSAL_LOCK_NAMESPACE, NavigationRegistry, todayISOString } from '../index.js';
 
 /**
  * Inventory proposal helpers for the application layer: the shared proposal list store, route
@@ -37,6 +38,93 @@ export function registerProposalRoutes(proposals = []) {
 
 export function proposalPath(name) {
     return `${PROPOSALS_PATH}/${ProposalUtils.slugify(name)}`;
+}
+
+/** A proposal page's table store (the proposal's rows; saving replaces its active entries) */
+export function proposalTableStore(name) {
+    return getReactiveStore(Requests.getInventoryProposalTable, Requests.saveInventoryProposalTable, [name]);
+}
+
+/**
+ * A category store's edits as proposal items: each edited item's saved row and its changes
+ * (ProposalUtils.diffRow). An item new to the category counts from quantity 0.
+ * @returns {Array<{ inventoryRow: Object, changes: Array<{n, ne}> }>}
+ */
+export function proposalItemsFromStore(store) {
+    const savedByItem = new Map((store.originalData || []).map(row => [row.itemNumber, row]));
+    return (store.data || [])
+        .filter(row => row.itemNumber)
+        .map(row => {
+            const saved = savedByItem.get(row.itemNumber) || { ...row, quantity: '0' };
+            return { inventoryRow: saved, changes: ProposalUtils.diffRow(saved, row) };
+        })
+        .filter(item => item.changes.length > 0);
+}
+
+/**
+ * Add items to a proposal, new or existing, the way the proposal page saves: through the
+ * proposal's table store, under its edit lock. Each item's changes merge into its row
+ * (ProposalUtils.mergeChanges: one row per item), or add a row; then the store saves.
+ * @param {string} name - Proposal name
+ * @param {string} category - Inventory tab of the items
+ * @param {Array<{ inventoryRow: Object, changes: Array<{n, ne}> }>} items - see proposalItemsFromStore
+ * @throws {Error} When the proposal has unsaved edits, is locked by someone else, or the save fails
+ *   (the proposal is then left as it was)
+ */
+export async function saveToProposal(name, category, items) {
+    const user = authState.user?.email;
+    if (!user) throw new Error('Log in to update a proposal');
+    const store = proposalTableStore(name);
+    await waitForLoad(store);
+    if (store.isModified) throw new Error(`Save or discard the unsaved changes in the ${name} proposal first.`);
+    const release = await acquireSheetLock(PROPOSAL_LOCK_NAMESPACE, name, `The ${name} proposal`, 'Nothing was added.');
+    try {
+        for (const { inventoryRow, changes } of items) {
+            const itemNumber = inventoryRow.itemNumber;
+            const row = store.data.find(other => other.category === category && other.itemNumber === itemNumber);
+            const merged = ProposalUtils.mergeChanges(row ? ProposalUtils.changesFromTableRow(row) : [], changes);
+            const next = ProposalUtils.toTableRow({ category, itemNumber, changes: merged }, inventoryRow);
+            if (row) Object.assign(row, next);
+            else store.addRow(next);
+        }
+        const saved = await store.save('Saving proposal...');
+        if (saved === false || store.isModified) {
+            const message = store.error || `Could not save the ${name} proposal`;
+            store.setData(store.originalData);
+            throw new Error(message);
+        }
+    } finally {
+        await release();
+    }
+    await reloadProposals();
+}
+
+/**
+ * Send a category store's edits to a proposal instead of inventory (the save dialog's Proposal
+ * button, from the category table or the categories view). Items new to the category are first
+ * created in inventory at quantity 0, once confirmNewItems() agrees, so the proposal can commit
+ * them; the proposal holds their quantity. The edits are then dropped from the store.
+ * @param {Object} store - The category's inventory store
+ * @param {string} category - Inventory tab
+ * @param {string} name - Proposal name, new or existing
+ * @param {Function} confirmNewItems - async () => boolean, asked only when there are new items
+ * @returns {Promise<boolean>} false when the user declined to create the new items
+ * @throws {Error} When saving the new items or the proposal fails (see saveToProposal)
+ */
+export async function sendEditsToProposal(store, category, name, confirmNewItems) {
+    const savedItems = new Set((store.originalData || []).map(row => row.itemNumber));
+    const newRows = (store.data || []).filter(row => row.itemNumber && !savedItems.has(row.itemNumber));
+    if (newRows.length > 0 && !await confirmNewItems()) return false;
+    const items = proposalItemsFromStore(store);
+    if (newRows.length > 0) {
+        const rows = [...store.originalData.map(row => ({ ...row })), ...newRows.map(row => ({ ...row, quantity: '0' }))];
+        await Requests.saveInventoryTabData(rows, category, undefined, undefined, undefined, {
+            note: ProposalUtils.commitNote(name, getInventoryNoteMaxLength())
+        });
+    }
+    if (items.length > 0) await saveToProposal(name, category, items);
+    await store.load('Loading...');
+    return true;
 }
 
 function inventoryStore(category) {
@@ -88,16 +176,11 @@ export async function commitInventoryProposal(name, scheduledDate, note) {
     }
 
     // ── Pass 1: lock every category, then apply the changes ──
-    const locked = [];
+    const releases = new Map();
     const edited = [];
     try {
         for (const category of categories) {
-            const acquired = await Requests.lockSheet('INVENTORY', category, user, getDeviceId());
-            if (!acquired) {
-                const lockInfo = await Requests.getSheetLock('INVENTORY', category, user);
-                throw new Error(`${category} is locked${lockInfo?.user ? ` by ${lockInfo.user}` : ''}. Nothing was committed.`);
-            }
-            locked.push(category);
+            releases.set(category, await acquireSheetLock('INVENTORY', category, category, 'Nothing was committed.'));
         }
         for (const category of categories) {
             const store = stores.get(category);
@@ -113,9 +196,7 @@ export async function commitInventoryProposal(name, scheduledDate, note) {
             const store = stores.get(category);
             store.setData(store.originalData);
         }
-        for (const category of locked) {
-            await Requests.unlockSheet('INVENTORY', category, user).catch(() => {});
-        }
+        for (const release of releases.values()) await release();
         throw error;
     }
 
@@ -134,7 +215,7 @@ export async function commitInventoryProposal(name, scheduledDate, note) {
             // A scheduled save keeps today's values and records pending entries: show the saved state
             if (isFuture) await store.load('Loading...');
         }
-        await Requests.unlockSheet('INVENTORY', category, user).catch(() => {});
+        await releases.get(category)();
     }
 
     if (committed.length > 0) {

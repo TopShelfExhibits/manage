@@ -817,40 +817,6 @@ class inventoryUtils_uncached {
     }
 
     /**
-     * Remove a pending change entry by effectiveDateDeciseconds from matching rows
-     * and save the updated EditHistory back. Mutation — uncached.
-     * @param {string} tabOrItemName
-     * @param {number} effectiveDateDeciseconds
-     * @param {string} [username]
-     * @param {Object} [mapping]
-     * @returns {Promise<boolean>}
-     */
-    static async deletePendingChangeEntry(tabOrItemName, effectiveDateDeciseconds, username = null, mapping = inventoryUtils_uncached.DEFAULT_INVENTORY_MAPPING) {
-        const allTabs = await Database.getTabs('INVENTORY');
-        const tabExists = allTabs.some(tab => tab.title === tabOrItemName);
-        let resolvedTabName = tabOrItemName;
-        if (!tabExists) {
-            const foundTab = await InventoryUtils.getTabNameForItem(tabOrItemName);
-            if (!foundTab) throw new Error(`Inventory tab for "${tabOrItemName}" not found.`);
-            resolvedTabName = foundTab;
-        }
-
-        const rows = await Database.getData('INVENTORY', resolvedTabName, mapping);
-        const updatedRows = rows.map(row => {
-            const parsed = EditHistoryUtils.parseEditHistory(row.edithistory);
-            if (!parsed || !Array.isArray(parsed.p)) return row;
-            const filtered = parsed.p.filter(e => e.t !== effectiveDateDeciseconds);
-            if (filtered.length === parsed.p.length) return row;
-            return { ...row, edithistory: JSON.stringify({ ...parsed, p: filtered }) };
-        });
-
-        return await Database.setData('INVENTORY', resolvedTabName, updatedRows, mapping, {
-            username,
-            skipMetadata: true
-        });
-    }
-
-    /**
      * Get hidden search data (item numbers, descriptions, notes) for a category.
      * Used for card grid searching. Low-priority, optional analysis step.
      * @param {Object} deps - Dependencies object
@@ -919,6 +885,5 @@ export const InventoryUtils = wrapMethods(inventoryUtils_uncached, 'inventory_ut
     'saveInventoryTabData',
     'checkAndApplyPendingChanges',
     'savePendingChangeEntry',
-    'deletePendingChangeEntry',
     'getHiddenSearchDataForCategory'
 ]);

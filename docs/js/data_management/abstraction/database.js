@@ -451,7 +451,7 @@ class database_uncached {
         const rawData = await GoogleSheetsService.getSheetData(tableId, tabName);
         const nextRow = (Array.isArray(rawData) ? rawData.length : 0) + 1;
         const endCol = _numberToColumnLetter(Math.max(values.length, 1));
-        const range = `${tabName}!A${nextRow}:${endCol}${nextRow}`;
+        const range = Database.a1Range(tabName, `A${nextRow}:${endCol}${nextRow}`);
 
         await GoogleSheetsService.setSheetData(tableId, range, [values], null);
 
@@ -619,16 +619,17 @@ async function _archiveDeletedRows(sourceTable, sourceTab, deletedRows, username
             await GoogleSheetsService.setSheetData(sourceTable, `${ARCHIVE_TAB_NAME}!A1:${endCol}1`, [headers], null);
         }
 
-        for (const deleted of deletedRows) {
-            const entry = EditHistoryUtils.createArchiveEntry(
-                sourceTable,
-                sourceTab,
-                deleted.identifier,
-                deleted.rowData,
-                username
-            );
-            await Database.appendSheetRow(sourceTable, ARCHIVE_TAB_NAME, headers.map(h => entry[h] ?? ''));
-        }
+        const rows = deletedRows.map(deleted => {
+            const entry = EditHistoryUtils.createArchiveEntry(sourceTable, sourceTab, deleted.identifier, deleted.rowData, username);
+            return headers.map(h => entry[h] ?? '');
+        });
+        // One values.append for all of them: rows archived at the same time by other sessions get
+        // their own rows (a read-then-write of the next free row could overwrite theirs)
+        await GoogleSheetsService.appendSheetValues(sourceTable, Database.a1Range(ARCHIVE_TAB_NAME, `A:${_numberToColumnLetter(headers.length)}`), rows);
+        stampDataChange(`database:getData:"${sourceTable}","${ARCHIVE_TAB_NAME}"`);
+        invalidateCache([
+            { namespace: 'database', methodName: 'getData', args: [sourceTable, ARCHIVE_TAB_NAME] }
+        ], true);
     } catch (error) {
         console.error('Failed to archive deleted rows:', error);
         // Don't throw - archival failure shouldn't block the main save

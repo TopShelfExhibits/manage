@@ -6,16 +6,20 @@
  *   'sign:<pos>:<neg>' → <pos> for a number above 0, <neg> below 0 (either may be empty)
  *   'differs:<key>:<class>' → <class> when the value differs (as text) from the row's <key>
  *   other             → a literal class name
+ * Wherever a rule names a class, it may name a severity instead ('critical', 'warning', …), which
+ * becomes that severity's colour (application/utils/severity.js).
  *
  * Pure: no Vue, no DOM. Safe to import from tests.
  */
 import { getAutoColorClass } from '../autoColor.js';
+import { severityColor } from '../severity.js';
+import { SEVERITY } from '../../../data_management/utils/severity.js';
 import { parseDate } from '../../../data_management/utils/helpers.js';
 import { isCheckedValue } from '../../../data_management/utils/checkbox-values.js';
 
 /**
  * Colour class for a date based on proximity to today (moved from TableComponent).
- * Within 2 days (or up to a week past) → red; within 7 days → orange; otherwise none.
+ * Within 2 days (or up to a week past) → critical (red); within 7 days → warning (orange).
  * @param {*} dateValue
  * @param {Date} [now]
  * @returns {string}
@@ -32,8 +36,8 @@ export function getDateColorClass(dateValue, now = new Date()) {
     const diffDays = Math.ceil((target.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
 
     if (diffDays < -7) return '';
-    if (diffDays <= 2) return 'red';
-    if (diffDays <= 7) return 'orange';
+    if (diffDays <= 2) return severityColor(SEVERITY.critical);
+    if (diffDays <= 7) return severityColor(SEVERITY.warning);
     return '';
 }
 
@@ -50,6 +54,11 @@ function isDateField(field) {
  * @returns {string} class name or ''
  */
 export function applyColorRule(rule, value, field, row) {
+    const cls = _applyColorRule(rule, value, field, row);
+    return severityColor(cls) || cls;
+}
+
+function _applyColorRule(rule, value, field, row) {
     if (!rule) return '';
     if (rule === 'auto') {
         if (value === null || value === undefined || value === '') return '';
@@ -102,5 +111,5 @@ export function rowColorFor(row, resolved) {
     if (!row || !rc || !rc.field) return '';
     const field = resolved.fieldMap?.get?.(rc.field) || { key: rc.field };
     const cls = applyColorRule(rc.rule || 'value', row[rc.field], field, row);
-    return cls || rc.fallback || '';
+    return cls || severityColor(rc.fallback) || rc.fallback || '';
 }

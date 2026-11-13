@@ -33,19 +33,27 @@ import { FakeGoogleSheetsAuth, FakeGoogleSheetsService, FakeGoogleState, setFake
 import { refreshAppData } from './fakeGoogleDevTools.js';
 import { isCheckedValue } from '../data_management/utils/checkbox-values.js';
 import { useBatchEdits, useInstantEdits } from '../application/utils/cellEdits.js';
-import { CacheInvalidationBus, ApplicationUtils, ProductionUtils, triggerCachePoll, stampDataChange, Database, EditHistoryUtils, InventoryUtils, ProposalUtils, resolveInventoryNoteMaxLength, checkDateRollover, clearCache, invalidateCache, resolveSheetMapping, parseThumbnails, parseThumbnailEntries, serializeThumbnailEntries, addThumbnails, removeThumbnailAt, setPrimaryThumbnail, setThumbnailNote, setThumbnailCrop, primaryThumbnailValue, thumbnailKey } from '../data_management/index.js';
+import { CacheInvalidationBus, ApplicationUtils, ProductionUtils, triggerCachePoll, stampDataChange, Database, DEFAULT_INVENTORY_MAPPING, EditHistoryUtils, InventoryUtils, ProposalUtils, PROPOSAL_LOCK_NAMESPACE, resolveInventoryNoteMaxLength, readRowMetadata, writeRowMetadata, checkDateRollover, clearCache, invalidateCache, resolveSheetMapping, parseThumbnails, parseThumbnailEntries, serializeThumbnailEntries, addThumbnails, removeThumbnailAt, setPrimaryThumbnail, setThumbnailNote, setThumbnailCrop, primaryThumbnailValue, thumbnailKey } from '../data_management/index.js';
 import { authState } from '../application/utils/auth.js';
-import { commitInventoryProposal } from '../application/utils/inventoryProposals.js';
+import { commitInventoryProposal, saveToProposal, proposalTableStore, sendEditsToProposal } from '../application/utils/inventoryProposals.js';
+import { hasQuantityChanges } from '../application/components/content/InventoryTable.js';
+import { evaluateArithmetic } from '../application/components/interface/cells.js';
+import { balancedSplit } from '../application/components/interface/buttonBar.js';
 import { resolveView, resolveAction, pickView, mergeView, matchesKeyPattern, setViewWarningHandler, withRegistryDefaults, searchTiers } from '../application/utils/views/resolveView.js';
 import { SEARCH_LIMITS, searchWords, matchRow, matchRows, makeHighlighter } from '../application/utils/views/searchMatch.js';
 import { formatValue, formatText } from '../application/utils/views/fieldFormat.js';
 import { rowsToCards, bucketRowsToCards } from '../application/utils/views/cardsAdapter.js';
 import { applyColorRule, colorFor, rowColorFor } from '../application/utils/views/viewColor.js';
 import { containerTier, viewportTier, BREAKPOINTS } from '../application/utils/useContainerSize.js';
-import { todayISOString, setTestToday, startOfTodayMs, resolveShortageAlertDays, shortageAlertDateFilters, INVENTORY_TAB_PREFERENCES, resolveInventoryTabList, searchFilter, textFiltersToSearchParams, parseSearchParameters } from '../data_management/utils/helpers.js';
+import { todayISOString, setTestToday, startOfTodayMs, resolveShortageAlertDays, shortageAlertDateFilters, INVENTORY_TAB_PREFERENCES, resolveInventoryTabList, itemVariantBase, resolveItemVariant, itemVariantFamilies, itemVariantKey, parseItemVariants, searchFilter, textFiltersToSearchParams, parseSearchParameters } from '../data_management/utils/helpers.js';
 import { instantWriteEntry, identityKey, cellKey, joinKey } from '../data_management/utils/instant-write-config.js';
 import { estimateShipDate } from '../data_management/utils/ship-date.js';
-import { getReactiveStore, createAnalysisConfig } from '../application/index.js';
+import { parseA1Range, gridNeeded, clipRangeToGrid, isGridLimitError } from '../google_sheets_services/gridRanges.js';
+import { SEVERITY, remainingSeverity } from '../data_management/utils/severity.js';
+import { severityColor, statusColor } from '../application/utils/severity.js';
+import { getAutoColorClass } from '../application/utils/autoColor.js';
+import { getReactiveStore, createAnalysisConfig, itemVariantCards, itemShortageCards, NavigationRegistry, isMarkedForDeletion, paramToggleValue, isTemporaryAdmin } from '../application/index.js';
+import { calculateStoreDiff, applyDiffToData } from '../application/utils/reactiveStores.js';
 import { checkSheetHealth } from './sheetHealth.js';
 import { guessColumnType, columnTypesEntry, columnTypeMap, columnTypeOf, isOpaqueType } from '../data_management/utils/column-types.js';
 import { migrateThumbnails } from '../data_management/migrations/thumbnail-column.js';
@@ -1101,6 +1109,133 @@ test('HARDWARE INVENTORY', 'getItemQuantitiesSummary counts HH BOLTHOG 1-4 20 x 
     assertEqual(row.quantity, 15, 'TEST 2025 ENHANCED HH BOLTHOG 1-4 20 x 2.5 quantity');
 });
 
+// ── Item Variants ─────────────────────────────────────────────────────────────
+// A letter appended to a standard item number notes a variant of the base item. Variants are
+// declared, with optional counts, in the base item's inventory description (parseItemVariants).
+// FakeGoogle CABINETS:
+//   CAB-005 (QTY 6, no real variant parts): CAB-005b and CAB-005C count as CAB-005. Its description
+//     "Tall gray storage cabinet\n(1) CAB-005b with locking doors" declares one CAB-005b.
+//   CAB-006 with a real CAB-006a: CAB-006a matches itself, CAB-006b stays unmatched (no fallback)
+//   CAB-009 is not an item: CAB-009b stays CAB-009b
+// Pack lists:
+//   TEST 2025 ENHANCED crate 1: (6) CAB-005, (2) CAB-005b, (1) CAB-005C, (3) CAB-006a, (1) CAB-006b
+//     → CAB-005=9, CAB-006a=3, CAB-006b=1. No show overlaps it.
+//   ATSC 2025 NAB and GEARFIRE 2025 SHOT (overlapping, 1/10 to 1/31/2025): (1) CAB-005b each
+// Variant checks:
+//   ATSC CAB-005b: 1 declared, 2 needed (ATSC 1 + GEARFIRE 1) → 1 short (red)
+//   TEST ENHANCED CAB-005b: 1 declared, 2 needed → 1 short (red)
+//   TEST ENHANCED unmodified CAB-005: 6 - 1 = 5 available, 9 - 3 variants = 6 needed → 1 short (orange)
+//   TEST ENHANCED CAB-005C: undeclared → a description alert, no variant check
+
+const CAB_005_DESCRIPTION = 'Tall gray storage cabinet\n(1) CAB-005b with locking doors';
+
+test('ITEM VARIANTS', 'resolveItemVariant applies the variant rules', async () => {
+    const items = ['CAB-005', 'CAB-006', 'CAB-006a', 'BX-10Rx39P'];
+    assertEqual(itemVariantBase('CAB-005b'), 'CAB-005', 'lower-case suffix');
+    assertEqual(itemVariantBase('CAB-005B'), 'CAB-005', 'upper-case suffix');
+    assertEqual([itemVariantBase('CAB-005'), itemVariantBase('CAB-005bc'), itemVariantBase('BX-3Rx8_45°')], [null, null, null], 'not variant-shaped');
+    assertEqual([itemVariantKey('CAB-005C'), itemVariantKey('CAB-005b'), itemVariantKey('CAB-005')], ['CAB-005c', 'CAB-005b', null], 'variant keys');
+    assertEqual(resolveItemVariant('CAB-005b', items), 'CAB-005', 'falls back to base');
+    assertEqual(resolveItemVariant('CAB-006a', items), 'CAB-006a', 'a real variant matches itself');
+    assertEqual(resolveItemVariant('CAB-006b', items), 'CAB-006b', 'a family with a real variant does not fall back');
+    assertEqual(resolveItemVariant('CAB-009b', items), 'CAB-009b', 'no base item');
+    assertEqual(resolveItemVariant('BX-10Rx39P', items), 'BX-10Rx39P', 'a real item ending in a letter');
+});
+
+test('ITEM VARIANTS', 'parseItemVariants reads variant lines from a description', async () => {
+    const parsed = parseItemVariants('CAB-004', 'gray cabinet\n(3) CAB-004b with larger top\n(1) CAB-004C with smaller top\nCAB-004d');
+    assertEqual(parsed, {
+        baseDescription: 'gray cabinet',
+        variants: [
+            { key: 'CAB-004b', itemNumber: 'CAB-004b', letter: 'b', quantity: 3, note: 'with larger top', description: 'gray cabinet with larger top' },
+            { key: 'CAB-004c', itemNumber: 'CAB-004C', letter: 'c', quantity: 1, note: 'with smaller top', description: 'gray cabinet with smaller top' },
+            { key: 'CAB-004d', itemNumber: 'CAB-004d', letter: 'd', quantity: null, note: '', description: 'gray cabinet' }
+        ]
+    }, 'three variants');
+    const prose = 'Counter. (4) standoffs on front and top\nsee CAB-004b\n(2) CAB-004bc\n(1) CAB-0045b\n(1) TABLE-001b';
+    assertEqual(parseItemVariants('CAB-004', prose), { baseDescription: prose, variants: [] }, 'no variant lines');
+    assertEqual(parseItemVariants('CAB-004', 'a\n(1) CAB-004b x\n(5) CAB-004B y').variants.map(v => v.quantity), [1], 'first line for a letter wins');
+    assertEqual(parseItemVariants('BX-10Rx39P', 'panel\n(1) BX-10Rx39Pb').variants, [], 'base ending in a letter has no variants');
+    assertEqual(parseItemVariants('CAB-004', ''), { baseDescription: '', variants: [] }, 'empty description');
+});
+
+test('ITEM VARIANTS', 'pack list text extracts the variant base item', async () => {
+    const extract = (text) => Requests.extractItemNumber(text);
+    assertEqual(await extract('(2) CAB-005b Tall gray storage cabinet with locking doors'), 'CAB-005', 'CAB-005b');
+    assertEqual(await extract('(1) CAB-005C Tall gray storage cabinet'), 'CAB-005', 'CAB-005C');
+    assertEqual(await extract('(3) CAB-006a Rolling demo cabinet'), 'CAB-006a', 'CAB-006a');
+    assertEqual(await extract('(1) CAB-006b Rolling demo cabinet'), 'CAB-006b', 'CAB-006b');
+    assertEqual(await extract('(1) CAB-009b Unknown cabinet'), 'CAB-009b', 'CAB-009b');
+    const variant = await Requests.extractCustomItemFromText('(2) CAB-005b with locking doors', ['CABINETS']);
+    assertEqual(variant.itemNumber, null, 'CABINETS is not a custom item number tab');
+});
+
+test('ITEM VARIANTS', 'variant quantities count against the base item', async () => {
+    const rows = await Requests.getItemQuantitiesSummary('TEST 2025 ENHANCED');
+    const quantities = Object.fromEntries(rows.filter(r => r.itemId.startsWith('CAB-')).map(r => [r.itemId, r.quantity]));
+    assertEqual(quantities, { 'CAB-005': 9, 'CAB-006a': 3, 'CAB-006b': 1 }, 'TEST 2025 ENHANCED cabinet quantities');
+});
+
+test('ITEM VARIANTS', 'description matching uses the variant or base description', async () => {
+    const check = (Description) => Requests.checkDescriptionMatch({ 'Extracted Item': 'CAB-005', Description });
+    assertEqual(await check('(1) CAB-005b Tall gray storage cabinet with locking doors'), null, 'declared variant matches its description');
+    assertEqual(await check('(6) CAB-005 Tall gray storage cabinet'), null, 'base line matches the base description without variant lines');
+    const mismatch = await check('(1) CAB-005b red cabinet');
+    assertEqual([mismatch?.type, mismatch?.variant, mismatch?.inventoryDescription], ['description mismatch', 'CAB-005b', 'Tall gray storage cabinet with locking doors'], 'variant mismatch keeps the variant');
+    const undeclared = await check('(1) CAB-005C Tall gray storage cabinet, short top');
+    assertEqual([undeclared?.type, undeclared?.severity, undeclared?.message, undeclared?.variant], ['undeclared variant', 'attention', 'Undeclared variant of CAB-005', 'CAB-005C'], 'undeclared variant');
+});
+
+test('ITEM VARIANTS', 'variant counts are checked against this and overlapping shows', async () => {
+    const level = (Description, show) => Requests.checkVariantLevel({ 'Extracted Item': Description.match(/CAB-00\d/)[0], Description }, show);
+    const pick = (alert) => alert && [alert.type, alert.severity, alert.message, alert.remaining, alert.details];
+    assertEqual(pick(await level('(1) CAB-005b Tall gray storage cabinet with locking doors', 'ATSC 2025 NAB')),
+        ['variant shortage', 'critical', 'CAB-005b: 1 short', -1, 'CAB-005b: 1 in inventory, 2 needed by this and overlapping shows.\nATSC 2025 NAB: 1\nGEARFIRE 2025 SHOT: 1'],
+        'ATSC CAB-005b with GEARFIRE overlapping');
+    assertEqual(pick(await level('(2) CAB-005b Tall gray storage cabinet with locking doors', 'TEST 2025 ENHANCED')),
+        ['variant shortage', 'critical', 'CAB-005b: 1 short', -1, 'CAB-005b: 1 in inventory, 2 needed by this and overlapping shows.\nTEST 2025 ENHANCED: 2'],
+        'TEST ENHANCED CAB-005b');
+    assertEqual(pick(await level('(6) CAB-005 Tall gray storage cabinet', 'TEST 2025 ENHANCED')),
+        ['variant shortage', 'warning', 'Unmodified CAB-005: 1 short', -1, 'Unmodified CAB-005: 5 in inventory, 6 needed by this and overlapping shows.\nTEST 2025 ENHANCED: 6'],
+        'TEST ENHANCED unmodified CAB-005');
+    assertEqual(await level('(1) CAB-005C Tall gray storage cabinet, short top', 'TEST 2025 ENHANCED'), null, 'undeclared variant has no count');
+    assertEqual(await level('(4) CAB-004 Curved-bottom white demo counter', 'ATSC 2025 NAB'), null, 'family without declared variants');
+});
+
+test('ITEM VARIANTS', 'inventory description cards show each declared variant', async () => {
+    const opened = [];
+    const cards = itemVariantCards({ itemNumber: 'CAB-005', quantity: '6', description: CAB_005_DESCRIPTION }, (message, title) => opened.push([message, title]));
+    assertEqual(cards.map(({ action, ...card }) => card), [{ message: 'b', class: 'purple', end: true, title: 'CAB-005b (1 of 6): Tall gray storage cabinet with locking doors' }], 'one card');
+    cards[0].action();
+    assertEqual(opened, [['Tall gray storage cabinet with locking doors', 'CAB-005b (1 of 6)']], 'card opens the variant');
+    assertEqual(itemVariantCards({ itemNumber: 'CAB-004', quantity: '10', description: 'Counter' }, () => {}), [], 'no variants, no cards');
+});
+
+test('ITEM VARIANTS', 'a family with a real variant item shows that its variants are off', async () => {
+    assertEqual([...itemVariantFamilies(['CAB-005', 'CAB-006', 'CAB-006a', 'BX-10Rx39P'])], ['CAB-006', 'BX-10Rx39'], 'families');
+    const families = itemVariantFamilies(['CAB-005', 'CAB-006', 'CAB-006a']);
+    const cards = itemVariantCards({ itemNumber: 'CAB-006', quantity: '4', description: 'Rolling demo cabinet\n(1) CAB-006b with shelves' }, () => {}, families);
+    assertEqual(cards.map(card => [card.message, card.severity]), [['Variants off', 'critical']], 'one critical card');
+    assertEqual(itemVariantCards({ itemNumber: 'CAB-005', quantity: '6', description: CAB_005_DESCRIPTION }, () => {}, families).map(card => card.message), ['b'], 'other families unaffected');
+});
+
+// Variant counts come from the inventory description through the cache: editing CAB-005's
+// description to declare (3) CAB-005b clears ATSC's shortage (3 declared, 2 needed: 1 spare).
+test('ITEM VARIANTS', 'editing a variant count updates the variant check', async () => {
+    const atscLine = { 'Extracted Item': 'CAB-005', Description: '(1) CAB-005b Tall gray storage cabinet with locking doors' };
+    const remaining = async () => (await Requests.checkVariantLevel(atscLine, 'ATSC 2025 NAB'))?.remaining ?? null;
+    const original = await Database.getData('INVENTORY', 'CABINETS', DEFAULT_INVENTORY_MAPPING);
+    const withDescription = (description) => original.map(row => row.itemNumber === 'CAB-005' ? { ...row, description } : row);
+    assertEqual(await remaining(), -1, 'before: 1 short');
+    try {
+        await Database.setData('INVENTORY', 'CABINETS', withDescription('Tall gray storage cabinet\n(3) CAB-005b with locking doors'), DEFAULT_INVENTORY_MAPPING, { skipMetadata: true });
+        assertEqual(await remaining(), null, 'after: no alert');
+    } finally {
+        await Database.setData('INVENTORY', 'CABINETS', withDescription(CAB_005_DESCRIPTION), DEFAULT_INVENTORY_MAPPING, { skipMetadata: true });
+    }
+    assertEqual(await remaining(), -1, 'restored: 1 short');
+});
+
 // ── Group 26: Thumbnail Column ────────────────────────────────────────────────
 // Item thumbnails live in each inventory tab's Thumbnail column as a JSON array of Drive file IDs;
 // category images in the index's Thumbnail column. FakeGoogle fixtures:
@@ -2105,6 +2240,101 @@ test('SAVE CACHING', 'a lock change is still confirmed by a fresh read at the ne
     invalidateCache([{ namespace: 'app_utils', methodName: 'getLocksData', args: [] }]);
 });
 
+// ── Group: URL toggles ────────────────────────────────────────────────────────
+// ParamToggles keeps on/off page options in the container's URL parameters (CLAUDE.md "Page
+// options in the URL"). A toggle at its default leaves the URL; other parameters are kept.
+
+test('URL TOGGLES', 'a toggle reads its parameter, else its default', async () => {
+    const pending = { param: 'pending', label: 'Pending' };
+    const hidden = { param: 'extra', label: 'Extra', default: false };
+    assertEqual([paramToggleValue({}, pending), paramToggleValue({ pending: false }, pending), paramToggleValue({}, hidden), paramToggleValue({ extra: true }, hidden)],
+        [true, false, false, true], 'values');
+});
+
+test('URL TOGGLES', 'updateContainerParams writes only the changed parameters', async () => {
+    const opened = [];
+    const navigate = path => opened.push(NavigationRegistry.parsePath(path));
+    const current = NavigationRegistry.buildPath('inventory/furniture', { searchTerm: 'chair' });
+    NavigationRegistry.updateContainerParams('inventory/furniture', current, { pending: false }, navigate);
+    const toggled = NavigationRegistry.buildPath('inventory/furniture', { searchTerm: 'chair', pending: false });
+    NavigationRegistry.updateContainerParams('inventory/furniture', toggled, { pending: undefined }, navigate);
+    assertEqual(opened.map(({ path, parameters }) => [path, parameters]),
+        [['inventory/furniture', { searchTerm: 'chair', pending: false }], ['inventory/furniture', { searchTerm: 'chair' }]], 'set, then removed');
+});
+
+// TEMPORARY admin check (until an admin system with permissions replaces it): a hand-kept list,
+// plus the fake test user on localhost
+test('URL TOGGLES', 'isTemporaryAdmin: the listed users, and the test user on localhost', async () => {
+    const previous = authState.user;
+    try {
+        const as = (email) => { authState.user = email ? { email } : null; return isTemporaryAdmin(); };
+        assertEqual([as('dschwab@topshelfexhibits.com'), as('test@example.com'), as('sam@example.com'), as(null)], [true, true, false, false], 'admins');
+    } finally {
+        authState.user = previous;
+    }
+});
+
+// ── Group: Severity ───────────────────────────────────────────────────────────
+// Alerts, banners and status cards carry a severity (data_management/utils/severity.js); the UI
+// gives each one colour (application/utils/severity.js). Expected colours are SEVERITY_COLORS.
+
+test('SEVERITY', 'each severity has one colour', async () => {
+    assertEqual(Object.values(SEVERITY).map(severityColor), ['red', 'orange', 'yellow', 'purple', 'white', 'blue', 'gray', 'green'], 'colours');
+    assertEqual([severityColor(''), severityColor('nonsense'), severityColor(undefined)], ['', '', ''], 'none');
+});
+
+test('SEVERITY', 'statusColor: a class wins, then the severity', async () => {
+    assertEqual(statusColor({ severity: SEVERITY.critical }), 'red', 'severity');
+    assertEqual(statusColor({ severity: SEVERITY.critical, class: 'green' }), 'green', 'explicit class');
+    assertEqual(statusColor({ color: 'blue' }), 'blue', 'older color field');
+    assertEqual([statusColor({}), statusColor(null)], ['', ''], 'plain');
+});
+
+test('SEVERITY', 'remaining quantities: one rule for alerts and cells', async () => {
+    assertEqual([-1, 0, 0.5, 1, 5, null, NaN].map(remainingSeverity), ['critical', 'warning', 'warning', '', '', '', ''], 'remainingSeverity');
+    assertEqual([-1, 0, 1].map(getAutoColorClass), ['red', 'orange', ''], 'getAutoColorClass');
+    assertEqual(applyColorRule('checked:critical', 'X'), 'red', 'a view rule may name a severity');
+    assertEqual(applyColorRule('checked:gray', 'X'), 'gray', 'or a class');
+});
+
+test('SEVERITY', 'API alerts carry a severity, not a colour', async () => {
+    const shortage = await Requests.checkInventoryLevel({ 'Extracted Item': 'CAB-004' }, 'ATSC 2025 NAB');
+    assertEqual([shortage?.type, shortage?.severity, shortage?.color], ['item shortage', 'critical', undefined], 'CAB-004 shortage');
+    const missing = await Requests.checkDescriptionMatch({ 'Extracted Item': 'CAB-005', Description: '(1) CAB-005C Tall gray storage cabinet' });
+    assertEqual([missing?.severity, missing?.color], ['attention', undefined], 'undeclared variant');
+});
+
+// ── Group: Grid ranges ────────────────────────────────────────────────────────
+// gridRanges.js: GoogleSheetsService grows a sheet's grid for range writes and clips range reads
+// to it. Regression: a show note appended after empty note rows were deleted wrote "ShowNotes!A7:C7"
+// to a 6-row grid ("exceeds grid limits"), because cell writes and range reads didn't handle it.
+
+test('GRID RANGES', 'parseA1Range reads sheets and bounds', async () => {
+    assertEqual(parseA1Range('ShowNotes!A7:C7'), { sheetPart: 'ShowNotes', sheet: 'ShowNotes', startRow: 7, startCol: 1, endRow: 7, endCol: 3 }, 'block');
+    assertEqual(parseA1Range("'Production Schedule'!AB5"), { sheetPart: "'Production Schedule'", sheet: 'Production Schedule', startRow: 5, startCol: 28, endRow: 5, endCol: 28 }, 'quoted single cell');
+    assertEqual(parseA1Range('Caching!A:B'), { sheetPart: 'Caching', sheet: 'Caching', startRow: null, startCol: 1, endRow: null, endCol: 2 }, 'whole columns');
+    assertEqual(parseA1Range("'Bob''s'"), { sheetPart: "'Bob''s'", sheet: "Bob's", startRow: null, startCol: null, endRow: null, endCol: null }, 'whole tab');
+});
+
+test('GRID RANGES', 'gridNeeded takes the furthest cell per sheet', async () => {
+    const needs = gridNeeded(['ShowNotes!A7:C7', 'ShowNotes!B9:B9', "'Production Schedule'!AA5:AA5", 'Caching!A:B']);
+    assertEqual([...needs], [['ShowNotes', { rows: 9, cols: 3 }], ['Production Schedule', { rows: 5, cols: 27 }], ['Caching', { rows: 0, cols: 2 }]], 'needs');
+});
+
+test('GRID RANGES', 'clipRangeToGrid pulls a range into the grid', async () => {
+    assertEqual(clipRangeToGrid('ShowNotes!A7:C7', 6, 3), null, 'row past the grid: nothing to read');
+    assertEqual(clipRangeToGrid('ShowNotes!A5:C8', 6, 3), 'ShowNotes!A5:C6', 'rows clipped');
+    assertEqual(clipRangeToGrid("'My Tab'!B2:Z2", 6, 3), "'My Tab'!B2:C2", 'columns clipped, quoting kept');
+    assertEqual(clipRangeToGrid('ShowNotes!D1:D1', 6, 3), null, 'column past the grid');
+    assertEqual(clipRangeToGrid('Caching!A:B', 6, 3), 'Caching!A:B', 'open rows stay open');
+    assertEqual(clipRangeToGrid('ShowNotes', 6, 3), 'ShowNotes', 'whole tab');
+});
+
+test('GRID RANGES', 'isGridLimitError recognises the API error', async () => {
+    const apiError = { status: 400, result: { error: { code: 400, message: 'Range (ShowNotes!A7:C7) exceeds grid limits. Max rows: 6, max columns: 3', status: 'INVALID_ARGUMENT' } } };
+    assertEqual([isGridLimitError(apiError), isGridLimitError({ status: 400, result: { error: { message: 'Unable to parse range' } } }), isGridLimitError(null)], [true, false, false], 'errors');
+});
+
 // ── Group: Tab reads ──────────────────────────────────────────────────────────
 // getData's whole-tab reads queue per spreadsheet and go out together as one values.batchGet.
 // clearCache empties the cache without reloading the stores, so only the test's own reads run.
@@ -2454,6 +2684,186 @@ test('EDIT HISTORY VIEW', 'getArchivedRows returns [] when the spreadsheet has n
     assertEqual(await Requests.getArchivedRows('CACHE', 'Notes'), [], 'no CACHE/_EditHistory tab');
 });
 
+// The history page's delete button (admins) marks a row as the table's Delete key does; saving
+// removes it from the tab and archives it, and the page's deleted items store shows it without a
+// reload. FakeGoogle SHELVES holds SHLF-001 only; the test puts it back.
+test('EDIT HISTORY VIEW', 'a row marked for deletion is removed and archived on save', async () => {
+    const original = await Database.getData('INVENTORY', 'SHELVES', DEFAULT_INVENTORY_MAPPING);
+    const store = await _loadedStore(Requests.getInventoryTabData, Requests.saveInventoryTabData, ['SHELVES', undefined, undefined, undefined]);
+    const deletedItems = await _loadedStore(Requests.getArchivedRows, null, ['INVENTORY', 'SHELVES']);
+    try {
+        assertEqual(deletedItems.data, [], 'nothing deleted yet');
+        const index = store.data.findIndex(row => row.itemNumber === 'SHLF-001');
+        store.markRowForDeletion(index, true);
+        assertEqual(isMarkedForDeletion(store.data[index]), true, 'marked');
+        await _asUser(() => store.save('Saving...'));
+        assertEqual(store.data.map(row => row.itemNumber), [], 'gone from the store');
+        assertEqual((await Requests.getInventoryTabData('SHELVES')).map(row => row.itemNumber), [], 'gone from the tab');
+        assertEqual((await Requests.getArchivedRows('INVENTORY', 'SHELVES')).map(row => row.RowData.itemNumber), ['SHLF-001'], 'archived');
+        for (let i = 0; i < 100 && !deletedItems.data.length; i++) await new Promise(r => setTimeout(r, 50));
+        assertEqual(deletedItems.data.map(row => row.RowData.itemNumber), ['SHLF-001'], 'the deleted items store reloaded');
+    } finally {
+        await Database.setData('INVENTORY', 'SHELVES', original, DEFAULT_INVENTORY_MAPPING, { skipMetadata: true });
+    }
+});
+
+// Row flags (deletion mark, highlight, grouping) live in a row's metadata as JSON text. Pages read and
+// write them with readRowMetadata / writeRowMetadata; clearing the last flag removes the key, as rows load.
+test('ROW METADATA', 'readRowMetadata reads JSON text or an object; anything else reads as no flags', async () => {
+    const flags = { grouping: { groupId: 'G1', isGroupMaster: true } };
+    assertEqual(readRowMetadata({ metadata: JSON.stringify(flags) }), flags, 'JSON text');
+    const row = { metadata: flags };
+    assertEqual(readRowMetadata(row) === flags, true, 'an object is returned as is');
+    assertEqual([{}, { metadata: '' }, { metadata: null }, { metadata: 'not json' }, { metadata: '"text"' }, null].map(readRowMetadata),
+        [{}, {}, {}, {}, {}, {}], 'missing, empty, unreadable or not an object');
+});
+
+test('ROW METADATA', 'writeRowMetadata stores JSON text, and removes the key when no flags are left', async () => {
+    const row = { itemNumber: 'A-1', metadata: '' };
+    writeRowMetadata(row, { highlight: { class: 'yellow' } });
+    assertEqual(row.metadata, '{"highlight":{"class":"yellow"}}', 'stored as text');
+    writeRowMetadata(row, {});
+    assertEqual('metadata' in row, false, 'key removed');
+});
+
+test('EDIT HISTORY VIEW', 'deleted items list the newest deletion of each item; a restored row drops its mark', async () => {
+    const entry = (itemNumber, i, t) => ({ Timestamp: t, RowData: { itemNumber, edithistory: i ? JSON.stringify({ i, h: [] }) : '' } });
+    const entries = [entry('A-1', 3, 30), entry('B-1', 5, 20), entry('A-1', 3, 10), entry('C-1', null, 5)];
+    assertEqual(EditHistoryUtils.currentDeletions(entries, [{ itemNumber: 'B-1' }], 'itemNumber').map(e => [e.RowData.itemNumber, e.Timestamp]),
+        [['A-1', 30], ['C-1', 5]], 'newest per item number; B-1 is in the tab again');
+    assertEqual(EditHistoryUtils.currentDeletions(entries, [{ itemNumber: 'B-1' }], null).map(e => [e.RowData.itemNumber, e.Timestamp]),
+        [['A-1', 30], ['B-1', 20], ['C-1', 5]], 'without a key field: newest per identity, item numbers ignored');
+    const archived = { itemNumber: 'A-1', AppData: { x: 1 }, metadata: JSON.stringify({ deletion: { marked: true }, grouping: 1 }), edithistory: JSON.stringify({ i: 3, h: [{ u: 'dan' }] }) };
+    const restored = EditHistoryUtils.restoredRow(archived);
+    assertEqual([restored.AppData, JSON.parse(restored.metadata), JSON.parse(restored.edithistory).i], [undefined, { grouping: 1 }, 3], 'no mark, identity kept');
+    const taken = EditHistoryUtils.restoredRow(archived, [{ itemNumber: 'Z-9', edithistory: JSON.stringify({ i: 3 }) }]);
+    assertEqual(JSON.parse(taken.edithistory), { h: [{ u: 'dan' }] }, 'an identity taken since is given up; history stays');
+    // Rows without item numbers go by identity: each is listed until a row with its identity is back
+    const blank = [entry('', 7, 40), entry('', 8, 35), entry('', 7, 15), entry('', null, 12), entry('', null, 11)];
+    assertEqual(EditHistoryUtils.currentDeletions(blank, [{ itemNumber: '', edithistory: JSON.stringify({ i: 8 }) }], 'itemNumber').map(e => e.Timestamp),
+        [40, 12, 11], 'no item numbers: newest per identity, identity 8 is back, rows without either all listed');
+});
+
+// The archive is appended in one values.append per save, so deletions saved at the same time
+// (two sessions, two categories) each keep their entry. Regression: each entry went to the next
+// free row found by a read, and simultaneous saves could write the same row (losing a deleted row
+// for good). FakeGoogle SHELVES holds SHLF-001, COUNTERTOPS CNTR-001; the test puts them back.
+test('EDIT HISTORY VIEW', 'deletions saved at the same time each keep their archive entry', async () => {
+    const tabs = ['SHELVES', 'COUNTERTOPS'];
+    const originals = await Promise.all(tabs.map(tab => Database.getData('INVENTORY', tab, DEFAULT_INVENTORY_MAPPING)));
+    const archived = async (tab) => (await Requests.getArchivedRows('INVENTORY', tab)).map(entry => entry.RowData.itemNumber);
+    const before = await Promise.all(tabs.map(archived));
+    try {
+        await Promise.all(tabs.map(tab => Database.setData('INVENTORY', tab, [], DEFAULT_INVENTORY_MAPPING, { username: 'test@example.com' })));
+        const after = await Promise.all(tabs.map(archived));
+        assertEqual(after.map((list, k) => list.length - before[k].length), [1, 1], 'one new entry each');
+        assertEqual(after.map(list => list[0]), ['SHLF-001', 'CNTR-001'], 'for the deleted rows');
+    } finally {
+        await Promise.all(tabs.map((tab, k) => Database.setData('INVENTORY', tab, originals[k], DEFAULT_INVENTORY_MAPPING, { skipMetadata: true })));
+    }
+});
+
+// Full cycle on the history page: delete an item, restore it from the deleted items list (its row,
+// identity and history come back as an unsaved change, and the save records the restore), then
+// delete it again: the list holds its newest deletion once. FakeGoogle SHELVES holds SHLF-001
+// only; the test gives it an identity first and puts the tab back.
+test('EDIT HISTORY VIEW', 'a deleted row restores with its identity and history, and deletes again', async () => {
+    const original = await Database.getData('INVENTORY', 'SHELVES', DEFAULT_INVENTORY_MAPPING);
+    const archivedBefore = (await Requests.getArchivedRows('INVENTORY', 'SHELVES')).length;
+    try {
+        await Database.setData('INVENTORY', 'SHELVES', original, DEFAULT_INVENTORY_MAPPING, { username: 'test@example.com' });
+        const store = await _loadedStore(Requests.getInventoryTabData, Requests.saveInventoryTabData, ['SHELVES', undefined, undefined, undefined]);
+        const identity = EditHistoryUtils.getRowIndex(store.data[0].edithistory);
+        const listed = async () => EditHistoryUtils.currentDeletions(await Requests.getArchivedRows('INVENTORY', 'SHELVES'), store.data, 'itemNumber');
+
+        store.markRowForDeletion(0, true);
+        await _asUser(() => store.save('Saving...'));
+        const [deleted] = await listed();
+        assertEqual([deleted?.RowData.itemNumber, store.data.length], ['SHLF-001', 0], 'deleted and listed');
+
+        store.addRow(EditHistoryUtils.restoredRow(deleted.RowData, store.data));
+        assertEqual([await listed(), store.isModified], [[], true], 'restoring takes it off the list, unsaved');
+        await _asUser(() => store.save('Saving...', { note: 'restore SHLF-001' }));
+        const [row] = await Requests.getInventoryTabData('SHELVES');
+        const history = EditHistoryUtils.parseEditHistory(row.edithistory);
+        assertEqual([row.itemNumber, history.i, history.h[0].s, history.h[0].c], ['SHLF-001', identity, 'restore SHLF-001', []], 'back with its identity; the save records the restore');
+
+        store.markRowForDeletion(0, true);
+        await _asUser(() => store.save('Saving...'));
+        const archived = await Requests.getArchivedRows('INVENTORY', 'SHELVES');
+        assertEqual([archived.length - archivedBefore, (await listed()).length], [2, 1], 'two deletions archived, the newest listed');
+    } finally {
+        await Database.setData('INVENTORY', 'SHELVES', original, DEFAULT_INVENTORY_MAPPING, { skipMetadata: true });
+    }
+});
+
+// ── Store backups ──
+// Unsaved edits are backed up to the user's data as a diff (calculateStoreDiff) and restored when
+// their store loads again (applyDiffToData). Each change names its row (EditHistory i, or a
+// fingerprint of its values), so it lands on that row after rows move. Regression: changes were
+// restored by position, so after a row above was deleted (by a save elsewhere, or a proposal
+// commit) a restored deletion mark fell on the next row, and the next save deleted that row.
+// FakeGoogle PANELS starts BX-16x39, BX-16x47, BX-15x39; the tests put it back.
+
+async function _loadedStore(...args) {
+    const store = getReactiveStore(...args);
+    for (let i = 0; i < 100 && (store.isLoading || store.initialLoad); i++) await new Promise(r => setTimeout(r, 50));
+    return store;
+}
+const _panels = () => Database.getData('INVENTORY', 'PANELS', DEFAULT_INVENTORY_MAPPING);
+const _marked = (rows) => rows.filter(row => isMarkedForDeletion(row)).map(row => row.itemNumber);
+const _withMark = (row) => ({ ...row, metadata: JSON.stringify({ deletion: { marked: true } }) });
+
+test('STORE BACKUPS', 'a restored change follows its row after rows move', async () => {
+    const original = await _panels();
+    try {
+        // Unsaved: BX-15x39 marked for deletion and BX-16x47's notes edited, backed up as a diff
+        const edited = original.map(row => row.itemNumber === 'BX-15x39' ? _withMark(row)
+            : row.itemNumber === 'BX-16x47' ? { ...row, notes: 'check edges' } : row);
+        const diff = calculateStoreDiff(original, edited);
+        // Another session deletes BX-16x39 (every row below it moves up one) and saves the tab
+        await Database.setData('INVENTORY', 'PANELS', original.filter(row => row.itemNumber !== 'BX-16x39'), DEFAULT_INVENTORY_MAPPING, { username: 'other@example.com' });
+        const restored = applyDiffToData(await _panels(), diff);
+        assertEqual(_marked(restored), ['BX-15x39'], 'the mark is back on its own row');
+        assertEqual(restored.filter(row => row.notes === 'check edges').map(row => row.itemNumber), ['BX-16x47'], 'and the edit');
+    } finally {
+        await Database.setData('INVENTORY', 'PANELS', original, DEFAULT_INVENTORY_MAPPING, { skipMetadata: true });
+    }
+});
+
+test('STORE BACKUPS', 'a change whose row is gone is not restored', async () => {
+    const original = await _panels();
+    const diff = calculateStoreDiff(original, original.map(row => row.itemNumber === 'BX-16x39' ? _withMark(row) : row));
+    const restored = applyDiffToData(original.filter(row => row.itemNumber !== 'BX-16x39'), diff);
+    assertEqual(_marked(restored), [], 'no other row takes the mark');
+});
+
+test('STORE BACKUPS', 'an older backup restores edits by position, never a deletion mark', async () => {
+    const original = await _panels();
+    // A backup saved before changes named their rows: index only
+    const legacy = [{ index: 2, type: 'modified', data: { notes: 'legacy edit', metadata: JSON.stringify({ deletion: { marked: true } }) } }];
+    const restored = applyDiffToData(original, legacy);
+    assertEqual([restored[2].itemNumber, restored[2].notes, _marked(restored)], ['BX-15x39', 'legacy edit', []], 'edit at its position, no mark');
+});
+
+test('STORE BACKUPS', 'discarding edits discards their backup', async () => {
+    const store = await _loadedStore(Requests.getInventoryTabData, Requests.saveInventoryTabData, ['PANELS', undefined, undefined, undefined]);
+    const calls = [];
+    const discardBackup = store.discardBackup;
+    store.discardBackup = async () => { calls.push('discarded'); };
+    try {
+        await store.load('Loading...');
+        assertEqual(calls, [], 'an unmodified reload keeps any backup');
+        store.markRowForDeletion(0, true);
+        // Discard, Refresh and sending edits to a proposal all reload the modified store
+        await store.load('Loading...');
+        assertEqual([calls, _marked(store.data)], [['discarded'], []], 'the edit and its backup are gone');
+    } finally {
+        store.discardBackup = discardBackup;
+        store.setData(store.originalData);
+    }
+});
+
 test('EDIT HISTORY VIEW', 'item timeline shows field changes and rebuilt quantities (CHAIR-003)', async () => {
     const events = await Requests.getItemTimeline('CHAIR-003', '2026-01-01', '2026-12-31');
     const balance = events.find(e => e.event === 'Balance');
@@ -2536,19 +2946,66 @@ test('INVENTORY PROPOSALS', 'applyChanges adds quantity deltas but sets text lit
     assertEqual(row.description, '-5 ft pole', 'signed text is not a delta');
 });
 
-test('INVENTORY PROPOSALS', 'mergeIntoProposal overwrites listed fields and keeps everything else', async () => {
-    const entries = ProposalUtils.parseRows([
-        { proposal: 'Spring buy', category: 'FURNITURE', itemNumber: 'CHAIR-003', changes: JSON.stringify([{ n: 'quantity', ne: '+4' }, { n: 'notes', ne: 'legs' }]), updated: '1' },
-        { proposal: 'Spring buy', category: 'FURNITURE', itemNumber: 'CHAIR-001', changes: JSON.stringify([{ n: 'quantity', ne: '+8' }]), updated: '1' }
-    ]);
-    const merged = ProposalUtils.mergeIntoProposal(entries, 'spring BUY', 'FURNITURE', [
-        { itemNumber: 'CHAIR-003', changes: [{ n: 'quantity', ne: '+2' }] },
-        { itemNumber: 'TABLE-001', changes: [{ n: 'quantity', ne: '+1' }] }
-    ], 'sam', 99);
-    const chair3 = merged.find(e => e.itemNumber === 'CHAIR-003');
-    assertEqual(chair3.changes, [{ n: 'notes', ne: 'legs' }, { n: 'quantity', ne: '+2' }], 'quantity replaced, notes kept');
-    assertEqual(merged.find(e => e.itemNumber === 'CHAIR-001').changes, [{ n: 'quantity', ne: '+8' }], 'untouched item kept');
-    assertEqual(merged.find(e => e.itemNumber === 'TABLE-001').proposal, 'Spring buy', 'new item uses the stored name');
+test('INVENTORY PROPOSALS', 'mergeChanges replaces the same field and keeps the others', async () => {
+    const merged = ProposalUtils.mergeChanges([{ n: 'quantity', ne: '+4' }, { n: 'notes', ne: 'legs' }], [{ n: 'quantity', ne: '+2' }, { n: 'description', ne: 'Chair' }]);
+    assertEqual(merged, [{ n: 'notes', ne: 'legs' }, { n: 'quantity', ne: '+2' }, { n: 'description', ne: 'Chair' }], 'quantity replaced, notes kept, description added');
+});
+
+// Every proposal write is a save of the proposal's table store. saveToProposal (the save dialog's
+// Proposal button) loads the store, takes the proposal lock, merges each item into its row (one row
+// per item) and saves. The tests make their own proposals and empty them afterwards.
+const _furnitureItem = async (itemNumber, changes) => ({
+    inventoryRow: (await Requests.getInventoryTabData('FURNITURE')).find(row => row.itemNumber === itemNumber),
+    changes
+});
+
+test('INVENTORY PROPOSALS', 'saveToProposal creates a proposal, then merges into it one row per item', async () => {
+    const name = 'Store test';
+    try {
+        await _asUser(async () => saveToProposal(name, 'FURNITURE', [await _furnitureItem('CHAIR-003', [{ n: 'quantity', ne: '+4' }, { n: 'notes', ne: 'legs' }])]));
+        await _asUser(async () => saveToProposal(name, 'FURNITURE', [
+            await _furnitureItem('CHAIR-003', [{ n: 'quantity', ne: '+2' }]),
+            await _furnitureItem('STOOL-002', [{ n: 'quantity', ne: '+1' }])
+        ]));
+        // Compare n/ne only: the proposals store (reloaded by saveToProposal) adds runtime AppData to the cached entries
+        assertEqual((await _proposalRows(name)).filter(e => !e.committed).map(e => [e.itemNumber, e.changes.map(({ n, ne }) => ({ n, ne }))]), [
+            ['CHAIR-003', [{ n: 'quantity', ne: '+2' }, { n: 'notes', ne: 'legs' }]],
+            ['STOOL-002', [{ n: 'quantity', ne: '+1' }]]
+        ], 'CHAIR-003 merged (quantity replaced, notes kept), STOOL-002 added');
+        assertEqual(await ApplicationUtils.getSheetLock(PROPOSAL_LOCK_NAMESPACE, name, 'other@example.com'), null, 'lock released');
+    } finally {
+        await _asUser(() => Requests.saveInventoryProposalTable([], name));
+    }
+});
+
+test('INVENTORY PROPOSALS', 'saveToProposal refuses while the proposal is locked, edited on another device, or has unsaved edits', async () => {
+    const name = 'Lock test';
+    const added = async (itemNumber) => {
+        try { await _asUser(async () => saveToProposal(name, 'FURNITURE', [await _furnitureItem(itemNumber, [{ n: 'quantity', ne: '+1' }])])); return null; }
+        catch (e) { return e.message; }
+    };
+    try {
+        assertEqual(await added('CHAIR-001'), null, 'created');
+        await ApplicationUtils.lockSheet(PROPOSAL_LOCK_NAMESPACE, name, 'other@example.com');
+        assertEqual(/is locked/.test(await added('CHAIR-002') || ''), true, 'refused while another user holds the lock');
+        await ApplicationUtils.unlockSheet(PROPOSAL_LOCK_NAMESPACE, name, 'other@example.com');
+        // The same user editing it on another device: that session's lock is left alone
+        await ApplicationUtils.lockSheet(PROPOSAL_LOCK_NAMESPACE, name, 'test@example.com', 'other-device');
+        assertEqual(/another of your devices/.test(await added('CHAIR-002') || ''), true, 'refused while this user edits it on another device');
+        assertEqual((await ApplicationUtils.getSheetLock(PROPOSAL_LOCK_NAMESPACE, name))?.deviceId, 'other-device', "the other device's lock kept");
+        await ApplicationUtils.unlockSheet(PROPOSAL_LOCK_NAMESPACE, name, 'test@example.com');
+        const store = proposalTableStore(name);
+        for (let i = 0; i < 100 && (store.isLoading || store.initialLoad); i++) await new Promise(r => setTimeout(r, 50));
+        store.data[0].notes = 'unsaved edit';
+        const refused = await added('CHAIR-002');
+        store.setData(store.originalData);
+        assertEqual(/unsaved changes/.test(refused || ''), true, `refused with unsaved edits: ${refused}`);
+        assertEqual((await _proposalRows(name)).map(e => e.itemNumber), ['CHAIR-001'], 'nothing added either time');
+    } finally {
+        await ApplicationUtils.unlockSheet(PROPOSAL_LOCK_NAMESPACE, name, 'other@example.com').catch(() => {});
+        await ApplicationUtils.unlockSheet(PROPOSAL_LOCK_NAMESPACE, name, 'test@example.com').catch(() => {});
+        await _asUser(() => Requests.saveInventoryProposalTable([], name));
+    }
 });
 
 test('INVENTORY PROPOSALS', 'replaceActiveEntries and markCommitted only touch the named proposal', async () => {
@@ -2599,6 +3056,63 @@ test('INVENTORY PROPOSALS', 'saving the proposal table replaces its rows and dro
     assertEqual((await _proposalRows('Spring buy')).length, 3, 'other proposals untouched');
 });
 
+// Removing an item from a proposal follows the delete design: the remove button marks the row
+// (store.toggleRowDeletion) and saving takes the marked rows out. The test makes a two-item
+// proposal (CHAIR-001, CHAIR-002) and empties it afterwards.
+test('INVENTORY PROPOSALS', 'removing an item marks it; saving takes it out of the proposal', async () => {
+    const name = 'Removal test';
+    await _asUser(async () => saveToProposal(name, 'FURNITURE', [
+        await _furnitureItem('CHAIR-001', [{ n: 'quantity', ne: '+1' }]),
+        await _furnitureItem('CHAIR-002', [{ n: 'quantity', ne: '+2' }])
+    ]));
+    const store = await _loadedStore(Requests.getInventoryProposalTable, Requests.saveInventoryProposalTable, [name]);
+    try {
+        const row = store.data.find(r => r.itemNumber === 'CHAIR-001');
+        assertEqual(store.indexOfRow({ AppData: { _rowId: row.AppData._rowId } }), store.data.indexOf(row), 'found by row id');
+        assertEqual([store.toggleRowDeletion(row), store.toggleRowDeletion(row), isMarkedForDeletion(row), store.isModified], [true, true, false, false], 'toggles back, unmodified');
+        store.toggleRowDeletion(row);
+        assertEqual([store.data.length, (await _proposalRows(name)).length], [2, 2], 'marked: still in the proposal until saved');
+        await _asUser(() => store.save('Saving proposal...'));
+        assertEqual((await _proposalRows(name)).filter(e => !e.committed).map(e => e.itemNumber), ['CHAIR-002'], 'saved: the marked item is out');
+    } finally {
+        await _asUser(() => Requests.saveInventoryProposalTable([], name));
+    }
+});
+
+// New Item adds an item picked from inventory (InventorySelectorModal) as a row with no changes,
+// built as the proposal page builds it (ProposalUtils.toTableRow). A row saves an entry once it has
+// a change. The test empties the proposal afterwards.
+test('INVENTORY PROPOSALS', 'an item added from inventory joins the proposal once it has a change', async () => {
+    const name = 'Add test';
+    await _asUser(async () => saveToProposal(name, 'FURNITURE', [await _furnitureItem('CHAIR-001', [{ n: 'quantity', ne: '+1' }])]));
+    const store = await _loadedStore(Requests.getInventoryProposalTable, Requests.saveInventoryProposalTable, [name]);
+    try {
+        const inventory = await Requests.getAllInventoryData(todayISOString());
+        const picked = ['STOOL-002', 'COUCH-001'].map(itemNumber => inventory.find(row => row.itemNumber === itemNumber));
+        for (const item of picked) {
+            store.addRow(ProposalUtils.toTableRow({ category: item.tab, itemNumber: item.itemNumber, changes: [] }, item));
+        }
+        assertEqual(store.data.slice(1).map(row => [row.category, row.itemNumber, row.currentQuantity, row.quantityChange]),
+            picked.map(item => ['FURNITURE', item.itemNumber, item.quantity, '0']), "added with the item's current values, no change");
+        store.data.find(row => row.itemNumber === 'STOOL-002').quantityChange = '3';
+        await _asUser(() => store.save('Saving proposal...'));
+        assertEqual((await _proposalRows(name)).filter(e => !e.committed).map(e => [e.itemNumber, e.changes]),
+            [['CHAIR-001', [{ n: 'quantity', ne: '+1' }]], ['STOOL-002', [{ n: 'quantity', ne: '+3' }]]], 'the changed item joined; the unchanged one saved nothing');
+    } finally {
+        await _asUser(() => Requests.saveInventoryProposalTable([], name));
+    }
+});
+
+// One entry per item whatever the rows: saving keeps the last row for an item (two entries would
+// apply its change twice at commit).
+test('INVENTORY PROPOSALS', 'a repeated item saves one entry, from the last row', async () => {
+    const row = (itemNumber, quantityChange) => ({ category: 'FURNITURE', itemNumber, quantityChange, description: '', currentDescription: '', notes: '', currentNotes: '' });
+    const saved = ProposalUtils.replaceActiveEntries([], 'Paste test', [row('CHAIR-001', '2'), row('CHAIR-002', '1'), row('CHAIR-001', '5')], 'test', 100);
+    assertEqual(saved.map(e => [e.itemNumber, e.changes]), [['CHAIR-002', [{ n: 'quantity', ne: '+1' }]], ['CHAIR-001', [{ n: 'quantity', ne: '+5' }]]], 'one entry per item');
+    const cleared = ProposalUtils.replaceActiveEntries([], 'Paste test', [row('CHAIR-001', '2'), row('CHAIR-001', '0')], 'test', 100);
+    assertEqual(cleared, [], 'the last row has no change: no entry');
+});
+
 test('INVENTORY PROPOSALS', 'committed proposals cannot be edited', async () => {
     let error = null;
     try { await Requests.saveInventoryProposalTable([], 'Fall buy'); } catch (e) { error = e; }
@@ -2624,6 +3138,58 @@ test('INVENTORY PROPOSALS', 'commit changes nothing when a category is locked by
     const cab = (await Requests.getInventoryTabData('CABINETS')).find(r => r.itemNumber === 'CAB-004');
     assertEqual(cab.quantity, '10', 'quantity unchanged');
     assertEqual((await _proposalRows('Cabinet fix'))[0].committed, 0, 'not committed');
+});
+
+test('INVENTORY PROPOSALS', "commit leaves alone a category this user is editing on another device", async () => {
+    await ApplicationUtils.lockSheet('INVENTORY', 'FURNITURE', 'test@example.com', 'other-device');
+    let error = null;
+    try { await _asUser(() => commitInventoryProposal('Spring buy', new Date().toISOString().slice(0, 10), 'proposal: Spring buy')); } catch (e) { error = e; }
+    const lock = await ApplicationUtils.getSheetLock('INVENTORY', 'FURNITURE');
+    await ApplicationUtils.unlockSheet('INVENTORY', 'FURNITURE', 'test@example.com');
+    assertEqual(error?.message, 'FURNITURE is being edited on another of your devices. Nothing was committed.', 'refused');
+    assertEqual(lock?.deviceId, 'other-device', "the other device's lock kept");
+    assertEqual((await _proposalRows('Spring buy')).every(e => !e.committed), true, 'nothing committed');
+});
+
+// The save dialog's Proposal button, from the category table or the categories view, sends edits
+// with sendEditsToProposal: an item new to the category is first created in inventory at quantity
+// 0 (so the proposal can commit it) and the proposal holds its quantity. The test adds CHAIR-900
+// (quantity 3) and changes CHAIR-001 by +1, then puts FURNITURE back.
+test('INVENTORY PROPOSALS', 'sendEditsToProposal creates new items at 0 and proposes their quantity', async () => {
+    const name = 'Send test';
+    const store = await _loadedStore(Requests.getInventoryTabData, Requests.saveInventoryTabData, ['FURNITURE', undefined, undefined, undefined]);
+    const saved = (await Requests.getInventoryTabData('FURNITURE')).map(row => ({ ...row }));
+    const fieldNames = Object.keys(store.data[0]).filter(key => key !== 'AppData');
+    const edit = () => {
+        const chair = store.data.find(row => row.itemNumber === 'CHAIR-001');
+        chair.quantity = String(Number(chair.quantity) + 1);
+        store.addRow({ itemNumber: 'CHAIR-900', quantity: '3', description: 'Test chair' }, fieldNames);
+    };
+    try {
+        edit();
+        assertEqual(await _asUser(() => sendEditsToProposal(store, 'FURNITURE', name, async () => false)), false, 'declined: nothing sent');
+        assertEqual([(await _proposalRows(name)).length, store.isModified], [0, true], 'declined: no proposal, edits kept');
+        assertEqual(await _asUser(() => sendEditsToProposal(store, 'FURNITURE', name, async () => true)), true, 'sent');
+        const created = (await Requests.getInventoryTabData('FURNITURE')).find(row => row.itemNumber === 'CHAIR-900');
+        assertEqual(created?.quantity, '0', 'CHAIR-900 created in inventory at 0');
+        assertEqual((await _proposalRows(name)).map(e => [e.itemNumber, e.changes.map(({ n, ne }) => `${n}=${ne}`).join(',')]),
+            [['CHAIR-001', 'quantity=+1'], ['CHAIR-900', 'quantity=+3']], 'both proposed');
+        assertEqual(store.isModified, false, 'edits dropped from the category store');
+    } finally {
+        store.setData(store.originalData);
+        await _asUser(() => Requests.saveInventoryProposalTable([], name));
+        await _asUser(() => Requests.saveInventoryTabData(saved, 'FURNITURE'));
+        await store.load('Loading...');
+    }
+});
+
+test('INVENTORY PROPOSALS', 'hasQuantityChanges pairs rows by their history id, not item number', async () => {
+    const row = (itemNumber, quantity, i) => ({ itemNumber, quantity, edithistory: i ? JSON.stringify({ i }) : '' });
+    const originalData = [row('A-1', '5', 1), row('A-1', '2', 2), row('', '7', 3)];
+    assertEqual(hasQuantityChanges({ originalData, data: [row('A-1', '5', 1), row('A-1', '2', 2), row('', '7', 3)] }), false, 'unchanged');
+    assertEqual(hasQuantityChanges({ originalData, data: [row('A-1', '5', 1), row('A-1', '4', 2), row('', '7', 3)] }), true, 'the second A-1 changed');
+    assertEqual(hasQuantityChanges({ originalData, data: [row('A-1', '5', 1), row('A-1', '2', 2), row('', '9', 3)] }), true, 'a row without an item number changed');
+    assertEqual(hasQuantityChanges({ originalData, data: [...originalData, row('B-1', '3')] }), false, 'a new row is not a quantity change');
 });
 
 test('INVENTORY PROPOSALS', 'commit applies every category with the note and marks the proposal committed', async () => {
@@ -3307,6 +3873,24 @@ function batchHarness(rowKey = null) {
     return { rows, emitted, edits };
 }
 
+// Typing + or - in a number cell starts a calculation (NumberCellInput); the cell holds its result
+test('CELL EDITS', 'number calculation: evaluateArithmetic adds and subtracts, without float noise', async () => {
+    assertEqual(['+3', '-5', '-24', '+3-5', ' + 3 - 1 '].map(terms => evaluateArithmetic(20, terms)), [23, 15, -4, 18, 22], 'add, subtract, chains, spaces');
+    assertEqual([evaluateArithmetic(0.1, '+0.2'), evaluateArithmetic(1.5, '-.25'), evaluateArithmetic(-5, '+2')], [0.3, 1.25, -3], 'decimals and a negative start');
+    assertEqual(['', '+', '-', '+3-'].map(terms => evaluateArithmetic(12, terms)), [12, 12, 12, 15], 'no terms yet, or a trailing sign while typing');
+    assertEqual(['3', '*3', '++3', '+x', '+1.2.3'].map(terms => evaluateArithmetic(12, terms)), [null, null, null, null, null], 'not a calculation');
+    assertEqual(evaluateArithmetic(NaN, '+3'), null, 'no start');
+});
+
+// A long ButtonBar splits where the wider of its two lines is narrowest; ties go to the middle
+test('CELL EDITS', 'button bars: balancedSplit balances the two lines by width', async () => {
+    assertEqual(balancedSplit([50, 50, 50, 50]), 2, 'equal widths: half each');
+    assertEqual(balancedSplit([200, 40, 40, 40, 40]), 1, 'one wide control: alone on the first line');
+    assertEqual(balancedSplit([40, 40, 40, 40, 200]), 4, 'a wide last control: alone on the second line');
+    assertEqual(balancedSplit([60, 30, 30, 60, 30]), 3, 'mixed widths, a tie: 120 over 90 (the longer line first)');
+    assertEqual(balancedSplit([30, 30, 30, 30, 30]), 3, 'odd count, equal widths: the longer line first');
+});
+
 test('CELL EDITS', 'batch: an edit marks the cell unsaved until it is back to the loaded value', async () => {
     const { edits, emitted } = batchHarness();
     edits.edit(0, 'A', 'z');
@@ -3868,6 +4452,18 @@ test('SHORTAGE ALERTS', 'alerts list the periods where an item runs out in the w
     assertEqual(await Requests.getInventoryShortageAlerts(), [CAB_004_ALERT], 'CAB-004 runs short');
 });
 
+// A "Short N" card opens the item's timeline over its shortage (CAB-004: 1/10 to 1/31/2025), as
+// pack list shortage alerts do
+test('SHORTAGE ALERTS', 'a Short card opens the item timeline over its shortage', async () => {
+    const opened = [];
+    const [card] = itemShortageCards([CAB_004_ALERT], 120, path => opened.push(NavigationRegistry.parsePath(path)));
+    card.action();
+    assertEqual(opened.map(({ path, parameters }) => [path, parameters]), [['inventory/cabinets/CAB-004', {
+        dateFilters: [{ column: 'Date', value: '2025-01-10', type: 'after' }, { column: 'Date', value: '2025-01-31', type: 'before' }]
+    }]], 'timeline over the shortage');
+    assertEqual(itemShortageCards([CAB_004_ALERT], 120)[0].action, null, 'no navigator, no action');
+});
+
 test('SHORTAGE ALERTS', 'a preference of 0 turns the alerts off, and saving it refreshes them', async () => {
     await setAlertDays('0');
     try {
@@ -4036,6 +4632,27 @@ test('INVENTORY TAB PREFERENCES', 'every tab listed for custom item numbers is s
         await setPreference(INVENTORY_TAB_PREFERENCES.customItemNumbers, '["HARDWARE"]');
     }
     assertEqual(await Requests.getTabNameForItem('VUE-V2C-LP'), 'HARDWARE', 'restored');
+});
+
+// Custom item numbers match whole item numbers only, longest first, so custom tabs have no
+// item variants. With CABINETS listed, its rows CAB-006 and CAB-006a are custom item numbers:
+// CAB-006a once matched CAB-006, the earlier row; CAB-006b and CAB-005b matched their bases.
+test('INVENTORY TAB PREFERENCES', 'custom item numbers match whole item numbers only', async () => {
+    const custom = async (text) => {
+        const found = await Requests.extractCustomItemFromText(text);
+        return [found.itemNumber, found.quantity];
+    };
+    assertEqual(await custom('(3) VUE-V2C-LP, spare'), ['VUE-V2C-LP', 3], 'followed by punctuation');
+    assertEqual(await custom('(3) VUE-V2C-LPb connectors'), [null, 1], 'a letter appended is not the item');
+    await setPreference(INVENTORY_TAB_PREFERENCES.customItemNumbers, '["HARDWARE","CABINETS"]');
+    try {
+        assertEqual(await custom('(3) CAB-006a Rolling demo cabinet'), ['CAB-006a', 3], 'longer item number wins');
+        assertEqual(await custom('(1) CAB-006b Rolling demo cabinet'), [null, 1], 'no variant fallback');
+        assertEqual(await Requests.extractItemNumber('(2) CAB-005b Tall gray storage cabinet'), null, 'extraction: no variants in custom tabs');
+        assertEqual(await Requests.extractItemNumber('(3) CAB-006a Rolling demo cabinet'), 'CAB-006a', 'extraction: whole item number');
+    } finally {
+        await setPreference(INVENTORY_TAB_PREFERENCES.customItemNumbers, '["HARDWARE"]');
+    }
 });
 
 // ── App update: an out-of-date session refuses data writes ───────────────────

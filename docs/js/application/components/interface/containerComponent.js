@@ -1,4 +1,4 @@
-import { html, BreadcrumbComponent, NavigationRegistry, BannerNotifications, appSettings } from '../../index.js';
+import { html, BreadcrumbComponent, NavigationRegistry, BannerNotifications, appSettings, SEVERITY } from '../../index.js';
 import { PageNoteComponent } from './pageNoteComponent.js';
 import { URLRouter } from '../../utils/urlRouter.js';
 
@@ -219,7 +219,7 @@ export const ContainerComponent = {
             const bannerKey = `bookmark-${Date.now()}`;
             const bookmarkBanner = {
                 key: bannerKey,
-                color: 'blue',
+                severity: SEVERITY.info,
                 message: `Page bookmarked: ${pathText}${paramSuffix}`,
                 visible: true,
                 dismissible: true,
