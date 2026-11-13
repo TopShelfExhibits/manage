@@ -2161,5 +2161,125 @@ if (isLocalhost() && FakeGoogleState.isPersistent()) {
     });
 }
 
-// Export both classes for easy swapping with real implementations
-export { FakeGoogleSheetsAuth as GoogleSheetsAuth, FakeGoogleSheetsService as GoogleSheetsService };
+/**
+ * The company Dropbox folder (DropboxFiles.js), as files. Folders exist because files sit in them.
+ * Matches the schedule fixtures: Allen Arms and Gearfire 2025 SHOT, BestBuy Health 2025 TANDEM
+ * (its client folder named by the abbreviation "Best Buy"), MOJO 2025 SHOT (no OUTPUT folder).
+ */
+const FAKE_DROPBOX_FILES = [
+    '/Allen Arms/2025/SHOT Show/CONCEPT/Allen Arms SHOT sketch.ai',
+    '/Allen Arms/2025/SHOT Show/CONTROL/Counter control.xlsx',
+    '/Allen Arms/2025/SHOT Show/OUTPUT/Cover Sheet.PDF',
+    '/Allen Arms/2025/SHOT Show/OUTPUT/CONCEPT A/Allen Arms SHOT Concept A.pdf',
+    '/Allen Arms/2025/SHOT Show/OUTPUT/CONCEPT B R2/Allen Arms SHOT Concept B R2.pdf',
+    '/Allen Arms/2025/SHOT Show/OUTPUT/CONCEPT B R2/Concept B render.jpg',
+    '/Allen Arms/2025/SHOT Show/OUTPUT/ELEVATIONS/Back Wall.pdf',
+    '/Allen Arms/2025/SHOT Show/OUTPUT/ELEVATIONS/Counter Graphics.pdf',
+    '/Allen Arms/2025/SHOT Show/OUTPUT/CONTROL/Counter Build.pdf',
+    '/Allen Arms/2025/SHOT Show/OUTPUT/SETUP/Setup Guide.pdf',
+    '/Allen Arms/2024/SHOT Show/OUTPUT/SETUP/Setup Guide 2024.pdf',
+    '/Best Buy/2025/TANDEM/OUTPUT/SETUP/Tandem Setup.pdf',
+    '/Gearfire/2025/SHOT/OUTPUT/ELEVATIONS/Gearfire Elevations.pdf',
+    '/MOJO/2025/SHOT Show/CONCEPT/Mojo sketch.ai',
+    '/Read Me.txt'
+];
+
+/** A one-page PDF whose page says `text`: what a fake Dropbox link opens */
+function _fakePdf(text) {
+    const safe = String(text).replace(/[\\()]/g, '');
+    const objects = [
+        '<< /Type /Catalog /Pages 2 0 R >>',
+        '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+        '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>',
+        null,
+        '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>'
+    ];
+    const stream = `BT /F1 18 Tf 72 720 Td (Fake Dropbox file: ${safe}) Tj ET`;
+    objects[3] = `<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`;
+    let pdf = '%PDF-1.4\n';
+    const offsets = objects.map((body, i) => {
+        const offset = pdf.length;
+        pdf += `${i + 1} 0 obj\n${body}\nendobj\n`;
+        return offset;
+    });
+    const xref = pdf.length;
+    pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n${offsets.map(o => `${String(o).padStart(10, '0')} 00000 n \n`).join('')}`;
+    pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`;
+    return pdf;
+}
+
+export class FakeDropboxFiles {
+    /** Tests: false answers as a service with no Dropbox connected */
+    static connected = true;
+    static files = [...FAKE_DROPBOX_FILES];
+    /** Every request, for tests: { action, paths | path, recursive } */
+    static requests = [];
+
+    static isAvailable() {
+        return true;
+    }
+
+    /** Same batching as the real service: calls made in the same moment are one request */
+    static listFolder(path, { recursive = false } = {}) {
+        return new Promise((resolve, reject) => {
+            this._queue.push({ path, recursive: !!recursive, resolve, reject });
+            if (this._queue.length === 1) setTimeout(() => this._flush(), 0);
+        });
+    }
+
+    static _queue = [];
+
+    static async _flush() {
+        const queue = this._queue;
+        this._queue = [];
+        for (const recursive of [false, true]) {
+            const waiting = queue.filter(item => item.recursive === recursive);
+            if (!waiting.length) continue;
+            const paths = [...new Set(waiting.map(item => item.path))];
+            this.requests.push({ action: 'dropbox_list', paths, recursive });
+            try {
+                await this._serviceCall();
+                waiting.forEach(item => item.resolve(this._list(item.path, recursive)));
+            } catch (error) {
+                waiting.forEach(item => item.reject(error));
+            }
+        }
+    }
+
+    static async getFileUrl(path) {
+        this.requests.push({ action: 'dropbox_link', path });
+        await this._serviceCall();
+        if (!this.files.some(file => file.toLowerCase() === path.toLowerCase())) {
+            throw Object.assign(new Error('That file is no longer in Dropbox.'), { code: 'NOT_FOUND' });
+        }
+        return URL.createObjectURL(new Blob([_fakePdf(path.split('/').pop())], { type: 'application/pdf' }));
+    }
+
+    // One request on the fake network (FakeGoogleSheetsService.network), then the service's checks
+    static async _serviceCall() {
+        await FakeGoogleSheetsService.delay(120);
+        if (!this.connected) throw Object.assign(new Error('Dropbox is not connected to the app yet.'), { code: 'DROPBOX_NOT_CONNECTED' });
+    }
+
+    static _list(path, recursive) {
+        const base = path.toLowerCase();
+        const found = new Map();
+        for (const file of this.files) {
+            if (!file.toLowerCase().startsWith(base + '/')) continue;
+            const parts = file.slice(base.length + 1).split('/');
+            const depth = recursive ? parts.length : 1;
+            for (let i = 1; i <= depth; i++) {
+                const entryPath = file.slice(0, base.length + 1) + parts.slice(0, i).join('/');
+                const folder = i < parts.length;
+                found.set(entryPath.toLowerCase(), folder
+                    ? { name: parts[i - 1], path: entryPath, folder: true }
+                    : { name: parts[i - 1], path: entryPath, folder: false, size: 48000, modified: '2025-01-06T15:00:00Z' });
+            }
+        }
+        if (!found.size && base) return { entries: [], missing: true };
+        return { entries: [...found.values()] };
+    }
+}
+
+// Export the fakes under the real services' names
+export { FakeGoogleSheetsAuth as GoogleSheetsAuth, FakeGoogleSheetsService as GoogleSheetsService, FakeDropboxFiles as DropboxFiles };

@@ -119,10 +119,11 @@ Set up at the bottom of `database.js` (`watchSpreadsheets`) and run by the polle
 - **Accounting for a change.** A stamp accounts for a change when its timestamp is no more than 60 seconds older than the change. This allows for other computers' clocks. A missed stamp can therefore go unnoticed when another stamped write to the same spreadsheet lands within a minute of it.
 - **Blind spots.** `modifiedTime` doesn't move when values change through `IMPORTRANGE`, a Google Form, or volatile formulas such as `NOW()`.
 - **Permissions.** Reading `modifiedTime` uses the `https://www.googleapis.com/auth/drive` scope the app already requests, through Drive API v3 `files.get`.
+- **Dropbox listings expire.** Dropbox has no stamps or `modifiedTime` for the poller to watch, so `DropboxUtils.listFolder` results expire after 5 minutes (`LISTING_LIFETIME_MS`). Offline, the cache keeps serving them. They are the one data read with an expiry. File links are never cached. See "Dropbox" in [auth-audit-findings.md](auth-audit-findings.md).
 
 ## Connection
 
-`networkState.js` (no imports, so any layer reads it) says how the connection to Google stands. Every Google request attempt in `withExponentialBackoff` reports how long it took and whether anything answered.
+`networkState.js` (no imports, so any layer reads it) says how the connection to Google stands. Every Google request attempt in `withExponentialBackoff` reports how long it took and whether anything answered, Dropbox requests to the sign-in service included.
 
 | Status | When | What changes |
 | --- | --- | --- |

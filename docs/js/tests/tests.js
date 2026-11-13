@@ -29,7 +29,7 @@
 
 import { Requests } from '../data_management/api.js';
 import { isAppOutdated, checkAppVersion } from '../data_management/index.js';
-import { FakeGoogleSheetsAuth, FakeGoogleSheetsService, FakeGoogleState, setFakeDelaysEnabled } from '../google_sheets_services/FakeGoogle.js';
+import { FakeGoogleSheetsAuth, FakeGoogleSheetsService, FakeGoogleState, FakeDropboxFiles, setFakeDelaysEnabled } from '../google_sheets_services/FakeGoogle.js';
 import { refreshAppData } from './fakeGoogleDevTools.js';
 import { isCheckedValue } from '../data_management/utils/checkbox-values.js';
 import { useBatchEdits, useInstantEdits } from '../application/utils/cellEdits.js';
@@ -405,6 +405,108 @@ test('CONNECTION', 'a lock read with no answer fails; it is not cached as nothin
     assertEqual(isNetworkError(error), true, 'the read fails');
     await _restoreConnection();
     assertEqual((await Requests.getSheetLock('PACK_LISTS', 'ATSC 2025 NAB'))?.user, 'locked.user@example.com', 'the lock, once back');
+}));
+
+// ── Dropbox ──────────────────────────────────────────────────────────────────
+// A show's output PDFs from the company Dropbox (DropboxUtils, through the sign-in service; faked
+// by FakeDropboxFiles in FakeGoogle.js). Project folders are CLIENT / YEAR / SHOW, matched to the
+// schedule row through the Clients and Shows index. Expected, from FAKE_DROPBOX_FILES:
+//   Allen Arms 2025 SHOT Show → /Allen Arms/2025/SHOT Show; OUTPUT groups '' (Cover Sheet.PDF),
+//     CONCEPT A, CONCEPT B R2 (its .jpg left out), CONTROL, ELEVATIONS (Back Wall, Counter Graphics),
+//     SETUP. The 2024 folder is another show.
+//   BestBuy Health 2025 TANDEM → /Best Buy/2025/TANDEM (client folder named by the abbreviation)
+//   Gearfire 2025 SHOT Show → /Gearfire/2025/SHOT
+//   MOJO 2025 SHOT Show → a project folder with no OUTPUT: no groups
+//   ATSC 2025 NAB → no project folder
+
+const ALLEN_ARMS_SHOT = '/Allen Arms/2025/SHOT Show';
+function _forgetDropbox() {
+    clearCache();
+    FakeDropboxFiles.requests.length = 0;
+}
+const _groupSummary = (result) => result.projects.map(project => [project.path, project.groups.map(group => [group.name, group.files.map(file => file.name)])]);
+
+test('DROPBOX', "a show's output PDFs, grouped by OUTPUT subfolder", async () => {
+    _forgetDropbox();
+    const result = await Requests.getShowOutputFiles('SHOT Show', 'Allen Arms', '2025');
+    assertEqual(result.available, true, 'available');
+    assertEqual(_groupSummary(result), [[ALLEN_ARMS_SHOT, [
+        ['', ['Cover Sheet.PDF']],
+        ['CONCEPT A', ['Allen Arms SHOT Concept A.pdf']],
+        ['CONCEPT B R2', ['Allen Arms SHOT Concept B R2.pdf']],
+        ['CONTROL', ['Counter Build.pdf']],
+        ['ELEVATIONS', ['Back Wall.pdf', 'Counter Graphics.pdf']],
+        ['SETUP', ['Setup Guide.pdf']]
+    ]]], 'groups and files');
+    assertEqual(result.projects[0].groups[5].files[0].path, `${ALLEN_ARMS_SHOT}/OUTPUT/SETUP/Setup Guide.pdf`, 'a file keeps its full path');
+});
+
+test('DROPBOX', 'client and show folders match through the index: an abbreviation, a short show name', async () => {
+    const tandem = await Requests.getShowOutputFiles('TANDEM', 'BestBuy Health', '2025');
+    assertEqual(_groupSummary(tandem), [['/Best Buy/2025/TANDEM', [['SETUP', ['Tandem Setup.pdf']]]]], '"Best Buy" folder');
+    const gearfire = await Requests.getShowOutputFiles('SHOT Show', 'Gearfire', '2025');
+    assertEqual(_groupSummary(gearfire), [['/Gearfire/2025/SHOT', [['ELEVATIONS', ['Gearfire Elevations.pdf']]]]], '"SHOT" folder');
+});
+
+test('DROPBOX', 'no OUTPUT folder gives no groups; no project folder gives no projects', async () => {
+    const mojo = await Requests.getShowOutputFiles('SHOT Show', 'MOJO', '2025');
+    assertEqual(_groupSummary(mojo), [['/MOJO/2025/SHOT Show', []]], 'MOJO: folder, no OUTPUT');
+    const atsc = await Requests.getShowOutputFiles('NAB', 'ATSC', '2025');
+    assertEqual([atsc.available, atsc.projects], [true, []], 'ATSC: nothing');
+});
+
+test('DROPBOX', 'listings made together go out as one request a level, and are cached', async () => {
+    _forgetDropbox();
+    await Promise.all([
+        Requests.getShowOutputFiles('SHOT Show', 'Allen Arms', '2025'),
+        Requests.getShowOutputFiles('SHOT Show', 'Gearfire', '2025')
+    ]);
+    const requests = FakeDropboxFiles.requests.map(r => [[...r.paths].sort(), r.recursive]);
+    assertEqual(requests, [
+        [[''], false],
+        [['/Allen Arms', '/Gearfire'], false],
+        [['/Allen Arms/2025', '/Gearfire/2025'], false],
+        [[`${ALLEN_ARMS_SHOT}/OUTPUT`, '/Gearfire/2025/SHOT/OUTPUT'], true]
+    ], 'four requests for two shows');
+    FakeDropboxFiles.requests.length = 0;
+    await Requests.getShowOutputFiles('SHOT Show', 'Allen Arms', '2025');
+    await Requests.getShowOutputFiles('TANDEM', 'BestBuy Health', '2025');
+    assertEqual(FakeDropboxFiles.requests.map(r => r.paths), [['/Best Buy'], ['/Best Buy/2025'], ['/Best Buy/2025/TANDEM/OUTPUT']], 'cached: only the new show reads, and not the root');
+});
+
+test('DROPBOX', 'opening a file asks for a fresh link each time; a missing file says so', async () => {
+    FakeDropboxFiles.requests.length = 0;
+    const path = `${ALLEN_ARMS_SHOT}/OUTPUT/SETUP/Setup Guide.pdf`;
+    const url = await Requests.getDropboxFileUrl(path);
+    const text = await (await fetch(url)).text();
+    assertEqual([url.startsWith('blob:'), text.startsWith('%PDF'), text.includes('Setup Guide.pdf')], [true, true, true], 'a PDF of that file');
+    await Requests.getDropboxFileUrl(path);
+    assertEqual(FakeDropboxFiles.requests.filter(r => r.action === 'dropbox_link').length, 2, 'never cached');
+    let error = null;
+    try { await Requests.getDropboxFileUrl(`${ALLEN_ARMS_SHOT}/OUTPUT/gone.pdf`); } catch (e) { error = e; }
+    assertEqual(error?.code, 'NOT_FOUND', 'missing file');
+});
+
+test('DROPBOX', 'without Dropbox connected to the service, the app has no Dropbox (not an error)', async () => {
+    _forgetDropbox();
+    FakeDropboxFiles.connected = false;
+    try {
+        assertEqual(await Requests.getShowOutputFiles('SHOT Show', 'Allen Arms', '2025'), { available: false, projects: [] }, 'unavailable');
+    } finally {
+        FakeDropboxFiles.connected = true;
+        _forgetDropbox();
+    }
+});
+
+test('DROPBOX', 'no answer fails the read and counts toward unreachable; once back it reads', () => _withConnectionReset(async () => {
+    _forgetDropbox();
+    FakeGoogleSheetsService.network.down = true;
+    let error = null;
+    try { await Requests.getShowOutputFiles('SHOT Show', 'Allen Arms', '2025'); } catch (e) { error = e; }
+    assertEqual(isNetworkError(error), true, 'a network failure');
+    await _restoreConnection();
+    const result = await Requests.getShowOutputFiles('SHOT Show', 'Allen Arms', '2025');
+    assertEqual(result.projects.map(p => p.path), [ALLEN_ARMS_SHOT], 'read once back');
 }));
 
 // ── Group 1: Identifier Resolution ───────────────────────────────────────────

@@ -9,6 +9,7 @@ export { ApplicationUtils, checkDateRollover } from './abstraction/application-u
 export { PackListUtils } from './abstraction/packlist-utils.js';
 export { ProductionUtils } from './abstraction/production-utils.js';
 export { InstantWriteUtils } from './abstraction/instant-write-utils.js';
+export { DropboxUtils } from './abstraction/dropbox-utils.js';
 
 // Utility classes
 export { parseDate, toISODateString, toUSDateString, currentDate, setTestToday, todayISOString, startOfTodayMs, offsetToISO, SHORTAGE_ALERT_DAYS_PREFERENCE, resolveShortageAlertDays, PREFERENCES_MAPPING, INVENTORY_TAB_PREFERENCES, resolveInventoryTabList, shortageAlertDateFilters, searchFilter, mapWithConcurrency, GetTopFuzzyMatch, GetParagraphMatchRating, ITEM_NUMBER_CHAR, itemVariantBase, resolveItemVariant, itemVariantFamilies, itemVariantKey, parseItemVariants, normalizeHeaderName, resolveSheetMapping, isLocalhost, sanitizeTabName, normalizeText, normalizeMatchKey, getRandomLoadingQuote } from './utils/helpers.js';

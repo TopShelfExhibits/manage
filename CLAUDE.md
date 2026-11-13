@@ -17,7 +17,7 @@ Top Shelf Exhibits' live inventory web app. It is plain ES modules and Vue 3 (Op
 - **Layers** (`docs/js/`), each talking only to the one below it:
   1. `application/`: the Vue UI. Components keep their own reactive state and reach persistent data only through the API, usually through reactive stores (`utils/reactiveStores.js`).
   2. `data_management/`: the API (`api.js`, `Requests.*`) and its domain abstractions (`abstraction/`: `database.js`, `inventory-utils.js`, `packlist-utils.js`, `production-utils.js`, `application-utils.js`, …).
-  3. `google_sheets_services/`: all direct Google Sheets access and authentication. Neither the UI nor application logic touches it.
+  3. `google_sheets_services/`: all direct Google Sheets access and authentication, and the company Dropbox (read only, through the sign-in service: `DropboxFiles.js`). Neither the UI nor application logic touches it.
 
 ## Data layer: caching and invalidation
 
@@ -25,7 +25,7 @@ Top Shelf Exhibits' live inventory web app. It is plain ES modules and Vue 3 (Op
 - **Mutations invalidate from the bottom.** Database mutation methods invalidate the matching `getData` caches. The invalidation cascades up the recorded chains to the API, and reactive stores reload. Don't invalidate caches by hand.
 - **Tab reads are batched.** Tab reads made at the same moment go out as one request per spreadsheet. Code that reads many tabs in a loop calls `Database.prefetch(tableId, tabNames)` before the loop.
 - **Whole-tab writes refill their own cache.** A whole-tab write's response is the tab as a read returns it. Database caches that response (`fillCache`), so the reload reads nothing. Range writes re-read.
-- **Sheet data never expires.** Each poll reads the spreadsheets' Drive `modifiedTime`, and the Caching tab stamps name the changed tab. Together they keep cached reads current. See "Spreadsheet watch" in [docs/notes/caching-tab-structure.md](docs/notes/caching-tab-structure.md). Don't add expiries to data reads.
+- **Sheet data never expires.** Each poll reads the spreadsheets' Drive `modifiedTime`, and the Caching tab stamps name the changed tab. Together they keep cached reads current. See "Spreadsheet watch" in [docs/notes/caching-tab-structure.md](docs/notes/caching-tab-structure.md). Don't add expiries to data reads. The one exception is Dropbox listings (`DropboxUtils.listFolder`, 5 minutes), which have no change signal.
 - **Mutation methods are never cached.** They take no `deps`, don't use `deps.call`, and are listed in the exclusion list passed to `wrapMethods` at the bottom of `api.js`. A new mutation method must be added to that list.
 - **Today is a cached source.** Cached code that depends on today reads it with `deps.call(ApplicationUtils.getToday)`, never `new Date()`. The date rollover then invalidates the result. `helpers.js` (`currentDate`, `todayISOString`, `offsetToISO`) is the one source of "now", on the local calendar.
 - **Persisted results are opt-in.** A slow API method can be listed in the `persistentMethods` argument of `wrapMethods` at the bottom of `api.js`. Its result is then saved to `CACHE/Analytics` and restored by later sessions while its sources are unchanged. See [docs/notes/caching-tab-structure.md](docs/notes/caching-tab-structure.md).

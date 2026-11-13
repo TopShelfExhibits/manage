@@ -1,4 +1,4 @@
-import { wrapMethods, normalizeHeaderName, Database, InventoryUtils, PackListUtils, ProductionUtils, ApplicationUtils, EditHistoryUtils, InstantWriteUtils, ARCHIVE_TAB_NAME, ARCHIVE_HEADERS, offsetToISO, resolveShortageAlertDays, shortageAlertDateFilters, PREFERENCES_MAPPING, INVENTORY_TAB_PREFERENCES, sanitizeTabName, mapWithConcurrency, ProgressBus, getRandomLoadingQuote, DEFAULT_INVENTORY_MAPPING, ProposalUtils, PROPOSALS_TAB_NAME, PROPOSAL_MAPPING, resolveInventoryNoteMaxLength, primaryThumbnailValue, SEVERITY, remainingSeverity } from './index.js';
+import { wrapMethods, normalizeHeaderName, Database, InventoryUtils, PackListUtils, ProductionUtils, ApplicationUtils, EditHistoryUtils, InstantWriteUtils, ARCHIVE_TAB_NAME, ARCHIVE_HEADERS, offsetToISO, resolveShortageAlertDays, shortageAlertDateFilters, PREFERENCES_MAPPING, INVENTORY_TAB_PREFERENCES, sanitizeTabName, mapWithConcurrency, ProgressBus, getRandomLoadingQuote, DEFAULT_INVENTORY_MAPPING, ProposalUtils, DropboxUtils, PROPOSALS_TAB_NAME, PROPOSAL_MAPPING, resolveInventoryNoteMaxLength, primaryThumbnailValue, SEVERITY, remainingSeverity } from './index.js';
 import { authState } from '../application/utils/auth.js';
 import { instantWriteEntry, identityText, parseColoredName } from './utils/instant-write-config.js';
 import { columnTypesEntry } from './utils/column-types.js';
@@ -557,6 +557,24 @@ class Requests_uncached {
      */
     static async getShowDetails(deps, identifier) {
         return await deps.call(ProductionUtils.getShowDetails, identifier);
+    }
+
+    /**
+     * A show's output PDFs in the company Dropbox (CLIENT / YEAR / SHOW / OUTPUT), grouped by
+     * OUTPUT subfolder. See DropboxUtils.getShowOutputFiles.
+     * @returns {Promise<{ available: boolean, projects: Array<{ client, year, show, path, groups: Array<{ name, files }> }> }>}
+     */
+    static async getShowOutputFiles(deps, show, client, year) {
+        return await deps.call(DropboxUtils.getShowOutputFiles, show, client, year);
+    }
+
+    /**
+     * An address the browser shows one Dropbox file at, from a fresh link. Uncached.
+     * @param {string} path
+     * @returns {Promise<string>}
+     */
+    static async getDropboxFileUrl(path) {
+        return await DropboxUtils.getFileUrl(path);
     }
 
     /**
@@ -1836,6 +1854,7 @@ export const Requests = wrapMethods(
         'savePreferences',
         'saveInventoryProposalTable', 'markInventoryProposalCommitted',
         'getDriveFileBlob', // Uncached read: callers own the Blob
+        'getDropboxFileUrl', // Uncached read: links expire
         'writeCellsVerified',
         'saveShowNote'
     ], // Mutation methods (and fresh reads that must not be cached)
