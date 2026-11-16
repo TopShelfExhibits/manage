@@ -51,7 +51,7 @@ function doGet() {
   return ContentService.createTextOutput('TopShelf sign-in service is running.');
 }
 
-/** The app POSTs plain-text JSON: { action: 'exchange' | 'refresh' | 'signout' | 'dropbox_list' | 'dropbox_link', ... } */
+/** The app POSTs plain-text JSON: { action: 'exchange' | 'refresh' | 'signout' | 'dropbox_list' | 'dropbox_link' | 'dropbox_changes', ... } */
 function doPost(e) {
   // Junk is turned away here, before any lock, Google call or property write, so a flood of it
   // can't hold up real renewals. The URL is public: only well-formed requests for a session that
@@ -78,12 +78,13 @@ function doPost(e) {
         return request.action === 'refresh' ? refresh_(request) : signOut_(request);
       }));
     }
-    if (request.action === 'dropbox_list' || request.action === 'dropbox_link') {
+    if (request.action === 'dropbox_list' || request.action === 'dropbox_link' || request.action === 'dropbox_changes') {
       // Reads only, so no lock: they never touch sessions or properties
       if (!isWellFormedDropbox_(request)) return reply_({ ok: false, error: 'BAD_REQUEST' });
       var caller = verifyGoogleToken_(request.token);
       if (caller.error) return reply_({ ok: false, error: caller.error });
       if (!dropboxConnected_()) return reply_({ ok: false, error: 'DROPBOX_NOT_CONNECTED' });
+      if (request.action === 'dropbox_changes') return reply_(dropboxChanges_(request));
       return reply_(request.action === 'dropbox_list' ? dropboxList_(request) : dropboxLink_(request, caller.email));
     }
     return reply_({ ok: false, error: 'BAD_REQUEST' });
@@ -221,20 +222,28 @@ function signOut_(request) {
 //   2. The Dropbox account the script holds has view-only access to the folder (set up in Dropbox).
 //   3. Every call is pinned to the folder's namespace (Dropbox-API-Path-Root): Dropbox resolves
 //      every path inside it, so no path can reach outside.
-//   4. This script offers only listings and temporary links, to company accounts.
+//   4. This script offers only listings, temporary links and change lists, to company accounts.
+//
+// The app keeps listings until Dropbox says they changed, as it keeps sheet data: its first listing
+// asks for a cursor (watch), and its poller asks what changed since (dropbox_changes). Listings are
+// not cached here, so every listing is as new as the cursor that watches it.
 
 var DROPBOX_API = 'https://api.dropboxapi.com/2/';
 var DROPBOX_TOKEN_URL = 'https://api.dropboxapi.com/oauth2/token';
 var DROPBOX_READ_SCOPES = ['account_info.read', 'files.metadata.read', 'files.content.read'];
 var DROPBOX_MAX_PATHS = 25;      // folders per listing request (fetched in parallel)
 var DROPBOX_MAX_ENTRIES = 2000;  // entries per folder; more comes back marked truncated
-var DROPBOX_LISTING_S = 60;      // a listing is shared by everyone asking within this time
+var DROPBOX_CHANGE_PAGES = 5;    // pages of changes per answer; more resets the watch
+var DROPBOX_MAX_CHANGES = 1000;  // changed folders per answer; more resets the watch
 
 function isWellFormedDropbox_(request) {
   if (typeof request.token !== 'string' || !/^[A-Za-z0-9._~+\/=-]{20,2048}$/.test(request.token)) return false;
   if (request.action === 'dropbox_link') return isDropboxPath_(request.path) && request.path !== '';
+  // A Dropbox cursor is opaque: printable, no spaces. None: start watching
+  if (request.action === 'dropbox_changes') return request.cursor === undefined || (typeof request.cursor === 'string' && /^[\x21-\x7e]{1,4000}$/.test(request.cursor));
   return Array.isArray(request.paths) && request.paths.length > 0 && request.paths.length <= DROPBOX_MAX_PATHS &&
-    request.paths.every(isDropboxPath_) && (request.recursive === undefined || typeof request.recursive === 'boolean');
+    request.paths.every(isDropboxPath_) && (request.recursive === undefined || typeof request.recursive === 'boolean') &&
+    (request.watch === undefined || typeof request.watch === 'boolean');
 }
 
 /** '' (the folder itself) or '/A/B': no empty, '.' or '..' parts, no control characters */
@@ -274,28 +283,50 @@ function dropboxConnected_() {
 
 /** Folder listings: { ok, folders: { path: { entries: [{ name, path, folder, size, modified }], missing?, truncated? } } } */
 function dropboxList_(request) {
-  var recursive = !!request.recursive;
-  var cache = CacheService.getScriptCache();
-  var cacheKey = function (path) { return 'dbx:' + (recursive ? 'r:' : 'l:') + hash_(path.toLowerCase()); };
-  var cached = cache.getAll(request.paths.map(cacheKey));
+  // watch: the cursor comes first, so a change made during the listing is reported later
+  var cursor = request.watch ? latestDropboxCursor_() : null;
+  var listings = listDropboxFolders_(request.paths, !!request.recursive);
   var folders = {};
-  var toList = [];
-  request.paths.forEach(function (path) {
-    var hit = cached[cacheKey(path)];
-    if (hit) folders[path] = JSON.parse(hit);
-    else if (toList.indexOf(path) === -1) toList.push(path);
-  });
-  if (toList.length) {
-    var listings = listDropboxFolders_(toList, recursive);
-    var keep = {};
-    toList.forEach(function (path, i) {
-      folders[path] = listings[i];
-      var text = JSON.stringify(listings[i]);
-      if (text.length < 90000) keep[cacheKey(path)] = text;   // CacheService holds 100 KB a value
+  request.paths.forEach(function (path, i) { folders[path] = listings[i]; });
+  return cursor ? { ok: true, folders: folders, cursor: cursor } : { ok: true, folders: folders };
+}
+
+/**
+ * What changed in the folder since the cursor: { ok, cursor, changed, touched } or, when it can't
+ * say (no cursor, Dropbox reset it, too many changes), { ok, cursor, reset: true }.
+ *   changed  folders whose own entries changed (an entry added, edited, moved or deleted in them)
+ *   touched  entries that may have been folders: deleted, or a folder added. Anything at or below
+ *            them changed.
+ * Paths are lowercase.
+ */
+function dropboxChanges_(request) {
+  if (!request.cursor) return { ok: true, reset: true, cursor: latestDropboxCursor_() };
+  var cursor = request.cursor;
+  var changed = {};
+  var touched = {};
+  var count = 0;
+  for (var page = 0; page < DROPBOX_CHANGE_PAGES; page++) {
+    var answer = dropboxCalls_([{ endpoint: 'files/list_folder/continue', body: { cursor: cursor } }])[0];
+    if (!answer.ok) break;   // reset, or a cursor Dropbox no longer knows
+    answer.body.entries.forEach(function (entry) {
+      var path = String(entry.path_lower || '');
+      if (!path) return;
+      var parent = path.slice(0, path.lastIndexOf('/'));
+      if (!changed[parent]) { changed[parent] = true; count++; }
+      if (entry['.tag'] !== 'file' && !touched[path]) { touched[path] = true; count++; }
     });
-    cache.putAll(keep, DROPBOX_LISTING_S);
+    cursor = answer.body.cursor;
+    if (count > DROPBOX_MAX_CHANGES) break;
+    if (!answer.body.has_more) return { ok: true, cursor: cursor, changed: Object.keys(changed), touched: Object.keys(touched) };
   }
-  return { ok: true, folders: folders };
+  return { ok: true, reset: true, cursor: latestDropboxCursor_() };
+}
+
+/** A cursor for every change in the folder from now on */
+function latestDropboxCursor_() {
+  var answer = dropboxCalls_([{ endpoint: 'files/list_folder/get_latest_cursor', body: { path: '', recursive: true, include_non_downloadable_files: false } }])[0];
+  if (!answer.ok) throw new Error('Dropbox refused a cursor: ' + answer.summary);
+  return answer.body.cursor;
 }
 
 function listDropboxFolders_(paths, recursive) {
@@ -473,8 +504,9 @@ function disconnectDropbox() {
  */
 function checkDropbox() {
   if (!dropboxConnected_()) { console.log('Dropbox is not connected. Run dropboxApprovalUrl, then connectDropbox.'); return; }
-  CacheService.getScriptCache().removeAll(['dropbox_access', 'dbx:l:' + hash_('')]);   // test the whole path
+  CacheService.getScriptCache().remove('dropbox_access');   // test the whole path, token included
   var folders = listDropboxFolders_([''], false)[0].entries.filter(function (e) { return e.folder; });
+  latestDropboxCursor_();   // the change watch
   console.log('Dropbox works. ' + folders.length + ' folders at the top: ' +
     folders.slice(0, 15).map(function (e) { return e.name; }).join(', ') + (folders.length > 15 ? ', …' : ''));
 }
