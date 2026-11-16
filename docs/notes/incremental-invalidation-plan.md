@@ -91,6 +91,9 @@ every edit. Narrowing the inputs is what avoids the recompute; cutoff is what st
   kept (generations): the held cascade runs and the key is announced, as before.
 - A key that changes again while it is being verified is verified again. Generations guard joins
   and caching exactly as before. `cutoffSettled()` resolves once no verification is running (tests).
+- Offline, `invalidate` keeps every value, so a held cascade would be lost (a connection that drops
+  while the key re-reads its tab). A key found changed or unverifiable while offline is verified
+  again once the connection is back; its dependents keep their values until then.
 - `EARLY_CUTOFF = false` restores the plain cascade (question 6: a code constant for now).
 
 **Applied to the schedule** (production-utils.js):
@@ -135,7 +138,25 @@ reads the full rows; getShowDetails gives the full row of getShowDates' match). 
 INVALIDATION, the transship test (an unrelated link announces nothing; a real one announces the
 source and timeline) and the name override and abbreviation tests (an unrelated entry leaves
 getShowDetails unannounced and unchanged). With `EARLY_CUTOFF = false` the transship test and the
-first two EARLY CUTOFF tests fail; with it on, the suite passes (390 tests).
+first two EARLY CUTOFF tests fail; with it on, the suite passes (412 tests).
+
+Edge cases, in EARLY CUTOFF: the date rows and the full rows give the same ids for 145 date filters
+(every date column, both directions, ISO dates, day offsets, shows across a year boundary, a transship
+destination, a suffix variant, an unknown show); without filters each show is listed once; a filter
+naming no show matches nothing; titles match in any case and spacing but never another year's show,
+a yearless name or a blank; date rows hold only the 10 columns (no row number), with full-year dates;
+cutoff values are plain JSON; a row inserted above and an edit to a repeated show's later row
+announce nothing; a Show cell with stray spaces still pairs its date row with its full row; moving a
+show to another year ends its old id; a row without a Client is listed by its stored Identifier on
+both paths. In EARLY CUTOFF MECHANISM (synthetic
+`wrapMethods` chains): a change undone before verification, a change made or undone during
+verification, a failed
+verification, the connection dropping during verification, a cutoff key without dependents, a chain
+of cutoff keys, null and empty values, a dependent running when the value changes, and an argument
+object changed after the call.
+
+Known conservative case: `getOverlappingShowIds` keeps schedule order, so sorting the sheet changes
+every id list and reruns the windows (show dates still cut off).
 
 ## Phase 2 — an immutability boundary (still needed)
 

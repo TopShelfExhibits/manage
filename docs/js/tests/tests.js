@@ -33,7 +33,7 @@ import { FakeGoogleSheetsAuth, FakeGoogleSheetsService, FakeGoogleState, setFake
 import { refreshAppData } from './fakeGoogleDevTools.js';
 import { isCheckedValue } from '../data_management/utils/checkbox-values.js';
 import { useBatchEdits, useInstantEdits } from '../application/utils/cellEdits.js';
-import { CacheInvalidationBus, ApplicationUtils, ProductionUtils, triggerCachePoll, cutoffSettled, stampDataChange, Database, DEFAULT_INVENTORY_MAPPING, EditHistoryUtils, InventoryUtils, ProposalUtils, PROPOSAL_LOCK_NAMESPACE, resolveInventoryNoteMaxLength, readRowMetadata, writeRowMetadata, checkDateRollover, clearCache, invalidateCache, resolveSheetMapping, parseThumbnails, parseThumbnailEntries, serializeThumbnailEntries, addThumbnails, removeThumbnailAt, setPrimaryThumbnail, setThumbnailNote, setThumbnailCrop, primaryThumbnailValue, thumbnailKey } from '../data_management/index.js';
+import { CacheInvalidationBus, ApplicationUtils, ProductionUtils, triggerCachePoll, cutoffSettled, wrapMethods, networkState, stampDataChange, Database, DEFAULT_INVENTORY_MAPPING, EditHistoryUtils, InventoryUtils, ProposalUtils, PROPOSAL_LOCK_NAMESPACE, resolveInventoryNoteMaxLength, readRowMetadata, writeRowMetadata, checkDateRollover, clearCache, invalidateCache, resolveSheetMapping, parseThumbnails, parseThumbnailEntries, serializeThumbnailEntries, addThumbnails, removeThumbnailAt, setPrimaryThumbnail, setThumbnailNote, setThumbnailCrop, primaryThumbnailValue, thumbnailKey } from '../data_management/index.js';
 import { authState } from '../application/utils/auth.js';
 import { commitInventoryProposal, saveToProposal, proposalTableStore, sendEditsToProposal } from '../application/utils/inventoryProposals.js';
 import { hasQuantityChanges } from '../application/components/content/InventoryTable.js';
@@ -2193,6 +2193,361 @@ test('EARLY CUTOFF', 'getShowDetails gives the full row of the show getShowDates
         [dates?.Show, '2026', dates?.Ship, true, false],
         'the same show and dates; only the details have the other columns'
     );
+});
+
+// Edge cases of the schedule's date rows. Fixture values (FakeGoogle PROD_SCHED): QGENDA 2025 HIMSS
+// has two rows (booths 1234 and 5678) with the same dates, shipping 9/2/2025; GUERBET 2025 SIO
+// ships "12/16" for a January show; TECHCORP 2026 CES ships 12/28/2025 for 1/7/2026; BESTBUY
+// HEALTH 2025 TANDEM has no Recieved date. Column 0 is Show, 1 Client, 2 Year, 3 Identifier.
+const SCHEDULE_DATE_COLUMNS = ['Show', 'Client', 'Year', 'Identifier', 'Ship', 'S. Install', 'S. Start', 'S. End', 'S. Dismantle', 'Recieved'];
+const MARCH_2026_WINDOW = { dateFilters: [{ column: 'Ship', value: '2026-03-31', type: 'before' }, { column: 'Return', value: '2026-03-01', type: 'after' }] };
+const _uniqueIdentifiers = (rows) => [...new Set(rows.map(row => row.Identifier).filter(Boolean))];
+
+test('EARLY CUTOFF', 'the date rows and the full rows give the same ids for every date-column filter', async () => {
+    const columns = ['Ship', 'Return', 'Date', 'S. Start', 'S. End', 'S. Install', 'S. Dismantle', 'Recieved'];
+    // ISO dates, day offsets from today, shows (a year-boundary one, a transship destination), a
+    // pack list suffix variant and a name no show has
+    const values = ['2025-09-01', '2026-01-01', 0, -400, 'CHAINCO 2026 SPRING EXPO', 'TECHCORP 2026 CES', 'TRICHAIN 2026 STAGE B', 'LOCKHEED MARTIN 2025 NGAUS VIP LOUNGE', 'NOBODY 2026 NOWHERE'];
+    const filters = [MARCH_2026_WINDOW];
+    for (const column of columns) for (const type of ['before', 'after']) for (const value of values) {
+        filters.push({ dateFilters: [{ column, value, type }] });
+    }
+    const mismatches = [];
+    for (const filter of filters) {
+        const [ids, rows] = await Promise.all([ProductionUtils.getOverlappingShowIds(filter), ProductionUtils.getOverlappingShows(filter)]);
+        if (JSON.stringify(ids) !== JSON.stringify(_uniqueIdentifiers(rows))) mismatches.push({ filter: filter.dateFilters, ids, full: _uniqueIdentifiers(rows) });
+    }
+    assertEqual(mismatches, [], `the same ids for all ${filters.length} filters`);
+});
+
+test('EARLY CUTOFF', 'without filters every show is listed once, a repeated show by its first row', async () => {
+    const lists = await Promise.all([
+        ProductionUtils.getOverlappingShowIds(),
+        ProductionUtils.getOverlappingShowIds({}),
+        ProductionUtils.getOverlappingShowIds({ dateFilters: [] }),
+        ProductionUtils.getOverlappingShowIds(null, {})
+    ]);
+    const rows = await ProductionUtils.getOverlappingShows();
+    const expected = [...new Set(await Promise.all(rows.map(row => ProductionUtils.getCanonicalIdentifierForScheduleRow(row))))].filter(Boolean);
+    const count = (id) => lists[0].filter(x => x === id).length;
+    const qgenda = await Requests.getShowDetails('QGENDA 2025 HIMSS');
+    assertEqual(
+        [lists.map(list => JSON.stringify(list) === JSON.stringify(expected)), count('QGENDA 2025 HIMSS'), count('MULTIBOOTHCO 2026 MULTI BOOTH'), qgenda?.['Booth#']],
+        [[true, true, true, true], 1, 1, '1234'],
+        'every show once, however no filter is given; the first QGenda booth'
+    );
+});
+
+test('EARLY CUTOFF', 'a date filter naming no show matches nothing, even beside one that does', async () => {
+    const unknown = { column: 'Ship', value: 'NOBODY 2026 NOWHERE', type: 'before' };
+    const known = MARCH_2026_WINDOW.dateFilters[1];
+    assertEqual(
+        [await ProductionUtils.getOverlappingShowIds({ dateFilters: [unknown] }), await ProductionUtils.getOverlappingShowIds({ dateFilters: [known, unknown] })],
+        [[], []],
+        'a bound that can\'t be found filters every row out'
+    );
+});
+
+test('EARLY CUTOFF', 'a title matches its show in any case and spacing, never another year\'s or a nameless one', async () => {
+    const show = async (title) => (await ProductionUtils.getShowDates(title))?.Show ?? null;
+    assertEqual(
+        await Promise.all(['chainco 2026 spring expo', '  CHAINCO   2026  SPRING EXPO ', 'CHAINCO 2027 SPRING EXPO', 'AUSTAL 2025 WORKBOAT', 'SPRING EXPO', 'WAREHOUSE STOCK', '', '   ', null, undefined].map(show)),
+        ['Spring Expo', 'Spring Expo', null, null, null, null, null, null, null, null],
+        'case and spacing; not 2027 or Austal\'s 2023 Workboat; no year; blank'
+    );
+});
+
+test('EARLY CUTOFF', 'date rows hold only the date columns, with full-year dates and blanks kept blank', async () => {
+    const [spring, sio, ces, tandem, mapping] = await Promise.all([
+        ProductionUtils.getShowDates('CHAINCO 2026 SPRING EXPO'),
+        ProductionUtils.getShowDates('GUERBET 2025 SIO'),
+        ProductionUtils.getShowDates('TECHCORP 2026 CES'),
+        ProductionUtils.getShowDates('BESTBUY HEALTH 2025 TANDEM'),
+        ProductionUtils.GetMappingFromProductionSchedule()
+    ]);
+    assertEqual(
+        [Object.keys(spring).sort(), SCHEDULE_DATE_COLUMNS.filter(column => !Object.hasOwn(mapping, column)), sio.Ship, [ces.Ship, ces['S. Start']], tandem.Recieved],
+        [[...SCHEDULE_DATE_COLUMNS].sort(), [], '12/16/2024', ['12/28/2025', '01/07/2026'], ''],
+        'no row number or other column (a row inserted above leaves the value equal); every column in the sheet; years filled in'
+    );
+});
+
+test('EARLY CUTOFF', 'the cutoff methods\' values are plain JSON, which their hashes compare', async () => {
+    const isPlain = (value) => value === null || typeof value === 'string' || typeof value === 'boolean'
+        || (typeof value === 'number' && Number.isFinite(value))
+        || (Array.isArray(value) && value.every(isPlain))
+        || (typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype && Object.values(value).every(isPlain));
+    const values = {
+        getScheduleDateRows: await ProductionUtils.getScheduleDateRows(),
+        getOverlappingShowIds: await ProductionUtils.getOverlappingShowIds(MARCH_2026_WINDOW)
+    };
+    for (const id of ['CHAINCO 2026 SPRING EXPO', 'CHAINCO 2026 SUMMER SHOW', 'TRICHAIN 2026 STAGE B', 'NOBODY 2026 NOWHERE']) {
+        for (const method of ['getShowDates', 'getProjectShipDate', 'getProjectReturnDate', 'getTransshipSourceForShow', 'getTransshipDestinationsForShow']) {
+            values[`${method}(${id})`] = await ProductionUtils[method](id);
+        }
+    }
+    assertEqual(Object.keys(values).filter(key => !isPlain(values[key])), [], 'no Date, Set, Map, undefined or NaN');
+});
+
+test('EARLY CUTOFF', 'a show inserted above the others leaves their analysis alone', async () => {
+    await _withRestoredSchedule(async () => {
+        await _warm(async () => {
+            await Requests.getItemTimeline(...TIMELINE_ARGS);
+            await Requests.getProjectShipDate('CHAINCO 2026 SPRING EXPO');
+        });
+        const announced = await _announcedDuringHandEdit(sheet => {
+            const row = [..._scheduleRow(sheet, 'SHOT Show', 'MOJO')];
+            row[0] = 'Inserted Show';
+            row[3] = '';
+            sheet.splice(1, 0, row); // a 2025 show, right under the headers
+        });
+        const methods = new Set(announced.map(key => key.split(':')[1]));
+        assertEqual([methods.has('getProjectShipDate'), methods.has('getItemTimeline')], [false, false], 'every row moved down one; no value changed');
+    });
+});
+
+test('EARLY CUTOFF', 'a repeated show\'s first row decides its dates: an edit to a later row changes nothing', async () => {
+    await _withRestoredSchedule(async () => {
+        await _warm(() => Requests.getProjectShipDate('QGENDA 2025 HIMSS'));
+        const qgendaRows = (sheet) => sheet.filter(row => row[0] === 'HIMSS' && row[1] === 'QGenda' && row[2] === '2025');
+        const shipAnnounced = (keys) => keys.some(key => key.startsWith('api:getProjectShipDate:"QGENDA 2025 HIMSS"'));
+        const later = await _announcedDuringHandEdit(sheet => { qgendaRows(sheet)[1][9] = '8/30/2025'; });
+        const afterLater = await Requests.getProjectShipDate('QGENDA 2025 HIMSS');
+        const first = await _announcedDuringHandEdit(sheet => { qgendaRows(sheet)[0][9] = '8/30/2025'; });
+        assertEqual(
+            [shipAnnounced(later), afterLater, shipAnnounced(first), await Requests.getProjectShipDate('QGENDA 2025 HIMSS')],
+            [false, '2025-09-02', true, '2025-08-30'],
+            'the second booth\'s edit is not announced; the first booth\'s is'
+        );
+    });
+});
+
+test('EARLY CUTOFF', 'moving a show to another year ends its old id and starts a new one', async () => {
+    await _withRestoredSchedule(async () => {
+        await _warm(() => Requests.getProjectShipDate('CHAINCO 2026 SPRING EXPO'));
+        const announced = await _announcedDuringHandEdit(sheet => { _scheduleRow(sheet, 'Spring Expo', 'ChainCo')[2] = '2027'; });
+        const moved = await ProductionUtils.getShowDates('CHAINCO 2027 SPRING EXPO');
+        assertEqual(
+            [announced.some(key => key.startsWith('api:getProjectShipDate:"CHAINCO 2026 SPRING EXPO"')), await Requests.getProjectShipDate('CHAINCO 2026 SPRING EXPO'), moved?.Show, moved?.Year],
+            [true, null, 'Spring Expo', '2027'],
+            'the 2026 ship date is announced and gone; the 2027 title finds the row'
+        );
+    });
+});
+
+test('EARLY CUTOFF', 'getShowDetails finds the full row when the Show cell has stray spaces', async () => {
+    await _withRestoredSchedule(async () => {
+        await _announcedDuringHandEdit(sheet => { _scheduleRow(sheet, 'Spring Expo', 'ChainCo')[0] = ' Spring Expo  '; });
+        const details = await Requests.getShowDetails('CHAINCO 2026 SPRING EXPO');
+        assertEqual([details?.City, details?.Ship], ['Chicago, IL', '03/01/2026'], 'the date row and the full row still pair up');
+    });
+});
+
+test('EARLY CUTOFF', 'a row without a Client is listed by its stored Identifier, on both paths', async () => {
+    await _withRestoredSchedule(async () => {
+        await _announcedDuringHandEdit(sheet => {
+            const row = [..._scheduleRow(sheet, 'Spring Expo', 'ChainCo')];
+            row[0] = 'Orphan Show';
+            row[1] = '';
+            row[3] = 'NOCLIENT 2026 ORPHAN';
+            sheet.push(row);
+        });
+        const [ids, rows] = await Promise.all([ProductionUtils.getOverlappingShowIds(MARCH_2026_WINDOW), ProductionUtils.getOverlappingShows(MARCH_2026_WINDOW)]);
+        assertEqual([ids.includes('NOCLIENT 2026 ORPHAN'), JSON.stringify(ids) === JSON.stringify(_uniqueIdentifiers(rows))], [true, true], 'in the window on both paths');
+    });
+});
+
+// ── Group: Early cutoff mechanism ─────────────────────────────────────────────
+// Synthetic chains built with wrapMethods check the cutoff contract without sheet timing: a source
+// (read, standing for a sheet read), a cutoff method computed from it (narrow) and a method computed
+// from that (top). rig.runs counts the computations; rig.change edits the source and invalidates it
+// as a mutation would.
+
+let _rigCount = 0;
+const _sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+/** A source → narrow (cutoff: project(source)) → top chain in namespaces of its own. */
+function _cutoffRig(project = (source) => source.dates) {
+    const ns = `cutoffRig${++_rigCount}`;
+    const rig = { source: { dates: [1, 2], tasks: 'a' }, runs: { narrow: 0, top: 0 }, readDelay: 0, topDelay: 0, onNarrow: null };
+    rig.src = wrapMethods(class {
+        static async read() {
+            // The data as the request found it, as a sheet read returns it
+            const data = structuredClone(rig.source);
+            if (rig.readDelay) await _sleep(rig.readDelay);
+            return data;
+        }
+    }, `${ns}src`);
+    rig.mid = wrapMethods(class {
+        static async narrow(deps) {
+            rig.runs.narrow++;
+            const source = await deps.call(rig.src.read);
+            const hook = rig.onNarrow;
+            rig.onNarrow = null;
+            if (hook) hook();
+            return project(source);
+        }
+    }, `${ns}mid`, [], [], {}, [], ['narrow']);
+    rig.top = wrapMethods(class {
+        static async top(deps) {
+            rig.runs.top++;
+            const narrow = await deps.call(rig.mid.narrow);
+            if (rig.topDelay) await _sleep(rig.topDelay);
+            return { narrow };
+        }
+    }, `${ns}top`);
+    rig.change = (edit) => {
+        edit(rig.source);
+        invalidateCache([{ namespace: `${ns}src`, methodName: 'read', args: [] }]);
+    };
+    rig.ns = ns;
+    return rig;
+}
+
+test('EARLY CUTOFF MECHANISM', 'an unchanged value stops the cascade; a changed one runs it', async () => {
+    const rig = _cutoffRig();
+    await rig.top.top();
+    rig.change(source => { source.tasks = 'b'; });
+    await cutoffSettled();
+    const quiet = { ...rig.runs, value: await rig.top.top() };
+    rig.change(source => { source.dates = [1, 3]; });
+    await cutoffSettled();
+    const value = await rig.top.top();
+    assertEqual([quiet, { ...rig.runs, value }], [{ narrow: 2, top: 1, value: { narrow: [1, 2] } }, { narrow: 3, top: 2, value: { narrow: [1, 3] } }], 'top reruns only for the changed value');
+});
+
+test('EARLY CUTOFF MECHANISM', 'a change undone before the verification runs nothing', async () => {
+    const rig = _cutoffRig();
+    await rig.top.top();
+    rig.change(source => { source.dates = [9]; });
+    rig.change(source => { source.dates = [1, 2]; });
+    await cutoffSettled();
+    await rig.top.top();
+    assertEqual(rig.runs, { narrow: 2, top: 1 }, 'one verification, no rerun');
+});
+
+test('EARLY CUTOFF MECHANISM', 'a change during the verification is verified again', async () => {
+    const rig = _cutoffRig();
+    await rig.top.top();
+    rig.readDelay = 60;
+    rig.change(source => { source.tasks = 'b'; }); // would verify equal...
+    await _sleep(20);
+    rig.change(source => { source.dates = [8]; }); // ...but the dates change while it reads
+    await cutoffSettled();
+    rig.readDelay = 0;
+    const value = await rig.top.top();
+    assertEqual([value, rig.runs.top], [{ narrow: [8] }, 2], 'the latest value, and top reruns for it');
+});
+
+test('EARLY CUTOFF MECHANISM', 'a change undone during the verification is verified again, and equal', async () => {
+    const rig = _cutoffRig();
+    await rig.top.top();
+    rig.readDelay = 60;
+    rig.change(source => { source.dates = [9]; }); // the verification reads [9]...
+    await _sleep(20);
+    rig.change(source => { source.dates = [1, 2]; }); // ...and the edit is undone while it reads
+    await cutoffSettled();
+    rig.readDelay = 0;
+    const value = await rig.top.top();
+    assertEqual([value, rig.runs], [{ narrow: [1, 2] }, { narrow: 3, top: 1 }], 'a second verification finds the first value; top keeps its own');
+});
+
+test('EARLY CUTOFF MECHANISM', 'a verification that fails runs the held cascade', async () => {
+    const rig = _cutoffRig();
+    await rig.top.top();
+    rig.onNarrow = () => { throw new Error('read failed'); };
+    rig.change(source => { source.tasks = 'b'; });
+    await cutoffSettled();
+    const value = await rig.top.top();
+    assertEqual([value, rig.runs], [{ narrow: [1, 2] }, { narrow: 3, top: 2 }], 'not verifiable, so top reruns');
+});
+
+test('EARLY CUTOFF MECHANISM', 'offline during the verification, the cascade waits for the connection', async () => {
+    const rig = _cutoffRig();
+    await rig.top.top();
+    try {
+        rig.onNarrow = () => { networkState.isOffline = true; throw new Error('Failed to fetch'); };
+        rig.change(source => { source.dates = [6]; });
+        await _sleep(30);
+        const offline = await rig.top.top();
+        networkState.isOffline = false;
+        await cutoffSettled();
+        assertEqual([offline, await rig.top.top()], [{ narrow: [1, 2] }, { narrow: [6] }], 'kept while offline, recomputed once back online');
+    } finally {
+        networkState.isOffline = false;
+    }
+});
+
+test('EARLY CUTOFF MECHANISM', 'a cutoff key nothing was computed from is dropped, not recomputed', async () => {
+    const rig = _cutoffRig();
+    await rig.mid.narrow();
+    rig.change(source => { source.dates = [5]; });
+    await cutoffSettled();
+    const eager = rig.runs.narrow;
+    assertEqual([eager, await rig.mid.narrow()], [1, [5]], 'no verification; the next read computes it');
+});
+
+test('EARLY CUTOFF MECHANISM', 'a chain of cutoff keys stops at the first unchanged one', async () => {
+    const rig = _cutoffRig();
+    const runs = { first: 0, top: 0 };
+    const first = wrapMethods(class {
+        static async first(deps) { runs.first++; return (await deps.call(rig.mid.narrow))[0]; }
+    }, `${rig.ns}first`, [], [], {}, [], ['first']);
+    const top = wrapMethods(class {
+        static async top(deps) { runs.top++; return { first: await deps.call(first.first) }; }
+    }, `${rig.ns}firstTop`);
+    await top.top();
+    rig.readDelay = 10; // narrow's verification spans several tasks, as a sheet read does
+    rig.change(source => { source.dates = [1, 5]; }); // narrow changes; its first value doesn't
+    await cutoffSettled();
+    const settled = { ...runs }; // cutoffSettled waited for the verification narrow's started
+    await top.top();
+    const quiet = { ...runs };
+    rig.change(source => { source.dates = [2, 5]; });
+    await cutoffSettled();
+    const value = await top.top();
+    assertEqual([settled, quiet, runs, value], [{ first: 2, top: 1 }, { first: 2, top: 1 }, { first: 3, top: 2 }, { first: 2 }], 'top reruns only when first changes');
+});
+
+test('EARLY CUTOFF MECHANISM', 'null and empty values compare like any other', async () => {
+    const rig = _cutoffRig(source => source.dates.length > 2 ? [] : null);
+    await rig.top.top();
+    rig.change(source => { source.dates = [3, 4]; });
+    await cutoffSettled();
+    const quiet = { ...rig.runs };
+    rig.change(source => { source.dates = [1, 2, 3]; });
+    await cutoffSettled();
+    const value = await rig.top.top();
+    assertEqual([quiet.top, value, rig.runs.top], [1, { narrow: [] }, 2], 'null stays null quietly; null to [] reruns top');
+});
+
+test('EARLY CUTOFF MECHANISM', 'a dependent running when the value changes keeps no stale result', async () => {
+    const rig = _cutoffRig();
+    await rig.mid.narrow();
+    rig.topDelay = 60;
+    const running = rig.top.top(); // reads narrow at once, then waits
+    await _sleep(10);
+    rig.change(source => { source.dates = [4]; });
+    await cutoffSettled();
+    const stale = await running;
+    rig.topDelay = 0;
+    assertEqual([stale, await rig.top.top()], [{ narrow: [1, 2] }, { narrow: [4] }], 'the running call returns what it read; the next computes afresh');
+});
+
+test('EARLY CUTOFF MECHANISM', 'an argument object changed after the call leaves no wrong value under its key', async () => {
+    const ns = `cutoffRig${++_rigCount}`;
+    const source = { dates: [1, 2] };
+    const src = wrapMethods(class { static async read() { return structuredClone(source); } }, `${ns}src`);
+    const mid = wrapMethods(class {
+        static async window(deps, filter) { return (await deps.call(src.read)).dates.filter(date => date >= filter.from); }
+    }, `${ns}mid`, [], [], {}, [], ['window']);
+    const top = wrapMethods(class { static async top(deps, filter) { return { dates: await deps.call(mid.window, filter) }; } }, `${ns}top`);
+    const filter = { from: 2 };
+    const before = await top.top(filter);
+    filter.from = 0; // the caller reuses its object
+    source.dates = [1, 2, 3];
+    invalidateCache([{ namespace: `${ns}src`, methodName: 'read', args: [] }]);
+    await cutoffSettled();
+    assertEqual([before, await top.top({ from: 2 }), await mid.window({ from: 0 })], [{ dates: [2] }, { dates: [2, 3] }, [1, 2, 3]], 'each key holds its own arguments\' value');
 });
 
 // ── Group: Change stamps ──────────────────────────────────────────────────────

@@ -487,22 +487,17 @@ class CacheManager {
     /**
      * Recompute a held cutoff key and compare it with its last value. Equal: done, its dependents
      * keep their values and nothing is announced. Changed, or not verifiable (an error, a result
-     * not kept): the held cascade runs, as invalidate would have run it.
+     * not kept): the held cascade runs, as invalidate would have run it. Offline, invalidate keeps
+     * every value, so the cascade would be lost: the key is verified again once the connection is
+     * back, and its dependents keep their values until then, as everything does offline.
      */
     static async _verify(key, state) {
-        let changed = true;
-        try {
-            do {
-                state.again = false;
-                await CacheManager._cutoffCalls.get(key)?.();
-            } while (state.again);
-            // No hash: the result wasn't kept, so it can't be trusted
-            changed = !CacheManager.valueHashes.has(key) || CacheManager.valueHashes.get(key) !== state.oldHash;
-        } catch {
-            // Not verifiable: the held cascade runs
-        } finally {
-            CacheManager._verifying.delete(key);
+        let changed = await CacheManager._recomputeChanged(key, state);
+        while (changed && networkState.isOffline) {
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            if (!networkState.isOffline) changed = await CacheManager._recomputeChanged(key, state);
         }
+        CacheManager._verifying.delete(key);
         if (changed) {
             const stack = new Set([key]);
             for (const depKey of CacheManager._dependentsOf(key)) {
@@ -511,6 +506,23 @@ class CacheManager {
             CacheManager._announce(key);
         }
         state.finish();
+    }
+
+    /**
+     * Recompute a held cutoff key, again while it was invalidated meanwhile, and tell whether it
+     * differs from its last value. Not verifiable (an error, a result not kept) counts as changed.
+     */
+    static async _recomputeChanged(key, state) {
+        try {
+            do {
+                state.again = false;
+                await CacheManager._cutoffCalls.get(key)?.();
+            } while (state.again);
+            // No hash: the result wasn't kept, so it can't be trusted
+            return !CacheManager.valueHashes.has(key) || CacheManager.valueHashes.get(key) !== state.oldHash;
+        } catch {
+            return true;
+        }
     }
     
     /**
