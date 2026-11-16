@@ -4,7 +4,7 @@ import { networkState } from '../utils/networkState.js';
 
 import { isLocalhost, todayISOString, startOfTodayMs } from '../utils/helpers.js';
 // The real or fake Google services (services.js picks them)
-import { GoogleSheetsAuth, GoogleSheetsService, classifyError } from '../services.js';
+import { AuthSession, GoogleSheetsService, classifyError } from '../services.js';
 
 // User data writes per tab name: { entries: the batch still collecting calls (null once it is
 // written), done: the latest batch's write } (storeUserData)
@@ -800,7 +800,7 @@ class applicationUtils_uncached {
     static async readCacheTimestamps() {
         // Null while nobody is signed in or the session needs the user: the poller pauses itself,
         // and the app restarts it when the session is active again
-        if (!GoogleSheetsAuth.isActive()) return null;
+        if (!AuthSession.isActive()) return null;
         try {
             const rawData = await GoogleSheetsService.getSheetData('CACHE', 'Caching');
             if (!rawData || rawData.length < 2) return [];

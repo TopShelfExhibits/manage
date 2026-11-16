@@ -29,7 +29,8 @@
 
 import { Requests } from '../data_management/api.js';
 import { isAppOutdated, checkAppVersion } from '../data_management/index.js';
-import { FakeGoogleSheetsAuth, FakeGoogleSheetsService, FakeGoogleState, FakeDropboxFiles, setFakeDelaysEnabled } from '../google_sheets_services/FakeGoogle.js';
+import { FakeSignInService, FakeSignInWindow, FakeGoogleSheetsService, FakeGoogleState, FakeDropboxFiles, setFakeDelaysEnabled } from '../google_sheets_services/FakeGoogle.js';
+import { AuthSession } from '../auth/AuthSession.js';
 import { refreshAppData } from './fakeGoogleDevTools.js';
 import { isCheckedValue } from '../data_management/utils/checkbox-values.js';
 import { useBatchEdits, useInstantEdits } from '../application/utils/cellEdits.js';
@@ -49,7 +50,7 @@ import { todayISOString, setTestToday, startOfTodayMs, resolveShortageAlertDays,
 import { instantWriteEntry, identityKey, cellKey, joinKey } from '../data_management/utils/instant-write-config.js';
 import { estimateShipDate } from '../data_management/utils/ship-date.js';
 import { parseA1Range, gridNeeded, clipRangeToGrid, isGridLimitError } from '../google_sheets_services/gridRanges.js';
-import { AUTH_STATUS, classifyError, isAuthError, isNetworkError } from '../google_sheets_services/authStatus.js';
+import { AUTH_STATUS, classifyError, isAuthError, isNetworkError } from '../auth/authStatus.js';
 import { GoogleSheetsService as RealSheetsService } from '../google_sheets_services/GoogleSheetsData.js';
 import { networkState, CONNECTION, trackRequest, checkConnection, onConnectionChange, resetConnection } from '../data_management/utils/networkState.js';
 import { SEVERITY, remainingSeverity } from '../data_management/utils/severity.js';
@@ -96,7 +97,9 @@ function assertLessThan(val, threshold, label) {
         throw new Error(`${label}\n    expected ${val} < ${threshold}`);
 }
 
-// Run fn as a logged-in user. Tests otherwise run logged out, so saves record no history entries.
+// Run fn with the UI's authState.user set. The suite's listeners are detached from the session
+// (FakeGoogleState.beginSandbox), so application helpers that read authState.user (locks,
+// proposals) see nobody otherwise. The data layer reads the session, signed in as test@example.com.
 async function _asUser(fn) {
     const previous = authState.user;
     authState.user = { email: 'test@example.com' };
@@ -104,105 +107,119 @@ async function _asUser(fn) {
 }
 
 // ── Group 0: Authentication ──────────────────────────────────────────────────
-// The sign-in session (FakeGoogleSheetsAuth: the real interface, with a pretend sign-in service).
-// Background code never opens a window: an expired token renews through the service (a refresh,
-// no window), and when the service has ended the session, requests fail with AUTH_REQUIRED and
-// the status turns needs-user until the user's click renews it. The group ends signed in, for
-// the groups after it. Expected: each signIn/renew opens one window; each renewal one refresh.
+// The real sign-in session (js/auth/AuthSession.js) over FakeSignInService (the sign-in service)
+// and FakeSignInWindow (the provider's page). Background code never opens a window: an expired
+// token renews through the service (a refresh, no window), and when the service has ended the
+// session, requests fail with AUTH_REQUIRED and the status turns needs-user until the user's
+// click renews it. The group ends signed in, for the groups after it.
+// Expected: each sign-in without a held session opens one window; each renewal is one refresh.
 
 async function _freshSession() {
-    await FakeGoogleSheetsAuth.signOut();
-    FakeGoogleSheetsAuth.brokerAvailable = true;
-    await FakeGoogleSheetsAuth.signIn();
+    await AuthSession.signOut();
+    FakeSignInService.available = true;
+    await AuthSession.signIn();
+}
+
+/** The token runs out now (the next request renews it) */
+function _expireToken() {
+    AuthSession._token.expiresAt = Date.now() - 1000;
 }
 
 test('AUTH', 'signed out, a request fails with AUTH_REQUIRED and no window opens', async () => {
-    await FakeGoogleSheetsAuth.signOut();
-    const windows = FakeGoogleSheetsAuth.windowsOpened;
+    await AuthSession.signOut();
+    const windows = FakeSignInWindow.windowsOpened;
     let error = null;
-    try { await FakeGoogleSheetsAuth.getToken(); } catch (e) { error = e; }
-    assertEqual([error?.code, isAuthError(error), FakeGoogleSheetsAuth.state.status], ['AUTH_REQUIRED', true, AUTH_STATUS.SIGNED_OUT], 'error and status');
-    assertEqual(FakeGoogleSheetsAuth.windowsOpened, windows, 'no window');
+    try { await AuthSession.getToken(); } catch (e) { error = e; }
+    assertEqual([error?.code, isAuthError(error), AuthSession.state.status], ['AUTH_REQUIRED', true, AUTH_STATUS.SIGNED_OUT], 'error and status');
+    assertEqual(FakeSignInWindow.windowsOpened, windows, 'no window');
 });
 
 test('AUTH', 'signIn opens one window and makes the session active for the test account', async () => {
-    const windows = FakeGoogleSheetsAuth.windowsOpened;
-    assertEqual(await FakeGoogleSheetsAuth.signIn(), true, 'signIn result');
-    assertEqual([FakeGoogleSheetsAuth.state.status, FakeGoogleSheetsAuth.state.email, await FakeGoogleSheetsAuth.getUserEmail()], [AUTH_STATUS.ACTIVE, 'test@example.com', 'test@example.com'], 'status and email');
-    assertEqual(FakeGoogleSheetsAuth.windowsOpened - windows, 1, 'windows opened');
+    const windows = FakeSignInWindow.windowsOpened;
+    assertEqual(await AuthSession.signIn(), true, 'signIn result');
+    assertEqual([AuthSession.state.status, AuthSession.state.email], [AUTH_STATUS.ACTIVE, 'test@example.com'], 'status and email');
+    assertEqual(FakeSignInWindow.windowsOpened - windows, 1, 'windows opened');
+});
+
+test('AUTH', 'signIn while the service still holds a session renews it with no window', async () => {
+    const windows = FakeSignInWindow.windowsOpened;
+    const refreshes = FakeSignInService.refreshCount;
+    assertEqual(await AuthSession.signIn(), true, 'signIn result');
+    assertEqual([FakeSignInWindow.windowsOpened - windows, FakeSignInService.refreshCount - refreshes], [0, 1], 'no window, one refresh');
 });
 
 test('AUTH', 'a valid token is used as it is, without a renewal', async () => {
     await _freshSession();
-    const refreshes = FakeGoogleSheetsAuth.refreshCount;
-    const token = await FakeGoogleSheetsAuth.getToken();
-    assertEqual([token, FakeGoogleSheetsAuth.refreshCount - refreshes], [FakeGoogleSheetsAuth.currentToken(), 0], 'same token, no refresh');
+    const refreshes = FakeSignInService.refreshCount;
+    const token = await AuthSession.getToken();
+    assertEqual([token, FakeSignInService.refreshCount - refreshes], [AuthSession.currentToken(), 0], 'same token, no refresh');
 });
 
 test('AUTH', 'an expired token renews through the sign-in service with no window', async () => {
     await _freshSession();
-    const before = FakeGoogleSheetsAuth.currentToken();
-    const refreshes = FakeGoogleSheetsAuth.refreshCount;
-    const windows = FakeGoogleSheetsAuth.windowsOpened;
-    FakeGoogleSheetsAuth.expireToken();
-    const token = await FakeGoogleSheetsAuth.getToken();
-    assertEqual([token !== before, FakeGoogleSheetsAuth.refreshCount - refreshes, FakeGoogleSheetsAuth.windowsOpened - windows, FakeGoogleSheetsAuth.state.status], [true, 1, 0, AUTH_STATUS.ACTIVE], 'renewed silently');
+    const before = AuthSession.currentToken();
+    const refreshes = FakeSignInService.refreshCount;
+    const windows = FakeSignInWindow.windowsOpened;
+    _expireToken();
+    const token = await AuthSession.getToken();
+    assertEqual([token !== before, FakeSignInService.refreshCount - refreshes, FakeSignInWindow.windowsOpened - windows, AuthSession.state.status], [true, 1, 0, AUTH_STATUS.ACTIVE], 'renewed silently');
 });
 
 test('AUTH', 'requests made together while the token is expired share one renewal', async () => {
     await _freshSession();
-    const refreshes = FakeGoogleSheetsAuth.refreshCount;
-    FakeGoogleSheetsAuth.expireToken();
-    const tokens = await Promise.all([1, 2, 3, 4, 5].map(() => FakeGoogleSheetsAuth.getToken()));
-    assertEqual([new Set(tokens).size, FakeGoogleSheetsAuth.refreshCount - refreshes], [1, 1], 'one token, one refresh');
+    const refreshes = FakeSignInService.refreshCount;
+    _expireToken();
+    const tokens = await Promise.all([1, 2, 3, 4, 5].map(() => AuthSession.getToken()));
+    assertEqual([new Set(tokens).size, FakeSignInService.refreshCount - refreshes], [1, 1], 'one token, one refresh');
 });
 
 test('AUTH', 'a 401 renews once; a 401 for a token already replaced just retries', async () => {
     await _freshSession();
-    const used = FakeGoogleSheetsAuth.currentToken();
-    const refreshes = FakeGoogleSheetsAuth.refreshCount;
-    assertEqual(await FakeGoogleSheetsAuth.handleUnauthorized(used), true, 'first 401: retry');
-    assertEqual([FakeGoogleSheetsAuth.currentToken() !== used, FakeGoogleSheetsAuth.refreshCount - refreshes], [true, 1], 'renewed once');
-    assertEqual(await FakeGoogleSheetsAuth.handleUnauthorized(used), true, 'late 401 for the old token: retry');
-    assertEqual(FakeGoogleSheetsAuth.refreshCount - refreshes, 1, 'no second renewal');
+    const used = AuthSession.currentToken();
+    const refreshes = FakeSignInService.refreshCount;
+    assertEqual(await AuthSession.handleUnauthorized(used), true, 'first 401: retry');
+    assertEqual([AuthSession.currentToken() !== used, FakeSignInService.refreshCount - refreshes], [true, 1], 'renewed once');
+    assertEqual(await AuthSession.handleUnauthorized(used), true, 'late 401 for the old token: retry');
+    assertEqual(FakeSignInService.refreshCount - refreshes, 1, 'no second renewal');
 });
 
 test('AUTH', 'the service ends the session: needs-user, requests fail, no window, the email stays', async () => {
     await _freshSession();
-    const windows = FakeGoogleSheetsAuth.windowsOpened;
+    const windows = FakeSignInWindow.windowsOpened;
     const statuses = [];
-    const stop = FakeGoogleSheetsAuth.onChange(state => { if (statuses[statuses.length - 1] !== state.status) statuses.push(state.status); });
-    FakeGoogleSheetsAuth.endBrokerSession();
-    FakeGoogleSheetsAuth.expireToken();
+    const stop = AuthSession.onChange(state => { if (statuses[statuses.length - 1] !== state.status) statuses.push(state.status); });
+    FakeSignInService.endSessions();
+    _expireToken();
     let error = null;
     try { await FakeGoogleSheetsService.getSheetData('CACHE', 'Caching'); } catch (e) { error = e; }
     stop();
-    assertEqual([isAuthError(error), FakeGoogleSheetsAuth.state.status, FakeGoogleSheetsAuth.state.email], [true, AUTH_STATUS.NEEDS_USER, 'test@example.com'], 'read fails, needs-user');
-    assertEqual([statuses, FakeGoogleSheetsAuth.windowsOpened - windows], [[AUTH_STATUS.NEEDS_USER], 0], 'listeners heard needs-user; no window');
+    assertEqual([isAuthError(error), AuthSession.state.status, AuthSession.state.reason, AuthSession.state.email], [true, AUTH_STATUS.NEEDS_USER, 'ended', 'test@example.com'], 'read fails, needs-user');
+    assertEqual([statuses, FakeSignInWindow.windowsOpened - windows], [[AUTH_STATUS.NEEDS_USER], 0], 'listeners heard needs-user; no window');
 });
 
 test('AUTH', 'while the session needs the user, the cache poller pauses (readCacheTimestamps → null)', async () => {
-    assertEqual(FakeGoogleSheetsAuth.state.status, AUTH_STATUS.NEEDS_USER, 'still needs-user from the test before');
+    assertEqual(AuthSession.state.status, AUTH_STATUS.NEEDS_USER, 'still needs-user from the test before');
     assertEqual(await ApplicationUtils.readCacheTimestamps(), null, 'poller read');
 });
 
 test('AUTH', 'renew (the banner click) opens one window and makes the session active again', async () => {
-    const windows = FakeGoogleSheetsAuth.windowsOpened;
-    assertEqual(await FakeGoogleSheetsAuth.renew(), true, 'renew result');
-    assertEqual([FakeGoogleSheetsAuth.state.status, FakeGoogleSheetsAuth.windowsOpened - windows], [AUTH_STATUS.ACTIVE, 1], 'active, one window');
+    const windows = FakeSignInWindow.windowsOpened;
+    assertEqual(await AuthSession.renew(), true, 'renew result');
+    assertEqual([AuthSession.state.status, FakeSignInWindow.windowsOpened - windows], [AUTH_STATUS.ACTIVE, 1], 'active, one window');
     const stamps = await ApplicationUtils.readCacheTimestamps();
     assertEqual(Array.isArray(stamps), true, 'the poller reads again');
 });
 
 test('AUTH', 'the service unreachable: an expired token turns needs-user instead of opening a window', async () => {
     await _freshSession();
-    const windows = FakeGoogleSheetsAuth.windowsOpened;
-    FakeGoogleSheetsAuth.brokerAvailable = false;
-    FakeGoogleSheetsAuth.expireToken();
+    const windows = FakeSignInWindow.windowsOpened;
+    FakeSignInService.available = false;
+    _expireToken();
     let error = null;
-    try { await FakeGoogleSheetsAuth.getToken(); } catch (e) { error = e; }
-    FakeGoogleSheetsAuth.brokerAvailable = true;
-    assertEqual([error?.code, FakeGoogleSheetsAuth.state.status, FakeGoogleSheetsAuth.windowsOpened - windows], ['AUTH_REQUIRED', AUTH_STATUS.NEEDS_USER, 0], 'needs-user, no window');
+    try { await AuthSession.getToken(); } catch (e) { error = e; }
+    FakeSignInService.available = true;
+    assertEqual([error?.code, AuthSession.state.status, AuthSession.state.reason, FakeSignInWindow.windowsOpened - windows], ['AUTH_REQUIRED', AUTH_STATUS.NEEDS_USER, 'unavailable', 0], 'needs-user, no window');
+    assertEqual([await AuthSession.renew(), AuthSession.state.status, FakeSignInWindow.windowsOpened - windows], [true, AUTH_STATUS.ACTIVE, 0], 'Try again renews with no window');
 });
 
 test('AUTH', 'classifyError tells sign-in, access, quota and network failures apart', async () => {
@@ -221,10 +238,10 @@ test('AUTH', 'classifyError tells sign-in, access, quota and network failures ap
 });
 
 test('AUTH', 'signOut ends the session; the group ends signed in for the groups after it', async () => {
-    await FakeGoogleSheetsAuth.signOut();
-    assertEqual([FakeGoogleSheetsAuth.state.status, FakeGoogleSheetsAuth.state.email, FakeGoogleSheetsAuth.currentToken()], [AUTH_STATUS.SIGNED_OUT, null, null], 'signed out');
-    await FakeGoogleSheetsAuth.signIn();
-    assertEqual(FakeGoogleSheetsAuth.state.status, AUTH_STATUS.ACTIVE, 'signed in again');
+    await AuthSession.signOut();
+    assertEqual([AuthSession.state.status, AuthSession.state.email, AuthSession.currentToken()], [AUTH_STATUS.SIGNED_OUT, null, null], 'signed out');
+    await AuthSession.signIn();
+    assertEqual(AuthSession.state.status, AUTH_STATUS.ACTIVE, 'signed in again');
 });
 
 // ── Connection ───────────────────────────────────────────────────────────────
@@ -4975,7 +4992,7 @@ export async function runTests() {
     try {
         // Ensure authenticated before any API-dependent tests run.
         // Auth tests below start with signOut() so they still test from an unauthenticated state.
-        await FakeGoogleSheetsAuth.signIn();
+        await AuthSession.signIn();
 
         console.group('%c TopShelf Test Suite', 'font-weight:bold;color:#6366f1');
 

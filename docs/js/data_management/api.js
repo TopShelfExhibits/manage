@@ -1,7 +1,10 @@
 import { wrapMethods, normalizeHeaderName, Database, InventoryUtils, PackListUtils, ProductionUtils, ApplicationUtils, EditHistoryUtils, InstantWriteUtils, ARCHIVE_TAB_NAME, ARCHIVE_HEADERS, offsetToISO, resolveShortageAlertDays, shortageAlertDateFilters, PREFERENCES_MAPPING, INVENTORY_TAB_PREFERENCES, sanitizeTabName, mapWithConcurrency, ProgressBus, getRandomLoadingQuote, DEFAULT_INVENTORY_MAPPING, ProposalUtils, DropboxUtils, PROPOSALS_TAB_NAME, PROPOSAL_MAPPING, resolveInventoryNoteMaxLength, primaryThumbnailValue, SEVERITY, remainingSeverity } from './index.js';
-import { authState } from '../application/utils/auth.js';
+import { AuthSession } from './services.js';
 import { instantWriteEntry, identityText, parseColoredName } from './utils/instant-write-config.js';
 import { columnTypesEntry } from './utils/column-types.js';
+
+/** The signed-in account's email, for edit history (null while signed out) */
+const signedInEmail = () => AuthSession.state.email || null;
 
 // CACHE tabs with tracked history. EditHistory is always mapped to the key 'edithistory'.
 const NOTES_MAPPING = { Path: 'Path', Note: 'Note', Color: 'Color', Size: 'Size', edithistory: 'EditHistory' };
@@ -407,7 +410,7 @@ class Requests_uncached {
      * @returns {Promise<boolean>}
      */
     static async saveInventoryTabData(mappedData, tabOrItemName, mapping, filters, referenceDate, options = {}) {
-        const username = authState.user?.email || null;
+        const username = signedInEmail();
         const { scheduledDate, note, ...rest } = options;
         const noteMaxLength = await Requests.getInventoryNoteMaxLength();
         return await InventoryUtils.saveInventoryTabData(mappedData, tabOrItemName, mapping, filters, username, {
@@ -432,7 +435,7 @@ class Requests_uncached {
      */
     static async savePackList(crates, projectIdentifier) {
         console.log("API.savePackList called for project:", projectIdentifier);
-        const username = authState.user?.email || null;
+        const username = signedInEmail();
         // Pass data directly to PackListUtils.savePackList; transformation is handled there
         return await PackListUtils.savePackList(projectIdentifier, crates, null, username, {
             source: 'web'
@@ -1540,7 +1543,7 @@ class Requests_uncached {
      * @returns {Promise<{ applied: boolean }>}
      */
     static async checkAndApplyPendingChanges(tabOrItemName) {
-        const username = authState.user?.email || null;
+        const username = signedInEmail();
         return await InventoryUtils.checkAndApplyPendingChanges(tabOrItemName, username);
     }
 
@@ -1555,7 +1558,7 @@ class Requests_uncached {
      * @returns {Promise<boolean>}
      */
     static async savePendingChangeEntry(tabOrItemName, originalRows, editedRows, effectiveDateDeciseconds, note) {
-        const username = authState.user?.email || null;
+        const username = signedInEmail();
         const noteMaxLength = await Requests.getInventoryNoteMaxLength();
         return await InventoryUtils.savePendingChangeEntry(tabOrItemName, originalRows, editedRows, effectiveDateDeciseconds, note, username, undefined, noteMaxLength);
     }
@@ -1596,7 +1599,7 @@ class Requests_uncached {
 
     // MUTATION METHOD — excluded from caching. History is tracked by Database.setData.
     static async savePageNotes(data) {
-        const username = authState.user?.email || null;
+        const username = signedInEmail();
         return await Database.setData('CACHE', 'Notes', data, NOTES_MAPPING, { username, source: 'web' });
     }
 
@@ -1620,7 +1623,7 @@ class Requests_uncached {
 
     // MUTATION METHOD — excluded from caching. History is tracked by Database.setData.
     static async savePreferences(data) {
-        const username = authState.user?.email || null;
+        const username = signedInEmail();
         return await Database.setData('CACHE', 'Preferences', data, PREFERENCES_MAPPING, { username, source: 'web' });
     }
 
@@ -1729,7 +1732,7 @@ class Requests_uncached {
      * Upsert one show note keyed by computeIdentifier, verified by re-reading.
      */
     static async saveShowNote(identifier, text) {
-        const username = authState.user?.email || null;
+        const username = signedInEmail();
         return await InstantWriteUtils.saveShowNote(identifier, text, username);
     }
 
@@ -1812,7 +1815,7 @@ async function _updateProposalEntries(transform) {
     const entries = tabExists
         ? ProposalUtils.parseRows(await Database.getData('CACHE', PROPOSALS_TAB_NAME, PROPOSAL_MAPPING))
         : [];
-    const user = (authState.user?.email || 'unknown').split('@')[0];
+    const user = (signedInEmail() || 'unknown').split('@')[0];
     const updated = transform(entries, user, Math.floor(Date.now() / 100));
     if (!tabExists) await Database.createTab('CACHE', null, PROPOSALS_TAB_NAME);
     return await Database.setData('CACHE', PROPOSALS_TAB_NAME, ProposalUtils.toRows(updated), PROPOSAL_MAPPING);

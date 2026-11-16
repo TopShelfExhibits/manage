@@ -1,11 +1,10 @@
 /**
  * Fake Google Sheets implementations for testing purposes
- * Provides dummy data and authentication objects that mirror the real GoogleSheetsAuth and GoogleSheetsService
+ * Provides dummy data mirroring GoogleSheetsService and DropboxFiles, and fakes of the sign-in service and window (the real AuthSession runs over them)
  */
 
 import { SheetSql } from './sheetSql.js';
-import { BaseTokenManager } from './GoogleSheetsAuth.js';
-import { AUTH_STATUS, authRequiredError } from './authStatus.js';
+import { AuthSession } from '../auth/AuthSession.js';
 import { normalizeHeaderName, isLocalhost } from '../data_management/utils/helpers.js';
 import { trackRequest } from '../data_management/utils/networkState.js';
 
@@ -57,164 +56,94 @@ function _unquoteSheetName(name) {
     return m ? m[1].replace(/''/g, "'") : name;
 }
 
-/**
- * The fake sign-in session: the real GoogleSheetsAuth interface, with a pretend sign-in service
- * (an Apps Script broker) that renews tokens without a window. Signing in or renewing counts a
- * window (windowsOpened); a renewal through the service counts a refresh (refreshCount). Tests
- * end the token (expireToken), the service's session (endBrokerSession) or the service itself
- * (brokerAvailable = false). Localhost always starts signed out.
- */
-export class FakeGoogleSheetsAuth {
-    static userEmail = _configuredEmail();
-    static state = {
-        status: AUTH_STATUS.SIGNED_OUT,
-        email: null,
-        missingScopes: [],
-        expiresAt: 0,
-        usesBroker: true,
-        reason: null,
-        error: null
-    };
-    static _listeners = new Set();
-    static _token = null;
-    static _renewPromise = null;
-    static brokerSession = null;   // the session the pretend service holds; null: it ended
-    static brokerAvailable = true;
+// ── Sign-in fakes: the real session (js/auth/AuthSession.js) runs over these on localhost ──
+// services.js passes fakeSignIn to AuthSession.use. Tests read the counters: each window the
+// session opens (FakeSignInWindow.windowsOpened), each renewal through the service
+// (FakeSignInService.refreshCount). They end the service's sessions (endSessions) or make it
+// unreachable (available = false). Tokens live in memory, so localhost starts signed out.
+
+function _signInDelay(ms) {
+    return _delaysEnabled ? new Promise(resolve => setTimeout(resolve, ms)) : Promise.resolve();
+}
+
+/** The sign-in service (apps-script/auth-broker): sessions, renewals, and sign-out */
+export class FakeSignInService {
+    static available = true;
     static refreshCount = 0;
-    static windowsOpened = 0;
+    static _sessions = new Set();
+    static _issued = 0;
 
-    static onChange(listener) {
-        this._listeners.add(listener);
-        return () => this._listeners.delete(listener);
-    }
-
-    static _set(changes) {
-        Object.assign(this.state, changes);
-        this._listeners.forEach(listener => {
-            try { listener(this.state); } catch (error) { console.error('[FakeGoogleSheetsAuth] Listener failed:', error); }
-        });
-    }
-
-    static isActive() {
-        return this.state.status === AUTH_STATUS.ACTIVE || this.state.status === AUTH_STATUS.EXPIRING;
-    }
-
-    static isAuthenticated() {
-        return this.isActive();
-    }
-
-    static currentToken() {
-        return this._token?.access_token || null;
-    }
-
-    static getMissingScopes() {
-        return this.state.missingScopes;
-    }
-
-    static async getUserEmail() {
-        return this.state.email;
-    }
-
-    static async initialize() {
-        await this.delay(100);
+    static isConfigured() {
         return true;
     }
 
-    static async getToken() {
-        if (this.isActive() && BaseTokenManager.secondsLeft(this._token) > 60) return this._token.access_token;
-        if (this.state.status !== AUTH_STATUS.SIGNED_OUT && await this._renew()) return this._token.access_token;
-        if (this.isActive()) this._set({ status: AUTH_STATUS.NEEDS_USER, reason: 'ended' });
-        throw authRequiredError(this.state.status === AUTH_STATUS.SIGNED_OUT ? 'Sign in to continue.' : 'Sign in again to continue.');
-    }
-
-    static async handleUnauthorized(usedToken) {
-        if (this._token && this._token.access_token !== usedToken) return true;
-        this._token = null;
-        if (await this._renew()) return true;
-        if (this.state.status !== AUTH_STATUS.SIGNED_OUT) this._set({ status: AUTH_STATUS.NEEDS_USER, reason: 'ended' });
-        return false;
-    }
-
-    static async signIn() {
-        this.windowsOpened++;
-        await this.delay(200);
-        this.brokerSession = `fake_session_${Date.now()}`;
-        this._issueToken();
-        return true;
-    }
-
-    static renew() {
-        return this.signIn();
-    }
-
-    static async signOut() {
-        await this.delay(100);
-        this.brokerSession = null;
-        this._token = null;
-        this.userEmail = null;
-        this._set({ status: AUTH_STATUS.SIGNED_OUT, email: null, expiresAt: 0, reason: null });
-    }
-
-    /** The pretend service renews: one renewal at a time, no window */
-    static _renew() {
-        if (!this._renewPromise) {
-            this._renewPromise = (async () => {
-                await this.delay(50);
-                if (!this.brokerAvailable || !this.brokerSession) return false;
-                this.refreshCount++;
-                this._issueToken();
-                return true;
-            })().finally(() => { this._renewPromise = null; });
+    /** SignInService.request: the answer when ok; a refusal throws with `refusal`; unreachable throws without */
+    static async request(body) {
+        await _signInDelay(50);
+        if (!this.available) throw new Error('Could not reach the sign-in service.');
+        if (body.action === 'exchange') {
+            const session = `fake_session_${++this._issued}`;
+            this._sessions.add(session);
+            return this._answer(session);
         }
-        return this._renewPromise;
+        if (body.action === 'refresh') {
+            if (!this._sessions.has(body.session)) throw Object.assign(new Error('Your sign-in has ended.'), { refusal: 'SESSION_ENDED' });
+            this.refreshCount++;
+            return this._answer(body.session);
+        }
+        if (body.action === 'signout') {
+            this._sessions.delete(body.session);
+            return { ok: true };
+        }
+        throw Object.assign(new Error('Bad request'), { refusal: 'BAD_REQUEST' });
     }
 
-    static _issueToken() {
-        this.userEmail = _configuredEmail();
-        const now = Date.now();
-        this._token = { access_token: `fake_access_token_${now}_${this.refreshCount}`, expires_in: 3600, timestamp: now, expiresAt: now + 3600 * 1000 };
-        this._set({ status: AUTH_STATUS.ACTIVE, email: this.userEmail, expiresAt: this._token.expiresAt, reason: null, error: null });
+    /** Tests: the service ends every session (revoked or idle); renewing fails until the user signs in */
+    static endSessions() {
+        this._sessions.clear();
     }
 
-    // ── Test hooks ────────────────────────────────────────────────────────────
-
-    /** The token runs out now (the next request renews it, or fails without the service) */
-    static expireToken() {
-        if (this._token) this._token.expiresAt = Date.now() - 1000;
-    }
-
-    /** The service ends the session (revoked or idle): renewing fails until the user signs in */
-    static endBrokerSession() {
-        this.brokerSession = null;
-    }
-
-    /** Everything about the session, to put back after the test suite (FakeGoogleState.beginSandbox) */
-    static _snapshot() {
-        return {
-            state: { ...this.state },
-            token: this._token && { ...this._token },
-            brokerSession: this.brokerSession,
-            brokerAvailable: this.brokerAvailable,
-            userEmail: this.userEmail,
-            listeners: this._listeners
-        };
-    }
-
-    static _restore(snapshot) {
-        Object.assign(this.state, snapshot.state);
-        this._token = snapshot.token;
-        this.brokerSession = snapshot.brokerSession;
-        this.brokerAvailable = snapshot.brokerAvailable;
-        this.userEmail = snapshot.userEmail;
-        this._listeners = snapshot.listeners;
-    }
-
-    // Utility method to simulate async delays
-    static delay(ms) {
-        if (!_delaysEnabled) return Promise.resolve();
-        return new Promise(resolve => setTimeout(resolve, ms));
+    static _answer(session) {
+        return { ok: true, session, accessToken: `fake_access_token_${++this._issued}`, expiresIn: 3600, scope: '', email: _configuredEmail() };
     }
 }
+
+/** The provider's sign-in page: every open is one window, answered at once with a code */
+export class FakeSignInWindow {
+    static windowsOpened = 0;
+
+    static missingScopes() {
+        return [];
+    }
+
+    static silentTried() {
+        return true;   // never sign in without a click on localhost
+    }
+
+    static takeRedirectResult() {
+        return null;
+    }
+
+    static async open({ mode, consent = false, silent = false }) {
+        this.windowsOpened++;
+        await _signInDelay(200);
+        const state = `${mode === 'popup' ? 'p' : 'r'}.fake_${this.windowsOpened}`;
+        return { result: { code: `fake_code_${this.windowsOpened}`, state }, pending: { mode, state, verifier: 'fake_verifier', redirectUri: 'fake', consent, silent } };
+    }
+}
+
+/** The session's store, in memory: one per page, so each tab signs in as its own fake user */
+function _memoryStore() {
+    const values = new Map();
+    return {
+        values,
+        get: (key) => values.get(key) ?? null,
+        set: (key, value) => { values.set(key, String(value)); },
+        remove: (key) => { values.delete(key); }
+    };
+}
+
+export const fakeSignIn = { service: FakeSignInService, window: FakeSignInWindow, store: _memoryStore() };
 
 export class FakeGoogleSheetsService {
     /**
@@ -1275,7 +1204,7 @@ export class FakeGoogleSheetsService {
     /** Delete whole rows (1-based; the header row is never deleted), bottom up, as one step. */
     static async deleteSheetRows(tableId, tabName, rowNumbers) {
         await this.delay(500 + Math.random() * 500);
-        await FakeGoogleSheetsAuth.getToken();
+        await AuthSession.getToken();
         if (!this.ENDPOINT_IDS[tableId]) throw new Error(`[deleteSheetRows] Spreadsheet ID not found for table: ${tableId}`);
         const sheet = this.mockData[tableId]?.[tabName];
         if (!sheet) throw new Error(`[deleteSheetRows] Sheet not found: ${tabName}`);
@@ -1292,7 +1221,7 @@ export class FakeGoogleSheetsService {
      */
     static async getModifiedTimes(tableIds) {
         await this.delay(100 + Math.random() * 200);
-        if (!FakeGoogleSheetsAuth.isActive()) return null;
+        if (!AuthSession.isActive()) return null;
         const overrides = await this._fault('beforeModifiedTimes', tableIds) || {};
         return Object.fromEntries(tableIds.map(tableId => {
             if (!this.ENDPOINT_IDS[tableId]) throw new Error(`[getModifiedTimes] Spreadsheet ID not found for table: ${tableId}`);
@@ -1312,7 +1241,7 @@ export class FakeGoogleSheetsService {
      */
     static async appendSheetValues(tableId, range, rows) {
         await this.delay(300 + Math.random() * 300);
-        await FakeGoogleSheetsAuth.getToken();
+        await AuthSession.getToken();
         if (!this.ENDPOINT_IDS[tableId]) throw new Error(`[appendSheetValues] Spreadsheet ID not found for table: ${tableId}`);
         if (await this._fault('beforeWrite', tableId, range, rows) === 'drop') return true;
         const bang = range.lastIndexOf('!');
@@ -1340,7 +1269,7 @@ export class FakeGoogleSheetsService {
      */
     static async batchSetValues(tableId, data) {
         await this.delay(500 + Math.random() * 500);
-        await FakeGoogleSheetsAuth.getToken();
+        await AuthSession.getToken();
         if (!this.ENDPOINT_IDS[tableId]) throw new Error(`[batchSetValues] Spreadsheet ID not found for table: ${tableId}`);
         const fault = await this._fault('beforeBatchWrite', tableId, data);
         if (fault === 'drop') return true;
@@ -1395,7 +1324,7 @@ export class FakeGoogleSheetsService {
 
     static async getSheetData(tableId, range) {
         await this.delay(500 + Math.random() * 500); // Add random delay > 1s
-        await FakeGoogleSheetsAuth.getToken();
+        await AuthSession.getToken();
 
         const spreadsheetId = this.ENDPOINT_IDS[tableId];
         if (!spreadsheetId) throw new Error(`[getSheetData] Spreadsheet ID not found for table: ${tableId}`);
@@ -1480,7 +1409,7 @@ export class FakeGoogleSheetsService {
 
     static async setSheetData(tableId, tabName, updates, removeRowsBelow) {
         await this.delay(500 + Math.random() * 500); // Add random delay > 1s
-        await FakeGoogleSheetsAuth.getToken();
+        await AuthSession.getToken();
 
         const spreadsheetId = this.ENDPOINT_IDS[tableId];
         if (!spreadsheetId) throw new Error(`[setSheetData] Spreadsheet ID not found for table: ${tableId}`);
@@ -1596,7 +1525,7 @@ export class FakeGoogleSheetsService {
 
     static async getSheetTabs(tableId) {
         await this.delay(500 + Math.random() * 500); // Add random delay > 1s
-        await FakeGoogleSheetsAuth.getToken();
+        await AuthSession.getToken();
 
         const spreadsheetId = this.ENDPOINT_IDS[tableId];
         if (!spreadsheetId) throw new Error(`[getSheetTabs] Spreadsheet ID not found for table: ${tableId}`);
@@ -1610,7 +1539,7 @@ export class FakeGoogleSheetsService {
 
     static async hideTabs(tableId, tabs) {
         await this.delay(500 + Math.random() * 500); // Add random delay > 1s
-        await FakeGoogleSheetsAuth.getToken();
+        await AuthSession.getToken();
 
         const spreadsheetId = this.ENDPOINT_IDS[tableId];
         if (!spreadsheetId) throw new Error(`[hideTabs] Spreadsheet ID not found for table: ${tableId}`);
@@ -1627,7 +1556,7 @@ export class FakeGoogleSheetsService {
 
     static async showTabs(tableId, tabs) {
         await this.delay(500 + Math.random() * 500); // Add random delay > 1s
-        await FakeGoogleSheetsAuth.getToken();
+        await AuthSession.getToken();
 
         const spreadsheetId = this.ENDPOINT_IDS[tableId];
         if (!spreadsheetId) throw new Error(`[showTabs] Spreadsheet ID not found for table: ${tableId}`);
@@ -1644,7 +1573,7 @@ export class FakeGoogleSheetsService {
 
     static async copySheetTab(tableId, sourceTab, newTabName) {
         await this.delay(500 + Math.random() * 500); // Add random delay > 1s
-        await FakeGoogleSheetsAuth.getToken();
+        await AuthSession.getToken();
 
         const spreadsheetId = this.ENDPOINT_IDS[tableId];
         if (!spreadsheetId) throw new Error(`[copySheetTab] Spreadsheet ID not found for table: ${tableId}`);
@@ -1690,7 +1619,7 @@ export class FakeGoogleSheetsService {
 
     static async createBlankTab(tableId, newTabName) {
         await this.delay(500 + Math.random() * 500); // Add random delay > 1s
-        await FakeGoogleSheetsAuth.getToken();
+        await AuthSession.getToken();
 
         const spreadsheetId = this.ENDPOINT_IDS[tableId];
         if (!spreadsheetId) throw new Error(`[createBlankTab] Spreadsheet ID not found for table: ${tableId}`);
@@ -1726,7 +1655,7 @@ export class FakeGoogleSheetsService {
 
     static async querySheetData(tableId, query) {
         await this.delay(500 + Math.random() * 500); // Add random delay > 1s
-        await FakeGoogleSheetsAuth.getToken();
+        await AuthSession.getToken();
         
         //console.log(`FakeGoogleSheetsService: Executing query on ${tableId}: ${query}`);
         await this.delay(100);
@@ -2097,17 +2026,31 @@ export const FakeGoogleState = {
     beginSandbox() {
         clearTimeout(_saveTimer);
         const snapshot = _currentStateJson();
-        // The app's sign-in listeners don't hear the tests sign in, expire and sign out
-        const authSnapshot = FakeGoogleSheetsAuth._snapshot();
-        FakeGoogleSheetsAuth._listeners = new Set();
+        // The app's sign-in listeners don't hear the tests sign in, expire and sign out; the
+        // session, its store and the fake service are put back afterwards
+        const authSnapshot = {
+            state: { ...AuthSession.state },
+            token: AuthSession._token,
+            listeners: AuthSession._listeners,
+            store: new Map(fakeSignIn.store.values),
+            sessions: new Set(FakeSignInService._sessions)
+        };
+        AuthSession._listeners = new Set();
         _sandboxed = true;
         _applyState(JSON.parse(_fixtureJson));
-        FakeGoogleSheetsAuth.userEmail = DEFAULT_FAKE_USER;
         return () => {
             _sandboxed = false;
             // Prefer the saved state: another tab may have written while the sandbox was active
             if (!(this.isPersistent() && this.load())) _applyState(JSON.parse(snapshot));
-            FakeGoogleSheetsAuth._restore(authSnapshot);
+            clearTimeout(AuthSession._timer);
+            Object.assign(AuthSession.state, authSnapshot.state);
+            AuthSession._token = authSnapshot.token;
+            AuthSession._listeners = authSnapshot.listeners;
+            fakeSignIn.store.values.clear();
+            authSnapshot.store.forEach((value, key) => fakeSignIn.store.values.set(key, value));
+            FakeSignInService._sessions = authSnapshot.sessions;
+            FakeSignInService.available = true;
+            AuthSession._checkClock();   // wake again for the restored token
         };
     },
 
@@ -2274,4 +2217,4 @@ export class FakeDropboxFiles {
 }
 
 // Export the fakes under the real services' names
-export { FakeGoogleSheetsAuth as GoogleSheetsAuth, FakeGoogleSheetsService as GoogleSheetsService, FakeDropboxFiles as DropboxFiles };
+export { FakeGoogleSheetsService as GoogleSheetsService, FakeDropboxFiles as DropboxFiles };

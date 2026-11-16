@@ -1,7 +1,7 @@
-// The sign-in session (real or fake, picked by services.js). It owns every token and decides when
-// the user is needed; this module mirrors it into authState for the UI and runs the user's actions.
-// See docs/notes/auth-audit-findings.md.
-import { GoogleSheetsAuth as AuthSession, AUTH_STATUS } from '../../data_management/services.js';
+// The sign-in session (js/auth/AuthSession.js; over fakes on localhost, set up by services.js). It
+// owns every token and decides when the user is needed; this module mirrors it into authState for
+// the UI and runs the user's actions. See docs/notes/auth-audit-findings.md.
+import { AuthSession, AUTH_STATUS } from '../../data_management/services.js';
 import { isLocalhost } from '../../data_management/utils/helpers.js';
 import { DashboardRegistry } from './DashboardRegistry.js';
 import { reloadErrorStores } from './reactiveStores.js';
@@ -19,7 +19,6 @@ export { AUTH_STATUS, isAuthError, isNetworkError } from '../../data_management/
 export const authState = Vue.reactive({
     status: AUTH_STATUS.SIGNED_OUT,
     reason: null,
-    usesBroker: false,
     isAuthenticated: false,
     isLoading: false,
     user: null,
@@ -62,8 +61,6 @@ async function getModalManager() {
     return modalManager;
 }
 
-const isActiveStatus = (status) => status === AUTH_STATUS.ACTIVE || status === AUTH_STATUS.EXPIRING;
-
 function permissionsWarning(missing) {
     if (!missing?.length) return null;
     const names = missing.map(s => s.split('/').pop()).join(', ');
@@ -78,16 +75,15 @@ function syncFromSession(session) {
         window.location.reload();
         return;
     }
-    const wasActive = isActiveStatus(authState.status);
+    const wasActive = authState.status === AUTH_STATUS.ACTIVE;
     authState.status = session.status;
     authState.reason = session.reason;
-    authState.usesBroker = session.usesBroker;
     authState.error = session.error;
     authState.permissionsWarning = permissionsWarning(session.missingScopes);
     if (!email) authState.user = null;
     else if (authState.user?.email !== email) authState.user = { email, name: email.split('@')[0] || 'User' };
     authState.isAuthenticated = !!email;
-    if (!wasActive && isActiveStatus(session.status) && authState.isInitialized) {
+    if (!wasActive && session.status === AUTH_STATUS.ACTIVE && authState.isInitialized) {
         reloadErrorStores();
         restartCacheTimestampPoller();
     }
@@ -98,13 +94,15 @@ export class Auth {
         if (authState.isInitialized) return;
         authState.isLoading = true;
         AuthSession.onChange(syncFromSession);
+        let failure = null;
         try {
             await AuthSession.initialize();
         } catch (error) {
             console.error('Auth initialization failed:', error);
-            AuthSession.state.error = error.message;
+            failure = error.message;
         }
         syncFromSession(AuthSession.state);
+        if (failure) authState.error = failure;
         if (AuthSession.isActive()) restartCacheTimestampPoller();
         authState.isInitialized = true;
         authState.isLoading = false;
@@ -112,10 +110,10 @@ export class Auth {
 
     /** Whether requests can go out now (no renewal waiting on the user) */
     static get isActive() {
-        return isActiveStatus(authState.status);
+        return authState.status === AUTH_STATUS.ACTIVE;
     }
 
-    /** The header's sign-in button: one redirect to Google and back, or Google's popup */
+    /** The header's sign-in button: one redirect to Google and back (none while a session is held) */
     static async login() {
         authState.isLoading = true;
         try {
@@ -126,7 +124,7 @@ export class Auth {
     }
 
     /**
-     * The session banner's button ("Sign in", "Stay signed in", "Try again"). Call it straight
+     * The session banner's button ("Sign in", "Try again"). Call it straight
      * from the click: a popup, when one is needed, may open only there. The page stays as it is.
      */
     static renew() {
@@ -196,9 +194,5 @@ export class Auth {
         await DashboardRegistry.saveNow();
         const { saveDirtyStoresToUserData } = await import('./reactiveStores.js');
         await saveDirtyStoresToUserData({ skipAuthCheck: true });
-    }
-
-    static get state() {
-        return authState;
     }
 }

@@ -1,5 +1,5 @@
-import { GoogleSheetsAuth } from './GoogleSheetsAuth.js';
-import { classifyError } from './authStatus.js';
+import { AuthSession } from '../auth/AuthSession.js';
+import { classifyError, requestError } from '../auth/authStatus.js';
 import { SheetSql } from './sheetSql.js';
 import { normalizeHeaderName } from '../data_management/utils/helpers.js';
 import { ProgressBus } from '../data_management/utils/caching.js';
@@ -18,6 +18,37 @@ function withTimeout(request, ms) {
         timer = setTimeout(() => reject(new DOMException('The request took too long.', 'TimeoutError')), ms);
     });
     return Promise.race([request, timeout]).finally(() => clearTimeout(timer));
+}
+
+function _loadScript(src) {
+    return new Promise((resolve, reject) => {
+        const script = document.createElement('script');
+        script.src = src;
+        script.onload = resolve;
+        // A TypeError, like fetch's: no connection (classifyError → 'network')
+        script.onerror = () => reject(new TypeError(`Could not load ${src}`));
+        document.head.appendChild(script);
+    });
+}
+
+let _clientReady = null;
+/** Google's API client (gapi) with the Sheets and Drive APIs, loaded once, on the first request */
+function _client() {
+    _clientReady ||= (async () => {
+        if (typeof gapi === 'undefined') await _loadScript('https://apis.google.com/js/api.js');
+        await new Promise((resolve, reject) => gapi.load('client', { callback: resolve, onerror: reject }));
+        await gapi.client.init({
+            apiKey: window.APP_CONFIG.API_KEY,
+            discoveryDocs: [
+                'https://sheets.googleapis.com/$discovery/rest?version=v4',
+                'https://www.googleapis.com/discovery/v1/apis/drive/v3/rest'
+            ]
+        });
+    })().catch((error) => {
+        _clientReady = null;   // the next request tries again
+        throw error;
+    });
+    return _clientReady;
 }
 
 export class GoogleSheetsService {
@@ -72,15 +103,18 @@ export class GoogleSheetsService {
     }
 
     /**
-     * Every Google API request attempt goes through here. Each attempt is timed and reported to
-     * the connection monitor (networkState.js), and gives up after timeoutMs.
+     * Every request that carries the user's Google token goes through here (Sheets, Drive, and
+     * the sign-in service's Dropbox reads). Each attempt takes its token from the session (it is
+     * also set on Google's API client) and passes it to fn; it is timed and reported to the
+     * connection monitor (networkState.js), and gives up after timeoutMs.
+     * - No token without the user: AUTH_REQUIRED, thrown before anything is sent.
      * - A rejected token: the session renews it once and the call retries.
      * - No access: thrown at once.
      * - No answer (network failure or timeout): retried with backoff while Google isn't known to
      *   be unreachable, unless `once`. A request that may have landed must not run twice (an
      *   append, a row delete, a copy): those pass `once`.
      * - Rate limits: waited out with a countdown. Other errors: retried with backoff.
-     * @param {Function} fn - Makes the request
+     * @param {(token: string) => Promise<*>} fn - Makes the request
      * @param {Object} [options]
      * @param {boolean} [options.once] - Never repeat it after no answer
      * @param {number} [options.timeoutMs] - 0 for none (an upload, whose time grows with its size)
@@ -99,10 +133,12 @@ export class GoogleSheetsService {
         
         let authRetried = false;
         while (true) {
-            const usedToken = GoogleSheetsAuth.currentToken();
+            const token = await AuthSession.getToken();
+            await _client();
+            gapi.client.setToken({ access_token: token });
             const done = trackRequest({ sample });
             try {
-                const result = await withTimeout(fn(), timeoutMs);
+                const result = await withTimeout(fn(token), timeoutMs);
                 done('answered');
                 return result;
             } catch (err) {
@@ -114,7 +150,7 @@ export class GoogleSheetsService {
                 // A rejected token: the session renews it once (through the sign-in service) and the
                 // call retries; otherwise the session asks the user, and the error goes up
                 if (kind === 'auth') {
-                    if (!authRetried && await GoogleSheetsAuth.handleUnauthorized(usedToken)) {
+                    if (!authRetried && await AuthSession.handleUnauthorized(token)) {
                         authRetried = true;
                         continue;
                     }
@@ -198,7 +234,6 @@ export class GoogleSheetsService {
     static async getSheetData(tableId, range) {
         //console.warn(`[GoogleSheets READ] ${tableId} → ${range}`);
         
-        await GoogleSheetsAuth.getToken();
         const spreadsheetId = window.ENDPOINT_IDS[tableId];
         if (!spreadsheetId) throw new Error(`[GoogleSheetsData.getSheetData] SPREADSHEET_NOT_FOUND: Spreadsheet ID not found for table: ${tableId}`);
 
@@ -214,7 +249,6 @@ export class GoogleSheetsService {
      * @returns {Promise<Array<Array<Array<string>>>>} one 2D array per range, in order ([[]] when empty)
      */
     static async batchGetValues(tableId, ranges) {
-        await GoogleSheetsAuth.getToken();
         const spreadsheetId = window.ENDPOINT_IDS[tableId];
         if (!spreadsheetId) throw new Error(`[GoogleSheetsData.batchGetValues] SPREADSHEET_NOT_FOUND: Spreadsheet ID not found for table: ${tableId}`);
         if (!ranges || !ranges.length) return [];
@@ -230,7 +264,6 @@ export class GoogleSheetsService {
      * @returns {Promise<boolean>}
      */
     static async batchSetValues(tableId, data, options = {}) {
-        await GoogleSheetsAuth.getToken();
         const spreadsheetId = window.ENDPOINT_IDS[tableId];
         if (!spreadsheetId) throw new Error(`[GoogleSheetsData.batchSetValues] SPREADSHEET_NOT_FOUND: Spreadsheet ID not found for table: ${tableId}`);
         if (!data || !data.length) return true;
@@ -253,7 +286,6 @@ export class GoogleSheetsService {
      * @returns {Promise<boolean>}
      */
     static async appendSheetValues(tableId, range, rows) {
-        await GoogleSheetsAuth.getToken();
         const spreadsheetId = window.ENDPOINT_IDS[tableId];
         if (!spreadsheetId) throw new Error(`[GoogleSheetsData.appendSheetValues] SPREADSHEET_NOT_FOUND: Spreadsheet ID not found for table: ${tableId}`);
         if (!rows || !rows.length) return true;
@@ -278,7 +310,6 @@ export class GoogleSheetsService {
      * @returns {Promise<boolean>}
      */
     static async deleteSheetRows(tableId, tabName, rowNumbers) {
-        await GoogleSheetsAuth.getToken();
         const spreadsheetId = window.ENDPOINT_IDS[tableId];
         if (!spreadsheetId) throw new Error(`[GoogleSheetsData.deleteSheetRows] SPREADSHEET_NOT_FOUND: Spreadsheet ID not found for table: ${tableId}`);
         const rows = [...new Set((rowNumbers || []).map(Number).filter(n => Number.isInteger(n) && n > 1))].sort((a, b) => b - a);
@@ -311,7 +342,6 @@ export class GoogleSheetsService {
      * @returns {Promise<boolean|Array<Array<string>>>}
      */
     static async setSheetData(tableId, tabName, updates, mapping = null, options = {}) {
-        await GoogleSheetsAuth.getToken();
         const spreadsheetId = window.ENDPOINT_IDS[tableId];
         if (!spreadsheetId) throw new Error(`[GoogleSheetsData.setSheetData] SPREADSHEET_NOT_FOUND: Spreadsheet ID not found for table: ${tableId}`);
         
@@ -555,7 +585,6 @@ export class GoogleSheetsService {
      * @returns {Promise<Array<{title: string, sheetId: number}>>} - A promise that resolves to an array of objects with tab names and ids.
      */
     static async getSheetTabs(tableId) {
-        await GoogleSheetsAuth.getToken();
 
         const spreadsheetId = window.ENDPOINT_IDS[tableId];
         if (!spreadsheetId) throw new Error(`[getSheetTabs] Spreadsheet ID not found for table: ${tableId}`);
@@ -581,7 +610,6 @@ export class GoogleSheetsService {
      * @returns {Promise<void>}
      */
     static async hideTabs(tableId, tabs) {
-        await GoogleSheetsAuth.getToken();
 
         const spreadsheetId = window.ENDPOINT_IDS[tableId];
         if (!spreadsheetId) throw new Error(`[hideTabs] Spreadsheet ID not found for table: ${tableId}`);
@@ -611,7 +639,6 @@ export class GoogleSheetsService {
      * @returns {Promise<void>}
      */
     static async showTabs(tableId, tabs) {
-        await GoogleSheetsAuth.getToken();
 
         const spreadsheetId = window.ENDPOINT_IDS[tableId];
         if (!spreadsheetId) throw new Error(`[showTabs] Spreadsheet ID not found for table: ${tableId}`);
@@ -642,7 +669,6 @@ export class GoogleSheetsService {
      * @returns {Promise<void>}
      */
     static async copySheetTab(tableId, sourceTab, newTabName) {
-        await GoogleSheetsAuth.getToken();
 
         const spreadsheetId = window.ENDPOINT_IDS[tableId];
         if (!spreadsheetId) throw new Error(`[copySheetTab] Spreadsheet ID not found for table: ${tableId}`);
@@ -688,7 +714,6 @@ export class GoogleSheetsService {
      * @returns {Promise<Array<Object>>} - Query results as an array of objects
      */
     static async querySheetData(tableId, query) {
-        await GoogleSheetsAuth.getToken();
         
         try {
             // Parse the query
@@ -720,7 +745,6 @@ export class GoogleSheetsService {
      * @returns {Promise<void>}
      */
     static async createBlankTab(tableId, newTabName) {
-        await GoogleSheetsAuth.getToken();
 
         const spreadsheetId = window.ENDPOINT_IDS[tableId];
         if (!spreadsheetId) throw new Error(`[createBlankTab] Spreadsheet ID not found for table: ${tableId}`);
@@ -786,7 +810,7 @@ export class GoogleSheetsService {
     }
 
     static async getModifiedTimes(tableIds) {
-        if (!GoogleSheetsAuth.isActive()) return null;
+        if (!AuthSession.isActive()) return null;
         const entries = await Promise.all(tableIds.map(async (tableId) => {
             const fileId = window.ENDPOINT_IDS[tableId];
             if (!fileId) throw new Error(`[GoogleSheetsData.getModifiedTimes] SPREADSHEET_NOT_FOUND: Spreadsheet ID not found for table: ${tableId}`);
@@ -821,14 +845,6 @@ export class GoogleSheetsService {
                 
                 const query = `name='${fileName}' and parents in '${folderId}' and trashed=false`;
                 //console.log(`[icons] Drive search: "${fileName}" in folder ${folderId}`);
-
-                // Log token scope so we can confirm drive.readonly was granted
-                const _token = gapi.client.getToken();
-                if (_token) {
-                    //console.log('[icons] Token scope granted:', _token.scope || '(scope field not present in token)');
-                } else {
-                    console.warn('[icons] No OAuth token present — Drive call will fail');
-                }
 
                 const response = await gapi.client.request({
                     path: 'https://www.googleapis.com/drive/v3/files',
@@ -874,20 +890,19 @@ export class GoogleSheetsService {
      */
     static async getDriveFileBlob(fileId) {
         try {
-            const token = gapi.client.getToken();
-            if (!token || !token.access_token) {
-                console.warn('[icons] getDriveFileBlob: no token available');
-                return null;
-            }
-            const response = await fetch(
-                `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true`,
-                { headers: { Authorization: `Bearer ${token.access_token}` } }
-            );
-            if (!response.ok) {
-                console.warn(`[icons] getDriveFileBlob failed for ${fileId}: HTTP ${response.status}`);
-                return null;
-            }
-            return await response.blob();
+            return await this.withExponentialBackoff(async (token) => {
+                const response = await fetch(
+                    `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true`,
+                    { headers: { Authorization: `Bearer ${token}` } }
+                );
+                // A rejected token goes to the gate, which renews it once; other failures give up
+                if (response.status === 401) throw requestError('Drive refused the token.', 401);
+                if (!response.ok) {
+                    console.warn(`[icons] getDriveFileBlob failed for ${fileId}: HTTP ${response.status}`);
+                    return null;
+                }
+                return await response.blob();
+            });
         } catch (error) {
             console.error('[icons] getDriveFileBlob error:', error);
             return null;
@@ -934,11 +949,8 @@ export class GoogleSheetsService {
      */
     static async uploadDriveFile(file, fileName, folderId, appProperties = null) {
         // Its time grows with the file: no timeout, and not a measure of the connection
-        return await this.withExponentialBackoff(async () => {
+        return await this.withExponentialBackoff(async (token) => {
             try {
-                const token = gapi.client.getToken();
-                if (!token || !token.access_token) throw new Error('Not authenticated');
-
                 const metadata = { name: fileName, parents: [folderId], ...(appProperties ? { appProperties } : {}) };
                 const form = new FormData();
                 form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
@@ -948,7 +960,7 @@ export class GoogleSheetsService {
                     'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true&fields=id,name',
                     {
                         method: 'POST',
-                        headers: { Authorization: `Bearer ${token.access_token}` },
+                        headers: { Authorization: `Bearer ${token}` },
                         body: form
                     }
                 );

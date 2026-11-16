@@ -71,9 +71,6 @@ const App = {
         authInitialized() {
             return authState.isInitialized;
         },
-        usesSignInService() {
-            return authState.usesBroker;
-        },
         authError() {
             return authState.error;
         },
@@ -100,11 +97,7 @@ const App = {
         // may open Google's popup; nothing else does.
         sessionBanner() {
             const banner = { key: 'session', severity: SEVERITY.warning, dismissible: false, visible: false };
-            if (!this.isAuthenticated) return banner;
-            if (authState.status === AUTH_STATUS.EXPIRING) {
-                return { ...banner, visible: true, message: 'Your sign-in ends in a few minutes.', action: { label: 'Stay signed in', fn: () => Auth.renew() } };
-            }
-            if (authState.status !== AUTH_STATUS.NEEDS_USER) return banner;
+            if (!this.isAuthenticated || authState.status !== AUTH_STATUS.NEEDS_USER) return banner;
             if (authState.reason === 'unavailable') {
                 return { ...banner, visible: true, message: 'The sign-in service is unreachable; retrying every minute. Your unsaved changes are kept.', action: { label: 'Try again', fn: () => Auth.renew() } };
             }
@@ -466,14 +459,11 @@ const App = {
                 <!-- Signed out: one card (while sign-in starts up, the loading indicator below shows instead) -->
                 <div v-if="!isAuthenticated && authInitialized" class="container dashboard-card sign-in-card">
                     <div class="container-header orange">
-                        <h2>{{ usesSignInService ? 'Sign-in has changed' : 'Sign in' }}</h2>
+                        <h2>Sign in</h2>
                     </div>
                     <div class="content">
-                        <template v-if="usesSignInService">
-                            <p>The app now keeps you signed in. Sign in once on this device through Google's page: no more pop-ups.</p>
-                            <p>The first time, Google shows a permissions page. Choose <strong>Allow</strong> so the app can stay signed in.</p>
-                        </template>
-                        <p v-else>Sign in with your Top Shelf Exhibits Google account to see inventory, pack lists and the schedule.</p>
+                        <p>Sign in with your Top Shelf Exhibits Google account to see inventory, pack lists and the schedule. Sign in once on this device through Google's page, and the app keeps you signed in.</p>
+                        <p>The first time, Google shows a permissions page. Choose <strong>Allow</strong> so the app can stay signed in.</p>
                         <button :disabled="isAuthLoading" class="orange" @click="login">{{ isAuthLoading ? 'Signing in…' : 'Log in' }}</button>
                     </div>
                 </div>

@@ -1,5 +1,5 @@
 import { networkState, onConnectionChange } from './networkState.js';
-import { classifyError } from '../../google_sheets_services/authStatus.js';
+import { classifyError } from '../../auth/authStatus.js';
 
 /**
  * Cache Management System with CPU-Aware Operations

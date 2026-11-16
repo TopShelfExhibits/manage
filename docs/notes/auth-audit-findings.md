@@ -1,38 +1,48 @@
 # Authentication
 
-How sign-in works, how to set up the sign-in service, and what protects what. Built on the `auth-apps-script` branch (2026-11-10). It replaces the 2026-11-05 audit, summarized at the end.
+How sign-in works, how to set up the sign-in service, and what protects what. Built on the `auth-apps-script` branch (2026-11-10), and unified into `js/auth/` on 2026-11-16. It replaces the 2026-11-05 audit, summarized at the end.
 
 ---
 
 ## How it works
 
-**One session owns every token.** `GoogleSheetsAuth` (`google_sheets_services/GoogleSheetsAuth.js`, faked by `FakeGoogleSheetsAuth` in `FakeGoogle.js`) gets, keeps and renews tokens. `data_management/services.js` picks the real or fake services, once, for `Database`, `ApplicationUtils` and `application/utils/auth.js`.
+**One session owns every token.** `AuthSession` (`js/auth/AuthSession.js`) gets, keeps and renews tokens, and decides when the user is needed. It knows no provider and no data API. It works through two parts:
 
-**Two modes**, chosen by `APP_CONFIG.AUTH_BROKER_URL` (`config.js`, injected by `deploy.yml` from the `AUTH_BROKER_URL` Actions variable):
+| Part | File | What it does | Moving to a server |
+| --- | --- | --- | --- |
+| The sign-in service | `js/auth/SignInService.js` | The only client of the service: `exchange`, `refresh`, `signout` (the session) and `dropbox_list`, `dropbox_link` (`DropboxFiles`). One POST format, timeout and retry. | Port `apps-script/auth-broker/Code.gs` to answer the same actions, and point `AUTH_BROKER_URL` at it. Nothing else changes. |
+| The provider's sign-in page | `js/auth/SignInWindow.js` | The only Google-specific part of sign-in: the OAuth code request (PKCE, `state`), redirect or popup, and the answer from `auth-callback.html`. | Unchanged. Or, if the server runs the OAuth flow itself, this file becomes a link to its sign-in page. |
 
-| | With the sign-in service (Apps Script) | Without it (empty URL) |
-| --- | --- | --- |
-| Sign in (header button, or "Log in" on the empty page) | One redirect: Google, then `auth-callback.html`, then back to the same page. If a session is still held, no redirect at all. | Google's token popup |
-| Keeping the token | A background `fetch` to the service about 10 minutes before expiry. No window, works in hidden tabs. | 5 minutes before expiry, a "Stay signed in" banner. Its click opens Google's popup, which closes by itself. |
-| The service ends the session (revoked, idle 30 days, reused secret) | The banner says "Your sign-in has ended". Its click opens Google's sign-in in a popup, so the page and unsaved work stay. | (no service) |
-| The service is unreachable | Retries every minute and when the tab shows again. The banner says so and offers "Try again". | (no service) |
+`authStatus.js` holds the statuses, `classifyError` and the error shapes. The services take tokens from the session. `GoogleSheetsService.withExponentialBackoff` gets one for each attempt, sets it on Google's API client (`gapi`) and passes it to the request function. Google's API client loads on the first request, not at sign-in.
+
+**On localhost**, `data_management/services.js` runs the same session over `fakeSignIn` from `FakeGoogle.js`: `FakeSignInService`, `FakeSignInWindow` (each open is one window, answered at once) and an in-memory store. Only the edges are fake, so the AUTH tests exercise the real session. The page starts signed out on every reload.
+
+**The sign-in service is required.** It is set by `APP_CONFIG.AUTH_BROKER_URL` (`config.js`, injected by `deploy.yml` from the `AUTH_BROKER_URL` Actions variable). Without it, the page shows "Sign-in is not set up for this site". Google's hourly token popup, the earlier fallback, was removed on 2026-11-16, along with the `expiring` status and the "Stay signed in" banner.
+
+| Event | What happens |
+| --- | --- |
+| Sign in (header button, or "Log in" on the sign-in card) | One redirect: Google, then `auth-callback.html`, then back to the same page. If the service still holds a session, there is no redirect at all. |
+| Keeping the token | A background `fetch` to the service about 10 minutes before expiry. No window, and it works in hidden tabs. |
+| The service ends the session (revoked, idle 30 days, reused secret) | The banner says "Your sign-in has ended". Its click opens Google's sign-in in a popup, so the page and unsaved work stay. |
+| The service is unreachable | Retries every minute, when the tab shows again, and when the connection comes back. The banner says so and offers "Try again". |
 
 **Page load, in order:**
 1. Finish a sign-in that just came back from Google.
 2. Else use a stored token that is still good.
 3. Else renew through the service (a fetch).
-4. Else, with the service and a device someone signed in on (`last_email`), try once per tab to sign in without a click: a redirect with `prompt=none`, and `auth_silent_tried` in sessionStorage. With a live Google session and the app already allowed, Google sends the user straight back signed in. If Google needs the user, or the service has no refresh token for the account, the page quietly shows the sign-in card. Logging out forgets `last_email`, so a logout stays a logout.
+4. Else, on a device someone signed in on (`last_email`), try once per tab to sign in without a click: a redirect with `prompt=none`, and `auth_silent_tried` in sessionStorage. It is skipped while `networkState` says offline. With a live Google session and the app already allowed, Google sends the user straight back signed in. If Google needs the user, or the service has no refresh token for the account, the page quietly shows the sign-in card. Logging out forgets `last_email`, so a logout stays a logout.
 
-**Slow networks:** calls to the service time out after 60 s. A call with no readable answer (timed out, cut off, or an error page in place of JSON, whose first 300 characters go to the console) is sent once more. Repeating a renewal is safe within the two-minute grace. A sign-in exchange that still gets no answer asks the user to log in again, because Google's code is single-use.
+**Slow networks:** calls to the service time out after 60 s. A session action with no readable answer (timed out, cut off, or an error page in place of JSON, whose first 300 characters go to the console) is sent once more. Repeating a renewal is safe within the two-minute grace. A sign-in exchange that still gets no answer asks the user to log in again, because Google's code is single-use. Dropbox reads go through the request gate instead, with its backoff.
 
-**Statuses** (`AUTH_STATUS`, `authStatus.js`): `signed-out`, `active`, `expiring` (no service, token ends within 5 minutes), `needs-user` (signed in, but only the user's click can renew; `reason` is `expired`, `ended` or `unavailable`).
+**Statuses** (`AUTH_STATUS`, `authStatus.js`): `signed-out`, `active`, or `needs-user` (signed in, but only the user's click can get a new token). `reason` is `ended` (the service ended the session, or another tab signed out) or `unavailable` (the service can't be reached).
 
 **Rules the code keeps:**
 
-- **Background code never opens a window.** Every Sheets and Drive call takes its token from `getToken()`. That call renews through the service, or throws `AUTH_REQUIRED` and turns the status `needs-user`. A popup opens only from `signIn()` or `renew()`, called straight from a click.
-- **One request gate.** `GoogleSheetsService.withExponentialBackoff` sends a 401 to `handleUnauthorized(usedToken)`: with the service, it renews once and the call retries. Concurrent 401s share one renewal, and a 401 for a token already replaced just retries.
+- **Background code never opens a window.** Every Sheets, Drive and Dropbox request takes its token from `getToken()` through the request gate. That call renews through the service, or throws `AUTH_REQUIRED` and turns the status `needs-user`. A popup opens only from `renew()`, called straight from the banner's click.
+- **One request gate.** `GoogleSheetsService.withExponentialBackoff` sends a 401 to `handleUnauthorized(token)`, which renews once, and the call retries. Concurrent 401s share one renewal, and a 401 for a token already replaced just retries.
 - **One error test.** `classifyError` (`authStatus.js`) returns `auth`, `permission`, `quota`, `network` or `other`. A 403 for a sheet that isn't shared is `permission`: it never prompts sign-in.
 - **One prompt.** `app.js`'s `sessionBanner` is the only place the app asks about sign-in. It is drawn from `authState`, which `auth.js` mirrors from the session, so there is never a second modal. Dismissing never logs out.
+- **The data layer reads the user from the session.** `api.js` records `AuthSession.state.email` in edit history. Only the UI reads `authState`.
 - **Pages stay up while the session needs the user.** `authState.isAuthenticated` means "someone is signed in" and doesn't flip on expiry. While the session needs the user:
   - Store loads fail with "Sign in again to load this data." and reload when the session is active again (`reloadErrorStores`).
   - Saves keep the edits.
@@ -41,20 +51,22 @@ How sign-in works, how to set up the sign-in service, and what protects what. Bu
 - **Tabs agree.** One tab renews at a time (Web Locks, `tse-auth-renew`). Other tabs pick up its token through the `storage` event. Signing out in one tab turns the others `needs-user`, so their unsaved work stays.
 - **Another account.** If a different account signs in on a page, the page reloads.
 
-**Storage:**
+**Storage** (the key names are unchanged from earlier versions, so sessions carry over):
 
 | Key | Where | What |
 | --- | --- | --- |
-| `gapi_token` | localStorage | The access token, with `expiresAt`. Older tokens without it count as 3500 s from `timestamp`. |
+| `gapi_token` | localStorage | The access token, with `expiresAt` (and `timestamp`, which older versions read). Older tokens without `expiresAt` count as 3500 s from `timestamp`. |
 | `last_email` | localStorage | The login hint |
 | `auth_session` | localStorage | The service's session, `<id>.<secret>`, replaced on every renewal |
-| `auth_pending`, `auth_result` | sessionStorage | A redirect sign-in in flight: the `state`, the PKCE verifier and the page to come back to; then Google's answer |
+| `auth_service_used` | localStorage | This device has given consent through the service |
+| `auth_pending`, `auth_result`, `auth_silent_tried` | sessionStorage | A redirect sign-in in flight: the `state`, the PKCE verifier and the page to come back to; then Google's answer; and whether this tab tried signing in without a click |
 
 **Files:**
-- `google_sheets_services/`: `GoogleSheetsAuth.js`, `authStatus.js`, `FakeGoogle.js`, `GoogleSheetsData.js` (the gate)
+- `js/auth/`: `AuthSession.js`, `SignInService.js`, `SignInWindow.js`, `authStatus.js`
+- `google_sheets_services/GoogleSheetsData.js` (the request gate), `DropboxFiles.js`, `FakeGoogle.js` (`fakeSignIn`)
 - `data_management/services.js`
 - `application/utils/auth.js`
-- `application/app.js` (banner, Log in button)
+- `application/app.js` (banner, sign-in card)
 - `docs/auth-callback.html`
 - `apps-script/auth-broker/` (the service; not published with the site)
 
@@ -62,7 +74,7 @@ How sign-in works, how to set up the sign-in service, and what protects what. Bu
 
 ## Sign-in service setup
 
-The service is a Google Apps Script web app. It holds the OAuth client secret and each account's refresh token in its Script Properties, and hands the app new access tokens. Until `AUTH_BROKER_URL` is set, the app runs without it (Google's popup), so the branch can deploy first.
+The service is a Google Apps Script web app. It holds the OAuth client secret and each account's refresh token in its Script Properties, and hands the app new access tokens. The app needs it: deploy the service and set `AUTH_BROKER_URL` before this branch goes live, or nobody can sign in.
 
 ### 1. Google Cloud Console (the project that owns the app's OAuth client)
 
@@ -96,14 +108,14 @@ The account that owns the script runs every request. If it is suspended or delet
 
 **Updating the script later:** use **Deploy → Manage deployments → Edit → Version: New version**, which keeps the same URL. "New deployment" would change the URL.
 
-**Turning it off:** clear `AUTH_BROKER_URL` and redeploy. The app goes back to Google's popup, and stored sessions are ignored.
+**Turning it off:** not possible without losing sign-in: the app has no sign-in without the service. To stop every session, run `endAllSessions` (see Security).
 
 ### First use after the switch
 
 - A token from before keeps working until it expires. Then the banner asks the user to sign in once, in a popup.
 - A user whose token already expired sees the sign-in page and redirects once.
 - A device's first sign-in through the service asks Google for consent (`prompt=consent`, flagged by `auth_service_used`). Google gives a refresh token only with consent, and accounts that signed in with the popup before hold a grant without offline access. Without consent up front, the first sign-in would come back with no refresh token and redirect a second time. Later sign-ins on that device skip the permissions page.
-- Signed out, the page shows one card ("Sign-in has changed", or "Sign in" without the service) with a Log in button.
+- Signed out, the page shows one "Sign in" card with a Log in button.
 
 ---
 
@@ -184,8 +196,8 @@ The app reads the company Dropbox project folder through the sign-in service. Th
 
 ## Tests
 
-- **AUTH group** in `tests/tests.js` (12 tests, FakeGoogle): signed-out requests, sign-in, silent renewal, one shared renewal, 401 handling, an ended session (needs-user, no window, the poller pauses), renew, an unreachable service, `classifyError`, and sign-out.
-- **Not covered by the suite:** the real `GoogleSheetsAuth` service paths (renew, rotation, 401, unreachable, PKCE URL, popup and redirect finishing, other-tab pickup, sign-out) and `Code.gs`. The suite runs only against FakeGoogle, so both were checked on 2026-11-10 against stand-ins for `fetch`, `gapi` and the Apps Script services.
+- **AUTH group** in `tests/tests.js` (13 tests): the real `AuthSession` over `FakeSignInService` and `FakeSignInWindow`. Covered: signed-out requests, sign-in (one window), sign-in while a session is held (no window), silent renewal, one shared renewal, 401 handling, an ended session (needs-user, no window, the poller pauses), renew, an unreachable service and "Try again", `classifyError`, and sign-out.
+- **Not covered by the suite:** the real `SignInService.js` (HTTP, timeout, retry), `SignInWindow.js` (PKCE URL, the popup and redirect relay), other-tab pickup, and `Code.gs`. They were checked on 2026-11-10 against stand-ins for `fetch` and the Apps Script services, before they were split out of `GoogleSheetsAuth.js` on 2026-11-16; the split kept their code as it was.
 - **DROPBOX group** (7 tests, `FakeDropboxFiles`): output PDFs grouped by subfolder, folder matching through the index, a missing OUTPUT or project folder, batched and cached listings, fresh links, no Dropbox connected, and no answer. `Code.gs`'s Dropbox actions were checked on 2026-11-13 against stand-ins for Google's tokeninfo and the Dropbox API. Covered: the token and account checks, the scope refusal, the namespace pin, path refusal, paging, the shared listing cache, access-token renewal and disconnecting. The real `DropboxFiles.js`, and whether Dropbox's temporary links allow the `blob:` fetch (it falls back to opening the link), wait for the deployed site.
 
 **After deploying with the service:**
@@ -216,3 +228,13 @@ The app reads the company Dropbox project folder through the sign-in service. Th
   - Google's sign-in won't load in an iframe.
   - The browser-only token model has no refresh tokens, so renewing needs a popup or a redirect.
   - Renewing without a window needs a server holding a refresh token, which is why the Apps Script service exists.
+
+## Background: the 2026-11-16 unification
+
+- **Two session implementations.** `FakeGoogleSheetsAuth` re-implemented the session, so the tests checked the fake. Now one `AuthSession` runs everywhere, and only the service and the window are faked.
+- **Two clients of the service.** The session and `DropboxFiles` each built their own POST and parsing. Both now use `SignInService`.
+- **Two modes.** The no-service popup mode (Google's token client, the `expiring` status, the warning timer, browser-side revocation, two versions of the banner and card) was removed. The service is required.
+- **Sign-in owned the Sheets client.** The session loaded `gapi`, ran discovery and set its token. The request gate now does that, and the session knows no data API.
+- **Tokens read around the session.** Drive downloads and uploads read `gapi.client.getToken()` and skipped renewal. They now take the gate's token, so a 401 renews once like every other request.
+- **The data layer imported the UI.** `api.js` read `authState` for the user's email. It reads `AuthSession.state.email` now.
+- **Removed as unused or misplaced:** `isAuthenticated()`, `getMissingScopes()`, `getUserEmail()`, `Auth.state`, `BaseTokenManager`, `getDriveFileThumbnailLink` (real and fake), and the Drive search's token-scope logging. `getDeviceId` moved from `auth.js` to `sheetLockMixin.js`, the only place that uses it. The silent sign-in checks `networkState` instead of `navigator.onLine`.
