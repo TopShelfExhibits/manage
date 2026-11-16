@@ -1,9 +1,9 @@
-import { html, Requests, isNetworkError } from '../../index.js';
+import { html, Requests, getReactiveStore } from '../../index.js';
 
 /**
  * A show's output PDFs from the company Dropbox (CLIENT / YEAR / SHOW / OUTPUT), one detail item
- * per OUTPUT subfolder, each PDF a button that opens it in a new tab. Renders nothing when the app
- * has no Dropbox. Used in the schedule's show details.
+ * per OUTPUT subfolder, each PDF a button that opens it in a new tab. Read through a reactive store,
+ * so the list follows Dropbox changes. Used in the schedule's show details.
  */
 export const ShowOutputFiles = {
     name: 'ShowOutputFiles',
@@ -13,14 +13,14 @@ export const ShowOutputFiles = {
         year: { type: [String, Number], default: '' }
     },
     data() {
-        return { result: null, error: null, loading: false, opening: null };
+        return { store: null, opening: null };
     },
     computed: {
         showKey() {
             return [this.show, this.client, this.year].join('|');
         },
         groups() {
-            const projects = this.result?.projects || [];
+            const projects = this.store?.data || [];
             return projects.flatMap(project => project.groups.map(group => ({
                 key: `${project.path}/${group.name}`,
                 // Two project folders (a show filed under two client folders): say whose
@@ -29,32 +29,22 @@ export const ShowOutputFiles = {
             })));
         },
         message() {
-            if (this.loading) return 'Looking in Dropbox…';
-            if (this.error) return this.error;
-            if (!this.result?.projects.length) return 'No Dropbox project folder found for this show.';
+            if (!this.store || this.store.isLoading) return 'Looking in Dropbox…';
+            if (this.store.error) return this.store.error;
+            if (!this.store.data.length) return 'No Dropbox project folder found for this show.';
             if (!this.groups.length) return 'No PDFs in OUTPUT yet.';
             return '';
         }
     },
     watch: {
-        showKey: { immediate: true, handler() { this.load(); } }
+        showKey: {
+            immediate: true,
+            handler() {
+                this.store = getReactiveStore(Requests.getShowOutputFiles, null, [this.show, this.client, String(this.year)]);
+            }
+        }
     },
     methods: {
-        async load() {
-            const key = this.showKey;
-            this.loading = true;
-            this.error = null;
-            try {
-                const result = await Requests.getShowOutputFiles(this.show, this.client, this.year);
-                if (key === this.showKey) this.result = result;
-            } catch (error) {
-                if (key !== this.showKey) return;
-                console.warn('[ShowOutputFiles] Reading Dropbox failed:', error);
-                this.error = isNetworkError(error) ? "Couldn't reach Dropbox." : `Couldn't read Dropbox: ${error.message}`;
-            } finally {
-                if (key === this.showKey) this.loading = false;
-            }
-        },
         async open(file) {
             // The tab opens inside the click: one opened after waiting for the file would be blocked
             const tab = window.open('', '_blank');
@@ -78,12 +68,12 @@ export const ShowOutputFiles = {
         }
     },
     template: html`
-        <div v-if="result?.available !== false" class="details-grid">
+        <div class="details-grid">
             <div v-if="message" class="detail-item">
                 <label>Dropbox Output</label>
                 <span>
                     {{ message }}
-                    <button v-if="error && !loading" class="white small" @click="load">Try again</button>
+                    <button v-if="store?.error && !store.isLoading" class="white small" @click="store.load('Looking in Dropbox…')">Try again</button>
                 </span>
             </div>
             <div v-for="group in groups" :key="group.key" class="detail-item">

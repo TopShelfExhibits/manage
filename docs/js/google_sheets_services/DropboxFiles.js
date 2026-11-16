@@ -29,11 +29,6 @@ export class DropboxFiles {
     static _queue = [];
     static _flushScheduled = false;
 
-    /** Whether the app can reach Dropbox at all (the sign-in service is configured) */
-    static isAvailable() {
-        return SignInService.isConfigured();
-    }
-
     /**
      * One folder's listing. Calls made in the same moment go out together, up to 25 folders a
      * request (the service lists them in parallel).

@@ -219,6 +219,8 @@ export const ScheduleTableComponent = {
     async mounted() {
         this.columnTypesStore = getReactiveStore(Requests.getColumnTypes, null, ['PROD_SCHED', 'Production Schedule']);
         this.recreateStore();
+        // A show's details look in Dropbox: its client folders are read ahead
+        Requests.prefetchShowFolders();
     },
     methods: {
         recreateStore() {

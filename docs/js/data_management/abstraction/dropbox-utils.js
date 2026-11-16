@@ -35,7 +35,8 @@ function _groupOutputPdfs(listing, outputPath) {
 
 class dropboxUtils_uncached {
     /**
-     * One Dropbox folder's listing (cached for LISTING_LIFETIME_MS).
+     * One Dropbox folder's listing (cached for LISTING_LIFETIME_MS). A folder that isn't there
+     * lists as { entries: [], missing: true }.
      * @param {Object} deps
      * @param {string} path - '' (the company folder) or '/CLIENT/...'
      * @param {boolean} [recursive] - every file and folder below it
@@ -46,61 +47,56 @@ class dropboxUtils_uncached {
     }
 
     /**
-     * A show's project folders: CLIENT / YEAR / SHOW folders whose client and show names resolve,
-     * through the Clients and Shows index (computeIdentifier), to the show's identifier. A client
-     * folder named by an abbreviation matches. Usually one; a show filed under two client folders
+     * Start listing folders ahead of code that reads them (as Database.prefetch does for tabs): the
+     * listings land in their own cache entries, and the first read joins the one running. Records no
+     * dependency. NOT cached.
+     * @param {string[]} paths
+     */
+    static prefetch(paths) {
+        for (const path of new Set(paths || [])) {
+            // A failure reaches the caller's own read of the folder
+            DropboxUtils.listFolder(path).catch(() => {});
+        }
+    }
+
+    /**
+     * A show's project folders: CLIENT / YEAR / SHOW. The schedule row resolves through the Clients
+     * and Shows index as its identifier does (resolveIdentifierParts); folder names resolve strictly
+     * (resolveIndexName: the index name or an abbreviation, never a near name), so a client folder
+     * named by an abbreviation matches and an unrelated folder never does. The year folder is named
+     * exactly the year, and is read by its path. Usually one; a show filed under two client folders
      * gives both.
      * @returns {Promise<Array<{ client: string, year: string, show: string, path: string }>>}
      */
     static async findProjectFolders(deps, show, client, year) {
-        const yearText = String(parseInt(year, 10) || '');
-        const identifier = yearText ? await deps.call(ProductionUtils.computeIdentifier, show, client, yearText) : '';
-        if (!identifier) return [];
-        const target = normalizeMatchKey(identifier);
-        const resolvesToShow = async (showName, clientName) =>
-            normalizeMatchKey(await deps.call(ProductionUtils.computeIdentifier, showName, clientName, yearText)) === target;
+        const target = await deps.call(ProductionUtils.resolveIdentifierParts, show, client, year);
+        if (!target?.year) return [];
+        const named = async (folders, kind, wanted) => {
+            const names = await Promise.all(folders.map(folder => deps.call(ProductionUtils.resolveIndexName, kind, folder.name)));
+            return folders.filter((folder, i) => normalizeMatchKey(names[i]) === normalizeMatchKey(wanted));
+        };
 
-        const clientFolders = [];
-        for (const folder of _subfolders(await deps.call(DropboxUtils.listFolder, ''))) {
-            if (await resolvesToShow(show, folder.name)) clientFolders.push(folder);
-        }
-        const clientListings = await Promise.all(clientFolders.map(folder => deps.call(DropboxUtils.listFolder, folder.path)));
-        const yearFolders = clientListings.flatMap((listing, i) => _subfolders(listing)
-            .filter(folder => folder.name.trim() === yearText)
-            .map(folder => ({ client: clientFolders[i].name, path: folder.path })));
-        const yearListings = await Promise.all(yearFolders.map(folder => deps.call(DropboxUtils.listFolder, folder.path)));
-
+        const clientFolders = await named(_subfolders(await deps.call(DropboxUtils.listFolder, '')), 'client', target.client);
+        const yearListings = await Promise.all(clientFolders.map(folder => deps.call(DropboxUtils.listFolder, `${folder.path}/${target.year}`)));
         const projects = [];
-        for (let i = 0; i < yearFolders.length; i++) {
-            for (const folder of _subfolders(yearListings[i])) {
-                if (await resolvesToShow(folder.name, client)) {
-                    projects.push({ client: yearFolders[i].client, year: yearText, show: folder.name, path: folder.path });
-                }
+        for (let i = 0; i < clientFolders.length; i++) {
+            for (const folder of await named(_subfolders(yearListings[i]), 'show', target.show)) {
+                projects.push({ client: clientFolders[i].name, year: target.year, show: folder.name, path: folder.path });
             }
         }
         return projects;
     }
 
     /**
-     * A show's output PDFs, per project folder, grouped by OUTPUT subfolder.
-     * available is false when the app has no Dropbox (no sign-in service, or Dropbox not connected to it).
-     * @returns {Promise<{ available: boolean, projects: Array<{ client, year, show, path, groups: Array<{ name: string, files: Array<{ name, path, size, modified }> }> }> }>}
+     * A show's output PDFs, per project folder, grouped by OUTPUT subfolder. Throws
+     * DROPBOX_NOT_CONNECTED when the sign-in service has no Dropbox connected.
+     * @returns {Promise<Array<{ client, year, show, path, groups: Array<{ name: string, files: Array<{ name, path, size, modified }> }> }>>}
      */
     static async getShowOutputFiles(deps, show, client, year) {
-        if (!DropboxFiles.isAvailable()) return { available: false, projects: [] };
-        let projects;
-        try {
-            projects = await deps.call(DropboxUtils.findProjectFolders, show, client, year);
-        } catch (error) {
-            if (error.code === 'DROPBOX_NOT_CONNECTED') return { available: false, projects: [] };
-            throw error;
-        }
+        const projects = await deps.call(DropboxUtils.findProjectFolders, show, client, year);
         const outputPaths = projects.map(project => `${project.path}/${OUTPUT_FOLDER}`);
         const outputs = await Promise.all(outputPaths.map(path => deps.call(DropboxUtils.listFolder, path, true)));
-        return {
-            available: true,
-            projects: projects.map((project, i) => ({ ...project, groups: _groupOutputPdfs(outputs[i], outputPaths[i]) }))
-        };
+        return projects.map((project, i) => ({ ...project, groups: _groupOutputPdfs(outputs[i], outputPaths[i]) }));
     }
 
     /**
@@ -117,7 +113,7 @@ class dropboxUtils_uncached {
 export const DropboxUtils = wrapMethods(
     dropboxUtils_uncached,
     'dropbox',
-    ['getFileUrl'], // Uncached: links expire
+    ['getFileUrl', 'prefetch'], // Uncached: links expire; prefetch only starts reads
     [],
     { listFolder: LISTING_LIFETIME_MS }
 );

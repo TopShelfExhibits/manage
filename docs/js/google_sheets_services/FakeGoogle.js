@@ -2100,6 +2100,8 @@ if (isLocalhost() && FakeGoogleState.isPersistent()) {
  * The company Dropbox folder (DropboxFiles.js), as files. Folders exist because files sit in them.
  * Matches the schedule fixtures: Allen Arms and Gearfire 2025 SHOT, BestBuy Health 2025 TANDEM
  * (its client folder named by the abbreviation "Best Buy"), MOJO 2025 SHOT (no OUTPUT folder).
+ * Decoys that only a fuzzy or loose match would take: the client folder "Allen Armz", the show
+ * folder "SHOT Shaw" and the year folder "2025 old".
  */
 const FAKE_DROPBOX_FILES = [
     '/Allen Arms/2025/SHOT Show/CONCEPT/Allen Arms SHOT sketch.ai',
@@ -2113,6 +2115,9 @@ const FAKE_DROPBOX_FILES = [
     '/Allen Arms/2025/SHOT Show/OUTPUT/CONTROL/Counter Build.pdf',
     '/Allen Arms/2025/SHOT Show/OUTPUT/SETUP/Setup Guide.pdf',
     '/Allen Arms/2024/SHOT Show/OUTPUT/SETUP/Setup Guide 2024.pdf',
+    '/Allen Arms/2025 old/SHOT Show/OUTPUT/Old Cover.pdf',
+    '/Allen Arms/2025/SHOT Shaw/OUTPUT/Shaw Cover.pdf',
+    '/Allen Armz/2025/SHOT Show/OUTPUT/Armz Cover.pdf',
     '/Best Buy/2025/TANDEM/OUTPUT/SETUP/Tandem Setup.pdf',
     '/Gearfire/2025/SHOT/OUTPUT/ELEVATIONS/Gearfire Elevations.pdf',
     '/MOJO/2025/SHOT Show/CONCEPT/Mojo sketch.ai',
@@ -2149,10 +2154,6 @@ export class FakeDropboxFiles {
     static files = [...FAKE_DROPBOX_FILES];
     /** Every request, for tests: { action, paths | path, recursive } */
     static requests = [];
-
-    static isAvailable() {
-        return true;
-    }
 
     /** Same batching as the real service: calls made in the same moment are one request */
     static listFolder(path, { recursive = false } = {}) {

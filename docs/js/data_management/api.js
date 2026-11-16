@@ -563,12 +563,20 @@ class Requests_uncached {
     }
 
     /**
-     * A show's output PDFs in the company Dropbox (CLIENT / YEAR / SHOW / OUTPUT), grouped by
-     * OUTPUT subfolder. See DropboxUtils.getShowOutputFiles.
-     * @returns {Promise<{ available: boolean, projects: Array<{ client, year, show, path, groups: Array<{ name, files }> }> }>}
+     * A show's output PDFs in the company Dropbox (CLIENT / YEAR / SHOW / OUTPUT), per project
+     * folder, grouped by OUTPUT subfolder. See DropboxUtils.getShowOutputFiles.
+     * @returns {Promise<Array<{ client, year, show, path, groups: Array<{ name, files }> }>>}
      */
     static async getShowOutputFiles(deps, show, client, year) {
         return await deps.call(DropboxUtils.getShowOutputFiles, show, client, year);
+    }
+
+    /**
+     * Start reading the Dropbox folders every show's lookup begins with (the client folders), so
+     * the first show's files arrive a request sooner. NOT cached.
+     */
+    static prefetchShowFolders() {
+        DropboxUtils.prefetch(['']);
     }
 
     /**
@@ -1858,6 +1866,7 @@ export const Requests = wrapMethods(
         'saveInventoryProposalTable', 'markInventoryProposalCommitted',
         'getDriveFileBlob', // Uncached read: callers own the Blob
         'getDropboxFileUrl', // Uncached read: links expire
+        'prefetchShowFolders', // Only starts reads
         'writeCellsVerified',
         'saveShowNote'
     ], // Mutation methods (and fresh reads that must not be cached)
