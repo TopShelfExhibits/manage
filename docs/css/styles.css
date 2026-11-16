@@ -1048,7 +1048,7 @@ button.card {
     box-sizing: border-box;
     border-radius: var(--radius-lg);
     box-shadow: 0 4px 8px transparent;
-    transition: box-shadow 0.7s ease, top 0.2s ease;
+    transition: box-shadow 0.7s ease, top 0.2s ease, clip-path 0.2s ease;
 }
 
 .sticky-header-wrapper[style*="position: fixed"] {
@@ -2459,9 +2459,10 @@ td .cell-button-list > .card {
 
 
 
-/* Compact chrome: viewport medium and narrow, width < calc(BREAKPOINTS.wide + 2 * gutterFull).
-   Chrome only — content adapts through container queries (@container container-component). */
-@media (width < calc(1000px + 2 * 12px)) {
+/* Compact chrome: viewport medium and narrow, width < calc(BREAKPOINTS.wide + 2 * gutterFull), or
+   short, height < BREAKPOINTS.short (viewportChrome.compact). Chrome only — content adapts through
+   container queries (@container container-component). */
+@media (width < calc(1000px + 2 * 12px)), (height < 500px) {
     :root {
         font-size: 10pt;
     }
@@ -2568,6 +2569,39 @@ td .cell-button-list > .card {
         flex-grow: 1;
     }
 
+}
+
+/* Short viewport (height < BREAKPOINTS.short, viewportChrome.short): the compact nav turns 90°
+   counterclockwise onto the left edge, its logo at the bottom, so pages keep the screen's height.
+   It doesn't hide on scroll here (PrimaryNavComponent.isHidden), and opens to the right. */
+@media (height < 500px) {
+    :root {
+        --navbar-sticky-offset: 0px;
+    }
+    header nav {
+        top: 100dvh;
+        right: auto;
+        width: 100dvh;
+        transform-origin: 0 0;
+        transform: rotate(-90deg);
+    }
+    header nav.open {
+        max-height: 100dvw;
+    }
+    div#app-content,
+    div#app-content.dashboard {
+        padding-top: var(--padding-lg);
+        padding-left: calc(var(--navbar-height) + var(--padding-lg));
+    }
+    /* A collapsed stuck header (useStickyHeader, .sticky-hidden) slides in and out over the nav's
+       0.2s, clipped so nothing moves. Shown, the clip leaves room for its shadow. */
+    .sticky-header-wrapper[style*="position: fixed"] {
+        clip-path: inset(0 -16px -16px -16px);
+    }
+    .sticky-header-wrapper[style*="position: fixed"].sticky-hidden {
+        clip-path: inset(0 -16px 100% -16px);
+        pointer-events: none;
+    }
 }
 
 /* Medium container tier (width < BREAKPOINTS.wide): visual changes for medium and narrow content.

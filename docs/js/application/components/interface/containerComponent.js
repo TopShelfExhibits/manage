@@ -1,6 +1,7 @@
 import { html, BreadcrumbComponent, NavigationRegistry, BannerNotifications, SEVERITY } from '../../index.js';
 import { PageNoteComponent } from './pageNoteComponent.js';
 import { URLRouter } from '../../utils/urlRouter.js';
+import { viewportChrome } from '../../utils/useContainerSize.js';
 
 // Container component functionality
 export const ContainerComponent = {
@@ -27,7 +28,7 @@ export const ContainerComponent = {
             default: ''
         },
         // A dashboard card: fills its cell, and its header has an expand button instead of the
-        // bookmark and share buttons
+        // page actions (bookmark, share)
         cardStyle: {
             type: Boolean,
             default: false
@@ -51,9 +52,25 @@ export const ContainerComponent = {
         };
     },
     computed: {
-        // Get hamburger menu component from registry
+        // A page in compact chrome: its header has an X back to the dashboard instead of its actions,
+        // which move to the top of its page menu
+        compactPage() {
+            return !this.cardStyle && viewportChrome.compact;
+        },
+        // A page's own actions, in its header or its page menu
+        pageActions() {
+            if (this.cardStyle || !this.containerPath) return [];
+            return [
+                { key: 'bookmark', icon: 'bookmark', label: 'Bookmark', fn: this.bookmarkContainer },
+                { key: 'share', icon: 'share', label: 'Share Link', fn: this.shareContainer }
+            ];
+        },
+        headerActions() {
+            return this.compactPage ? [] : this.pageActions;
+        },
         hamburgerMenuComponent() {
-            return this.hamburgerMenuRegistry.getMenuComponent(this.containerType, this.containerPath);
+            const menuActions = this.compactPage ? this.pageActions : null;
+            return this.hamburgerMenuRegistry.getMenuComponent(this.containerType, this.containerPath, menuActions);
         },
         // Get navigation parameters from NavigationRegistry
         navigationParameters() {
@@ -207,17 +224,18 @@ export const ContainerComponent = {
                             title="Expand to page">
                         <span class="material-symbols-outlined">expand_content</span>
                     </button>
-                    <button v-if="containerPath && !cardStyle"
+                    <button v-for="action in headerActions"
+                            :key="action.key"
                             class="button-symbol white"
-                            @click="bookmarkContainer"
-                            title="Create bookmark">
-                        <span class="material-symbols-outlined">bookmark</span>
+                            @click="action.fn"
+                            :title="action.label">
+                        <span class="material-symbols-outlined">{{ action.icon }}</span>
                     </button>
-                    <button v-if="containerPath && !cardStyle"
+                    <button v-if="compactPage"
                             class="button-symbol white"
-                            @click="shareContainer"
-                            title="Share Page Link">
-                        <span class="material-symbols-outlined">share</span>
+                            @click="$emit('navigate-to-path', 'dashboard')"
+                            title="Close (back to the dashboard)">
+                        <span class="material-symbols-outlined">close</span>
                     </button>
                 </div>
             </div>

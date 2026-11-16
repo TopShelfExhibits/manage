@@ -291,7 +291,7 @@ There are 20 renderer instances in 14 components.
 | `docs/js/application/utils/views/fieldFormat.js`                     | `formatValue` (from `formatCellValue`)                                                     |
 | `docs/js/application/utils/views/viewColor.js`                       | `colorFor(row, field, resolved)`, `rowColorFor(row, resolved)` (wraps `getAutoColorClass`) |
 | `docs/js/application/utils/views/searchMatch.js`                     | `SEARCH_LIMITS`, `searchWords`, `matchRow`, `matchRows` (abort)                            |
-| `docs/js/application/utils/useContainerSize.js`                      | `useContainerSize()`, `useViewportSize()`, `BREAKPOINTS`                                   |
+| `docs/js/application/utils/useContainerSize.js`                      | `useContainerSize()`, `viewportChrome`, `BREAKPOINTS`                                      |
 | `docs/js/application/components/interface/dataViewComponent.js`      | `DataView`                                                                                 |
 | `docs/js/application/components/interface/viewSelectComponent.js`    | `ViewSelectComponent`                                                                      |
 | `docs/js/application/components/interface/contentHeaderComponent.js` | Shared header                                                                              |
@@ -642,7 +642,7 @@ There are two scopes, each with the same three tiers.
 - **Padding:** a container query measures the container's content box. `.container` has no padding, so a page or dashboard card measures its full width. `.modal > .content` has `--padding-md` padding, so modal widths add it back (§4.17).
 - **Dashboard cards** take the width of their grid cells (§4.11). A miniature is scaled with a transform, which leaves its layout width alone: it measures its unscaled width (360px per column), so it shows the view a card that size would.
 
-**Viewport scope** (`useViewportSize()`, CSS `@media`) covers app chrome, dashboard layout and default CSS variables: primary nav (`isMobileView`, today 800), root font size, the dashboard grid, `--padding-*`, `--navbar-height`, `--page-width-*`.
+**Viewport scope** (`viewportTier()`, the reactive `viewportChrome`, CSS `@media`) covers app chrome, dashboard layout and default CSS variables: primary nav, root font size, the dashboard grid, `--padding-*`, `--navbar-height`, `--page-width-*`.
 
 | Viewport tier | Chrome (R4.4)                                                 |
 | ------------- | ------------------------------------------------------------- |
@@ -650,7 +650,10 @@ There are two scopes, each with the same three tiers.
 | `medium`      | compact: 50px navbar, `--padding-md` 8px, `--padding-lg` 16px |
 | `narrow`      | compact                                                       |
 
-- **Compact chrome** covers medium and narrow (R4.4). It replaces today's ≤ 800px block, so portrait tablets and small laptop windows up to 1023px get the compact navbar.
+- **Compact chrome** covers medium and narrow (R4.4), and short viewports (below). It replaces today's ≤ 800px block, so portrait tablets and small laptop windows up to 1023px get the compact navbar. In JS it is `viewportChrome.compact` (the same media condition, through `matchMedia`).
+  - **Page headers** (`ContainerComponent`): a page's header has its page menu, then an X back to the dashboard. Its actions (`pageActions`: bookmark, share) move into a button bar at the top of its page menu: `getMenuComponent(type, path, pageActions)` adds `PageActionsMenuComponent`, which closes the menu before running the action. In full chrome they stay in the header and there is no X. Dashboard cards keep their expand button.
+- **Short viewport** (`height < 500px`, `viewportChrome.short`): the compact nav turns 90° counterclockwise onto the left edge (logo at the bottom), so pages keep the screen's height. It doesn't hide on scroll (`isHidden`), opens to the right, and sticky headers take no offset for it. `#app-content` has the nav's width as left padding instead of top padding.
+  - **Sticky headers appear only on the way back up** (tables, calendar, cards: `useStickyHeader`, `_collapsedOnShortScreen`). Scrolling down, a header starts collapsed where it would stick and scrolls away in its place. Once its place is out of view, scrolling up slides it in, and scrolling down slides it out again, with the nav's steps (`createScrollHider` in `scrollHider.js`, shared with the nav: more than 12px down past the last turn hides, more than 64px up shows) and the nav's 0.2s ease. While its place is in view, a collapsed header stays in that place instead of sticking, so no empty place shows and it can't slide in there; once shown, it stays until it settles back into its place. Stuck and collapsed, it is clipped (`clip-path`, `.sticky-hidden`), so nothing below it moves and it stays inside a dashboard card.
 - **The dashboard doesn't follow the viewport tiers.** Its grid follows orientation, and miniature mode follows the measured cell size (§4.11).
 - **Viewport thresholds include the page gutter**, so a viewport tier matches the tier of a full-width page container. `#app-content` has `--padding-md` on each side, and the gutter is the one in effect on the larger side of each boundary:
   - narrow: `width < calc(600px + 2 * 8px)` (616px). Compact chrome is on both sides, so this boundary matches the container exactly.
@@ -665,8 +668,8 @@ There are two scopes, each with the same three tiers.
 
 **Constants**
 
-- Defined once in `BREAKPOINTS` (JS: `{ narrow: 600, wide: 1000, gutterCompact: 8, gutterFull: 12 }`) and documented in [theme.css](../css/theme.css).
-- `@media` and `@container` conditions can't use CSS variables, but they can use `calc()` with literals. The numbers are therefore repeated as `calc(600px + 2 * 8px)` and similar, each with a comment pointing at `BREAKPOINTS`. `useViewportSize()` computes the same sums.
+- Defined once in `BREAKPOINTS` (JS: `{ narrow: 600, wide: 1000, short: 500, gutterCompact: 8, gutterFull: 12 }`) and documented in [theme.css](../css/theme.css).
+- `@media` and `@container` conditions can't use CSS variables, but they can use `calc()` with literals. The numbers are therefore repeated as `calc(600px + 2 * 8px)` and similar, each with a comment pointing at `BREAKPOINTS`. `viewportTier()` and `viewportChrome` compute the same sums.
 
 **Migration**
 

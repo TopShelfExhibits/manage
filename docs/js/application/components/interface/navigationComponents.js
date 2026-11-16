@@ -1,6 +1,7 @@
 import { html, NavigationRegistry, appSettings, runNonessentialAnalysisOnAllStores, SEVERITY, hamburgerMenuRegistry } from '../../index.js';
 import { PriorityQueue } from '../../utils/priorityQueue.js';
-import { viewportTier } from '../../utils/useContainerSize.js';
+import { viewportChrome } from '../../utils/useContainerSize.js';
+import { createScrollHider } from '../../utils/scrollHider.js';
 
 // Settings Menu Component
 const SettingsMenuComponent = {
@@ -101,8 +102,7 @@ export const PrimaryNavComponent = {
         const saved = localStorage.getItem('theme');
         const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
         return {
-            isMenuVisible: true,
-            lastScrollTop: 0,
+            scrollHider: createScrollHider(),
             darkMode: saved === 'dark' ? true : saved === 'light' ? false : prefersDark
         };
     },
@@ -117,9 +117,13 @@ export const PrimaryNavComponent = {
         logoSrc() {
             return this.isDarkMode ? 'assets/logoW.png' : 'assets/logo.png';
         },
+        // Compact chrome: the nav collapses to the current page and a toggle (size model §4.10)
         isMobileView() {
-            // Compact chrome: viewport medium and narrow tiers (size model §4.10, R4.4)
-            return viewportTier(window.innerWidth) !== 'wide';
+            return viewportChrome.compact;
+        },
+        // Scrolling down hides the nav, except on a short screen (the nav is on the left edge)
+        isHidden() {
+            return this.scrollHider.hidden && !this.isMenuOpen && !viewportChrome.short;
         },
         onlyEssentialAnalysis() {
             return appSettings.onlyRunEssentialAnalysis;
@@ -137,7 +141,7 @@ export const PrimaryNavComponent = {
             
             // If actual path changed (not just params), show the navbar
             if (newBase !== oldBase) {
-                this.isMenuVisible = true;
+                this.scrollHider.show();
             }
         }
     },
@@ -251,32 +255,16 @@ export const PrimaryNavComponent = {
         if (saved) document.documentElement.dataset.theme = saved;
         document.addEventListener('mouseup', this.handleClickOutside);
         
-        // Add a listener for scroll up or down in #app-content to hide or show the navbar.
-        // Avoid hiding if there's insufficient scrollable content (less than navbar height * 2).
+        // Scrolling #app-content down hides the nav and scrolling up shows it (scrollHider). A page
+        // with less than two nav heights to scroll keeps it shown.
         this._scrollHandler = () => {
             const appContent = document.querySelector('#app-content');
             if (!appContent) return;
-            
-            // Calculate available scrollable height
-            const scrollableHeight = appContent.scrollHeight - appContent.clientHeight;
-            const navbarHeight = parseFloat(
-                getComputedStyle(document.documentElement).getPropertyValue('--navbar-height')
-            );
-            const minScrollThreshold = navbarHeight * 2;
-            
-            // Don't allow hiding if there's not enough scrollable content
-            if (scrollableHeight < minScrollThreshold) {
-                this.isMenuVisible = true;
-                return;
-            }
-            
-            const currentScroll = appContent.scrollTop;
-            if (currentScroll > this.lastScrollTop + 12) {
-                this.isMenuVisible = false;
-                this.lastScrollTop = currentScroll;
-            } else if (currentScroll < this.lastScrollTop - 64 || currentScroll <= 0) {
-                this.isMenuVisible = true;
-                this.lastScrollTop = currentScroll;
+            const navbarHeight = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--navbar-height'));
+            if (appContent.scrollHeight - appContent.clientHeight < navbarHeight * 2) {
+                this.scrollHider.show();
+            } else {
+                this.scrollHider.update(appContent.scrollTop);
             }
         };
         
@@ -293,7 +281,7 @@ export const PrimaryNavComponent = {
     template: html`
         <header>
             <nav 
-                :class="{ 'open': isMenuOpen, 'hidden': !isMenuVisible && !isMenuOpen }"
+                :class="{ 'open': isMenuOpen, 'hidden': isHidden }"
                 >
                 <a @click.prevent="$emit('navigate-to-path', 'dashboard');">
                     <img :src="logoSrc" alt="Top Shelf Exhibits" />

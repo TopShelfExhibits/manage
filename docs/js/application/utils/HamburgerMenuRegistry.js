@@ -116,6 +116,31 @@ const LockRemovalMenuComponent = {
     `
 };
 
+// A page's header buttons as a bar at the top of its menu (getMenuComponent's pageActions). Each
+// closes the menu first: an action may open its own modal.
+const PageActionsMenuComponent = {
+    name: 'PageActionsMenuComponent',
+    props: {
+        pageActions: { type: Array, required: true }
+    },
+    emits: ['close-modal'],
+    inheritAttrs: false,
+    methods: {
+        run(action) {
+            this.$emit('close-modal');
+            action.fn();
+        }
+    },
+    template: html`
+        <div class="button-bar">
+            <button v-for="action in pageActions" :key="action.key" class="white" @click="run(action)">
+                <span class="material-symbols-outlined">{{ action.icon }}</span>
+                {{ action.label }}
+            </button>
+        </div>
+    `
+};
+
 // Hamburger Menu Registry
 export class HamburgerMenuRegistry {
     constructor() {
@@ -139,7 +164,12 @@ export class HamburgerMenuRegistry {
         this.menus.set(containerType, menuConfig);
     }
 
-    getMenuComponent(containerType, containerPath = '') {
+    /**
+     * The page menu: the registered menu with the shared items added.
+     * @param {Array<{key, icon, label, fn}>} [pageActions] - a page's header buttons, drawn as a bar
+     *        at the top of the menu instead (ContainerComponent's bookmark and share in compact chrome)
+     */
+    getMenuComponent(containerType, containerPath = '', pageActions = null) {
         const menu = this.getMenuConfig(containerType, containerPath);
         
         // Always provide standardized props
@@ -178,7 +208,12 @@ export class HamburgerMenuRegistry {
         if (containerType === 'packlist' || containerPath.startsWith('packlist/')) {
             components = this.filterPacklistMenuComponents(components, containerPath);
         }
-        
+
+        if (pageActions?.length) {
+            components.unshift(PageActionsMenuComponent);
+            standardProps.pageActions = pageActions;
+        }
+
         return {
             components,
             props: standardProps

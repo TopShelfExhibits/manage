@@ -99,16 +99,19 @@
 /*
  * Size model (views-and-renderers-plan §4.10). Two scopes, three tiers each:
  *   container (@container, useContainerSize): narrow < 600px · medium 600–999px · wide ≥ 1000px
- *   viewport  (@media, useViewportSize): the same tiers with the #app-content gutter added on the
- *             larger side of each boundary: narrow < 600 + 2*8 = 616px · wide ≥ 1000 + 2*12 = 1024px
+ *   viewport  (@media, viewportTier / viewportChrome): the same tiers with the #app-content gutter
+ *             added on the larger side of each boundary: narrow < 600 + 2*8 = 616px ·
+ *             wide ≥ 1000 + 2*12 = 1024px
  *   short     (@container height-container): height < 500px — a dashboard card, or #app-content
- *             on a full page
+ *             on a full page. A short viewport (@media (height < 500px)) is compact chrome too,
+ *             with the primary nav on the left edge.
  * CSS can't read variables in media conditions, so the numbers repeat here as calc() literals.
  * Keep them in sync with BREAKPOINTS in js/application/utils/useContainerSize.js.
  */
 
-/* Compact chrome: viewport medium and narrow (BREAKPOINTS.wide + 2 * gutterFull) */
-@media (width < calc(1000px + 2 * 12px)) {
+/* Compact chrome: viewport medium and narrow (BREAKPOINTS.wide + 2 * gutterFull), or short
+   (BREAKPOINTS.short); viewportChrome.compact */
+@media (width < calc(1000px + 2 * 12px)), (height < 500px) {
     :root {
         --padding-sm: 2px;
         --padding-md: 8px;

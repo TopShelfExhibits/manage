@@ -46,6 +46,7 @@ import { formatValue, formatText } from '../application/utils/views/fieldFormat.
 import { rowsToCards, bucketRowsToCards } from '../application/utils/views/cardsAdapter.js';
 import { applyColorRule, colorFor, rowColorFor } from '../application/utils/views/viewColor.js';
 import { containerTier, viewportTier, BREAKPOINTS } from '../application/utils/useContainerSize.js';
+import { createScrollHider } from '../application/utils/scrollHider.js';
 import { todayISOString, setTestToday, startOfTodayMs, resolveShortageAlertDays, shortageAlertDateFilters, INVENTORY_TAB_PREFERENCES, resolveInventoryTabList, itemVariantBase, resolveItemVariant, itemVariantFamilies, itemVariantKey, parseItemVariants, searchFilter, textFiltersToSearchParams, parseSearchParameters } from '../data_management/utils/helpers.js';
 import { instantWriteEntry, identityKey, cellKey, joinKey } from '../data_management/utils/instant-write-config.js';
 import { estimateShipDate } from '../data_management/utils/ship-date.js';
@@ -3709,6 +3710,22 @@ test('VIEWS SIZE', 'container and viewport tiers use the shared breakpoints', as
     assertEqual([containerTier(360), containerTier(599), containerTier(600), containerTier(999), containerTier(1000)], ['narrow', 'narrow', 'medium', 'medium', 'wide'], 'container');
     assertEqual([viewportTier(615), viewportTier(616), viewportTier(1023), viewportTier(1024)], ['narrow', 'medium', 'medium', 'wide'], 'viewport');
     assertEqual(BREAKPOINTS, { narrow: 600, wide: 1000, short: 500, gutterCompact: 8, gutterFull: 12 }, 'constants');
+});
+
+// The steps the primary nav (narrow) and sticky headers (short) hide and show by: more than 12px
+// down past the last turn hides, more than 64px up past it (or the top) shows
+test('VIEWS SIZE', 'scroll hider: 12px down hides, 64px up or the top shows', async () => {
+    const hider = createScrollHider();
+    hider.reset(500);
+    assertEqual([hider.update(510), hider.update(512), hider.update(513)], [false, false, true], 'down: hides past 12px');
+    assertEqual([hider.update(600), hider.update(537), hider.update(535)], [true, true, false], 'up from the last turn (600): shows past 64px');
+    assertEqual([hider.update(548), hider.update(560)], [true, true], 'down again from 535');
+    assertEqual(hider.update(0), false, 'the top shows');
+    hider.update(100);
+    hider.show();
+    assertEqual([hider.hidden, hider.update(105), hider.update(113)], [false, false, true], 'show keeps the last turn (100)');
+    hider.reset(300, true);
+    assertEqual([hider.hidden, hider.update(400), hider.update(340), hider.update(335)], [true, true, true, false], 'starts hidden: shows 64px up from the lowest point (400)');
 });
 
 test('VIEWS CARDS', 'rowsToCards: title, escaped content lines, footer, rowColor, decorations', async () => {
