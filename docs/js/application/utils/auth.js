@@ -202,19 +202,3 @@ export class Auth {
         return authState;
     }
 }
-
-/**
- * Returns a stable identifier for this browser/device profile.
- * Generated once using crypto.randomUUID() and persisted in localStorage.
- * Survives browser restarts. Clearing localStorage or using incognito produces a new ID,
- * which is safe — it will simply trigger the "Claim this device" banner rather than
- * silently releasing another session's lock.
- */
-export function getDeviceId() {
-    let id = localStorage.getItem('_tse_device_id');
-    if (!id) {
-        id = crypto.randomUUID();
-        localStorage.setItem('_tse_device_id', id);
-    }
-    return id;
-}

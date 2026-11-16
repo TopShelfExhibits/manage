@@ -1,5 +1,19 @@
-import { Requests, authState, CacheInvalidationBus, getDeviceId, undoRegistry, isNetworkError } from '../index.js';
+import { Requests, authState, CacheInvalidationBus, undoRegistry, isNetworkError } from '../index.js';
 import { whenConnected } from '../../data_management/utils/networkState.js';
+
+/**
+ * A stable identifier for this browser profile, kept in localStorage, so a lock knows which of a
+ * user's devices holds it. Clearing localStorage or a private window makes a new one, which is
+ * safe: it shows the "Claim this device" banner rather than silently releasing another's lock.
+ */
+function getDeviceId() {
+    let id = localStorage.getItem('_tse_device_id');
+    if (!id) {
+        id = crypto.randomUUID();
+        localStorage.setItem('_tse_device_id', id);
+    }
+    return id;
+}
 
 /**
  * sheetLockMixin — Vue Options API mixin for sheet-level write-lock management.

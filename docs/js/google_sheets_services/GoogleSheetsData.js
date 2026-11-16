@@ -867,26 +867,6 @@ export class GoogleSheetsService {
     }
 
     /**
-     * Fetch a Drive file's thumbnail link directly by file ID.
-     * Unlike files.list search, this is immediate and not subject to indexing delays.
-     * @param {string} fileId - Google Drive file ID
-     * @returns {Promise<string|null>} The thumbnailLink URL, or null if not available
-     */
-    static async getDriveFileThumbnailLink(fileId) {
-        try {
-            const response = await gapi.client.request({
-                path: `https://www.googleapis.com/drive/v3/files/${fileId}`,
-                method: 'GET',
-                params: { fields: 'thumbnailLink', supportsAllDrives: true }
-            });
-            return response.result?.thumbnailLink || null;
-        } catch (error) {
-            console.error('[icons] getDriveFileThumbnailLink error:', error);
-            return null;
-        }
-    }
-
-    /**
      * Fetch a Drive file's raw content as a Blob (authenticated — works for files that are not
      * publicly shared). Wrap it with URL.createObjectURL to show it in an <img>.
      * @param {string} fileId - Google Drive file ID
