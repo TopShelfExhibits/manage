@@ -541,6 +541,95 @@ test('DROPBOX', 'no answer fails the read and counts toward unreachable; once ba
     assertEqual(projects.map(p => p.path), [ALLEN_ARMS_SHOT], 'read once back');
 }));
 
+// The Dropbox watch: listings stay cached until the poller's look at Dropbox's changes reaches
+// them (DropboxUtils, caching.js "Other sources"). FakeDropboxFiles.addFile/removePath change the
+// fake Dropbox as a user would; triggerCachePoll looks at once. Each test puts the files back.
+async function _withDropboxShows(fn) {
+    _forgetDropbox();
+    const shows = () => Promise.all([
+        Requests.getShowOutputFiles('SHOT Show', 'Allen Arms', '2025'),
+        Requests.getShowOutputFiles('TANDEM', 'BestBuy Health', '2025')
+    ]);
+    await shows();
+    await triggerCachePoll();   // the watch has a cursor and nothing pending
+    FakeDropboxFiles.requests.length = 0;
+    await fn(shows);
+}
+
+test('DROPBOX', 'a file saved to OUTPUT shows after the next poll; only its listing is read again', () => _withDropboxShows(async (shows) => {
+    const added = `${ALLEN_ARMS_SHOT}/OUTPUT/SETUP/Setup Guide R2.pdf`;
+    FakeDropboxFiles.addFile(added);
+    try {
+        await triggerCachePoll();
+        const [allen] = await shows();
+        assertEqual(allen[0].groups.find(group => group.name === 'SETUP').files.map(file => file.name).sort(), ['Setup Guide R2.pdf', 'Setup Guide.pdf'], 'the new file');
+        assertEqual(_dropboxListings(), [[[`${ALLEN_ARMS_SHOT}/OUTPUT`], true]], 'only the OUTPUT listing');
+    } finally {
+        FakeDropboxFiles.removePath(added);
+        await triggerCachePoll();
+    }
+}));
+
+test('DROPBOX', 'a change elsewhere in the project reads nothing again', () => _withDropboxShows(async (shows) => {
+    const added = `${ALLEN_ARMS_SHOT}/CONCEPT/Allen Arms SHOT sketch 2.ai`;
+    FakeDropboxFiles.addFile(added);
+    try {
+        await triggerCachePoll();
+        await shows();
+        assertEqual(_dropboxListings(), [], 'no listing read');
+    } finally {
+        FakeDropboxFiles.removePath(added);
+        await triggerCachePoll();
+    }
+}));
+
+test('DROPBOX', 'a year folder added later is found: the missing folder\'s listing changes', () => _withDropboxShows(async () => {
+    assertEqual(await Requests.getShowOutputFiles('SHOT Show', 'Allen Arms', '2026'), [], 'no 2026 folder yet');
+    FakeDropboxFiles.addFile('/Allen Arms/2026/SHOT Show/OUTPUT/Cover 2026.pdf');
+    try {
+        await triggerCachePoll();
+        const projects = await Requests.getShowOutputFiles('SHOT Show', 'Allen Arms', '2026');
+        assertEqual(_groupSummary(projects), [['/Allen Arms/2026/SHOT Show', [['', ['Cover 2026.pdf']]]]], 'found');
+    } finally {
+        FakeDropboxFiles.removePath('/Allen Arms/2026');
+        await triggerCachePoll();
+    }
+    assertEqual(await Requests.getShowOutputFiles('SHOT Show', 'Allen Arms', '2026'), [], 'deleted again');
+}));
+
+test('DROPBOX', 'the panel\'s store reloads with the change', () => _withDropboxShows(async () => {
+    const store = await _loadedStore(Requests.getShowOutputFiles, null, ['TANDEM', 'BestBuy Health', '2025']);
+    const files = () => store.data[0]?.groups.flatMap(group => group.files.map(file => file.name)) || [];
+    assertEqual(files(), ['Tandem Setup.pdf'], 'before');
+    const added = '/Best Buy/2025/TANDEM/OUTPUT/SETUP/Tandem Map.pdf';
+    FakeDropboxFiles.addFile(added);
+    try {
+        await triggerCachePoll();
+        await _waitFor(() => files().length === 2 && !store.isLoading, 'the reload');
+        assertEqual(files(), ['Tandem Map.pdf', 'Tandem Setup.pdf'], 'after');
+    } finally {
+        FakeDropboxFiles.removePath(added);
+        await triggerCachePoll();
+    }
+}));
+
+test('DROPBOX', 'a look that fails starts the watch again: every listing is read again', () => _withDropboxShows(async (shows) => {
+    FakeDropboxFiles.connected = false;
+    try {
+        await triggerCachePoll();
+    } finally {
+        FakeDropboxFiles.connected = true;
+    }
+    assertEqual(FakeDropboxFiles._cursor, null, 'the cursor is dropped');
+    await triggerCachePoll();
+    await shows();
+    assertEqual(_dropboxListings(), [
+        [[''], false],
+        [['/Allen Arms/2025', '/Best Buy/2025'], false],
+        [[`${ALLEN_ARMS_SHOT}/OUTPUT`, '/Best Buy/2025/TANDEM/OUTPUT'], true]
+    ], 'client folders, both year folders and both OUTPUT folders read again');
+}));
+
 // ── Group 1: Identifier Resolution ───────────────────────────────────────────
 // computeIdentifier fuzzy-matches raw Show/Client/Year values against the Clients
 // and Shows index tables. These tests confirm the canonical output used by all

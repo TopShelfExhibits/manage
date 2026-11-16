@@ -1,6 +1,6 @@
 // The company Dropbox folder, read only (DropboxFiles: the sign-in service's Dropbox actions)
 import { DropboxFiles } from '../services.js';
-import { wrapMethods, ProductionUtils, normalizeMatchKey } from '../index.js';
+import { wrapMethods, watchSource, ProductionUtils, normalizeMatchKey } from '../index.js';
 
 /**
  * Project folders are CLIENT / YEAR / SHOW; a show's finished documents sit in its OUTPUT folder,
@@ -8,9 +8,11 @@ import { wrapMethods, ProductionUtils, normalizeMatchKey } from '../index.js';
  */
 const OUTPUT_FOLDER = 'OUTPUT';
 
-// Dropbox has no change stamps for the poller to watch (unlike the sheets), so a listing is read
-// again once it is this old. Offline, the cache keeps serving it.
-const LISTING_LIFETIME_MS = 5 * 60 * 1000;
+// Listings stay cached until Dropbox says they changed (the watch at the bottom), as sheet data
+// does. The poller asks at most this often: each look is a request to the sign-in service.
+const WATCH_INTERVAL_MS = 60 * 1000;
+// While the watch can't look (no connection, the service failing), listings expire after this long
+const UNCONFIRMED_MS = 5 * 60 * 1000;
 
 const _subfolders = (listing) => (listing?.entries || []).filter(entry => entry.folder);
 
@@ -35,7 +37,7 @@ function _groupOutputPdfs(listing, outputPath) {
 
 class dropboxUtils_uncached {
     /**
-     * One Dropbox folder's listing (cached for LISTING_LIFETIME_MS). A folder that isn't there
+     * One Dropbox folder's listing, cached until the watch sees it change. A folder that isn't there
      * lists as { entries: [], missing: true }.
      * @param {Object} deps
      * @param {string} path - '' (the company folder) or '/CLIENT/...'
@@ -114,6 +116,33 @@ export const DropboxUtils = wrapMethods(
     dropboxUtils_uncached,
     'dropbox',
     ['getFileUrl', 'prefetch'], // Uncached: links expire; prefetch only starts reads
-    [],
-    { listFolder: LISTING_LIFETIME_MS }
+    ['listFolder'] // Infinite cache: the watch below keeps listings current
 );
+
+const _isBelow = (path, folder) => path.startsWith(folder + '/');
+
+/**
+ * Whether Dropbox's changes (DropboxFiles.getChanges) reach a listing. A folder's listing changes
+ * when an entry in it changes; a recursive one when an entry anywhere below it does. Either is
+ * gone, or new, when it or a folder above it was deleted or added.
+ */
+function _listingChanged({ changed, touched }, path, recursive) {
+    const folder = path.toLowerCase();
+    if (touched.some(entry => entry === folder || _isBelow(folder, entry))) return true;
+    if (!recursive) return changed.has(folder);
+    return [...changed].some(entry => entry === folder || _isBelow(entry, folder));
+}
+
+// Dropbox watch, as the spreadsheet watch keeps sheet data (caching.js, Other sources)
+watchSource({
+    name: 'Dropbox',
+    prefix: 'dropbox:listFolder:',
+    minIntervalMs: WATCH_INTERVAL_MS,
+    unconfirmedMs: UNCONFIRMED_MS,
+    check: async (cached) => {
+        const changes = await DropboxFiles.getChanges();
+        return cached
+            .filter(({ args: [path, recursive] }) => changes.reset || _listingChanged(changes, path, !!recursive))
+            .map(({ key }) => key);
+    }
+});

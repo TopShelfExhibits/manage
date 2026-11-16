@@ -1107,7 +1107,11 @@ function _mustReadStamps(times) {
 
 /** Cached keys of a table's reads, with when each was filled. */
 function _tableKeys(tableId) {
-    const prefixes = _watch.prefixes(tableId);
+    return _keysUnder(_watch.prefixes(tableId));
+}
+
+/** Cached keys under any of the prefixes, with when each was filled. */
+function _keysUnder(prefixes) {
     const keys = new Map();
     for (const [key, entry] of CacheManager.cache.entries()) {
         if (prefixes.some(prefix => key.startsWith(prefix))) keys.set(key, entry.filled);
@@ -1216,6 +1220,47 @@ function _applyStamps(entries) {
     }
 }
 
+// ─── Other sources ───────────────────────────────────────────────────────────
+// A source that isn't a spreadsheet (the company Dropbox) is watched by the same poller, so its
+// reads stay cached until it says they changed, as sheet reads do. Its check gets the cached reads
+// under its prefix and names the ones that changed; they are invalidated, and the stores reload. It
+// runs only while some read is cached, and at most every minIntervalMs (a forced poll runs it). A
+// check that fails confirms nothing: reads unconfirmed for unconfirmedMs expire, as a spreadsheet's
+// do while Drive can't confirm it.
+const _sources = [];
+
+/**
+ * Watch a data source that isn't a spreadsheet (see Other sources above).
+ * @param {{ name: string, prefix: string, minIntervalMs?: number, unconfirmedMs?: number,
+ *           check: (cached: Array<{ key: string, args: Array }>) => Promise<string[]> }} source -
+ *        prefix: the cache key prefix of its reads; check: the keys of the cached reads that changed
+ */
+export function watchSource(source) {
+    _sources.push({ ...source, checkedAt: 0, confirmedAt: Date.now() });
+}
+
+async function _checkSources(force) {
+    for (const source of _sources) {
+        const keys = _keysUnder([source.prefix]);
+        const startedAt = Date.now();
+        if (!keys.size) { source.confirmedAt = startedAt; continue; }
+        if (!force && startedAt - source.checkedAt < (source.minIntervalMs || 0)) continue;
+        source.checkedAt = startedAt;
+        try {
+            const cached = [...keys.keys()].map(key => ({ key, args: JSON.parse(`[${key.slice(source.prefix.length)}]`) }));
+            const changed = await source.check(cached);
+            source.confirmedAt = startedAt;
+            changed.forEach(key => CacheManager.invalidate(key));
+        } catch (err) {
+            console.warn(`[CacheWatch] Could not check ${source.name} for changes:`, err);
+            if (!source.unconfirmedMs) continue;
+            for (const [key, filled] of keys) {
+                if (startedAt - Math.max(filled, source.confirmedAt) >= source.unconfirmedMs) CacheManager.expire(key);
+            }
+        }
+    }
+}
+
 // One poll at a time: on a slow connection a poll can outlast the interval. A call made while
 // one runs shares it; a forced one runs after it.
 let _pollRunning = null;
@@ -1226,11 +1271,11 @@ const SLOW_POLL_MS = 3 * 60 * 1000;
 function _pollCacheTimestamps({ force = false } = {}) {
     if (_pollRunning) return force ? _pollRunning.then(() => _pollCacheTimestamps({ force })) : _pollRunning;
     if (!force && networkState.isSlow && Date.now() - _lastPollAt < SLOW_POLL_MS) return Promise.resolve();
-    _pollRunning = _pollOnce().finally(() => { _pollRunning = null; });
+    _pollRunning = _pollOnce(force).finally(() => { _pollRunning = null; });
     return _pollRunning;
 }
 
-async function _pollOnce() {
+async function _pollOnce(force = false) {
     const readFn = _pollerReadFn;
     _lastPollAt = Date.now();
     _pollCount++;
@@ -1260,6 +1305,7 @@ async function _pollOnce() {
         }
         if (times) _applyModifiedTimes(times);
         else _expireUnconfirmed();
+        await _checkSources(force);
     } catch (err) {
         // Sign-in and access failures stop the poller; the app restarts it when the session is
         // active again (auth.js)

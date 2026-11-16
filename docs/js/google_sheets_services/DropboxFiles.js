@@ -1,5 +1,5 @@
 import { SignInService } from '../auth/SignInService.js';
-import { requestError } from '../auth/authStatus.js';
+import { requestError, isNetworkError } from '../auth/authStatus.js';
 import { GoogleSheetsService } from './GoogleSheetsData.js';
 
 /**
@@ -28,6 +28,10 @@ const MESSAGES = {
 export class DropboxFiles {
     static _queue = [];
     static _flushScheduled = false;
+    // The change watch: the cursor the next getChanges reads from. The session's first listing
+    // asks for one (watch), taken before its listing, so no change slips between them.
+    static _cursor = null;
+    static _cursorAsked = false;
 
     /**
      * One folder's listing. Calls made in the same moment go out together, up to 25 folders a
@@ -56,12 +60,40 @@ export class DropboxFiles {
             for (let i = 0; i < paths.length; i += MAX_PATHS) {
                 const chunk = paths.slice(i, i + MAX_PATHS);
                 const mine = waiting.filter(item => chunk.includes(item.path));
-                this._request({ action: 'dropbox_list', paths: chunk, recursive }).then(
-                    answer => mine.forEach(item => item.resolve(answer.folders[item.path])),
-                    error => mine.forEach(item => item.reject(error))
+                const watch = !this._cursor && !this._cursorAsked;
+                if (watch) this._cursorAsked = true;
+                this._request({ action: 'dropbox_list', paths: chunk, recursive, ...(watch ? { watch } : {}) }).then(
+                    answer => {
+                        if (answer.cursor && !this._cursor) this._cursor = answer.cursor;
+                        if (watch) this._cursorAsked = false;
+                        mine.forEach(item => item.resolve(answer.folders[item.path]));
+                    },
+                    error => {
+                        if (watch) this._cursorAsked = false;
+                        mine.forEach(item => item.reject(error));
+                    }
                 );
             }
         }
+    }
+
+    /**
+     * What changed in the folder since the last look: { changed: Set, touched: string[] } (lowercase
+     * paths; see dropbox_changes in Code.gs) or { reset: true } when it can't say, then every
+     * listing may have changed. Without a cursor (none yet, or the last look failed) it starts one,
+     * and answers reset.
+     */
+    static async getChanges() {
+        let answer;
+        try {
+            answer = await this._request({ action: 'dropbox_changes', ...(this._cursor ? { cursor: this._cursor } : {}) });
+        } catch (error) {
+            // No answer: the cursor still holds. Any other failure: start again with a fresh one
+            if (!isNetworkError(error)) this._cursor = null;
+            throw error;
+        }
+        this._cursor = answer.cursor;
+        return answer.reset ? { reset: true } : { changed: new Set(answer.changed), touched: answer.touched };
     }
 
     /**

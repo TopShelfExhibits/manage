@@ -2152,8 +2152,52 @@ export class FakeDropboxFiles {
     /** Tests: false answers as a service with no Dropbox connected */
     static connected = true;
     static files = [...FAKE_DROPBOX_FILES];
-    /** Every request, for tests: { action, paths | path, recursive } */
+    /** Every request, for tests: { action, paths | path, recursive, watch?, cursor? } */
     static requests = [];
+    /** Every change, as Dropbox's change list gives it: { tag: 'file' | 'folder' | 'deleted', path } (lowercase) */
+    static changes = [];
+    // The change watch, as DropboxFiles keeps it: a cursor is an index into changes
+    static _cursor = null;
+    static _cursorAsked = false;
+
+    /** Tests: add a file, as someone saving it to Dropbox (new folders above it are changes too) */
+    static addFile(path) {
+        const parts = path.split('/');
+        for (let i = 2; i < parts.length; i++) {
+            const folder = parts.slice(0, i).join('/').toLowerCase();
+            if (!this.files.some(file => file.toLowerCase().startsWith(folder + '/'))) this.changes.push({ tag: 'folder', path: folder });
+        }
+        this.files.push(path);
+        this.changes.push({ tag: 'file', path: path.toLowerCase() });
+    }
+
+    /** Tests: delete a file or folder */
+    static removePath(path) {
+        const lower = path.toLowerCase();
+        this.files = this.files.filter(file => file.toLowerCase() !== lower && !file.toLowerCase().startsWith(lower + '/'));
+        this.changes.push({ tag: 'deleted', path: lower });
+    }
+
+    /** Same answers as DropboxFiles.getChanges */
+    static async getChanges() {
+        this.requests.push({ action: 'dropbox_changes', cursor: this._cursor });
+        try {
+            await this._serviceCall();
+        } catch (error) {
+            if (error.code === 'DROPBOX_NOT_CONNECTED') this._cursor = null;
+            throw error;
+        }
+        const since = this._cursor;
+        this._cursor = this.changes.length;
+        if (since === null) return { reset: true };
+        const changed = new Set();
+        const touched = [];
+        for (const { tag, path } of this.changes.slice(since)) {
+            changed.add(path.slice(0, path.lastIndexOf('/')));
+            if (tag !== 'file' && !touched.includes(path)) touched.push(path);
+        }
+        return { changed, touched };
+    }
 
     /** Same batching as the real service: calls made in the same moment are one request */
     static listFolder(path, { recursive = false } = {}) {
@@ -2172,12 +2216,19 @@ export class FakeDropboxFiles {
             const waiting = queue.filter(item => item.recursive === recursive);
             if (!waiting.length) continue;
             const paths = [...new Set(waiting.map(item => item.path))];
-            this.requests.push({ action: 'dropbox_list', paths, recursive });
+            const watch = this._cursor === null && !this._cursorAsked;
+            if (watch) this._cursorAsked = true;
+            this.requests.push({ action: 'dropbox_list', paths, recursive, ...(watch ? { watch } : {}) });
             try {
+                // The cursor is taken before the listing, as the service does
+                const cursor = this.changes.length;
                 await this._serviceCall();
+                if (watch && this._cursor === null) this._cursor = cursor;
                 waiting.forEach(item => item.resolve(this._list(item.path, recursive)));
             } catch (error) {
                 waiting.forEach(item => item.reject(error));
+            } finally {
+                if (watch) this._cursorAsked = false;
             }
         }
     }
