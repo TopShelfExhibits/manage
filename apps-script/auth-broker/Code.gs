@@ -361,11 +361,13 @@ function dropboxCalls_(calls) {
   }
   return responses.map(function (response) {
     var code = response.getResponseCode();
+    var text = response.getContentText() || '';
     var body = {};
-    try { body = JSON.parse(response.getContentText() || '{}'); } catch (err) { body = {}; }
+    try { body = JSON.parse(text || '{}'); } catch (err) { body = {}; }
     if (code === 200) return { ok: true, body: body };
     if (code === 409) return { ok: false, summary: String(body.error_summary || '') };
-    throw new Error('Dropbox answered ' + code + (body.error_summary ? ': ' + body.error_summary : ''));
+    // A 400 explains itself in plain text (about the request, never the token)
+    throw new Error('Dropbox answered ' + code + ': ' + (body.error_summary || text.slice(0, 300)));
   });
 }
 
@@ -437,10 +439,14 @@ function connectDropbox() {
   props.deleteProperty('DROPBOX_AUTH_CODE');   // single-use either way
   var tokens = dropboxToken_({ grant_type: 'authorization_code', code: code });
   if (tokens.error) throw new Error('Dropbox refused the code (' + tokens.error + '). Run dropboxApprovalUrl for a new one.');
-  var extra = String(tokens.scope || '').split(' ').filter(function (s) { return s && DROPBOX_READ_SCOPES.indexOf(s) === -1; });
-  if (extra.length) {
+  var granted = String(tokens.scope || '').split(' ').filter(Boolean);
+  var extra = granted.filter(function (s) { return DROPBOX_READ_SCOPES.indexOf(s) === -1; });
+  var missing = DROPBOX_READ_SCOPES.filter(function (s) { return granted.indexOf(s) === -1; });
+  if (extra.length || missing.length) {
     revokeDropbox_(tokens.access_token);
-    throw new Error('Dropbox granted more than reading (' + extra.join(', ') + '). Turn those permissions off in the Dropbox app, then start again.');
+    throw new Error(extra.length
+      ? 'Dropbox granted more than reading (' + extra.join(', ') + '). Turn those permissions off in the Dropbox app, then start again.'
+      : 'Dropbox did not grant ' + missing.join(', ') + '. Tick it under Permissions in the Dropbox app, Submit, then start again.');
   }
   var namespace = findDropboxNamespace_(tokens.access_token);
   props.setProperties({ DROPBOX_REFRESH_TOKEN: tokens.refresh_token, DROPBOX_NAMESPACE_ID: String(namespace.id) });
@@ -458,6 +464,19 @@ function disconnectDropbox() {
   props.deleteProperty('DROPBOX_NAMESPACE_ID');
   CacheService.getScriptCache().remove('dropbox_access');
   console.log('Dropbox disconnected');
+}
+
+/**
+ * Runs the app's top-level Dropbox listing and logs what it found, or the error. The web app's
+ * own runs often can't be opened under Executions, so run this to see why the app's Dropbox
+ * requests fail. Logs folder names only.
+ */
+function checkDropbox() {
+  if (!dropboxConnected_()) { console.log('Dropbox is not connected. Run dropboxApprovalUrl, then connectDropbox.'); return; }
+  CacheService.getScriptCache().removeAll(['dropbox_access', 'dbx:l:' + hash_('')]);   // test the whole path
+  var folders = listDropboxFolders_([''], false)[0].entries.filter(function (e) { return e.folder; });
+  console.log('Dropbox works. ' + folders.length + ' folders at the top: ' +
+    folders.slice(0, 15).map(function (e) { return e.name; }).join(', ') + (folders.length > 15 ? ', …' : ''));
 }
 
 /** Logs every session: account, started, last used. No secrets. */

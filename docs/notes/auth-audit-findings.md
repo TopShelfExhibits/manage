@@ -150,7 +150,7 @@ The app reads the company Dropbox project folder through the sign-in service. Th
 1. **A Dropbox account for the app**, for example `liveinventory@topshelfexhibits.com`. Share the company project folder with it as **Can view**, and nothing else. It needs a team seat, or the team's sharing policy must allow a view-only outside member.
 2. **A Dropbox app** at [dropbox.com/developers/apps](https://www.dropbox.com/developers/apps), created as the admin:
    - **Scoped access, Full Dropbox.** The namespace pin and the account's view-only access keep it to the one folder.
-   - Under **Permissions**, tick only `files.metadata.read` and `files.content.read`, then **Submit**.
+   - Under **Permissions**, tick only `files.metadata.read` and `files.content.read`, then **Submit**. Do this before approving: a connection keeps the permissions it was approved with, so a later change needs `disconnectDropbox` and a new approval. `connectDropbox` refuses a connection that has more or fewer.
    - Copy the **App key** and **App secret**. The secret goes only into Script Properties.
 3. **Script Properties** on the sign-in service:
    - `DROPBOX_APP_KEY`, `DROPBOX_APP_SECRET`
