@@ -255,9 +255,8 @@ const App = {
         });
 
         // Path changes: scroll the new page to the top (the dashboard is one screen and doesn't
-        // scroll). Leaving the dashboard ends arrange mode; entering it re-measures the grid.
-        this.$watch(() => this.currentPage, (newPage) => {
-            if (newPage !== 'dashboard') NavigationRegistry.dashboardRegistry.arranging = false;
+        // scroll). Entering the dashboard re-measures the grid.
+        this.$watch(() => this.currentPage, () => {
             this.$nextTick(() => measureDashboardGrid());
         });
         this.$watch(() => this.currentPath, () => {
@@ -267,6 +266,14 @@ const App = {
                 if (appContent) appContent.scrollTop = 0;
             });
         });
+        // Each page has its own undo history, arrange mode included (its own address): undo on the
+        // dashboard never changes the layout. Leaving arrange mode drops its history.
+        this.$watch(() => this.currentPath.split('?')[0], (path) => {
+            const registry = NavigationRegistry.dashboardRegistry;
+            if (registry.arranging && path !== registry.arrangePath) undoRegistry.clearRouteHistory(registry.arrangePath);
+            registry.arranging = path === registry.arrangePath;
+            undoRegistry.setActiveRoute(path);
+        }, { immediate: true });
         observeDashboardGrid(this.$el.querySelector('#app-content'));
 
         // Watch for notification bus app-level changes to force computed to recalculate
@@ -370,7 +377,7 @@ const App = {
         },
 
         arrangeDashboard() {
-            NavigationRegistry.dashboardRegistry.arranging = true;
+            this.navigateToPath(NavigationRegistry.dashboardRegistry.arrangePath);
         },
 
         // Open the page the address names, once signed in (a short link resolves now). Until then
@@ -392,7 +399,7 @@ const App = {
         handleGlobalKeyDown(event) {
             // Escape ends arrange mode (when no modal is open to take it)
             if (event.key === 'Escape' && this.arranging && !this.modals.length) {
-                NavigationRegistry.dashboardRegistry.arranging = false;
+                this.navigateToPath('dashboard');
                 return;
             }
             // Ctrl+Z or Cmd+Z for undo

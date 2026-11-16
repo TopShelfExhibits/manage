@@ -3,6 +3,7 @@
 import { authState } from './auth.js';
 import { getReactiveStore } from './reactiveStores.js';
 import { Requests } from '../../data_management/api.js';
+import { undoRegistry } from './undoRegistry.js';
 import { entryPath, cleanPath, findCard, normalizeLayout, firstFreeSlot, freeGroupSlots, isFull, classesForSize, planMove, planResize, planSlotDrop, planSlotResize, fits } from './dashboardLayout.js';
 
 export const DashboardRegistry = Vue.reactive({
@@ -10,7 +11,11 @@ export const DashboardRegistry = Vue.reactive({
     saveTimeout: null,
     isSaving: false, // Track save state to prevent invalidation-triggered reloads
     SAVE_DELAY_MS: 5000, // 5 seconds
-    arranging: false, // Arrange mode: cards drawn as miniatures that can be moved and resized
+    // Arrange mode: cards drawn as miniatures that can be moved and resized. It is a page of its
+    // own (arrangePath), so its layout changes have their own undo history; app.js keeps
+    // `arranging` in step with the address.
+    arranging: false,
+    arrangePath: 'dashboard/arrange',
 
     /**
      * Initialize the dashboard registry
@@ -216,9 +221,14 @@ export const DashboardRegistry = Vue.reactive({
      * Write every placed card's rect into its stored entry, with the given rects applied.
      * Old entries are read first-fit (normalizeLayout); writing all of them on the first change
      * keeps one card's move from shifting the others. Cards that don't fit lose any stored rect.
+     * Every layout change starts here, so in arrange mode this records its undo step first
+     * (undoing or redoing it saves).
      * @param {Array<{path,x,y,w,h}>} rects - new rects by path
      */
     _commit(rects) {
+        if (this.arranging) {
+            undoRegistry.capture(this.store.data, this.arrangePath, { type: 'dashboard-layout', onRestore: () => this.save() });
+        }
         const { placed, unplaced, grouped } = this.layout;
         const updates = new Map(rects.map(r => [cleanPath(r.path), r]));
         for (const card of placed) {

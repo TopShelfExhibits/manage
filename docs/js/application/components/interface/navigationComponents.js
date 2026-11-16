@@ -158,7 +158,7 @@ export const PrimaryNavComponent = {
                 toggleDashboardHeaders: this.toggleDashboardHeaders,
                 openPageMenu: this.openCurrentPageMenu,
                 arrangeDashboard: this.currentPage === 'dashboard' && this.isAuthenticated
-                    ? () => { NavigationRegistry.dashboardRegistry.arranging = true; }
+                    ? () => this.$emit('navigate-to-path', NavigationRegistry.dashboardRegistry.arrangePath)
                     : null,
                 isAuthenticated: this.isAuthenticated
             }, 'Application Settings');
@@ -539,7 +539,7 @@ export const DashboardToggleComponent = {
             }
         },
         arrange() {
-            this.registry.arranging = true;
+            this.appContext.navigateToPath(this.registry.arrangePath);
             this.$emit('close-modal');
         }
     },

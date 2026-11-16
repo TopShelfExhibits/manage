@@ -63,7 +63,8 @@ export const undoRegistry = Vue.reactive({
             cellInfo = null,
             preventDuplicates = false,
             selectionState = null, // Optional: pass tableRowSelectionState to capture selections
-            undoAlert = null // Optional: message to show when this snapshot is undone/redone
+            undoAlert = null, // Optional: message to show when this snapshot is undone/redone
+            onRestore = null // Optional: called after this step is undone or redone (to save)
         } = options;
         
         // Normalize arrays to always be an array of data arrays
@@ -176,7 +177,8 @@ export const undoRegistry = Vue.reactive({
             cellInfo,
             arrays: arraySnapshots,
             selections: capturedSelections, // Store selection state
-            undoAlert // Message to surface when this snapshot is undone/redone
+            undoAlert, // Message to surface when this snapshot is undone/redone
+            onRestore
         };
         
         // Add to undo stack
@@ -580,14 +582,16 @@ export const undoRegistry = Vue.reactive({
                 snapshot: this._createSnapshotWithoutAppData(arrSnapshot.arrayRef)
             })),
             selections: currentSelections,
-            undoAlert: state.undoAlert || null
+            undoAlert: state.undoAlert || null,
+            onRestore: state.onRestore || null
         };
         targetStack.push(newState);
-        
+
         // Restore state while preserving AppData
         state.arrays.forEach(arrSnapshot => {
             this._restoreSnapshotPreservingAppData(arrSnapshot.arrayRef, arrSnapshot.snapshot);
         });
+        state.onRestore?.();
         
         // Restore selection state (must happen after arrays are restored)
         if (state.selections && typeof tableRowSelectionState !== 'undefined') {
@@ -602,6 +606,14 @@ export const undoRegistry = Vue.reactive({
         return state.undoAlert || null;
     },
     
+    // Whether the route (the active one by default) has a step to undo, or to redo (reactive)
+    canUndo(routeKey = this.currentRouteKey) {
+        return !!this.undoStacksByRoute.get(routeKey)?.undoStack.length;
+    },
+    canRedo(routeKey = this.currentRouteKey) {
+        return !!this.undoStacksByRoute.get(routeKey)?.redoStack.length;
+    },
+
     // Undo last operation for current route
     undo() {
         return this._performUndoRedo(true);

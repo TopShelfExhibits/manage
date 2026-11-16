@@ -1,4 +1,4 @@
-import { html, NavigationRegistry, appSettings } from '../../index.js';
+import { html, NavigationRegistry, appSettings, undoRegistry } from '../../index.js';
 import { GRID, GROUP_SIDE, MINI_MIN_CELL, MINI_BASE_WIDTH, transpose, clampRect, fits, planMove, planResize, planSlotDrop, planSlotResize, resizeRect, freeCells, freeGroupSlots, slotRect, sameRect, cleanPath } from '../../utils/dashboardLayout.js';
 
 /**
@@ -218,16 +218,12 @@ export const DashboardCell = {
             if (!this.onDashboard) return null;
             const style = gridAreaStyle(this.card);
             if (this.miniature) {
-                // Render the page MINI_BASE_WIDTH px wide per column (a card in a group as one
-                // column), scaled down to the cell
+                // The page renders MINI_BASE_WIDTH px wide per column (a card in a group as one
+                // column), scaled down to the card's width; CSS sizes it below the header
                 const g = dashboardGeometry;
                 const shown = toDisplay(this.card);
                 const width = g.cellWidth * shown.w + g.gap * (shown.w - 1);
-                const height = g.cellHeight * shown.h + g.gap * (shown.h - 1);
-                const scale = width > 0 ? Math.min(1, width / (MINI_BASE_WIDTH * Math.max(1, shown.w))) : 1;
-                style['--mini-scale'] = scale;
-                style['--mini-width'] = `${width / scale}px`;
-                style['--mini-height'] = `${height / scale}px`;
+                style['--mini-scale'] = width > 0 ? Math.min(1, width / (MINI_BASE_WIDTH * Math.max(1, shown.w))) : 1;
             }
             return style;
         }
@@ -385,7 +381,14 @@ export const DashboardCell = {
  */
 export const DashboardArrangeLayer = {
     components: { DashboardCell },
+    inject: ['appContext'],
     computed: {
+        canUndo() {
+            return undoRegistry.canUndo(this.registry.arrangePath);
+        },
+        canRedo() {
+            return undoRegistry.canRedo(this.registry.arrangePath);
+        },
         registry() {
             return NavigationRegistry.dashboardRegistry;
         },
@@ -434,8 +437,15 @@ export const DashboardArrangeLayer = {
                 await this.registry.placeAt(option.path, cell);
             }
         },
+        // Arrange mode is its own page: undo and redo act on its layout history (and save)
+        undo() {
+            undoRegistry.undo();
+        },
+        redo() {
+            undoRegistry.redo();
+        },
         done() {
-            this.registry.arranging = false;
+            this.appContext.navigateToPath('dashboard');
         }
     },
     template: html`
@@ -462,6 +472,8 @@ export const DashboardArrangeLayer = {
              :style="gridAreaStyle(preview.rect)"></div>
         <div class="button-bar dashboard-arrange-bar">
             <span>Drag a card to move it, an edge or corner to resize it</span>
+            <button class="button-symbol white" title="Undo" :disabled="!canUndo" @click="undo"><span class="material-symbols-outlined">undo</span></button>
+            <button class="button-symbol white" title="Redo" :disabled="!canRedo" @click="redo"><span class="material-symbols-outlined">redo</span></button>
             <button class="green" @click="done">Done</button>
         </div>
     `

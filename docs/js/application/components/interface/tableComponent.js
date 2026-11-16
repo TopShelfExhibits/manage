@@ -4307,7 +4307,7 @@ export const TableComponent = {
                             class="button-symbol white"
                             title="Undo"
                         >
-                            ⮢
+                            <span class="material-symbols-outlined">undo</span>
                         </button>
                         <button
                             v-if="isBatchEditing && showUndoRedo"
@@ -4316,7 +4316,7 @@ export const TableComponent = {
                             class="button-symbol white"
                             title="Redo"
                         >
-                            ⮣
+                            <span class="material-symbols-outlined">redo</span>
                         </button>
                     </template>
                 </ContentHeaderComponent>

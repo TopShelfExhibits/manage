@@ -328,15 +328,39 @@ div#app-content > div.empty-message,
     padding: 0;
 }
 
-/* Miniature: the page rendered at --mini-width x --mini-height, scaled down to the cell */
+/* Miniature: the card keeps its cell's size, so its corners match the cells around it. Its header
+   stays full size, one compact line with no buttons. The page below renders at the miniature
+   width (--mini-scale, DashboardCell) and is scaled down to fit; it is the container its views
+   measure, so they lay out as at that width. */
 .dashboard-cell.miniature > .container.dashboard-card {
+    --mini-header-height: 0px;
+    position: relative;
+}
+.dashboard-cell.miniature > .container.dashboard-card:has(> .container-header) {
+    --mini-header-height: calc(1.5rem + 2 * var(--padding-sm));
+}
+.dashboard-cell.miniature > .container.dashboard-card > .container-header {
+    box-sizing: border-box;
+    height: var(--mini-header-height);
+    padding-block: var(--padding-sm);
+    flex-wrap: nowrap;
+    overflow: hidden;
+    white-space: nowrap;
+}
+.dashboard-cell.miniature > .container.dashboard-card > .container-header .button-group {
+    display: none;
+}
+.dashboard-cell.miniature > .container.dashboard-card > .content {
     position: absolute;
-    top: 0;
+    top: var(--mini-header-height);
     left: 0;
-    width: var(--mini-width);
-    height: var(--mini-height);
+    width: calc(100% / var(--mini-scale));
+    height: calc((100% - var(--mini-header-height)) / var(--mini-scale));
     transform: scale(var(--mini-scale));
     transform-origin: 0 0;
+    container-name: container-component height-container;
+    container-type: size;
+    overflow: hidden;
 }
 
 /* Arrange mode: a handle over each card to drag it, a remove button, resize zones along its edges
@@ -368,10 +392,6 @@ div#app-content > div.empty-message,
 }
 .dashboard-cell-controls {
     top: var(--padding-md);
-}
-/* The header names the card while arranging: its buttons give way to the remove button */
-.dashboard-cell.arranging .container-header .button-group {
-    visibility: hidden;
 }
 .dashboard-cell-resize {
     bottom: var(--padding-md);
@@ -481,6 +501,9 @@ div#app-content.dashboard.arranging {
     bottom: var(--padding-md);
     left: 50%;
     transform: translateX(-50%);
+    /* Its own width, up to the screen's (starting halfway across, it would get only half) */
+    width: max-content;
+    max-width: calc(100vw - 2 * var(--padding-md));
     z-index: 5000;
     box-shadow: 0 4px 8px var(--color-shadow);
 }
