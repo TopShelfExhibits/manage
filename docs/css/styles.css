@@ -157,13 +157,15 @@ div#app-content {
     container-type: size;
 }
 
-/* Dashboard: one screen, a 4 x 2 grid of cards, 2 x 4 in portrait (dashboardComponents.js).
-   Keep the grid sizes in step with GRID in js/application/utils/dashboardLayout.js and the
-   orientation query with PORTRAIT_QUERY in dashboardComponents.js. */
+/* Dashboard: one screen, a 4 x 2 grid of cards, 2 x 4 in portrait (dashboardComponents.js). Each
+   cell is 2 x 2 tracks (GROUP_SIDE), so a group's small cards are grid items too; with the same
+   gap between tracks, the cells come out as on a 4 x 2 grid. Keep the sizes in step with GRID and
+   GROUP_SIDE in js/application/utils/dashboardLayout.js and the orientation query with
+   PORTRAIT_QUERY in dashboardComponents.js. */
 div#app-content.dashboard:not(:has(> div.empty-message)) {
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    grid-template-rows: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(8, minmax(0, 1fr));
+    grid-template-rows: repeat(4, minmax(0, 1fr));
     align-items: stretch;
     justify-items: stretch;
     gap: var(--padding-lg);
@@ -173,8 +175,8 @@ div#app-content.dashboard:not(:has(> div.empty-message)) {
 }
 @media (orientation: portrait) {
     div#app-content.dashboard:not(:has(> div.empty-message)) {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        grid-template-rows: repeat(4, minmax(0, 1fr));
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        grid-template-rows: repeat(8, minmax(0, 1fr));
     }
 }
 /* Room around the cards (the arrange bar's room below wins while arranging) */
@@ -357,13 +359,14 @@ div#app-content > div.empty-message,
     cursor: grabbing;
     opacity: .6;
 }
-.dashboard-cell-remove,
+/* Top right: remove (and, for a card in a group, make it wide or tall); bottom right: resize */
+.dashboard-cell-controls,
 .dashboard-cell-resize {
     position: absolute;
     right: var(--padding-md);
     z-index: 1020;
 }
-.dashboard-cell-remove {
+.dashboard-cell-controls {
     top: var(--padding-md);
 }
 /* The header names the card while arranging: its buttons give way to the remove button */
@@ -372,6 +375,9 @@ div#app-content > div.empty-message,
 }
 .dashboard-cell-resize {
     bottom: var(--padding-md);
+}
+.dashboard-cell-resize,
+.dashboard-cell-controls > .slot-resize {
     cursor: nwse-resize;
     touch-action: none;
 }
@@ -428,6 +434,28 @@ div#app-content > div.empty-message,
     box-sizing: border-box;
     border: 2px dashed var(--color-gray-bg-transparent);
     border-radius: var(--radius-lg);
+}
+/* A group while arranging: its frame, its free slots (small, so their buttons scroll), and a bar
+   at its centre that moves and removes it, clear of its cards' remove buttons */
+.dashboard-cell.group {
+    /* border: 2px dashed var(--color-primary); */
+    border-radius: var(--radius-lg);
+    background: var(--color-blue-bg-transparent);
+}
+#app-content.dashboard > .dashboard-slot.group-slot {
+    overflow: auto;
+}
+.dashboard-group-controls {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 1020;
+    box-shadow: 0 4px 8px var(--color-shadow);
+}
+.dashboard-group-controls > button:first-child {
+    cursor: grab;
+    touch-action: none;
 }
 #app-content.dashboard > .dashboard-drop-preview {
     z-index: 1030;

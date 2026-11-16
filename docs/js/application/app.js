@@ -190,7 +190,9 @@ const App = {
                 };
             };
             if (this.isDashboard) {
-                return NavigationRegistry.dashboardRegistry.layout.placed.map(card => containerFor(card.path, card));
+                // The grid's cards and the cards in groups (groups themselves draw only while arranging)
+                const { placed, grouped } = NavigationRegistry.dashboardRegistry.layout;
+                return [...placed.filter(card => !card.group), ...grouped].map(card => containerFor(card.path, card));
             }
             return [containerFor(this.currentPath, null)];
         }

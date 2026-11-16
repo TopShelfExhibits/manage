@@ -10,9 +10,19 @@
  * normalizeLayout places those first-fit when read, so old data needs no migration. `classes`
  * keeps being written from the size (classesForSize), so sessions on an older deploy still
  * draw something sensible.
+ *
+ * Groups: a group is one cell split into GROUP_SIDE x GROUP_SIDE half cells, holding small cards.
+ * A card in a group covers one half cell, two (wide or tall), or all four. A group is stored as
+ * { group: id, x, y, w, h } with no path, so older deploys skip it; in memory it is placed like a
+ * card under the path groupPath(id). A card in a group is stored as
+ * { path, classes, inGroup: id, slot: { x, y, w, h } } with no rect (an older deploy places it
+ * first-fit). Its slot is a rect in half cells from the group's corner, in landscape terms, so
+ * the rect helpers (rectsOverlap, resizeRect, sameRect) work on slots too; its rect on the grid
+ * is the slot's (slotRect).
  */
 
 export const GRID = Object.freeze({ cols: 4, rows: 2 });
+export const GROUP_SIDE = 2;
 
 /**
  * Miniature mode: below this cell size (px) cards stop being interactive and show a scaled
@@ -22,9 +32,47 @@ export const GRID = Object.freeze({ cols: 4, rows: 2 });
 export const MINI_MIN_CELL = Object.freeze({ width: 300, height: 200 });
 export const MINI_BASE_WIDTH = 360;
 
-/** Path of a stored entry (a plain string in old data). */
+/** A group's path in memory (stored groups have none) */
+export function groupPath(id) {
+    return `group:${id}`;
+}
+
+/** Path of a stored entry (a plain string in old data; a group's in-memory path). */
 export function entryPath(entry) {
-    return typeof entry === 'string' ? entry : (entry?.path || '');
+    if (typeof entry === 'string') return entry;
+    return entry?.path || (entry?.group ? groupPath(entry.group) : '');
+}
+
+/** A group's half cells ({ x, y, w: 1, h: 1 } from its corner), row by row */
+export function groupSlots(group) {
+    const slots = [];
+    for (let y = 0; y < group.h * GROUP_SIDE; y++) {
+        for (let x = 0; x < group.w * GROUP_SIDE; x++) slots.push({ x, y, w: 1, h: 1 });
+    }
+    return slots;
+}
+
+/** The rect on the grid of a slot in a group (a slot is in half cells from the group's corner) */
+export function slotRect(group, slot) {
+    return {
+        x: group.x + slot.x / GROUP_SIDE,
+        y: group.y + slot.y / GROUP_SIDE,
+        w: slot.w / GROUP_SIDE,
+        h: slot.h / GROUP_SIDE
+    };
+}
+
+/** A slot inside the group, in whole half cells, clear of the other cards in it */
+function slotFits(group, slot, others) {
+    const { x, y, w, h } = slot || {};
+    const inside = [x, y, w, h].every(Number.isInteger) && w >= 1 && h >= 1 && x >= 0 && y >= 0
+        && x + w <= group.w * GROUP_SIDE && y + h <= group.h * GROUP_SIDE;
+    return inside && others.every(card => !rectsOverlap(card.slot, slot));
+}
+
+/** The cards of a group (any list of { inGroup, slot }) */
+function cardsIn(cards, groupId) {
+    return cards.filter(card => card.inGroup === groupId);
 }
 
 /** Path without URL parameters: one card per page path. */
@@ -131,40 +179,72 @@ export function isFull(placed) {
  *   1. Entries with a valid stored rect keep it, in list order, unless it overlaps one before.
  *   2. The rest are placed first-fit in list order at their legacy size (classes), or 1 x 1 when
  *      that size has no room.
- *   3. What still doesn't fit is unplaced: kept in the list, not drawn.
+ *   3. Cards in a placed group take their slot, or else the group's first free half cell. Without
+ *      one they are placed like any card.
+ *   4. What still doesn't fit is unplaced: kept in the list, not drawn.
  * Duplicate paths (same page twice) keep the first.
- * @returns {{ placed: Array<{path,index,x,y,w,h}>, unplaced: Array<{path,index}> }}
+ * @returns {{ placed: Array<{path,index,x,y,w,h,group?}>, unplaced: Array<{path,index}>,
+ *             grouped: Array<{path,index,inGroup,slot,x,y,w,h}> }}
+ *          placed holds cards and groups (group: its id); grouped holds the cards in groups.
  *          index is the entry's position in the stored list.
  */
 export function normalizeLayout(entries) {
     const list = Array.isArray(entries) ? entries : [];
     const placed = [];
     const unplaced = [];
+    const grouped = [];
     const seen = new Set();
     const pending = [];
+    const members = [];
 
     list.forEach((entry, index) => {
         const path = entryPath(entry);
         const key = cleanPath(path);
         if (!key || seen.has(key)) return;
         seen.add(key);
+        if (entry.inGroup) {
+            members.push({ path, index, entry });
+            return;
+        }
+        const card = entry.group ? { path, index, group: entry.group } : { path, index };
         const stored = typeof entry === 'object' ? { x: entry.x, y: entry.y, w: entry.w, h: entry.h } : null;
         if (stored && isValidRect(stored) && fits(placed, stored)) {
-            placed.push({ path, index, ...stored });
+            placed.push({ ...card, ...stored });
         } else {
-            pending.push({ path, index, entry });
+            pending.push({ card, entry });
         }
     });
 
-    for (const { path, index, entry } of pending) {
-        const size = sizeFromClasses(typeof entry === 'object' ? entry.classes : '');
+    const placeFirstFit = (card, classes) => {
+        const size = sizeFromClasses(classes);
         const rect = firstFreeSlot(placed, size.w, size.h) || firstFreeSlot(placed, 1, 1);
-        if (rect) placed.push({ path, index, ...rect });
-        else unplaced.push({ path, index });
+        if (rect) placed.push({ ...card, ...rect });
+        else unplaced.push(card);
+    };
+    for (const { card, entry } of pending) placeFirstFit(card, entry.classes);
+
+    for (const { path, index, entry } of members) {
+        const group = placed.find(card => card.group === entry.inGroup);
+        const others = group ? cardsIn(grouped, group.group) : [];
+        const slot = group && (slotFits(group, entry.slot, others) ? { ...entry.slot } : freeSlotsOf(group, grouped)[0]);
+        if (!slot) placeFirstFit({ path, index }, entry.classes);
+        else grouped.push({ path, index, inGroup: group.group, slot, ...slotRect(group, slot) });
     }
 
     placed.sort((a, b) => a.index - b.index);
-    return { placed, unplaced };
+    return { placed, unplaced, grouped };
+}
+
+/** A placed group's free half cells */
+function freeSlotsOf(group, grouped) {
+    const others = cardsIn(grouped, group.group);
+    return groupSlots(group).filter(slot => slotFits(group, slot, others));
+}
+
+/** The free half cells of every placed group, group by group: [{ group: id, slot }] */
+export function freeGroupSlots({ placed, grouped }) {
+    return placed.filter(card => card.group)
+        .flatMap(group => freeSlotsOf(group, grouped).map(slot => ({ group: group.group, slot })));
 }
 
 /**
@@ -215,4 +295,55 @@ export function resizeRect(rect, edges, cell) {
 export function planResize(placed, path, rect) {
     const card = findCard(placed, path);
     return card && fits(placed, rect, path) ? [{ path: card.path, ...rect }] : null;
+}
+
+/**
+ * Plan dropping a card on a half cell ({ x, y }) of a group: from the grid or a card not on the
+ * dashboard yet (it takes the half cell), or a card in a group (it keeps its size, its corner on
+ * the half cell, kept inside the group). Onto another card in a group, a card in a group swaps
+ * with it: each takes the other's corner at its own size. Every card must still fit.
+ * @returns {Array<{path,inGroup,slot}>|null} the cards' new slots, or null when it isn't possible
+ */
+export function planSlotDrop({ placed, grouped }, path, group, { x, y }) {
+    const target = placed.find(card => card.group === group);
+    if (!target) return null;
+    const moving = findCard(grouped, path);
+    const size = moving ? { w: moving.slot.w, h: moving.slot.h } : { w: 1, h: 1 };
+    const occupant = cardsIn(grouped, group).find(card => card !== moving && rectsOverlap(card.slot, { x, y, w: 1, h: 1 }));
+    let moves;
+    if (occupant) {
+        if (!moving) return null;
+        moves = [
+            { path: moving.path, inGroup: group, slot: { x: occupant.slot.x, y: occupant.slot.y, ...size } },
+            { path: occupant.path, inGroup: moving.inGroup, slot: { ...occupant.slot, x: moving.slot.x, y: moving.slot.y } }
+        ];
+    } else {
+        const cols = target.w * GROUP_SIDE;
+        const rows = target.h * GROUP_SIDE;
+        const slot = { x: Math.min(x, cols - size.w), y: Math.min(y, rows - size.h), ...size };
+        if (moving?.inGroup === group && sameRect(slot, moving.slot)) return null;
+        moves = [{ path: moving?.path ?? path, inGroup: group, slot }];
+    }
+    return slotsFitAfter(placed, grouped, moves) ? moves : null;
+}
+
+/**
+ * Plan resizing a card in a group to a new slot (wide, tall, or back to one half cell)
+ * @returns {Array<{path,inGroup,slot}>|null}
+ */
+export function planSlotResize({ placed, grouped }, path, slot) {
+    const card = findCard(grouped, path);
+    if (!card) return null;
+    const moves = [{ path: card.path, inGroup: card.inGroup, slot }];
+    return slotsFitAfter(placed, grouped, moves) ? moves : null;
+}
+
+/** Whether the moved cards fit in their groups, among the cards in groups after the moves */
+function slotsFitAfter(placed, grouped, moves) {
+    const moved = new Set(moves.map(move => cleanPath(move.path)));
+    const after = [...grouped.filter(card => !moved.has(cleanPath(card.path))), ...moves];
+    return moves.every(move => {
+        const group = placed.find(card => card.group === move.inGroup);
+        return group && slotFits(group, move.slot, cardsIn(after, move.inGroup).filter(card => card !== move));
+    });
 }

@@ -58,7 +58,7 @@ import { getReactiveStore, createAnalysisConfig, itemVariantCards, itemShortageC
 import { calculateStoreDiff, applyDiffToData } from '../application/utils/reactiveStores.js';
 import { notificationBus } from '../application/utils/notificationBus.js';
 import { findScope, carriesSearch, withoutSearch } from '../application/utils/findScopes.js';
-import { normalizeLayout, freeCells, isFull, firstFreeSlot, planMove, planResize, resizeRect, transpose, clampRect, classesForSize, sizeFromClasses } from '../application/utils/dashboardLayout.js';
+import { normalizeLayout, freeCells, freeGroupSlots, isFull, firstFreeSlot, planMove, planResize, planSlotDrop, planSlotResize, resizeRect, transpose, clampRect, classesForSize, sizeFromClasses } from '../application/utils/dashboardLayout.js';
 import { checkSheetHealth } from './sheetHealth.js';
 import { guessColumnType, columnTypesEntry, columnTypeMap, columnTypeOf, isOpaqueType } from '../data_management/utils/column-types.js';
 import { migrateThumbnails } from '../data_management/migrations/thumbnail-column.js';
@@ -1167,6 +1167,110 @@ test('DASHBOARD LAYOUT', 'resizeRect: dragged edges follow the pointer, the othe
     assertEqual(resizeRect(card, { top: true, left: true }, { col: 1, row: 1 }), { x: 1, y: 1, w: 2, h: 1 }, 'top-left corner, in and out');
     assertEqual(resizeRect({ x: 1, y: 0, w: 2, h: 1 }, { right: true }, { col: 0, row: 0 }), { x: 0, y: 0, w: 2, h: 1 }, 'right edge past the left one: turns over it');
     assertEqual(resizeRect({ x: 0, y: 1, w: 1, h: 1 }, { top: true }, { col: 3, row: 0 }), { x: 0, y: 0, w: 1, h: 2 }, 'top edge up');
+});
+
+// A 1 x 1 group's half cells, as slots (x, y in half cells from its corner)
+const TOP_LEFT = { x: 0, y: 0, w: 1, h: 1 };
+const TOP_RIGHT = { x: 1, y: 0, w: 1, h: 1 };
+const BOTTOM_LEFT = { x: 0, y: 1, w: 1, h: 1 };
+const BOTTOM_RIGHT = { x: 1, y: 1, w: 1, h: 1 };
+
+// Groups: group g1 in cell (3, 0). Notices asks for the bottom-right half cell and gets it;
+// inventory asks for it too and gets the first free one (top left); reports names a group that
+// doesn't exist, so it is placed first-fit like any card, in (3, 1).
+test('DASHBOARD LAYOUT', 'groups: cards take their slots; a taken slot or a missing group falls back', () => {
+    const layout = normalizeLayout([
+        { path: 'schedule', classes: 'wide tall', x: 0, y: 0, w: 3, h: 2 },
+        { group: 'g1', x: 3, y: 0, w: 1, h: 1 },
+        { path: 'notices', classes: '', inGroup: 'g1', slot: BOTTOM_RIGHT },
+        { path: 'inventory', classes: '', inGroup: 'g1', slot: BOTTOM_RIGHT },
+        { path: 'reports', classes: '', inGroup: 'gone', slot: TOP_LEFT }
+    ]);
+    assertEqual(layout.placed.map(c => [c.path, c.x, c.y, c.w, c.h, c.group]), [
+        ['schedule', 0, 0, 3, 2, undefined],
+        ['group:g1', 3, 0, 1, 1, 'g1'],
+        ['reports', 3, 1, 1, 1, undefined]
+    ], 'the group is placed like a card; reports falls back to the grid');
+    assertEqual(layout.grouped.map(c => [c.path, c.slot, c.x, c.y, c.w, c.h]), [
+        ['notices', BOTTOM_RIGHT, 3.5, 0.5, 0.5, 0.5],
+        ['inventory', TOP_LEFT, 3, 0, 0.5, 0.5]
+    ], 'cards in the group: their slot, or the first free one');
+    assertEqual(freeGroupSlots(layout), [{ group: 'g1', slot: TOP_RIGHT }, { group: 'g1', slot: BOTTOM_LEFT }], 'free half cells');
+    assertEqual(isFull(layout.placed), true, 'no free cell (the registry also counts free slots)');
+});
+
+// Wide and tall cards in a group: reports is wide across the top half of g1 (0, 0); notices asks
+// for the left half (tall), which overlaps reports, so it takes the first free half cell instead
+test('DASHBOARD LAYOUT', 'groups: wide and tall cards cover two half cells', () => {
+    const layout = normalizeLayout([
+        { group: 'g1', x: 0, y: 0, w: 1, h: 1 },
+        { path: 'reports', classes: '', inGroup: 'g1', slot: { x: 0, y: 0, w: 2, h: 1 } },
+        { path: 'notices', classes: '', inGroup: 'g1', slot: { x: 0, y: 0, w: 1, h: 2 } }
+    ]);
+    assertEqual(layout.grouped.map(c => [c.path, c.x, c.y, c.w, c.h]), [
+        ['reports', 0, 0, 1, 0.5],
+        ['notices', 0, 0.5, 0.5, 0.5]
+    ], 'reports wide on top; notices in the first free half cell');
+    assertEqual(freeGroupSlots(layout), [{ group: 'g1', slot: BOTTOM_RIGHT }], 'one half cell left');
+});
+
+test('DASHBOARD LAYOUT', 'a group moves and swaps like a card', () => {
+    const { placed } = normalizeLayout([
+        { path: 'schedule', classes: '', x: 0, y: 0, w: 1, h: 1 },
+        { group: 'g1', x: 1, y: 0, w: 1, h: 1 }
+    ]);
+    assertEqual(planMove(placed, 'group:g1', { x: 0, y: 0, w: 1, h: 1 }), [
+        { path: 'group:g1', x: 0, y: 0, w: 1, h: 1 },
+        { path: 'schedule', x: 1, y: 0, w: 1, h: 1 }
+    ], 'onto a card: swaps');
+    assertEqual(planMove(placed, 'group:g1', { x: 3, y: 1, w: 1, h: 1 }), [{ path: 'group:g1', x: 3, y: 1, w: 1, h: 1 }], 'into free space');
+});
+
+// Dropping onto a group's half cells: groups g1 (notices top left, reports top right) and g2
+// (inventory top left); schedule is on the grid
+test('DASHBOARD LAYOUT', 'planSlotDrop: a free half cell takes any card; cards in groups swap', () => {
+    const layout = normalizeLayout([
+        { path: 'schedule', classes: '', x: 0, y: 0, w: 1, h: 1 },
+        { group: 'g1', x: 1, y: 0, w: 1, h: 1 },
+        { group: 'g2', x: 2, y: 0, w: 1, h: 1 },
+        { path: 'notices', classes: '', inGroup: 'g1', slot: TOP_LEFT },
+        { path: 'reports', classes: '', inGroup: 'g1', slot: TOP_RIGHT },
+        { path: 'inventory', classes: '', inGroup: 'g2', slot: TOP_LEFT }
+    ]);
+    assertEqual(planSlotDrop(layout, 'schedule', 'g1', BOTTOM_RIGHT), [{ path: 'schedule', inGroup: 'g1', slot: BOTTOM_RIGHT }], 'a card from the grid into a free half cell');
+    assertEqual(planSlotDrop(layout, 'packlist', 'g1', BOTTOM_LEFT), [{ path: 'packlist', inGroup: 'g1', slot: BOTTOM_LEFT }], 'a card not on the dashboard');
+    assertEqual(planSlotDrop(layout, 'notices', 'g1', BOTTOM_LEFT), [{ path: 'notices', inGroup: 'g1', slot: BOTTOM_LEFT }], 'within the group, to a free half cell');
+    assertEqual(planSlotDrop(layout, 'notices', 'g1', TOP_RIGHT), [
+        { path: 'notices', inGroup: 'g1', slot: TOP_RIGHT },
+        { path: 'reports', inGroup: 'g1', slot: TOP_LEFT }
+    ], 'onto another card in the group: swaps');
+    assertEqual(planSlotDrop(layout, 'reports', 'g2', TOP_LEFT), [
+        { path: 'reports', inGroup: 'g2', slot: TOP_LEFT },
+        { path: 'inventory', inGroup: 'g1', slot: TOP_RIGHT }
+    ], 'across groups: swaps');
+    assertEqual(planSlotDrop(layout, 'schedule', 'g1', TOP_LEFT), null, 'a grid card onto a taken half cell');
+    assertEqual(planSlotDrop(layout, 'notices', 'g1', TOP_LEFT), null, 'onto its own half cell');
+    assertEqual(planSlotDrop(layout, 'schedule', 'gone', TOP_LEFT), null, 'no such group');
+});
+
+// Wide and tall cards move and resize within the group: g1 holds reports wide across the bottom
+// and notices top left
+test('DASHBOARD LAYOUT', 'planSlotDrop and planSlotResize with wide and tall cards', () => {
+    const WIDE_BOTTOM = { x: 0, y: 1, w: 2, h: 1 };
+    const layout = normalizeLayout([
+        { group: 'g1', x: 0, y: 0, w: 1, h: 1 },
+        { path: 'reports', classes: '', inGroup: 'g1', slot: WIDE_BOTTOM },
+        { path: 'notices', classes: '', inGroup: 'g1', slot: TOP_LEFT }
+    ]);
+    assertEqual(planSlotResize(layout, 'notices', { x: 0, y: 0, w: 2, h: 1 }), [{ path: 'notices', inGroup: 'g1', slot: { x: 0, y: 0, w: 2, h: 1 } }], 'wide across the free top');
+    assertEqual(planSlotResize(layout, 'notices', { x: 0, y: 0, w: 1, h: 2 }), null, 'tall: reports is in the way');
+    assertEqual(planSlotResize(layout, 'reports', BOTTOM_LEFT), [{ path: 'reports', inGroup: 'g1', slot: BOTTOM_LEFT }], 'back to one half cell');
+    assertEqual(planSlotDrop(layout, 'reports', 'g1', TOP_RIGHT), null, 'wide onto the top: notices is in the way of its other half');
+    assertEqual(planSlotDrop(layout, 'reports', 'g1', BOTTOM_RIGHT), null, 'onto its own other half: kept in the group, no change');
+    assertEqual(planSlotDrop(layout, 'notices', 'g1', BOTTOM_RIGHT), [
+        { path: 'notices', inGroup: 'g1', slot: BOTTOM_LEFT },
+        { path: 'reports', inGroup: 'g1', slot: { x: 0, y: 0, w: 2, h: 1 } }
+    ], 'onto wide reports: they trade corners, each at its own size (reports wide on top)');
 });
 
 test('DASHBOARD LAYOUT', 'transpose, clampRect and classesForSize', () => {
