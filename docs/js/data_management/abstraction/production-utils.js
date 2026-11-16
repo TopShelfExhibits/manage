@@ -330,38 +330,37 @@ class productionUtils_uncached {
      * @returns {Promise<string>} The computed identifier string
      */
     static async computeIdentifier(deps, showName, clientName, year) {
-        // Normalize inputs so all callers produce the same result regardless of type or whitespace
-        const normalizedShow   = String(showName   || '').trim();
-        const normalizedClient = String(clientName || '').trim();
-        const normalizedYear   = String(parseInt(year, 10) || '').replace('NaN', '').trim();
-
-        // If showName is blank, return blank
-        if (!normalizedShow) {
-            return '';
-        }
-
-        // Get reference data
+        if (!String(showName || '').trim()) return '';
         const referenceData = await deps.call(ProductionUtils.computeIdentifierReferenceData);
-        
-        // Resolve identifier parts through the same strict-first pathway used by
-        // schedule/packlist matching. For short tokens (< 6 chars), skip fuzzy fallback
-        // to prevent one-character aliases (e.g. AANS -> AANA).
-        const clientMatch = _resolveIndexToken(
-            normalizedClient,
-            referenceData.clients.names,
-            referenceData.clients.abbrs,
-            { allowFuzzy: true, fuzzyThreshold: 2 }
-        );
+        const parts = _identifierParts(referenceData, showName, clientName, year);
+        return `${parts.client} ${parts.year} ${parts.show}`.trim();
+    }
 
-        const showMatch = _resolveIndexToken(
-            normalizedShow,
-            referenceData.shows.names,
-            referenceData.shows.abbrs,
-            { allowFuzzy: true, fuzzyThreshold: 2.5 }
-        );
+    /**
+     * The parts of a schedule row's identifier: client and show resolved through the index (name or
+     * abbreviation; a fuzzy match only when neither matches and the name is 6+ characters), the year
+     * as a number. computeIdentifier joins them. null when the show is blank.
+     * @returns {Promise<{ client: string, year: string, show: string }|null>}
+     */
+    static async resolveIdentifierParts(deps, showName, clientName, year) {
+        if (!String(showName || '').trim()) return null;
+        const referenceData = await deps.call(ProductionUtils.computeIdentifierReferenceData);
+        return _identifierParts(referenceData, showName, clientName, year);
+    }
 
-        // Compose identifier
-        return `${clientMatch} ${normalizedYear} ${showMatch}`.trim();
+    /**
+     * One client or show name resolved through the index: its canonical name when the name or one
+     * of its abbreviations matches, else the name itself. fuzzy: when neither matches, the closest
+     * index entry (names of 6+ characters), as schedule rows are resolved. Names that aren't schedule
+     * values (Dropbox folders, pack list tab parts) resolve strictly.
+     * @param {'client'|'show'} kind
+     * @param {string} name
+     * @param {boolean} [fuzzy]
+     * @returns {Promise<string>}
+     */
+    static async resolveIndexName(deps, kind, name, fuzzy = false) {
+        const referenceData = await deps.call(ProductionUtils.computeIdentifierReferenceData);
+        return _resolveIndexName(referenceData, kind, name, fuzzy);
     }
 
     /**
@@ -1148,8 +1147,8 @@ class productionUtils_uncached {
         // abbreviated tab names like "AUSTAL 2026 SNA" match canonical "AUSTAL USA 2026 SURFACE NAVY".
         if (deps && queryParts) {
             const refData = await deps.call(ProductionUtils.computeIdentifierReferenceData);
-            const resolvedQueryClient = _resolveIndexToken(queryParts.client, refData.clients.names, refData.clients.abbrs, { allowFuzzy: false });
-            const resolvedQueryShow = _resolveIndexToken(queryParts.show, refData.shows.names, refData.shows.abbrs, { allowFuzzy: false });
+            const resolvedQueryClient = _resolveIndexName(refData, 'client', queryParts.client, false);
+            const resolvedQueryShow = _resolveIndexName(refData, 'show', queryParts.show, false);
             const resolvedQueryNormalized = normalizeMatchKey(`${resolvedQueryClient} ${queryParts.year} ${resolvedQueryShow}`);
 
             const sameYearCandidates = cleanCandidates.filter(candidate => {
@@ -1160,8 +1159,8 @@ class productionUtils_uncached {
             const strictMatches = sameYearCandidates.filter(candidate => {
                 const candidateParts = _parseIdentifierParts(candidate);
                 if (!candidateParts) return false;
-                const resolvedClient = _resolveIndexToken(candidateParts.client, refData.clients.names, refData.clients.abbrs, { allowFuzzy: false });
-                const resolvedShow = _resolveIndexToken(candidateParts.show, refData.shows.names, refData.shows.abbrs, { allowFuzzy: false });
+                const resolvedClient = _resolveIndexName(refData, 'client', candidateParts.client, false);
+                const resolvedShow = _resolveIndexName(refData, 'show', candidateParts.show, false);
                 const resolvedCandidate = `${resolvedClient} ${candidateParts.year} ${resolvedShow}`.trim();
                 return normalizeMatchKey(resolvedCandidate) === resolvedQueryNormalized;
             });
@@ -1757,6 +1756,26 @@ function _resolveIndexToken(value, names, abbrs, options = {}) {
     }
 
     return _resolveRefPart(raw, safeNames, safeAbbrs, fuzzyThreshold);
+}
+
+// Fuzzy thresholds per index: show names vary more than client names
+const INDEX_FUZZY_THRESHOLD = { client: 2, show: 2.5 };
+
+// A client or show name through its index (resolveIndexName). For short tokens (< 6 chars) the
+// fuzzy fallback is skipped, to prevent one-character aliases (e.g. AANS -> AANA).
+function _resolveIndexName(referenceData, kind, name, fuzzy) {
+    const index = kind === 'client' ? referenceData.clients : referenceData.shows;
+    return _resolveIndexToken(name, index.names, index.abbrs, { allowFuzzy: fuzzy, fuzzyThreshold: INDEX_FUZZY_THRESHOLD[kind] });
+}
+
+// A schedule row's identifier parts (resolveIdentifierParts). Inputs are normalized so every caller
+// gets the same result whatever the type or whitespace.
+function _identifierParts(referenceData, showName, clientName, year) {
+    return {
+        client: _resolveIndexName(referenceData, 'client', String(clientName || '').trim(), true),
+        year: String(parseInt(year, 10) || '').replace('NaN', '').trim(),
+        show: _resolveIndexName(referenceData, 'show', String(showName || '').trim(), true)
+    };
 }
 
 // Builds a year-filtered identifier→row map from schedule data, using the year parsed from title.

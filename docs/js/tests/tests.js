@@ -546,6 +546,18 @@ test('IDENTIFIER RESOLUTION', 'Allen Arms/SHOT Show resolves correctly', async (
     assertEqual(result, 'ALLEN ARMS 2025 SHOT', 'computeIdentifier("SHOT Show", "Allen Arms", "2025")');
 });
 
+// resolveIndexName is the one index lookup: computeIdentifier (schedule rows) uses it with the fuzzy
+// fallback, pack list and Dropbox folder names strictly. "Allen Armz" is no index name or
+// abbreviation, but close to ALLEN ARMS; "Best Buy" is an abbreviation of BESTBUY HEALTH.
+test('IDENTIFIER RESOLUTION', 'one index lookup: strict for names that are not schedule values, fuzzy for rows', async () => {
+    assertEqual(await ProductionUtils.resolveIndexName('client', 'Best Buy'), 'BESTBUY HEALTH', 'an abbreviation, strictly');
+    assertEqual(await ProductionUtils.resolveIndexName('client', 'Allen Armz'), 'Allen Armz', 'strict: no near names');
+    assertEqual(await ProductionUtils.resolveIndexName('client', 'Allen Armz', true), 'ALLEN ARMS', 'fuzzy: the near name');
+    assertEqual(await ProductionUtils.resolveIdentifierParts('SHOT Show', 'Allen Armz', 2025), { client: 'ALLEN ARMS', year: '2025', show: 'SHOT' }, 'a row resolves as before');
+    assertEqual(await Requests.computeIdentifier('SHOT Show', 'Allen Armz', '2025'), 'ALLEN ARMS 2025 SHOT', 'computeIdentifier joins the parts');
+    assertEqual(await ProductionUtils.resolveIdentifierParts('', 'ATSC', '2025'), null, 'blank show: no parts');
+});
+
 test('IDENTIFIER RESOLUTION', 'blank show name returns empty string', async () => {
     const result = await Requests.computeIdentifier('', 'ATSC', '2025');
     assertEqual(result, '', 'computeIdentifier("", "ATSC", "2025")');
