@@ -9,18 +9,10 @@ import { html, BannerNotifications } from '../../index.js';
  */
 export const NoticesContent = {
     components: { BannerNotifications },
-    inject: ['appContext', '$notify'],
-    inheritAttrs: false,
-    computed: {
-        banners() {
-            return this.appContext.appBanners;
-        },
-        hasNotices() {
-            return this.banners.some(b => b.visible && !this.$notify.isDismissed('app', b.key));
-        }
-    },
+    inject: ['appContext'],
     template: html`
-        <BannerNotifications :banners="banners" scope="app" />
-        <p v-if="!hasNotices" class="empty-message">No notices</p>
+        <BannerNotifications :banners="appContext.appBanners" scope="app">
+            <template #empty><p class="empty-message">No notices</p></template>
+        </BannerNotifications>
     `
 };

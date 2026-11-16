@@ -45,7 +45,7 @@ import { SEARCH_LIMITS, searchWords, matchRow, matchRows, makeHighlighter } from
 import { formatValue, formatText } from '../application/utils/views/fieldFormat.js';
 import { rowsToCards, bucketRowsToCards } from '../application/utils/views/cardsAdapter.js';
 import { applyColorRule, colorFor, rowColorFor } from '../application/utils/views/viewColor.js';
-import { containerTier, viewportTier, BREAKPOINTS } from '../application/utils/useContainerSize.js';
+import { containerTier, BREAKPOINTS } from '../application/utils/useContainerSize.js';
 import { createScrollHider } from '../application/utils/scrollHider.js';
 import { todayISOString, setTestToday, startOfTodayMs, resolveShortageAlertDays, shortageAlertDateFilters, INVENTORY_TAB_PREFERENCES, resolveInventoryTabList, itemVariantBase, resolveItemVariant, itemVariantFamilies, itemVariantKey, parseItemVariants, searchFilter, textFiltersToSearchParams, parseSearchParameters } from '../data_management/utils/helpers.js';
 import { instantWriteEntry, identityKey, cellKey, joinKey } from '../data_management/utils/instant-write-config.js';
@@ -54,7 +54,7 @@ import { parseA1Range, gridNeeded, clipRangeToGrid, isGridLimitError } from '../
 import { SEVERITY, remainingSeverity } from '../data_management/utils/severity.js';
 import { severityColor, statusColor } from '../application/utils/severity.js';
 import { getAutoColorClass } from '../application/utils/autoColor.js';
-import { getReactiveStore, createAnalysisConfig, itemVariantCards, itemShortageCards, NavigationRegistry, isMarkedForDeletion, paramToggleValue, isTemporaryAdmin } from '../application/index.js';
+import { getReactiveStore, createAnalysisConfig, itemVariantCards, itemShortageCards, NavigationRegistry, isMarkedForDeletion, paramToggleValue, isTemporaryAdmin, undoRegistry } from '../application/index.js';
 import { calculateStoreDiff, applyDiffToData } from '../application/utils/reactiveStores.js';
 import { notificationBus } from '../application/utils/notificationBus.js';
 import { findScope, carriesSearch, withoutSearch } from '../application/utils/findScopes.js';
@@ -1039,12 +1039,22 @@ test('FIND SCOPES', 'a search carries within a scope only', () => {
     assertEqual(withoutSearch({ view: 'cards', searchTerm: 'x', searchIndex: '2' }), { view: 'cards' }, 'withoutSearch');
 });
 
-test('FIND SCOPES', 'a search left in a scope comes back for 5 minutes', () => {
-    const savedMemory = NavigationRegistry.recentSearches;
+// Runs fn with empty search memories (recent and live), putting the app's back afterwards
+function withSearchMemory(fn) {
+    const saved = [NavigationRegistry.recentSearches, NavigationRegistry.liveSearches];
     NavigationRegistry.recentSearches = new Map();
+    NavigationRegistry.liveSearches = new Map();
+    try {
+        return fn();
+    } finally {
+        [NavigationRegistry.recentSearches, NavigationRegistry.liveSearches] = saved;
+    }
+}
+
+test('FIND SCOPES', 'a search left in a scope comes back for 5 minutes', () => withSearchMemory(() => {
     const t0 = 1_000_000;
     const minutes = m => t0 + m * 60 * 1000;
-    try {
+    {
         NavigationRegistry.resolveTargetPath('schedule', 'inventory/furniture?{"searchTerm":"chair"}', { now: t0 });
         const back = (now, label, expected) => {
             const opened = NavigationRegistry.resolveTargetPath('inventory/cabinets', 'schedule', { now });
@@ -1055,16 +1065,12 @@ test('FIND SCOPES', 'a search left in a scope comes back for 5 minutes', () => {
         back(minutes(5), 'left again without a search: forgotten', undefined);
         NavigationRegistry.resolveTargetPath('schedule', 'inventory?{"searchTerm":"table"}', { now: minutes(10) });
         back(minutes(16), 'back after 5 minutes: cleared', undefined);
-    } finally {
-        NavigationRegistry.recentSearches = savedMemory;
     }
-});
+}));
 
-test('FIND SCOPES', 'a bare navigation keeps route parameters, drops their old search, carries in scope', () => {
+test('FIND SCOPES', 'a bare navigation keeps route parameters, drops their old search, carries in scope', () => withSearchMemory(() => {
     const route = NavigationRegistry.getRoute('schedule');
     const saved = route.lastParameters;
-    const savedMemory = NavigationRegistry.recentSearches;
-    NavigationRegistry.recentSearches = new Map();
     try {
         route.lastParameters = { view: 'calendar', searchTerm: 'old', searchIndex: '3' };
         assertEqual(NavigationRegistry.resolveTargetPath('schedule', 'inventory/furniture?{"searchTerm":"chair"}'),
@@ -1080,9 +1086,41 @@ test('FIND SCOPES', 'a bare navigation keeps route parameters, drops their old s
             'inventory category to overview carries');
     } finally {
         route.lastParameters = saved;
-        NavigationRegistry.recentSearches = savedMemory;
     }
-});
+}));
+
+// A search box notes what it holds as it is typed (NavigationRegistry.noteLiveSearch); its URL
+// gets it only when the box is left, after the click that left it. A navigation reads the box.
+test('FIND SCOPES', 'a navigation carries what the search box holds, typed or not yet in the URL', () => withSearchMemory(() => {
+    const route = NavigationRegistry.getRoute('schedule');
+    const saved = route.lastParameters;
+    try {
+        route.lastParameters = {};
+        NavigationRegistry.noteLiveSearch('schedule/design-queue', 'typed');
+        assertEqual(NavigationRegistry.resolveTargetPath('schedule', 'schedule/design-queue'),
+            'schedule?{"searchTerm":"typed"}', 'typed, not in the URL: carries in scope');
+        NavigationRegistry.noteLiveSearch('schedule/design-queue', '');
+        assertEqual(NavigationRegistry.resolveTargetPath('schedule', 'schedule/design-queue?{"searchTerm":"acme"}'),
+            'schedule', 'box emptied: its old URL search does not carry');
+        NavigationRegistry.noteLiveSearch('schedule/design-queue', null);
+        assertEqual(NavigationRegistry.resolveTargetPath('schedule', 'schedule/design-queue?{"searchTerm":"acme"}'),
+            'schedule?{"searchTerm":"acme"}', 'box gone: the URL says');
+
+        NavigationRegistry.noteLiveSearch('inventory/furniture', 'sofa');
+        NavigationRegistry.resolveTargetPath('schedule', 'inventory/furniture');
+        NavigationRegistry.noteLiveSearch('inventory/furniture', null);
+        assertEqual(NavigationRegistry.parsePath(NavigationRegistry.resolveTargetPath('inventory/cabinets', 'schedule')).parameters.searchTerm,
+            'sofa', 'typed in another scope: noted there, offered on the way back');
+
+        NavigationRegistry.noteLiveSearch('inventory/furniture?{"view":"cards"}', 'desk');
+        assertEqual(NavigationRegistry.resolveTargetPath('inventory/furniture?{"view":"cards"}', 'dashboard'),
+            'inventory/furniture?{"view":"cards","searchTerm":"desk"}', 'a dashboard card opens with its box');
+        assertEqual(NavigationRegistry.resolveTargetPath('inventory/furniture?{"searchTerm":"link"}', 'schedule'),
+            'inventory/furniture?{"searchTerm":"link"}', 'off the dashboard a link names its own search');
+    } finally {
+        route.lastParameters = saved;
+    }
+}));
 
 // ── Group 24b: Dashboard Layout ───────────────────────────────────────────────
 // The single-screen dashboard grid (4 x 2 cells, utils/dashboardLayout.js). FakeGoogle's
@@ -1188,7 +1226,7 @@ test('DASHBOARD LAYOUT', 'groups: cards take their slots; a taken slot or a miss
     ]);
     assertEqual(layout.placed.map(c => [c.path, c.x, c.y, c.w, c.h, c.group]), [
         ['schedule', 0, 0, 3, 2, undefined],
-        ['group:g1', 3, 0, 1, 1, 'g1'],
+        ['dashboard/group:g1', 3, 0, 1, 1, 'g1'],
         ['reports', 3, 1, 1, 1, undefined]
     ], 'the group is placed like a card; reports falls back to the grid');
     assertEqual(layout.grouped.map(c => [c.path, c.slot, c.x, c.y, c.w, c.h]), [
@@ -1219,11 +1257,11 @@ test('DASHBOARD LAYOUT', 'a group moves and swaps like a card', () => {
         { path: 'schedule', classes: '', x: 0, y: 0, w: 1, h: 1 },
         { group: 'g1', x: 1, y: 0, w: 1, h: 1 }
     ]);
-    assertEqual(planMove(placed, 'group:g1', { x: 0, y: 0, w: 1, h: 1 }), [
-        { path: 'group:g1', x: 0, y: 0, w: 1, h: 1 },
+    assertEqual(planMove(placed, 'dashboard/group:g1', { x: 0, y: 0, w: 1, h: 1 }), [
+        { path: 'dashboard/group:g1', x: 0, y: 0, w: 1, h: 1 },
         { path: 'schedule', x: 1, y: 0, w: 1, h: 1 }
     ], 'onto a card: swaps');
-    assertEqual(planMove(placed, 'group:g1', { x: 3, y: 1, w: 1, h: 1 }), [{ path: 'group:g1', x: 3, y: 1, w: 1, h: 1 }], 'into free space');
+    assertEqual(planMove(placed, 'dashboard/group:g1', { x: 3, y: 1, w: 1, h: 1 }), [{ path: 'dashboard/group:g1', x: 3, y: 1, w: 1, h: 1 }], 'into free space');
 });
 
 // Dropping onto a group's half cells: groups g1 (notices top left, reports top right) and g2
@@ -1296,6 +1334,84 @@ test('DASHBOARD LAYOUT', 'banner tray reports are per instance; dismissals are s
         notificationBus.setScrolledOut('test-scope#1', 'test-scope', false);
     }
 });
+
+// ── Group 24c: Dashboard Registry ─────────────────────────────────────────────
+// DashboardRegistry writes the layout into the stored entries (user data 'dashboard_containers').
+// Each test runs it on a stand-in store (the app's own is put back after) with saves counted, not
+// written. Paths are the fixture dashboard's (schedule, inventory, packlist), so the cards on screen
+// keep their components. Old entries [schedule, {inventory, tall}, {packlist, wide}] read first-fit:
+//   schedule (0,0) 1x1    inventory (1,0) 1x2    packlist (2,0) 2x1
+
+const _oldDashboard = () => ['schedule', { path: 'inventory', classes: 'tall' }, { path: 'packlist', classes: 'wide' }];
+
+async function withDashboard(entries, fn) {
+    const registry = NavigationRegistry.dashboardRegistry;
+    const saved = { store: registry.store, save: registry.save, route: undoRegistry.currentRouteKey };
+    const counts = { saves: 0 };
+    registry.store = { data: entries };
+    registry.save = async () => { counts.saves++; };
+    try {
+        await fn(registry, counts);
+    } finally {
+        undoRegistry.clearRouteHistory(registry.arrangePath);
+        undoRegistry.setActiveRoute(saved.route);
+        registry.store = saved.store;
+        registry.save = saved.save;
+    }
+}
+
+test('DASHBOARD REGISTRY', "the first change writes every card's rect into old entries", () => withDashboard(_oldDashboard(), async (registry, counts) => {
+    assertEqual(await registry.move('schedule', { x: 0, y: 1, w: 1, h: 1 }), true, 'moved');
+    assertEqual(registry.store.data, [
+        { path: 'schedule', classes: '', x: 0, y: 1, w: 1, h: 1 },
+        { path: 'inventory', classes: 'tall', x: 1, y: 0, w: 1, h: 2 },
+        { path: 'packlist', classes: 'wide', x: 2, y: 0, w: 2, h: 1 }
+    ], 'plain string made an object; the others keep their first-fit places, classes kept for old deploys');
+    assertEqual(counts.saves, 1, 'one save');
+    assertEqual(await registry.move('schedule', { x: 3, y: 0, w: 1, h: 1 }), false, 'onto two cards: not possible');
+}));
+
+test('DASHBOARD REGISTRY', 'adding at a free cell in arrange mode is one undo step', () => withDashboard(_oldDashboard(), async (registry) => {
+    undoRegistry.setActiveRoute(registry.arrangePath);
+    assertEqual(registry.arranging, true, 'the arrange page is arrange mode');
+    await registry.add('notices', { x: 3, y: 1, w: 1, h: 1 });
+    assertEqual(registry.getContainer('notices'), { path: 'notices', classes: '', x: 3, y: 1, w: 1, h: 1 }, 'at the cell asked for');
+    assertEqual(undoRegistry.canUndo(registry.arrangePath), true, 'an undo step');
+    undoRegistry.undo();
+    assertEqual([registry.has('notices'), undoRegistry.canUndo(registry.arrangePath)], [false, false], 'one undo removes it');
+    await registry.add('notices', { x: 0, y: 0, w: 1, h: 1 });
+    assertEqual(registry.getPlaced('notices'), { path: 'notices', index: 3, x: 0, y: 1, w: 1, h: 1 }, 'cell taken: the first free cell');
+}));
+
+test('DASHBOARD REGISTRY', "groups are stored under the dashboard's location", () => withDashboard([], async (registry) => {
+    await registry.addGroup({ x: 1, y: 1, w: 1, h: 1 });
+    const [group] = registry.store.data;
+    assertEqual(group.path, `dashboard/group:${group.group}`, 'a group has a path, so older deploys draw it as an empty card');
+    assertEqual(registry.layout.placed.map(c => [c.path, c.x, c.y]), [[group.path, 1, 1]], 'placed like a card');
+}));
+
+test('DASHBOARD REGISTRY', 'a group stored without a path gets one when written', () => withDashboard([{ group: 'g1', x: 0, y: 0, w: 1, h: 1 }], async (registry) => {
+    assertEqual(registry.has('dashboard/group:g1'), true, 'found by its path');
+    await registry.move('dashboard/group:g1', { x: 2, y: 1, w: 1, h: 1 });
+    assertEqual(registry.store.data, [{ group: 'g1', x: 2, y: 1, w: 1, h: 1, path: 'dashboard/group:g1' }], 'moved, path written');
+}));
+
+test('DASHBOARD REGISTRY', 'a card dropped in a group leaves the grid; removing the group returns it', () => withDashboard([
+    { path: 'dashboard/group:g1', group: 'g1', x: 0, y: 0, w: 1, h: 1 },
+    { path: 'schedule', classes: 'wide', x: 1, y: 0, w: 2, h: 1 }
+], async (registry) => {
+    assertEqual(await registry.placeInGroup('schedule', 'g1', { x: 1, y: 0 }), true, 'dropped');
+    assertEqual(registry.getContainer('schedule'), { path: 'schedule', classes: 'wide', inGroup: 'g1', slot: { x: 1, y: 0, w: 1, h: 1 } }, 'no rect, a slot');
+    assertEqual(registry.getPlaced('schedule'), { path: 'schedule', index: 1, inGroup: 'g1', slot: { x: 1, y: 0, w: 1, h: 1 }, x: 0.5, y: 0, w: 0.5, h: 0.5 }, 'drawn in the group');
+    await registry.remove('dashboard/group:g1');
+    assertEqual(registry.store.data, [{ path: 'schedule', classes: 'wide' }], 'group gone, the card out of it');
+    assertEqual(registry.getPlaced('schedule'), { path: 'schedule', index: 0, x: 0, y: 0, w: 2, h: 1 }, 'back on the grid first-fit, at its old size');
+}));
+
+test('DASHBOARD REGISTRY', 'removing a plain-string entry removes that entry', () => withDashboard(_oldDashboard(), async (registry) => {
+    await registry.remove('schedule');
+    assertEqual(registry.store.data.map(e => e.path), ['inventory', 'packlist'], 'schedule removed, nothing else');
+}));
 
 // ── Group 25: Hardware Inventory Resolution ───────────────────────────────────
 // Hardware items use non-standard item number formats that fail the prefix lookup
@@ -3810,9 +3926,8 @@ test('VIEWS COLOR', 'colour rules: sign and differs (the proposal table)', async
     assertEqual(applyColorRule('differs:currentDescription:proposal-changed', 'New'), '', 'no row, no colour');
 });
 
-test('VIEWS SIZE', 'container and viewport tiers use the shared breakpoints', async () => {
+test('VIEWS SIZE', 'container tiers use the shared breakpoints', async () => {
     assertEqual([containerTier(360), containerTier(599), containerTier(600), containerTier(999), containerTier(1000)], ['narrow', 'narrow', 'medium', 'medium', 'wide'], 'container');
-    assertEqual([viewportTier(615), viewportTier(616), viewportTier(1023), viewportTier(1024)], ['narrow', 'medium', 'medium', 'wide'], 'viewport');
     assertEqual(BREAKPOINTS, { narrow: 600, wide: 1000, short: 500, gutterCompact: 8, gutterFull: 12 }, 'constants');
 });
 

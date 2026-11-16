@@ -13,8 +13,10 @@
  *
  * Groups: a group is one cell split into GROUP_SIDE x GROUP_SIDE half cells, holding small cards.
  * A card in a group covers one half cell, two (wide or tall), or all four. A group is stored as
- * { group: id, x, y, w, h } with no path, so older deploys skip it; in memory it is placed like a
- * card under the path groupPath(id). A card in a group is stored as
+ * { path: groupPath(id), group: id, x, y, w, h } and placed like a card. Older deploys read every
+ * entry as a page and fail on one without a path; under the dashboard's own location
+ * (dashboard/group:<id>) they draw it as an empty card. Groups stored before they had a path get
+ * groupPath(id) when read (entryPath) and when next written. A card in a group is stored as
  * { path, classes, inGroup: id, slot: { x, y, w, h } } with no rect (an older deploy places it
  * first-fit). Its slot is a rect in half cells from the group's corner, in landscape terms, so
  * the rect helpers (rectsOverlap, resizeRect, sameRect) work on slots too; its rect on the grid
@@ -32,12 +34,12 @@ export const GROUP_SIDE = 2;
 export const MINI_MIN_CELL = Object.freeze({ width: 300, height: 200 });
 export const MINI_BASE_WIDTH = 360;
 
-/** A group's path in memory (stored groups have none) */
+/** A group's path: under the dashboard's own location, so it never names a page */
 export function groupPath(id) {
-    return `group:${id}`;
+    return `dashboard/group:${id}`;
 }
 
-/** Path of a stored entry (a plain string in old data; a group's in-memory path). */
+/** Path of a stored entry (a plain string in old data; groupPath for a group stored without one). */
 export function entryPath(entry) {
     if (typeof entry === 'string') return entry;
     return entry?.path || (entry?.group ? groupPath(entry.group) : '');

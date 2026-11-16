@@ -8,8 +8,9 @@ import { GRID, GROUP_SIDE, MINI_MIN_CELL, MINI_BASE_WIDTH, transpose, clampRect,
  * - #app-content is the grid on the dashboard. Every page container is wrapped in a DashboardCell,
  *   on every page, so a card keeps its component when it's expanded to the full page and back.
  *   Off the dashboard the cell is `display: contents`.
- * - Cards are placed with CSS variables (--col-start, --row-start, --col-span, --row-span) in
- *   landscape terms; a portrait media rule swaps the axes. Pointer math converts with transpose.
+ * - Layouts are stored in landscape terms. The grid's size (dashboardGridStyle) and each card's
+ *   place (gridAreaStyle: --col-start, --row-start, --col-span, --row-span) are drawn in display
+ *   terms, transposed on a portrait screen; pointer math converts back with the same transpose.
  *   The CSS grid has GROUP_SIDE tracks per cell, so a group's small cards are grid items too.
  * - Miniature mode: when cells are smaller than MINI_MIN_CELL, always while arranging, and always
  *   for a card in a group, a card renders its page MINI_BASE_WIDTH px wide per column, scaled down
@@ -93,8 +94,17 @@ export function stopObservingDashboardGrid() {
 /** Every 1 x 1 cell of the grid, row by row (the loading placeholders) */
 export const DASHBOARD_CELLS = Object.freeze(freeCells([]));
 
-/** CSS variables placing a stored (landscape) rect on the grid, in grid tracks (GROUP_SIDE a cell) */
-export function gridAreaStyle({ x, y, w, h }) {
+/** CSS variables sizing the grid (#app-content on the dashboard), in tracks (GROUP_SIDE a cell) */
+export function dashboardGridStyle() {
+    return {
+        '--grid-cols': dashboardGeometry.cols * GROUP_SIDE,
+        '--grid-rows': dashboardGeometry.rows * GROUP_SIDE
+    };
+}
+
+/** CSS variables placing a stored (landscape) rect on the grid as drawn, in tracks */
+export function gridAreaStyle(rect) {
+    const { x, y, w, h } = toDisplay(rect);
     return {
         '--col-start': x * GROUP_SIDE + 1,
         '--row-start': y * GROUP_SIDE + 1,
@@ -188,6 +198,16 @@ export const DashboardCell = {
         this.resizeZones = RESIZE_ZONES;
         this.cornerEdges = CORNER_EDGES;
     },
+    watch: {
+        // Leaving arrange mode mid-drag (Escape) drops the drag
+        arranging(on) {
+            if (!on) this.endDrag(false);
+        },
+        miniature(isMini) {
+            // A miniature shows the top of its page (and drops any fixed sticky header)
+            if (isMini) this.$el?.querySelector?.('.dashboard-card > .content')?.scrollTo({ top: 0 });
+        }
+    },
     computed: {
         onDashboard() {
             return !!this.card;
@@ -228,13 +248,16 @@ export const DashboardCell = {
             return style;
         }
     },
-    watch: {
-        miniature(isMini) {
-            // A miniature shows the top of its page (and drops any fixed sticky header)
-            if (isMini) this.$el?.querySelector?.('.dashboard-card > .content')?.scrollTo({ top: 0 });
-        }
-    },
     methods: {
+        // The pointer handlers of a drag control: mode 'move' or 'resize' (dragging the given edges)
+        dragOn(mode, edges = null) {
+            return {
+                pointerdown: event => this.startDrag(mode, event, edges),
+                pointermove: this.onDrag,
+                pointerup: () => this.endDrag(true),
+                pointercancel: () => this.endDrag(false)
+            };
+        },
         // mode 'move' or 'resize'; a resize drags the given edges (as drawn)
         startDrag(mode, event, edges = null) {
             if (event.button !== undefined && event.button !== 0) return;
@@ -313,10 +336,7 @@ export const DashboardCell = {
             <div v-if="arranging && isGroup" class="button-bar dashboard-group-controls">
                 <button class="button-symbol white"
                         title="Drag to move the group"
-                        @pointerdown="startDrag('move', $event)"
-                        @pointermove="onDrag"
-                        @pointerup="endDrag(true)"
-                        @pointercancel="endDrag(false)">
+                        v-on="dragOn('move')">
                     <span class="material-symbols-outlined">open_with</span>
                 </button>
                 <button class="button-symbol red"
@@ -328,20 +348,14 @@ export const DashboardCell = {
             <template v-else-if="arranging">
                 <div class="dashboard-cell-handle"
                      :title="'Drag to move ' + title"
-                     @pointerdown="startDrag('move', $event)"
-                     @pointermove="onDrag"
-                     @pointerup="endDrag(true)"
-                     @pointercancel="endDrag(false)">
+                     v-on="dragOn('move')">
                     <span v-if="!header">{{ title }}</span>
                 </div>
                 <div class="button-bar dashboard-cell-controls">
                     <button v-if="inGroup"
                             class="button-symbol white slot-resize"
                             title="Drag to make it wide or tall"
-                            @pointerdown="startDrag('resize', $event, cornerEdges)"
-                            @pointermove="onDrag"
-                            @pointerup="endDrag(true)"
-                            @pointercancel="endDrag(false)">
+                            v-on="dragOn('resize', cornerEdges)">
                         <span class="material-symbols-outlined">open_in_full</span>
                     </button>
                     <button class="button-symbol red"
@@ -356,16 +370,10 @@ export const DashboardCell = {
                          class="dashboard-cell-resize-zone"
                          :data-edge="zone.name"
                          title="Drag to resize"
-                         @pointerdown="startDrag('resize', $event, zone.edges)"
-                         @pointermove="onDrag"
-                         @pointerup="endDrag(true)"
-                         @pointercancel="endDrag(false)"></div>
+                         v-on="dragOn('resize', zone.edges)"></div>
                     <button class="button-symbol white dashboard-cell-resize"
                             title="Drag to resize"
-                            @pointerdown="startDrag('resize', $event, cornerEdges)"
-                            @pointermove="onDrag"
-                            @pointerup="endDrag(true)"
-                            @pointercancel="endDrag(false)">
+                            v-on="dragOn('resize', cornerEdges)">
                         <span class="material-symbols-outlined">open_in_full</span>
                     </button>
                 </template>
@@ -412,7 +420,7 @@ export const DashboardArrangeLayer = {
         addable() {
             const options = this.registry.layout.unplaced.map(card => ({
                 path: card.path,
-                title: NavigationRegistry.getDisplayName(card.path, true),
+                title: card.group ? 'Group' : NavigationRegistry.getDisplayName(card.path, true),
                 onDashboard: true
             }));
             if (!this.registry.has(NOTICES_PATH)) {
@@ -430,12 +438,8 @@ export const DashboardArrangeLayer = {
             return `${cell.x}-${cell.y}`;
         },
         async addAt(option, cell) {
-            if (option.onDashboard) {
-                await this.registry.placeAt(option.path, cell);
-            } else {
-                await this.registry.add(option.path);
-                await this.registry.placeAt(option.path, cell);
-            }
+            if (option.onDashboard) await this.registry.placeAt(option.path, cell);
+            else await this.registry.add(option.path, cell);
         },
         // Arrange mode is its own page: undo and redo act on its layout history (and save)
         undo() {

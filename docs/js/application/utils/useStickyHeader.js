@@ -44,8 +44,8 @@ import { createScrollHider } from './scrollHider.js';
  *   way down, with the primary nav's steps and timing (scrollHider.js, .sticky-hidden).
  *
  * DASHBOARD CARDS — a dashboard card's content scrolls by itself. Inside one, the top edge is the
- *   card content's top instead of the navbar, written to --navbar-sticky-offset on the card content
- *   so the fixed wrapper's CSS top follows. The context is checked on every update: a page keeps
+ *   card content's top instead of the navbar, written to --navbar-sticky-offset on the sticky
+ *   element itself so its fixed CSS top follows. The context is checked on every update: a page keeps
  *   its component when a card is expanded to the full page and back.
  *
  * @param {Object}   options
@@ -82,19 +82,27 @@ export function useStickyHeader({
     // oscillation at the table bottom (deactivate → shrink → check passes → re-activate → grow →
     // check fails → deactivate again…). Caching the maximum seen height keeps the threshold stable.
     let _peakStickyHeight = 0;
-    // The dashboard card content the sticky element was last measured in (holds the offset property)
+    // The dashboard card content the sticky element was last measured in, and the element itself
+    // (it holds its own offset property)
     let _cardEl = null;
+    let _offsetEl = null;
     // Short screens: the slide-in steps, and whether they're counting (the header would stick)
     const _hider = createScrollHider();
     let _counting = false;
 
+    // In a dashboard card the top edge is the card content's top, written to the sticky element's
+    // own --navbar-sticky-offset: each sticky header holds its own, so several in one card (a pack
+    // list's crates) never clear each other's
     function _getTopOffsetPx(stickyEl) {
-        const cardEl = stickyEl.closest('.dashboard-card > .content');
-        if (_cardEl && _cardEl !== cardEl) _cardEl.style.removeProperty('--navbar-sticky-offset');
-        _cardEl = cardEl;
-        if (!cardEl) return _getNavbarOffsetPx();
-        const top = Math.max(0, cardEl.getBoundingClientRect().top);
-        cardEl.style.setProperty('--navbar-sticky-offset', `${top}px`);
+        if (_offsetEl && _offsetEl !== stickyEl) _offsetEl.style.removeProperty('--navbar-sticky-offset');
+        _offsetEl = stickyEl;
+        _cardEl = stickyEl.closest('.dashboard-card > .content');
+        if (!_cardEl) {
+            stickyEl.style.removeProperty('--navbar-sticky-offset');
+            return _getNavbarOffsetPx();
+        }
+        const top = Math.max(0, _cardEl.getBoundingClientRect().top);
+        stickyEl.style.setProperty('--navbar-sticky-offset', `${top}px`);
         return top;
     }
 
@@ -236,7 +244,8 @@ export function useStickyHeader({
             _scrollEl.removeEventListener('scroll', _fn, { capture: true });
             window.removeEventListener('resize', _fn);
         }
-        if (_cardEl) _cardEl.style.removeProperty('--navbar-sticky-offset');
+        _offsetEl?.style.removeProperty('--navbar-sticky-offset');
+        _offsetEl = null;
         _cardEl = null;
         if (_navEl && _navTransitionFn) {
             _navEl.removeEventListener('transitionend', _navTransitionFn);

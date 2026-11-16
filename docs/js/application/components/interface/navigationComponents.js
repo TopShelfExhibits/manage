@@ -65,7 +65,7 @@ const SettingsMenuComponent = {
 };
 
 export const PrimaryNavComponent = {
-    inject: ['$modal', '$notify'],
+    inject: ['$modal', '$notify', 'appContext'],
     props: {
         isMenuOpen: {
             type: Boolean,
@@ -158,7 +158,7 @@ export const PrimaryNavComponent = {
                 toggleDashboardHeaders: this.toggleDashboardHeaders,
                 openPageMenu: this.openCurrentPageMenu,
                 arrangeDashboard: this.currentPage === 'dashboard' && this.isAuthenticated
-                    ? () => this.$emit('navigate-to-path', NavigationRegistry.dashboardRegistry.arrangePath)
+                    ? () => this.appContext.arrangeDashboard()
                     : null,
                 isAuthenticated: this.isAuthenticated
             }, 'Application Settings');
@@ -527,7 +527,7 @@ export const DashboardToggleComponent = {
             return !this.registry.isFull;
         },
         onDashboardPage() {
-            return this.appContext.currentPath?.split('?')[0].split('/')[0] === 'dashboard';
+            return this.appContext.currentPage === 'dashboard';
         }
     },
     methods: {
@@ -539,7 +539,7 @@ export const DashboardToggleComponent = {
             }
         },
         arrange() {
-            this.appContext.navigateToPath(this.registry.arrangePath);
+            this.appContext.arrangeDashboard();
             this.$emit('close-modal');
         }
     },

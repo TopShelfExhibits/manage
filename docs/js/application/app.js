@@ -5,7 +5,7 @@ import { PrimaryNavComponent } from './index.js';
 import { Auth, authState } from './index.js';
 import { NavigationRegistry } from './index.js';
 import { PacklistContent, InventoryContent, ScheduleContent, ReportsContent, NoticesContent } from './index.js';
-import { DashboardCell, DashboardArrangeLayer, observeDashboardGrid, stopObservingDashboardGrid, measureDashboardGrid, noticesOnDashboard, NOTICES_PATH, gridAreaStyle, DASHBOARD_CELLS } from './index.js';
+import { DashboardCell, DashboardArrangeLayer, observeDashboardGrid, stopObservingDashboardGrid, measureDashboardGrid, noticesOnDashboard, NOTICES_PATH, gridAreaStyle, dashboardGridStyle, DASHBOARD_CELLS, cleanPath } from './index.js';
 import { hamburgerMenuRegistry } from './index.js';
 import { undoRegistry } from './index.js';
 import { Requests, getReactiveStore, appSettings, saveDirtyStoresToUserData, getShortageAlertsStore, getShortageAlertDays, shortageBanner } from './index.js';
@@ -160,6 +160,10 @@ const App = {
         arranging() {
             return this.isDashboard && NavigationRegistry.dashboardRegistry.arranging;
         },
+        // The dashboard grid's track counts (portrait swaps them)
+        dashboardGrid() {
+            return this.isDashboard ? dashboardGridStyle() : null;
+        },
         // The app banners at the top of the page. The notices page draws them itself, and so does
         // the dashboard's notices card while it's on the grid.
         showTopBanners() {
@@ -182,7 +186,7 @@ const App = {
             const containerFor = (path, card) => {
                 const type = NavigationRegistry.getTypeFromPath(path);
                 return {
-                    key: `${type}-${path.split('?')[0].replace(/[^a-zA-Z0-9]/g, '_')}`,
+                    key: `${type}-${cleanPath(path).replace(/[^a-zA-Z0-9]/g, '_')}`,
                     type,
                     title: NavigationRegistry.getDisplayName(path, !!card),
                     containerPath: path,
@@ -266,12 +270,12 @@ const App = {
                 if (appContent) appContent.scrollTop = 0;
             });
         });
-        // Each page has its own undo history, arrange mode included (its own address): undo on the
-        // dashboard never changes the layout. Leaving arrange mode drops its history.
-        this.$watch(() => this.currentPath.split('?')[0], (path) => {
-            const registry = NavigationRegistry.dashboardRegistry;
-            if (registry.arranging && path !== registry.arrangePath) undoRegistry.clearRouteHistory(registry.arrangePath);
-            registry.arranging = path === registry.arrangePath;
+        // Each page has its own undo history, arrange mode included (its own address, which is also
+        // what says arrange mode is open: DashboardRegistry.arranging): undo on the dashboard never
+        // changes the layout. Leaving arrange mode drops its history.
+        this.$watch(() => cleanPath(this.currentPath), (path, oldPath) => {
+            const { arrangePath } = NavigationRegistry.dashboardRegistry;
+            if (oldPath === arrangePath) undoRegistry.clearRouteHistory(arrangePath);
             undoRegistry.setActiveRoute(path);
         }, { immediate: true });
         observeDashboardGrid(this.$el.querySelector('#app-content'));
@@ -435,7 +439,7 @@ const App = {
                 @logout="logout">
             </primary-nav>
 
-            <div id="app-content" :class="{ 'dashboard': isDashboard, 'arranging': arranging }">
+            <div id="app-content" :class="{ 'dashboard': isDashboard, 'arranging': arranging }" :style="dashboardGrid">
                 <BannerNotifications v-if="showTopBanners" :banners="appBanners" scope="app" :collapsed="collapseTopBanners" />
 
                 <!-- Dashboard first load: loading cards over the grid's cells -->

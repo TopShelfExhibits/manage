@@ -9,7 +9,9 @@
  * Container scope (useContainerSize, CSS @container) covers content and views; it measures the
  * content box of the nearest `container-type: inline-size` ancestor (.container, .modal > .content),
  * with the same thresholds as the CSS, so JS and CSS agree and there is no hysteresis.
- * Viewport scope (viewportTier, viewportChrome, CSS @media) covers app chrome and dashboard layout.
+ * Viewport scope (viewportChrome, CSS @media) covers app chrome. Its thresholds include the
+ * #app-content gutter on the larger side of each boundary, so a viewport tier matches the tier of
+ * a full-width page container.
  *
  * Short tier: a height container under BREAKPOINTS.short px tall (CSS only). The height
  * containers (`container-name: height-container`) are dashboard cards and #app-content. A short
@@ -26,17 +28,6 @@ export function containerTier(width) {
     if (!(width >= 0)) return 'wide';
     if (width < BREAKPOINTS.narrow) return 'narrow';
     if (width < BREAKPOINTS.wide) return 'medium';
-    return 'wide';
-}
-
-/**
- * Tier for a viewport width. Thresholds include the #app-content gutter in effect on the larger
- * side of each boundary, so a viewport tier matches the tier of a full-width page container.
- */
-export function viewportTier(width) {
-    if (!(width >= 0)) return 'wide';
-    if (width < BREAKPOINTS.narrow + 2 * BREAKPOINTS.gutterCompact) return 'narrow';
-    if (width < BREAKPOINTS.wide + 2 * BREAKPOINTS.gutterFull) return 'medium';
     return 'wide';
 }
 

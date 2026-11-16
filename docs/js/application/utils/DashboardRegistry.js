@@ -4,17 +4,15 @@ import { authState } from './auth.js';
 import { getReactiveStore } from './reactiveStores.js';
 import { Requests } from '../../data_management/api.js';
 import { undoRegistry } from './undoRegistry.js';
-import { entryPath, cleanPath, findCard, normalizeLayout, firstFreeSlot, freeGroupSlots, isFull, classesForSize, planMove, planResize, planSlotDrop, planSlotResize, fits } from './dashboardLayout.js';
+import { entryPath, findCard, groupPath, normalizeLayout, firstFreeSlot, freeGroupSlots, isFull, classesForSize, planMove, planResize, planSlotDrop, planSlotResize, fits } from './dashboardLayout.js';
 
 export const DashboardRegistry = Vue.reactive({
     store: null,
     saveTimeout: null,
     isSaving: false, // Track save state to prevent invalidation-triggered reloads
     SAVE_DELAY_MS: 5000, // 5 seconds
-    // Arrange mode: cards drawn as miniatures that can be moved and resized. It is a page of its
-    // own (arrangePath), so its layout changes have their own undo history; app.js keeps
-    // `arranging` in step with the address.
-    arranging: false,
+    // Arrange mode is a page of its own (cards drawn as miniatures that can be moved and resized),
+    // so its layout changes have their own undo history
     arrangePath: 'dashboard/arrange',
 
     /**
@@ -68,6 +66,14 @@ export const DashboardRegistry = Vue.reactive({
     },
 
     /**
+     * Whether arrange mode is open. The active undo route is the app's address (app.js and every
+     * table set it from the path), so it is the one place this is read from.
+     */
+    get arranging() {
+        return undoRegistry.currentRouteKey === this.arrangePath;
+    },
+
+    /**
      * Check if this is the initial load (first time loading dashboard data)
      */
     get isInitialLoad() {
@@ -82,10 +88,11 @@ export const DashboardRegistry = Vue.reactive({
     },
 
     /**
-     * The grid layout: placed cards with their rects, and the cards that don't fit
+     * The grid layout: placed cards with their rects, the cards in groups, and the cards that
+     * don't fit (computed once per change of the stored entries)
      */
     get layout() {
-        return normalizeLayout(this.containers);
+        return _layout.value;
     },
 
     /**
@@ -121,24 +128,33 @@ export const DashboardRegistry = Vue.reactive({
     },
 
     /**
-     * Add a container at the first free cell, or else the first free group slot. Returns false
-     * when the dashboard is full. Stores full path including parameters
+     * Add a container at rect when it's free, else at the first free cell, else in the first
+     * free group slot. Returns false when the dashboard is full. Stores full path including
+     * parameters.
      */
-    async add(containerPathWithParams) {
+    async add(containerPathWithParams, rect = null) {
         if (!this.store) return false;
         if (this.has(containerPathWithParams)) return true;
-        const rect = firstFreeSlot(this.layout.placed, 1, 1);
-        if (rect) return this._push({ path: containerPathWithParams, classes: '', ...rect });
-        const slot = freeGroupSlots(this.layout)[0];
-        return slot ? this.placeInGroup(containerPathWithParams, slot.group, slot.slot) : false;
+        const at = (rect && fits(this.layout.placed, rect)) ? rect : firstFreeSlot(this.layout.placed, 1, 1);
+        if (!at) {
+            const slot = freeGroupSlots(this.layout)[0];
+            return slot ? this.placeInGroup(containerPathWithParams, slot.group, slot.slot) : false;
+        }
+        this._begin();
+        this.store.data.push({ path: containerPathWithParams, classes: '', ...at });
+        return this._finish();
     },
 
     /**
-     * Make a free cell a group of small cards
+     * Make a free cell a group of small cards. Its path (dashboard/group:<id>) keeps older deploys,
+     * which read every entry as a page, from failing on it.
      */
     async addGroup(cell) {
         if (!this.store || !fits(this.layout.placed, cell)) return false;
-        return this._push({ group: Date.now().toString(36), ...cell });
+        const id = Date.now().toString(36);
+        this._begin();
+        this.store.data.push({ path: groupPath(id), group: id, ...cell });
+        return this._finish();
     },
 
     /**
@@ -148,10 +164,14 @@ export const DashboardRegistry = Vue.reactive({
      */
     async placeInGroup(containerPathWithParams, group, halfCell) {
         const moves = planSlotDrop(this.layout, containerPathWithParams, group, halfCell);
-        if (moves && !this.has(containerPathWithParams)) {
-            return this._push({ path: containerPathWithParams, classes: '', inGroup: group, slot: moves[0].slot });
+        if (!moves) return false;
+        this._begin();
+        if (!this.has(containerPathWithParams)) {
+            this.store.data.push({ path: containerPathWithParams, classes: '', inGroup: group, slot: moves[0].slot });
+        } else {
+            this._writeSlots(moves);
         }
-        return this._setSlots(moves);
+        return this._finish();
     },
 
     /**
@@ -159,30 +179,11 @@ export const DashboardRegistry = Vue.reactive({
      * Returns false when it doesn't fit.
      */
     async resizeInGroup(containerPathWithParams, slot) {
-        return this._setSlots(planSlotResize(this.layout, containerPathWithParams, slot));
-    },
-
-    /** Store a plan's group slots (each card leaves the grid if it was on it) and save */
-    async _setSlots(moves) {
+        const moves = planSlotResize(this.layout, containerPathWithParams, slot);
         if (!moves) return false;
-        this._commit([]);
-        // After the commit: it rewrites entries, so find each entry again
-        for (const move of moves) {
-            const index = this.containers.indexOf(this.getContainer(move.path));
-            const { x, y, w, h, ...entry } = this._entryObject(index);
-            this.store.data[index] = { ...entry, inGroup: move.inGroup, slot: { ...move.slot } };
-        }
-        await this.save();
-        return true;
-    },
-
-    /** Add a stored entry, keeping every card in its place, and save */
-    async _push(entry) {
-        if (!Array.isArray(this.store.data)) this.store.data = [];
-        this._commit([]);
-        this.store.data.push(entry);
-        await this.save();
-        return true;
+        this._begin();
+        this._writeSlots(moves);
+        return this._finish();
     },
 
     /**
@@ -192,77 +193,105 @@ export const DashboardRegistry = Vue.reactive({
     async placeAt(containerPathWithParams, rect) {
         const entry = this.getContainer(containerPathWithParams);
         const fitsThere = entry && fits(this.layout.placed, rect, containerPathWithParams);
-        return this._apply(fitsThere ? [{ path: entryPath(entry), ...rect }] : null);
+        return this._applyRects(fitsThere ? [{ path: entryPath(entry), ...rect }] : null);
     },
 
     /**
      * Move a card; onto exactly one other card it swaps the two. Returns false when not possible.
      */
     async move(containerPathWithParams, rect) {
-        return this._apply(planMove(this.layout.placed, containerPathWithParams, rect));
+        return this._applyRects(planMove(this.layout.placed, containerPathWithParams, rect));
     },
 
     /**
      * Resize a card to a new rect (from any edge). Returns false when it doesn't fit.
      */
     async resize(containerPathWithParams, rect) {
-        return this._apply(planResize(this.layout.placed, containerPathWithParams, rect));
+        return this._applyRects(planResize(this.layout.placed, containerPathWithParams, rect));
     },
 
-    /** Store a plan's rects and save. Returns false for no plan (the change isn't possible). */
-    async _apply(rects) {
+    /**
+     * Remove container from dashboard. The other cards keep their places. A group's cards go
+     * back to the grid, first-fit.
+     * Compares clean paths (without parameters) for matching
+     */
+    async remove(containerPathWithParams) {
+        if (!this.has(containerPathWithParams)) return;
+        this._begin();
+        const entry = this._entry(containerPathWithParams);
+        if (entry.group) {
+            for (const card of this.containers) {
+                if (card?.inGroup === entry.group) _leaveGroup(card);
+            }
+        }
+        this.store.data.splice(this.containers.indexOf(entry), 1);
+        await this._finish();
+    },
+
+    /** Store a plan's rects (a card in a group given one leaves it for the grid) and save */
+    async _applyRects(rects) {
         if (!rects) return false;
-        this._commit(rects);
+        this._begin();
+        for (const rect of rects) this._writeRect(this._entry(rect.path), rect);
+        return this._finish();
+    },
+
+    /** Store a plan's group slots (a card on the grid leaves it) */
+    _writeSlots(moves) {
+        for (const move of moves) {
+            const entry = this._entry(move.path);
+            delete entry.x; delete entry.y; delete entry.w; delete entry.h;
+            Object.assign(entry, { inGroup: move.inGroup, slot: { ...move.slot } });
+        }
+    },
+
+    /**
+     * Start a layout change. In arrange mode it records the undo step first (undoing or redoing it
+     * saves). Then every drawn card's rect is written into its stored entry: old entries are read
+     * first-fit (normalizeLayout), and writing all of them keeps one card's change from shifting
+     * the others. Cards that don't fit lose any stored rect. Entries are changed in place, so
+     * entries found before still hold.
+     */
+    _begin() {
+        if (!Array.isArray(this.store.data)) this.store.data = [];
+        if (this.arranging) {
+            undoRegistry.capture(this.store.data, this.arrangePath, { type: 'dashboard-layout', onRestore: () => this.save() });
+        }
+        const { placed, unplaced } = this.layout;
+        for (const card of placed) this._writeRect(this._entry(card.path), card);
+        for (const card of unplaced) {
+            const entry = this._entry(card.path);
+            delete entry.x; delete entry.y; delete entry.w; delete entry.h;
+        }
+    },
+
+    /** Finish a layout change: save (debounced) */
+    async _finish() {
         await this.save();
         return true;
     },
 
-    /**
-     * Write every placed card's rect into its stored entry, with the given rects applied.
-     * Old entries are read first-fit (normalizeLayout); writing all of them on the first change
-     * keeps one card's move from shifting the others. Cards that don't fit lose any stored rect.
-     * Every layout change starts here, so in arrange mode this records its undo step first
-     * (undoing or redoing it saves).
-     * @param {Array<{path,x,y,w,h}>} rects - new rects by path
-     */
-    _commit(rects) {
-        if (this.arranging) {
-            undoRegistry.capture(this.store.data, this.arrangePath, { type: 'dashboard-layout', onRestore: () => this.save() });
-        }
-        const { placed, unplaced, grouped } = this.layout;
-        const updates = new Map(rects.map(r => [cleanPath(r.path), r]));
-        for (const card of placed) {
-            const rect = updates.get(cleanPath(card.path)) || card;
-            this._writeRect(card.index, rect);
-            updates.delete(cleanPath(card.path));
-        }
-        for (const card of unplaced) {
-            const rect = updates.get(cleanPath(card.path));
-            if (rect) {
-                this._writeRect(card.index, rect);
-            } else if (typeof this.store.data[card.index] === 'object') {
-                const { x, y, w, h, ...rest } = this.store.data[card.index];
-                this.store.data[card.index] = rest;
-            }
-        }
-        // A card in a group given a rect leaves its group for the grid
-        for (const card of grouped) {
-            const rect = updates.get(cleanPath(card.path));
-            if (rect) this._writeRect(card.index, rect);
-        }
-    },
-
     // A card on the grid is in no group; a group keeps no classes (they size old deploys' cards)
-    _writeRect(index, { x, y, w, h }) {
-        const { inGroup, slot, ...entry } = this._entryObject(index);
+    _writeRect(entry, { x, y, w, h }) {
+        _leaveGroup(entry);
         if (!entry.group) entry.classes = classesForSize(w, h, entry.classes);
-        this.store.data[index] = { ...entry, x, y, w, h };
+        Object.assign(entry, { x, y, w, h });
     },
 
-    /** A stored entry as an object (old data has plain path strings) */
-    _entryObject(index) {
+    /**
+     * A stored entry as an object, by path. Old data has plain path strings, replaced here by
+     * objects; a group stored before groups had paths gets its path.
+     */
+    _entry(path) {
+        const index = this.containers.indexOf(this.getContainer(path));
+        if (index < 0) return null;
         const entry = this.store.data[index];
-        return typeof entry === 'string' ? { path: entry, classes: '' } : entry;
+        if (typeof entry === 'string') {
+            this.store.data[index] = { path: entry, classes: '' };
+        } else if (entry.group && !entry.path) {
+            entry.path = groupPath(entry.group);
+        }
+        return this.store.data[index];
     },
 
     /**
@@ -287,27 +316,6 @@ export const DashboardRegistry = Vue.reactive({
         } else {
             console.warn('[DashboardRegistry] Container not found for path:', cleanPathToUpdate);
         }
-    },
-
-    /**
-     * Remove container from dashboard. The other cards keep their places. A group's cards go
-     * back to the grid, first-fit.
-     * Compares clean paths (without parameters) for matching
-     */
-    async remove(containerPathWithParams) {
-        if (!this.has(containerPathWithParams)) return;
-        this._commit([]);
-        // After the commit: it rewrites entries, so find the entry again
-        const entry = this.getContainer(containerPathWithParams);
-        if (entry.group) {
-            this.store.data.forEach((card, index) => {
-                if (card?.inGroup !== entry.group) return;
-                const { inGroup, slot, ...rest } = card;
-                this.store.data[index] = rest;
-            });
-        }
-        this.store.data.splice(this.containers.indexOf(entry), 1);
-        await this.save();
     },
 
     /**
@@ -380,6 +388,14 @@ export const DashboardRegistry = Vue.reactive({
             this.saveTimeout = null;
         }
         this.store = null;
-        this.arranging = false;
     }
 });
+
+// The layout of the stored entries, recomputed only when they change
+const _layout = Vue.computed(() => normalizeLayout(DashboardRegistry.containers));
+
+/** Take a stored entry out of its group */
+function _leaveGroup(entry) {
+    delete entry.inGroup;
+    delete entry.slot;
+}

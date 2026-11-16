@@ -14,7 +14,6 @@
     /* Interface Sizes */
     --navbar-height: 80px;
     --navbar-sticky-offset: var(--navbar-height); /* Offset for sticky headers; changes when nav hidden */
-    --page-width-card: 360px;
     --page-width-large: 1000px;
 
     --control-height: 38px;
@@ -99,7 +98,7 @@
 /*
  * Size model (views-and-renderers-plan §4.10). Two scopes, three tiers each:
  *   container (@container, useContainerSize): narrow < 600px · medium 600–999px · wide ≥ 1000px
- *   viewport  (@media, viewportTier / viewportChrome): the same tiers with the #app-content gutter
+ *   viewport  (@media, viewportChrome): the same tiers with the #app-content gutter
  *             added on the larger side of each boundary: narrow < 600 + 2*8 = 616px ·
  *             wide ≥ 1000 + 2*12 = 1024px
  *   short     (@container height-container): height < 500px — a dashboard card, or #app-content

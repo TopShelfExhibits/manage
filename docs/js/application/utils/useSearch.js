@@ -1,6 +1,5 @@
 import {html} from '../index.js';
 import { searchWords as toSearchWords, makeHighlighter } from './views/searchMatch.js';
-import { carriesSearch } from './findScopes.js';
 
 /**
  * useSearch - Vue 3 Composable for Search Functionality
@@ -59,6 +58,34 @@ function restoreSearchInputFocusState(state) {
     }
 }
 
+// Whether a pointer is pressed (a click in progress)
+let _pointerDown = false;
+if (typeof document !== 'undefined') {
+    document.addEventListener('pointerdown', () => { _pointerDown = true; }, true);
+    const release = () => { _pointerDown = false; };
+    document.addEventListener('pointerup', release, true);
+    document.addEventListener('pointercancel', release, true);
+}
+
+/**
+ * Run fn once the click in progress has run: after the pointer is released (the click follows its
+ * release in the same task), or at once, after this task, when no pointer is down (a key left the
+ * box). Writing the URL while a click is in progress would re-render the page under the pointer.
+ */
+function afterClick(fn) {
+    if (!_pointerDown) {
+        setTimeout(fn, 0);
+        return;
+    }
+    const done = () => {
+        document.removeEventListener('pointerup', done, true);
+        document.removeEventListener('pointercancel', done, true);
+        setTimeout(fn, 0);
+    };
+    document.addEventListener('pointerup', done, true);
+    document.addEventListener('pointercancel', done, true);
+}
+
 function restoreSearchInputFocusStateWithRetry(state) {
     if (!state) return;
     restoreSearchInputFocusState(state);
@@ -94,7 +121,15 @@ export function useSearch(options = {}) {
         debounceTimer = null;
         debouncedValue.value = value;
     }
+    // What the box holds, for navigation to carry (NavigationRegistry.liveSearches): noted as it
+    // changes (typed, or read from the URL), while the URL waits for the box to be left. Until it
+    // changes the URL already says what it holds.
+    const tracksLive = syncWithUrl && navigationRegistry && containerPath;
+    if (tracksLive && Vue.getCurrentInstance()) {
+        Vue.onBeforeUnmount(() => navigationRegistry.noteLiveSearch(containerPath, null));
+    }
     Vue.watch(searchValue, (value) => {
+        if (tracksLive) navigationRegistry.noteLiveSearch(containerPath, value);
         if (!value || !value.trim()) { applyNow(value); return; }
         clearTimeout(debounceTimer);
         debounceTimer = setTimeout(() => applyNow(searchValue.value), SEARCH_DEBOUNCE_MS);
@@ -222,36 +257,23 @@ export function useSearch(options = {}) {
     }
 
     /**
-     * Handle search input blur event: write the typed search to the URL. Blur also happens when a
-     * click navigates away, so this waits for that navigation to finish, then:
-     *   - still on the same page: writes the search to this box's own path (the card's stored
-     *     path on the dashboard);
-     *   - on a page of the same find scope (findScopes.js) that opened without a search: carries
-     *     the typed search there, as the navigation would have if it had been in the URL already;
-     *   - anywhere else (another scope, or a link that named its own search): leaves it, noted as
-     *     the search last left in its own scope (NavigationRegistry.rememberSearch), so coming
-     *     back soon offers it again.
+     * Handle search input blur event: write the search to the URL (this box's own path; the card's
+     * stored path on the dashboard). It waits until the click that left the box has run, so the
+     * write never re-renders the page under a click. A click that navigated away has already
+     * carried the search or noted it in its scope (NavigationRegistry.resolveTargetPath reads the
+     * box), so nothing is written then. An unchanged search writes nothing.
      */
     function handleBlur() {
-        if (!syncWithUrl || _clearingSearch.value || !navigationRegistry) return;
-
+        if (!syncWithUrl || _clearingSearch.value || !navigationRegistry || !containerPath) return;
         const pathAtBlur = appContext?.currentPath;
         if (!pathAtBlur) return;
-        const typed = (searchValue.value && searchValue.value.trim()) ? searchValue.value : undefined;
-
-        setTimeout(() => {
+        afterClick(() => {
             const currentPath = appContext?.currentPath;
-            if (!currentPath) return;
-            const samePage = currentPath.split('?')[0] === pathAtBlur.split('?')[0];
-            if (samePage) {
-                updateUrlParameter(typed);
-            } else if (typed && carriesSearch(pathAtBlur, currentPath)
-                && !navigationRegistry.getNavigationParameters(currentPath).searchTerm) {
-                navigationRegistry.updatePathParametersSilently(currentPath.split('?')[0], currentPath, { searchTerm: typed });
-            } else if (typed) {
-                navigationRegistry.rememberSearch?.(pathAtBlur, typed);
-            }
-        }, 100); // Brief pause to ensure navigation completes
+            if (!currentPath || currentPath.split('?')[0] !== pathAtBlur.split('?')[0]) return;
+            const typed = (searchValue.value && searchValue.value.trim()) ? searchValue.value : undefined;
+            const inUrl = navigationRegistry.getParametersForContainer(containerPath, currentPath)?.searchTerm || undefined;
+            if (typed !== inUrl) updateUrlParameter(typed);
+        });
     }
 
     /**

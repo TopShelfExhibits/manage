@@ -477,15 +477,30 @@ export const NavigationRegistry = {
     // The search last left in each find scope, offered again for SEARCH_MEMORY_MS (findScopes.js)
     recentSearches: new Map(),
 
-    /** Note a page's search as the one last left in its scope (an empty term forgets it) */
-    rememberSearch(path, term, now = Date.now()) {
-        rememberSearch(this.recentSearches, path, term, now);
+    // What each search box on screen holds, by its container's clean path, written as it is typed
+    // (useSearch). The URL gets it only when the box is left, so a navigation reads it here: typing
+    // never re-renders the page, and a click that navigates carries the search it had.
+    liveSearches: new Map(),
+
+    /** Note what a search box holds ('' for empty); null forgets the box (it's gone) */
+    noteLiveSearch(containerPath, term) {
+        const key = this.parsePath(containerPath || '').path;
+        if (term == null) this.liveSearches.delete(key);
+        else this.liveSearches.set(key, String(term).trim() ? term : '');
+    },
+
+    /** The search on a path: what its box holds when it's on screen, else its URL's */
+    searchOn(path) {
+        const { path: key, parameters } = this.parsePath(path || '');
+        return this.liveSearches.has(key) ? (this.liveSearches.get(key) || undefined) : parameters.searchTerm;
     },
 
     /**
-     * The path a navigation opens. The current page's search is noted first, as the one last left
-     * in its scope. A target with explicit parameters ('?') then opens as given. A bare target gets
-     * the route's last parameters (view, filters) without their search, plus:
+     * The path a navigation opens. The current page's search (searchOn: its box, typed or not yet
+     * in the URL) is noted first, as the one last left in its scope. A dashboard card opens as
+     * its page with what its box holds. Otherwise a target with explicit parameters ('?') opens
+     * as given. A bare target gets the route's last parameters (view, filters) without their
+     * search, plus:
      *   - the current search, when both pages share a find scope;
      *   - otherwise the search last left in the target's scope, if that was under
      *     SEARCH_MEMORY_MS ago.
@@ -496,18 +511,25 @@ export const NavigationRegistry = {
      * @returns {string}
      */
     resolveTargetPath(targetPath, currentPath, { carry = true, now = Date.now() } = {}) {
-        const currentSearch = this.parsePath(currentPath || '').parameters.searchTerm;
-        if (currentPath) this.rememberSearch(currentPath, currentSearch, now);
-        if (targetPath.includes('?')) return targetPath;
-        const cleanTarget = this.parsePath(targetPath).path;
-        const params = withoutSearch(this.getRoute(cleanTarget)?.lastParameters || {});
-        if (carry) {
-            const search = carriesSearch(currentPath, cleanTarget)
+        const currentSearch = this.searchOn(currentPath);
+        if (currentPath) rememberSearch(this.recentSearches, currentPath, currentSearch, now);
+        const target = this.parsePath(targetPath);
+        const explicit = targetPath.includes('?');
+        const params = explicit ? { ...target.parameters } : withoutSearch(target.route?.lastParameters || {});
+        let search = explicit ? params.searchTerm : undefined;
+        const onDashboard = this.parsePath(currentPath || '').path.split('/')[0] === 'dashboard';
+        if (carry && onDashboard && this.liveSearches.has(target.path)) {
+            search = this.liveSearches.get(target.path) || undefined;
+        } else if (explicit) {
+            return targetPath;
+        } else if (carry) {
+            search = carriesSearch(currentPath, target.path)
                 ? currentSearch
-                : recallSearch(this.recentSearches, cleanTarget, now);
-            if (search) params.searchTerm = search;
+                : recallSearch(this.recentSearches, target.path, now);
         }
-        return this.buildPath(cleanTarget, params);
+        if (search) params.searchTerm = search;
+        else delete params.searchTerm;
+        return this.buildPath(target.path, params);
     },
 
     async handleNavigateToPath(navigationData, appContext) {

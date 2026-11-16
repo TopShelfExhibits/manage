@@ -372,10 +372,12 @@ Components react to currentPath change
 
 `resolveTargetPath(targetPath, currentPath)` decides the parameters of every navigation:
 
-- **A target with parameters** (`?` in the path) opens exactly as given. This covers links that name a search (an item number into inventory), dashboard cards opening their page, and shared links.
+- **The current page's search** is what its search box holds (`searchOn`), typed or not yet in the URL. Each box notes what it holds as it changes (`noteLiveSearch`, `liveSearches`), so typing never writes the URL or re-renders the page; a box that's gone falls back to its URL.
+- **A dashboard card** opens as its page with what its box holds.
+- **A target with parameters** (`?` in the path) otherwise opens exactly as given. This covers links that name a search (an item number into inventory), dashboard cards opening their page, and shared links.
 - **A bare target** gets the route's remembered parameters (`lastParameters`: view, filters, toggles) **without their search**. It gets a search in one of two ways:
   - **The current page's search**, when both pages share a **find scope** ([findScopes.js](../js/application/utils/findScopes.js)).
-  - **The search last left in the target's scope**, when that was under 5 minutes ago (`SEARCH_MEMORY_MS`). Every navigation notes the page it leaves (`rememberSearch`). Leaving with an empty box forgets the scope's search.
+  - **The search last left in the target's scope**, when that was under 5 minutes ago (`SEARCH_MEMORY_MS`). Every navigation notes the page it leaves (`rememberSearch`, findScopes.js). Leaving with an empty box forgets the scope's search.
 
   | Find scope | Pages |
   | --- | --- |
@@ -385,9 +387,9 @@ Components react to currentPath change
   | its own path | everything else (item timelines, each report) |
 
 - **Browser back/forward** opens the history entry as it was and carries nothing.
-- **Search box blur** (`useSearch.handleBlur`) writes a typed search that isn't in the URL yet.
-  - If the blur came from a click that navigated, the search goes to the new page only when that page shares the scope and opened without a search of its own.
-  - Otherwise the search is noted as the one last left in its scope.
+- **Search box blur** (`useSearch.handleBlur`) writes the box's search to its own path (a card's stored path on the dashboard), only when it changed.
+  - It waits until the click that left the box has run (`afterClick`: after the pointer's release), so the write never re-renders the page under a click.
+  - After a click that navigated it writes nothing: that navigation already carried the search or noted it in its scope.
 - **Item timelines** (`inventory/<category>/<item#>`) have the standard search box. A table's details button opens the timeline with the table's search (`DataView.performAction`). The item details above the timeline highlight the same words, read from the URL.
 
 Only `searchTerm` carries. `searchIndex` (the selected result) belongs to one page's results.

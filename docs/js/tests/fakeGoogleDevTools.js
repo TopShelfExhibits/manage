@@ -74,8 +74,8 @@ export function refreshAppData() {
     ], true);
 }
 
-// The test suite in progress, so a second command waits for it instead of running alongside it
-let _testRun = null;
+// The last test run asked for: each command waits for the one before it instead of running alongside
+let _testRun = Promise.resolve();
 
 export const fakeGoogleDevTools = {
     help() {
@@ -268,12 +268,9 @@ export const fakeGoogleDevTools = {
      * @returns {Promise<{passed: number, failed: Array<{group, name, error}>}>}
      */
     runTests(groups) {
-        if (!_testRun) {
-            _testRun = import('./tests.js')
-                .then(m => m.runTests(groups))
-                .finally(() => { _testRun = null; });
-        }
-        return _testRun;
+        const run = _testRun.catch(() => {}).then(() => import('./tests.js')).then(m => m.runTests(groups));
+        _testRun = run;
+        return run;
     },
 
     refresh() {

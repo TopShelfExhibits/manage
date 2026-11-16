@@ -114,6 +114,8 @@ export const NotificationBubbleOverlay = {
  * notification bus, and NotificationBubbleOverlay shows them as bubbles. `collapsed` draws
  * nothing and reports every visible banner, so they go straight to the tray (the dashboard
  * without a notices card).
+ *
+ * Slot `empty`: drawn instead when no banner is visible (the notices page's "No notices").
  */
 let _instanceCount = 0;
 
@@ -302,5 +304,6 @@ export const BannerNotifications = {
                 </template>
             </transition-group>
         </div>
+        <slot v-else-if="!collapsed" name="empty"></slot>
     `
 };

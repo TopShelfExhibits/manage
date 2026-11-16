@@ -101,7 +101,7 @@ nav #navbar a:hover {
 
 footer {
     width:100%;
-    max-width: calc(var(--page-width-card) * 4 + var(--padding-lg) * 3);
+    max-width: var(--page-width-large);
     background-color: transparent;
     box-shadow: 0 -12px 14px -18px var(--color-shadow);
     display: flex;
@@ -157,15 +157,14 @@ div#app-content {
     container-type: size;
 }
 
-/* Dashboard: one screen, a 4 x 2 grid of cards, 2 x 4 in portrait (dashboardComponents.js). Each
-   cell is 2 x 2 tracks (GROUP_SIDE), so a group's small cards are grid items too; with the same
-   gap between tracks, the cells come out as on a 4 x 2 grid. Keep the sizes in step with GRID and
-   GROUP_SIDE in js/application/utils/dashboardLayout.js and the orientation query with
-   PORTRAIT_QUERY in dashboardComponents.js. */
+/* Dashboard: one screen, a 4 x 2 grid of cards, 2 x 4 in portrait. The track counts come from
+   dashboardGridStyle (dashboardComponents.js): each cell is GROUP_SIDE x GROUP_SIDE tracks, so a
+   group's small cards are grid items too; with the same gap between tracks, the cells come out as
+   on a 4 x 2 grid. */
 div#app-content.dashboard:not(:has(> div.empty-message)) {
     display: grid;
-    grid-template-columns: repeat(8, minmax(0, 1fr));
-    grid-template-rows: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(var(--grid-cols), minmax(0, 1fr));
+    grid-template-rows: repeat(var(--grid-rows), minmax(0, 1fr));
     align-items: stretch;
     justify-items: stretch;
     gap: var(--padding-lg);
@@ -173,16 +172,19 @@ div#app-content.dashboard:not(:has(> div.empty-message)) {
     overflow: hidden;
     scrollbar-gutter: auto;
 }
-@media (orientation: portrait) {
-    div#app-content.dashboard:not(:has(> div.empty-message)) {
-        grid-template-columns: repeat(4, minmax(0, 1fr));
-        grid-template-rows: repeat(8, minmax(0, 1fr));
-    }
-}
-/* Room around the cards (the arrange bar's room below wins while arranging) */
+/* Room around the cards (the arrange bar's room below wins while arranging). The dashboard's
+   layers, lowest first: a miniature's open overlay, arrange mode's move handle, resize zones,
+   buttons and drop preview, the loading cards, and the arrange bar. */
 div#app-content.dashboard {
     padding-inline: var(--padding-lg);
     padding-bottom: var(--padding-lg);
+    --z-card-overlay: 1000;
+    --z-arrange-handle: 1010;
+    --z-arrange-zone: 1015;
+    --z-arrange-control: 1020;
+    --z-drop-preview: 1030;
+    --z-loading-card: 2000;
+    --z-arrange-bar: 5000;
 }
 
 /* The page's messages (sign in, no cards), and the bare notices card's "No notices" in its cell */
@@ -244,7 +246,7 @@ div#app-content > div.empty-message,
 }
 
 /* A page container's cell (DashboardCell). Off the dashboard it adds no box. On the dashboard it
-   covers its rect, set in landscape terms; portrait swaps the axes. */
+   covers its rect as drawn (gridAreaStyle). */
 .dashboard-cell {
     display: contents;
 }
@@ -261,21 +263,12 @@ div#app-content > div.empty-message,
     grid-column: var(--col-start) / span var(--col-span);
     grid-row: var(--row-start) / span var(--row-span);
 }
-@media (orientation: portrait) {
-    #app-content.dashboard > .dashboard-cell,
-    #app-content.dashboard > .dashboard-slot,
-    #app-content.dashboard > .dashboard-drop-preview,
-    #app-content.dashboard > .loading-card {
-        grid-column: var(--row-start) / span var(--row-span);
-        grid-row: var(--col-start) / span var(--col-span);
-    }
-}
 
 /* Dashboard first load (app.js loadingCards): a translucent card over each cell, with the loading
    bar's sweep. They sit above the cards (which arrive underneath) and fade out (longfade) when
    it's ready. */
 #app-content.dashboard > .loading-card {
-    z-index: 2000;
+    z-index: var(--z-loading-card);
     overflow: hidden;
     pointer-events: none;
     border-radius: var(--radius-lg);
@@ -368,7 +361,7 @@ div#app-content > div.empty-message,
 .dashboard-cell-handle {
     position: absolute;
     inset: 0;
-    z-index: 1010;
+    z-index: var(--z-arrange-handle);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -388,7 +381,7 @@ div#app-content > div.empty-message,
 .dashboard-cell-resize {
     position: absolute;
     right: var(--padding-md);
-    z-index: 1020;
+    z-index: var(--z-arrange-control);
 }
 .dashboard-cell-controls {
     top: var(--padding-md);
@@ -405,7 +398,7 @@ div#app-content > div.empty-message,
 .dashboard-cell-resize-zone {
     --zone: 14px;
     position: absolute;
-    z-index: 1015;
+    z-index: var(--z-arrange-zone);
     touch-action: none;
     border-radius: var(--radius-lg);
 }
@@ -470,7 +463,7 @@ div#app-content > div.empty-message,
     left: 50%;
     top: 50%;
     transform: translate(-50%, -50%);
-    z-index: 1020;
+    z-index: var(--z-arrange-control);
     box-shadow: 0 4px 8px var(--color-shadow);
 }
 .dashboard-group-controls > button:first-child {
@@ -478,7 +471,7 @@ div#app-content > div.empty-message,
     touch-action: none;
 }
 #app-content.dashboard > .dashboard-drop-preview {
-    z-index: 1030;
+    z-index: var(--z-drop-preview);
     pointer-events: none;
     border: 3px solid var(--color-green);
     border-radius: var(--radius-lg);
@@ -504,7 +497,7 @@ div#app-content.dashboard.arranging {
     /* Its own width, up to the screen's (starting halfway across, it would get only half) */
     width: max-content;
     max-width: calc(100vw - 2 * var(--padding-md));
-    z-index: 5000;
+    z-index: var(--z-arrange-bar);
     box-shadow: 0 4px 8px var(--color-shadow);
 }
 /* Labels in arrange mode: the card's name on its handle, the hint in the bar */
@@ -531,7 +524,7 @@ div#app-content.dashboard.arranging {
 }
 /* A miniature card opens its page on click */
 .dashboard-cell > .container-expand-overlay {
-    z-index: 1000;
+    z-index: var(--z-card-overlay);
     position: absolute;
     display: flex;
     justify-content: center;
@@ -1059,7 +1052,6 @@ button.card {
 
 .hamburger-menu ul {
     list-style: none;
-    /* min-width: calc(var(--page-width-card) - var(--padding-lg) * 2); */
     padding: 0;
     margin:0;
 }
