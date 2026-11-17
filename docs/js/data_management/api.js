@@ -1104,15 +1104,12 @@ class Requests_uncached {
         }
         
         // New signature: (deps, filterParams, searchParams, ctgFilter)
-        // Find all shows matching the search criteria
-        const shows = await deps.call(ProductionUtils.getOverlappingShows, filter, searchParams);
-        
-        const resolvedShows = (await mapWithConcurrency(
-            shows,
-            async (showRow) => {
-                const identifier = await deps.call(ProductionUtils.getCanonicalIdentifierForScheduleRow, showRow);
-                if (!identifier) return null;
+        // The canonical ids of the shows matching the search criteria, once each
+        const showIds = await deps.call(ProductionUtils.getOverlappingShowIds, filter, searchParams);
 
+        const resolvedShows = (await mapWithConcurrency(
+            showIds,
+            async (identifier) => {
                 const [shipDate, returnDate] = await Promise.all([
                     deps.call(ProductionUtils.getProjectShipDate, identifier).catch(() => null),
                     deps.call(ProductionUtils.getProjectReturnDate, identifier).catch(() => null)
@@ -1342,7 +1339,7 @@ class Requests_uncached {
         const tabs = await deps.call(Database.getTabs, 'PACK_LISTS');
         // Use the same path the schedule does: look up the schedule row first so that
         // NameOverrides (manual client-abbreviation links) are honoured.
-        const scheduleRow = await deps.call(ProductionUtils.getShowDetails, identifier);
+        const scheduleRow = await deps.call(ProductionUtils.getShowDates, identifier);
         if (scheduleRow) {
             const results = await deps.call(ProductionUtils.findPacklistTabsForScheduleRow, scheduleRow, tabs);
             if (results.length > 0) return results[0].title;

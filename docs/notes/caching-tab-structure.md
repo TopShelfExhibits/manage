@@ -111,7 +111,7 @@ Set up at the bottom of `database.js` (`watchSpreadsheets`) and run by the polle
 
 | Table | A change means | While Drive can't confirm it |
 | --- | --- | --- |
-| PROD_SCHED | Edited by hand, without stamps: every cached read of it is invalidated, and the stores reload. | Reads older than 4 minutes expire. |
+| PROD_SCHED | Edited by hand, without stamps: every cached read of it is invalidated, and the stores built on its full rows reload. Quantity analysis reads only the date and identity columns, through early cutoff, so it reruns only for the shows and date windows a change affects (incremental-invalidation-plan.md). | Reads older than 4 minutes expire. |
 | PACK_LISTS | The stamps name the tab. A change that no stamp of the table accounts for is checked again at the next poll. If still unaccounted for, the table's older cached reads expire (`[CacheWatch] … changed with no stamp` in the console). | Reads older than 30 minutes expire. |
 | INVENTORY | As PACK_LISTS. | Nothing expires. |
 | CACHE | Holds the stamps: a change means the Caching tab may hold new stamps. | Nothing expires. |

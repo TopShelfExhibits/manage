@@ -69,11 +69,16 @@ export const appSettings = Vue.reactive({
  *   2. Data is reloaded from server
  *   3. Analysis runs automatically after load completes
  *   4. Lock is released
- * - When analysis data is invalidated:
- *   1. 50ms delay allows main reload to register if happening simultaneously
- *   2. If main reload is active, analysis is skipped (will run after reload)
- *   3. Otherwise, specific analysis step is cleared and re-run
- * - This prevents analysis from running on empty/stale data during reload
+ * - When analysis data is invalidated (targeted re-analysis):
+ *   1. Each analysis run records which rows produced which cache key (analysisKeyIndex)
+ *   2. An invalidation event names one key (method + args); after a short debounce only
+ *      the rows behind that key are re-run. Results are not cleared first: the old value
+ *      stays until the new one arrives, and a result equal to the old one is not written
+ *   3. If main reload is active, the targets are dropped (analysis runs after reload);
+ *      if a full analysis is running, they run when it finishes
+ *   4. Configs whose key can't be predicted (passFullItem) re-run every row they ran on
+ * - This prevents analysis from running on empty/stale data during reload, and keeps
+ *   one row's invalidation (from any page) from blanking a column on every row
  * 
  * Preemptive Eviction Optimization:
  * - On cache invalidation, before reloading, check store's priority score
@@ -211,13 +216,67 @@ function storeAnalysisResult(item, config, result) {
     // - undefined: preserve existing value (do nothing)
     // - null: explicitly clear the value
     // - any other value: update with new value
+    // A value equal to the current one is not written (no reactive update, no re-render).
     if (result !== undefined) {
         if (config.targetColumn) {
-            item[config.targetColumn] = result;
+            if (!areValuesEqual(item[config.targetColumn], result)) item[config.targetColumn] = result;
         } else {
-            item.AppData[config.resultKey] = result;
+            if (!areValuesEqual(item.AppData[config.resultKey], result)) item.AppData[config.resultKey] = result;
         }
     }
+    // A successful run replaces any earlier error for this step
+    const errorKey = `${config.targetColumn || config.resultKey}_error`;
+    if (item.AppData && errorKey in item.AppData) delete item.AppData[errorKey];
+}
+
+/** The identifier an analysis config's results are stored under (resultKey or targetColumn). */
+function analysisConfigId(config) {
+    return config.resultKey || config.targetColumn;
+}
+
+/**
+ * The args part of the cache key an analysis call produces. Must match
+ * CacheManager.generateCacheKey(namespace, method, args) for args = apiParams.
+ */
+function analysisArgsString(apiParams) {
+    return JSON.stringify(apiParams).replace(/^\[|\]$/g, '');
+}
+
+/**
+ * Value to pass to an analysis function from ordered source columns.
+ * With extractAsObject and several columns: { col: value|null, ... }. Otherwise the first
+ * non-empty value (item first, then parentItem). No source columns: the item itself.
+ */
+function findSourceValue(item, sourceColumns, parentItem = null, extractAsObject = false) {
+    if (!sourceColumns || sourceColumns.length === 0) return item;
+
+    // If extractAsObject is true and multiple columns specified, extract all as an object
+    if (extractAsObject && sourceColumns.length > 1) {
+        const result = {};
+        for (const column of sourceColumns) {
+            if (item && (item[column] !== undefined && item[column] !== null && item[column] !== '')) {
+                result[column] = item[column];
+            } else if (parentItem && (parentItem[column] !== undefined && parentItem[column] !== null && parentItem[column] !== '')) {
+                result[column] = parentItem[column];
+            } else {
+                result[column] = null;
+            }
+        }
+        return result;
+    }
+
+    // Original behavior: return first non-empty value (fallback chain)
+    for (const column of sourceColumns) {
+        // First check the item itself
+        if (item && item[column] !== undefined && item[column] !== null && item[column] !== '') {
+            return item[column];
+        }
+        // Then check parent item if available
+        if (parentItem && parentItem[column] !== undefined && parentItem[column] !== null && parentItem[column] !== '') {
+            return parentItem[column];
+        }
+    }
+    return null;
 }
 
 /**
@@ -334,6 +393,27 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
         return arr;
     }
 
+    // Targeted re-analysis index (not reactive): config id → Map(argsString → Map(item → parentItem|null)).
+    // Filled as analysis runs; cleared when the rows are replaced (setData / reset).
+    const analysisKeyIndex = new Map();
+    function recordAnalysisKey(config, apiParams, item, parentItem = null) {
+        const id = analysisConfigId(config);
+        if (!analysisKeyIndex.has(id)) analysisKeyIndex.set(id, new Map());
+        const byArgs = analysisKeyIndex.get(id);
+        const key = config.passFullItem ? '*' : analysisArgsString(apiParams);
+        if (!byArgs.has(key)) byArgs.set(key, new Map());
+        byArgs.get(key).set(item, parentItem);
+    }
+    // Targets waiting for a running full analysis: config id → Set(argsString | '*')
+    let pendingTargets = new Map();
+    let targetedChain = Promise.resolve();
+    function mergeTargets(into, from) {
+        for (const [id, keys] of from) {
+            if (!into.has(id)) into.set(id, new Set());
+            keys.forEach(k => into.get(id).add(k));
+        }
+    }
+
     // Read-only stores (saveCall === null) never need originalData: isModified is always false,
     // saves are impossible, and no unsaved-changes guards or undo baselines apply.
     // Skipping originalData eliminates one full deep clone of the dataset and prevents
@@ -436,6 +516,8 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
             }
             // Mutate existing array in place to preserve references (critical for undo system)
             this._data.splice(0, this._data.length, ...processedData);
+            // The rows were replaced: recorded analysis keys point at the old rows
+            analysisKeyIndex.clear();
             // Clear auto-save hash when data changes
             this.lastAutoSaveHash = null;
             
@@ -463,6 +545,8 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
             if (!isLoading) this.loadingProgress = -1;
         },
         reset() {
+            analysisKeyIndex.clear();
+            pendingTargets = new Map();
             // Clear arrays in place to preserve references for undo system
             this._data.splice(0, this._data.length);
             this.originalData.splice(0, this.originalData.length);
@@ -843,39 +927,6 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
             this.analysisMessage = 'Starting analysis...';
 
             try {
-                // Helper to find value from ordered source columns
-                const findSourceValue = (item, sourceColumns, parentItem = null, extractAsObject = false) => {
-                    if (!sourceColumns || sourceColumns.length === 0) return item;
-                    
-                    // If extractAsObject is true and multiple columns specified, extract all as an object
-                    if (extractAsObject && sourceColumns.length > 1) {
-                        const result = {};
-                        for (const column of sourceColumns) {
-                            if (item && (item[column] !== undefined && item[column] !== null && item[column] !== '')) {
-                                result[column] = item[column];
-                            } else if (parentItem && (parentItem[column] !== undefined && parentItem[column] !== null && parentItem[column] !== '')) {
-                                result[column] = parentItem[column];
-                            } else {
-                                result[column] = null;
-                            }
-                        }
-                        return result;
-                    }
-                    
-                    // Original behavior: return first non-empty value (fallback chain)
-                    for (const column of sourceColumns) {
-                        // First check the item itself
-                        if (item && item[column] !== undefined && item[column] !== null && item[column] !== '') {
-                            return item[column];
-                        }
-                        // Then check parent item if available
-                        if (parentItem && parentItem[column] !== undefined && parentItem[column] !== null && parentItem[column] !== '') {
-                            return parentItem[column];
-                        }
-                    }
-                    return null;
-                };
-
                 // Helper to detect which arrays contain the requested columns
                 const detectRelevantArrays = () => {
                     const relevantConfigs = [];
@@ -993,7 +1044,8 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
                                     // Use full item if passFullItem is true, otherwise use extracted value
                                     const firstParam = config.passFullItem ? item : inputValue;
                                     const apiParams = [firstParam, ...(config.additionalParams || [])];
-                                    
+                                    recordAnalysisKey(config, apiParams, item);
+
                                     // Use priority queue for analysis calls (low priority)
                                     const result = await PriorityQueue.enqueue(
                                         config.apiFunction,
@@ -1068,7 +1120,8 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
                                             // Use full item if passFullItem is true, otherwise use extracted value
                                             const firstParam = config.passFullItem ? nestedItem : inputValue;
                                             const apiParams = [firstParam, ...(config.additionalParams || [])];
-                                            
+                                            recordAnalysisKey(config, apiParams, nestedItem, config.needsParentContext ? parentItem : null);
+
                                             // Use priority queue for analysis calls (low priority)
                                             const result = await PriorityQueue.enqueue(
                                                 config.apiFunction,
@@ -1123,11 +1176,74 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
                     this._pendingReanalysis = false;
                     Vue.nextTick(() => this.runConfiguredAnalysis({ skipIfAnalyzed: false }));
                 }
+                // Targets invalidated while this run was in flight: re-run them now
+                if (pendingTargets.size) {
+                    const targets = pendingTargets;
+                    pendingTargets = new Map();
+                    Vue.nextTick(() => this.reanalyzeTargets(targets));
+                }
                 setTimeout(() => {
                     this.analysisProgress = 0;
                     this.analysisMessage = '';
                 }, 2000);
             }
+        },
+        /**
+         * Targeted re-analysis: re-run only the rows whose analysis produced the given keys.
+         * @param {Map<string, Set<string>>} targets - config id → Set of argsStrings ('*' = every
+         *        row the config ran on). Unknown keys are ignored (no row produced them).
+         * Results are written over the old ones (no clearing), and only when they differ.
+         * Runs one targeted batch at a time; doesn't set isAnalyzing (no progress UI for a few rows).
+         */
+        reanalyzeTargets(targets) {
+            if (!this.analysisConfig || !targets || !targets.size) return Promise.resolve();
+            if (this.isReloadingMainData) return Promise.resolve(); // analysis runs after the reload
+            if (this.isAnalyzing) {
+                mergeTargets(pendingTargets, targets);
+                return Promise.resolve();
+            }
+            const run = async () => {
+                const jobs = [];
+                for (const [id, keys] of targets) {
+                    const config = this.analysisConfig.find(c => analysisConfigId(c) === id);
+                    const byArgs = analysisKeyIndex.get(id);
+                    if (!config || !byArgs) continue;
+                    const seen = new Set();
+                    const wanted = keys.has('*') || config.passFullItem ? [...byArgs.keys()] : [...keys];
+                    for (const k of wanted) {
+                        for (const [item, parentItem] of byArgs.get(k) || []) {
+                            if (seen.has(item) || !this._data.length) continue;
+                            seen.add(item);
+                            jobs.push({ config, item, parentItem });
+                        }
+                    }
+                }
+                const BATCH = 10;
+                for (let i = 0; i < jobs.length; i += BATCH) {
+                    if (this.isReloadingMainData) return; // rows are being replaced
+                    await Promise.all(jobs.slice(i, i + BATCH).map(async ({ config, item, parentItem }) => {
+                        if (!item.AppData) item.AppData = {};
+                        try {
+                            const inputValue = findSourceValue(item, config.sourceColumns, parentItem, config.extractColumnsAsObject);
+                            if (inputValue === null && !config.passFullItem) return;
+                            const apiParams = [config.passFullItem ? item : inputValue, ...(config.additionalParams || [])];
+                            recordAnalysisKey(config, apiParams, item, parentItem);
+                            const result = await PriorityQueue.enqueue(
+                                config.apiFunction,
+                                apiParams,
+                                config.priority !== undefined ? config.priority : priorities.analysis,
+                                { label: config.label || config.resultKey, type: 'analysis', resultKey: config.resultKey, essential: config.essential !== false, store: 'reactive', targeted: true }
+                            );
+                            storeAnalysisResult(item, config, result);
+                        } catch (error) {
+                            console.error(`[TargetedAnalysis] Error in ${config.label || config.resultKey}:`, error);
+                            storeAnalysisError(item, config, error);
+                        }
+                    }));
+                }
+            };
+            targetedChain = targetedChain.then(run, run);
+            return targetedChain;
         },
         async handleInvalidation() {
             // Block during save: the invalidation cascade fires synchronously inside the save's PriorityQueue
@@ -2074,42 +2190,32 @@ function setupCacheInvalidationListeners(store, apiCall, apiArgs, analysisConfig
         });
     }
     
-    // Subscribe to analysis function invalidations (triggers re-analysis only)
-    // A shared debounce timer coalesces rapid bursts of analysis invalidations into a
-    // single clear + re-run, preventing UI flickering from chain-reaction invalidations.
+    // Subscribe to analysis function invalidations (targeted re-analysis)
+    // Each event names one cache key (method + args). Only the rows whose analysis produced that
+    // key are re-run, without clearing their current values first. A shared debounce timer
+    // coalesces bursts of invalidations (a cascade) into one targeted run.
     if (analysisConfig && Array.isArray(analysisConfig)) {
         let analysisDebounceTimer = null;
-        const pendingInvalidatedKeys = new Set();
+        let pendingTargetKeys = new Map(); // config id → Set(argsString)
 
         const flushAnalysisInvalidations = () => {
             analysisDebounceTimer = null;
-
+            const targets = pendingTargetKeys;
+            pendingTargetKeys = new Map();
             // If main data is reloading, analysis will run automatically after load completes
-            if (store.isReloadingMainData) {
-                pendingInvalidatedKeys.clear();
-                return;
-            }
-
-            const keysToInvalidate = [...pendingInvalidatedKeys];
-            pendingInvalidatedKeys.clear();
-
-            // Clear all accumulated results in one pass, then run analysis once
-            store.clearSpecificAnalysisResults(keysToInvalidate);
-            if (store.isAnalyzing) {
-                // Analysis is mid-flight; flag a re-run for when it finishes
-                store._pendingReanalysis = true;
-            } else {
-                store.runConfiguredAnalysis({ skipIfAnalyzed: false });
-            }
+            if (store.isReloadingMainData) return;
+            store.reanalyzeTargets(targets);
         };
 
         analysisConfig.forEach((config) => {
             const analysisMethodName = extractMethodName(config.apiFunction);
             if (analysisMethodName) {
                 const analysisPattern = `api:${analysisMethodName}`;
+                const id = analysisConfigId(config);
 
-                CacheInvalidationBus.on(analysisPattern, () => {
-                    pendingInvalidatedKeys.add(config.resultKey || config.targetColumn);
+                CacheInvalidationBus.on(analysisPattern, (eventData) => {
+                    if (!pendingTargetKeys.has(id)) pendingTargetKeys.set(id, new Set());
+                    pendingTargetKeys.get(id).add(eventData?.argsString ?? '*');
 
                     // Reset the debounce window on every new invalidation so that a burst
                     // of invalidations only triggers one re-analysis at the end of the burst.

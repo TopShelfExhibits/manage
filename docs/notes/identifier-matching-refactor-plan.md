@@ -1,5 +1,9 @@
 # Identifier Matching Refactor Plan
 
+> **Since then:** Direction 2 lives in `ProductionUtils.getShowDates` (matching on the schedule's
+> date and identity columns, with early cutoff), and `getShowDetails` returns the matched row's full
+> columns. `findScheduleRowsForPacklist` below is gone. See incremental-invalidation-plan.md.
+
 ## Summary of the Two Matching Directions
 
 **Direction 1 — Schedule → Packlist:** Given a schedule row (Show + Client + Year), find the corresponding packlist tab(s).
