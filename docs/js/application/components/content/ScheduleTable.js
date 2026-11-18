@@ -136,6 +136,12 @@ export const ScheduleTableComponent = {
         error() {
             return this.scheduleTableStore ? this.scheduleTableStore.error : null;
         },
+        // A client or show name of these rows missing from the index (a fuzzy match that passes is
+        // no error): the page's header shows an alert that opens the index mismatch report
+        hasIndexIssues() {
+            const isError = (issue) => issue?.severity === SEVERITY.critical;
+            return this.tableData.some(row => isError(row.AppData?.clientIndexIssue) || isError(row.AppData?.showIndexIssue));
+        },
         loadingMessage() {
             return this.scheduleTableStore ? (this.scheduleTableStore.loadingMessage || 'Loading schedule...') : 'Loading schedule...';
         },
@@ -590,7 +596,7 @@ export const ScheduleTableComponent = {
             @refresh="handleRefresh"
         >
             <template #header-area>
-                <slot name="header-area"></slot>
+                <slot name="header-area" :has-index-issues="hasIndexIssues"></slot>
             </template>
             <template #row-details="{ row }">
                 <div class="button-bar" style="margin-top: var(--padding-sm)">

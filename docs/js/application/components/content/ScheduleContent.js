@@ -168,7 +168,7 @@ export const ScheduleContent = {
                     :navigate-to-path="navigateToPath"
                     @navigate-to-path="navigateToPath"
                 >
-                    <template #header-area>
+                    <template #header-area="{ hasIndexIssues }">
                         <div class="button-bar">
                             <ScheduleFilterSelect
                                 :container-path="scheduleBasePath"
@@ -178,6 +178,7 @@ export const ScheduleContent = {
                                 :show-advanced-button="true"
                                 @search-selected="handleSearchSelected"
                             />
+                            <button v-if="hasIndexIssues" @click="navigateToPath('reports/index-mismatches')" class="button-symbol red" title="Names missing from the index: open the index mismatch report"><span class="material-symbols-outlined">warning</span></button>
                         </div>
                     </template>
                 </ScheduleTableComponent>
