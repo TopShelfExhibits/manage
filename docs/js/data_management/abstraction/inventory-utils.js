@@ -633,18 +633,13 @@ class inventoryUtils_uncached {
                 const overlapFilters = [];
                 if (endDate)   overlapFilters.push({ column: 'Ship',   value: endDate,   type: 'before' });
                 if (startDate) overlapFilters.push({ column: 'Return', value: startDate, type: 'after'  });
-                const overlapping = await deps.call(ProductionUtils.getOverlappingShows, {
+                // Canonical schedule ids (ScheduleOverrides stores these, not packlist tab titles),
+                // once each so a show with several booths isn't counted twice
+                const showIds = await deps.call(ProductionUtils.getOverlappingShowIds, {
                     dateFilters: overlapFilters
                 });
 
-                // Deduplicate to prevent double-counting items when a show has multiple booths
-                const deduplicated = await deps.call(ProductionUtils.deduplicateScheduleByShow, overlapping);
-
-                for (const showRow of deduplicated) {
-                    // Canonical schedule identifier — ScheduleOverrides stores canonical ids, not packlist tab titles
-                    const scheduleId = await deps.call(ProductionUtils.getCanonicalIdentifierForScheduleRow, showRow);
-                    if (!scheduleId) continue;
-
+                for (const scheduleId of showIds) {
                     // Transship destinations are skipped — validated direction ensures only later shows are destinations
                     const transshipSource = await deps.call(ProductionUtils.getTransshipSourceForShow, scheduleId);
                     if (transshipSource) continue;
@@ -687,7 +682,7 @@ class inventoryUtils_uncached {
 
                     // Transship handoff events at each intermediate node's own return date (zero-delta)
                     for (let i = 0; i < chainIds.length - 1; i++) {
-                        const nodeRow = await deps.call(ProductionUtils.getShowDetails, chainIds[i]);
+                        const nodeRow = await deps.call(ProductionUtils.getShowDates, chainIds[i]);
                         const nodeRawReturn = await deps.call(ProductionUtils.getProjectReturnDateFromRow, nodeRow);
                         if (nodeRawReturn) {
                             const nodeRetDs = Math.floor(parseDate(nodeRawReturn).getTime() / 100);

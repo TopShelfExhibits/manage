@@ -58,6 +58,34 @@ function restoreSearchInputFocusState(state) {
     }
 }
 
+// Whether a pointer is pressed (a click in progress)
+let _pointerDown = false;
+if (typeof document !== 'undefined') {
+    document.addEventListener('pointerdown', () => { _pointerDown = true; }, true);
+    const release = () => { _pointerDown = false; };
+    document.addEventListener('pointerup', release, true);
+    document.addEventListener('pointercancel', release, true);
+}
+
+/**
+ * Run fn once the click in progress has run: after the pointer is released (the click follows its
+ * release in the same task), or at once, after this task, when no pointer is down (a key left the
+ * box). Writing the URL while a click is in progress would re-render the page under the pointer.
+ */
+function afterClick(fn) {
+    if (!_pointerDown) {
+        setTimeout(fn, 0);
+        return;
+    }
+    const done = () => {
+        document.removeEventListener('pointerup', done, true);
+        document.removeEventListener('pointercancel', done, true);
+        setTimeout(fn, 0);
+    };
+    document.addEventListener('pointerup', done, true);
+    document.addEventListener('pointercancel', done, true);
+}
+
 function restoreSearchInputFocusStateWithRetry(state) {
     if (!state) return;
     restoreSearchInputFocusState(state);
@@ -93,7 +121,15 @@ export function useSearch(options = {}) {
         debounceTimer = null;
         debouncedValue.value = value;
     }
+    // What the box holds, for navigation to carry (NavigationRegistry.liveSearches): noted as it
+    // changes (typed, or read from the URL), while the URL waits for the box to be left. Until it
+    // changes the URL already says what it holds.
+    const tracksLive = syncWithUrl && navigationRegistry && containerPath;
+    if (tracksLive && Vue.getCurrentInstance()) {
+        Vue.onBeforeUnmount(() => navigationRegistry.noteLiveSearch(containerPath, null));
+    }
     Vue.watch(searchValue, (value) => {
+        if (tracksLive) navigationRegistry.noteLiveSearch(containerPath, value);
         if (!value || !value.trim()) { applyNow(value); return; }
         clearTimeout(debounceTimer);
         debounceTimer = setTimeout(() => applyNow(searchValue.value), SEARCH_DEBOUNCE_MS);
@@ -221,46 +257,23 @@ export function useSearch(options = {}) {
     }
 
     /**
-     * Handle search input blur event
-     * Defers URL sync to allow navigation to complete, then checks if still in same section
+     * Handle search input blur event: write the search to the URL (this box's own path; the card's
+     * stored path on the dashboard). It waits until the click that left the box has run, so the
+     * write never re-renders the page under a click. A click that navigated away has already
+     * carried the search or noted it in its scope (NavigationRegistry.resolveTargetPath reads the
+     * box), so nothing is written then. An unchanged search writes nothing.
      */
     function handleBlur() {
-        if (!syncWithUrl || _clearingSearch.value) return;
-        
-        // Capture the current path at blur time
+        if (!syncWithUrl || _clearingSearch.value || !navigationRegistry || !containerPath) return;
         const pathAtBlur = appContext?.currentPath;
         if (!pathAtBlur) return;
-        
-        // Extract top-level section from path (e.g., "/inventory/furniture" → "inventory")
-        const getTopLevelSection = (path) => {
-            const cleanPath = path.split('?')[0]; // Remove query params
-            const segments = cleanPath.split('/').filter(s => s.length > 0);
-            return segments[0] || '';
-        };
-        
-        const sectionAtBlur = getTopLevelSection(pathAtBlur);
-        
-        // Defer URL update asynchronously to allow navigation to complete
-        setTimeout(() => {
+        afterClick(() => {
             const currentPath = appContext?.currentPath;
-            if (!currentPath) return;
-            
-            const currentSection = getTopLevelSection(currentPath);
-            
-            // Only sync if we're still in the same top-level section
-            if (currentSection === sectionAtBlur && navigationRegistry) {
-                // Update parameters on the CURRENT path, not the original containerPath
-                const currentBasePath = currentPath.split('?')[0];
-                navigationRegistry.updatePathParametersSilently(
-                    currentBasePath,
-                    currentPath,
-                    {
-                        searchTerm: (searchValue.value && searchValue.value.trim()) ? searchValue.value : undefined
-                    }
-                );
-            }
-            // If we've navigated to a different section, skip the sync
-        }, 100); // Brief pause to ensure navigation completes
+            if (!currentPath || currentPath.split('?')[0] !== pathAtBlur.split('?')[0]) return;
+            const typed = (searchValue.value && searchValue.value.trim()) ? searchValue.value : undefined;
+            const inUrl = navigationRegistry.getParametersForContainer(containerPath, currentPath)?.searchTerm || undefined;
+            if (typed !== inUrl) updateUrlParameter(typed);
+        });
     }
 
     /**

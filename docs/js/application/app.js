@@ -4,7 +4,8 @@ import { ModalComponent, modalManager } from './index.js';
 import { PrimaryNavComponent } from './index.js';
 import { Auth, authState, AUTH_STATUS } from './index.js';
 import { NavigationRegistry } from './index.js';
-import { PacklistContent, InventoryContent, ScheduleContent, ReportsContent } from './index.js';
+import { PacklistContent, InventoryContent, ScheduleContent, ReportsContent, NoticesContent } from './index.js';
+import { DashboardCell, DashboardArrangeLayer, observeDashboardGrid, stopObservingDashboardGrid, measureDashboardGrid, noticesOnDashboard, NOTICES_PATH, gridAreaStyle, dashboardGridStyle, DASHBOARD_CELLS, cleanPath } from './index.js';
 import { hamburgerMenuRegistry } from './index.js';
 import { undoRegistry } from './index.js';
 import { Requests, getReactiveStore, appSettings, saveDirtyStoresToUserData, getShortageAlertsStore, getShortageAlertDays, shortageBanner } from './index.js';
@@ -14,6 +15,13 @@ import { isLocalhost } from '../data_management/utils/helpers.js';
 import { CONNECTION, checkConnection } from '../data_management/utils/networkState.js';
 
 const { createApp } = Vue;
+
+// Whether the address the app opened with names a page rather than the dashboard (a short link
+// counts as a page until it resolves)
+function addressNamesPage() {
+    const page = window.location.hash.slice(1).split(/[?/]/)[0];
+    return !!page && page !== 'dashboard';
+}
 
 // Vue app with inline template
 const App = {
@@ -25,8 +33,11 @@ const App = {
         'inventory-content': InventoryContent,
         'schedule-content': ScheduleContent,
         'reports-content': ReportsContent,
+        'notices-content': NoticesContent,
         BannerNotifications,
         NotificationBubbleOverlay,
+        DashboardCell,
+        DashboardArrangeLayer,
     },
     provide() {
         return {
@@ -40,7 +51,8 @@ const App = {
     data() {
         return {
             appLoading: true,
-            appLoadingMessage: 'Loading application...',
+            // Opened on a page's address: true until the app has signed in and opened that page
+            startingOnPage: addressNamesPage(),
             isMenuOpen: false,
             navigationItems: NavigationRegistry.primaryNavigation,
             currentPath: 'dashboard',
@@ -146,54 +158,69 @@ const App = {
             const dynamicBanners = this.notificationBus.getBanners('app') || [];
             return [...staticBanners, ...dynamicBanners];
         },
-        dashboardLoading() {
-            return NavigationRegistry.dashboardRegistry.isLoading;
-        },
         // Check if dashboard is doing initial load (triggers app loading indicator)
         isDashboardInitialLoad() {
             return NavigationRegistry.dashboardRegistry.isInitialLoad;
         },
+        // (Opened on a page's address, the dashboard is never drawn on the way there)
+        isDashboard() {
+            return this.currentPage === 'dashboard' && !this.startingOnPage;
+        },
+        // The dashboard's first load, once signed in: reading the user's cards
+        dashboardLoading() {
+            if (!this.isDashboard || !this.isAuthenticated) return false;
+            return this.appLoading || !NavigationRegistry.dashboardRegistry.store || this.isDashboardInitialLoad;
+        },
+        // A loading card over each dashboard cell while it loads. They fade in, sit above the
+        // cards arriving underneath, and fade out when it's ready. (Pages open at once: their
+        // content shows its own loading.)
+        loadingCards() {
+            if (!this.dashboardLoading) return [];
+            return DASHBOARD_CELLS.map(cell => ({ key: `${cell.x}-${cell.y}`, style: gridAreaStyle(cell) }));
+        },
+        // Arrange mode: dashboard cards drawn as miniatures that can be moved and resized
+        arranging() {
+            return this.isDashboard && NavigationRegistry.dashboardRegistry.arranging;
+        },
+        // The dashboard grid's track counts (portrait swaps them)
+        dashboardGrid() {
+            return this.isDashboard ? dashboardGridStyle() : null;
+        },
+        // The app banners at the top of the page. The notices page draws them itself, and so does
+        // the dashboard's notices card while it's on the grid.
+        showTopBanners() {
+            if (this.currentPage === NOTICES_PATH) return false;
+            return !(this.isDashboard && this.isAuthenticated && !this.isDashboardInitialLoad && noticesOnDashboard());
+        },
+        // A dashboard without a notices card keeps the screen for cards: banners go to the corner tray
+        collapseTopBanners() {
+            return this.isDashboard && this.isAuthenticated;
+        },
         // Reactive containers based on current page and authentication state
         containers() {
-            if (!authState.isAuthenticated) {
+            if (!authState.isAuthenticated || this.startingOnPage) {
                 return [];
             }
-            
-            if (this.currentPage === 'dashboard') {
-                const containers = NavigationRegistry.dashboardRegistry.containers || [];
-                return containers.map(container => {
-                    const containerId = typeof container === 'string' ? container : container.path;
-                    const containerClasses = typeof container === 'string' ? '' : (container.classes || '');
-                    const type = NavigationRegistry.getTypeFromPath(containerId);
-                    // Key on the clean path: URL parameters (search, view, filters) update the page in
-                    // place instead of rebuilding it. Shared links still carry the parameters.
-                    return {
-                        key: `${type}-${containerId.split('?')[0].replace(/[^a-zA-Z0-9]/g, '_')}`,
-                        path: containerId,
-                        type,
-                        title: NavigationRegistry.getDisplayName(containerId),
-                        containerPath: containerId,
-                        cardStyle: true,
-                        cardClasses: ` ${containerClasses}`,
-                        showExpandButton: true,
-                        isOnDashboard: true
-                    };
-                });
-            } else {
-                const type = NavigationRegistry.getTypeFromPath(this.currentPath);
-                // Key on the clean path (see above): parameter-only changes don't remount the page
-                return [{
-                    key: `${type}-${this.currentPath.split('?')[0].replace(/[^a-zA-Z0-9]/g, '_')}`,
-                    path: this.currentPath,
+
+            // Key on the clean path: URL parameters (search, view, filters) update the page in
+            // place instead of rebuilding it, and a card expanded to its page keeps its component.
+            // Shared links still carry the parameters.
+            const containerFor = (path, card) => {
+                const type = NavigationRegistry.getTypeFromPath(path);
+                return {
+                    key: `${type}-${cleanPath(path).replace(/[^a-zA-Z0-9]/g, '_')}`,
                     type,
-                    title: NavigationRegistry.getDisplayName(this.currentPath),
-                    containerPath: this.currentPath,
-                    cardStyle: false,
-                    cardClasses: '',
-                    showExpandButton: false,
-                    isOnDashboard: NavigationRegistry.dashboardRegistry.has(this.currentPath)
-                }];
+                    title: NavigationRegistry.getDisplayName(path, !!card),
+                    containerPath: path,
+                    card // the placed card on the dashboard grid ({ path, x, y, w, h }), null on a page
+                };
+            };
+            if (this.isDashboard) {
+                // The grid's cards and the cards in groups (groups themselves draw only while arranging)
+                const { placed, grouped } = NavigationRegistry.dashboardRegistry.layout;
+                return [...placed.filter(card => !card.group), ...grouped].map(card => containerFor(card.path, card));
             }
+            return [containerFor(this.currentPath, null)];
         }
     },
     async mounted() {
@@ -220,15 +247,7 @@ const App = {
             
             this.initializeGlobalStores();
             
-            // Apply current URL state if user is already authenticated
-            // Use resolvePathFromURL to expand short hashes since we're authenticated
-            const currentUrl = await NavigationRegistry.urlRouter.resolvePathFromURL();
-            if (currentUrl && currentUrl !== 'dashboard') {
-                await NavigationRegistry.handleNavigateToPath({ 
-                    targetPath: currentUrl, 
-                    isBrowserNavigation: true 
-                }, this);
-            }
+            await this.openStartingPath();
         }
         
         // Watch for auth state changes
@@ -241,8 +260,11 @@ const App = {
                 if (savedRaw) {
                     try {
                         const saved = JSON.parse(savedRaw);
+                        // Bookmarks are info banners. Ones saved before the severity was kept have
+                        // neither severity nor color: they get info back (an old color still wins).
                         const restored = saved.map(b => ({
                             ...b,
+                            severity: b.severity || SEVERITY.info,
                             visible: true,
                             action: { label: 'Return', fn: () => this.navigateToPath(b.bookmarkTarget) }
                         }));
@@ -254,60 +276,31 @@ const App = {
                 
                 this.initializeGlobalStores();
                 
-                // Apply current URL when user logs in — resolve short hashes now that we are authenticated
-                const currentUrl = await NavigationRegistry.urlRouter.resolvePathFromURL();
-                if (currentUrl && currentUrl !== 'dashboard') {
-                    await NavigationRegistry.handleNavigateToPath({ 
-                        targetPath: currentUrl, 
-                        isBrowserNavigation: true 
-                    }, this);
-                }
+                await this.openStartingPath();
             }
         });
 
-        // Watch for path changes to reset scroll position
-        this.$watch(() => this.currentPath, (newPath, oldPath) => {
+        // Path changes: scroll the new page to the top (the dashboard is one screen and doesn't
+        // scroll). Entering the dashboard re-measures the grid.
+        this.$watch(() => this.currentPage, () => {
+            this.$nextTick(() => measureDashboardGrid());
+        });
+        this.$watch(() => this.currentPath, () => {
+            this.startingOnPage = false;
             this.$nextTick(() => {
                 const appContent = document.querySelector('#app-content');
-                if (!appContent) return;
-                
-                // Strip query parameters for page comparison
-                const newCleanPath = newPath.split('?')[0];
-                const oldCleanPath = oldPath.split('?')[0];
-                const newPage = newCleanPath.split('/')[0];
-                const oldPage = oldCleanPath.split('/')[0];
-                
-                // Check if navigating TO dashboard FROM a page that's ON the dashboard
-                if (newPage === 'dashboard' && oldPage !== 'dashboard' && oldCleanPath && oldCleanPath !== 'dashboard') {
-                    const isOnDashboard = NavigationRegistry.dashboardRegistry.has(oldCleanPath);
-                    
-                    if (isOnDashboard) {
-                        const containerType = NavigationRegistry.getTypeFromPath(oldPath);
-                        const containerId = `${containerType}-${oldPath.replace(/[^a-zA-Z0-9]/g, '_')}`;
-                        const containerElement = appContent.querySelector(`[data-container-id="${containerId}"]`);
-                        
-                        if (containerElement) {
-                            // Get element position relative to the scrollable container
-                            const elementTop = containerElement.offsetTop;
-                            // Calculate offset from CSS variables (navbar height + padding)
-                            const computedStyle = getComputedStyle(document.documentElement);
-                            const navbarHeight = parseInt(computedStyle.getPropertyValue('--navbar-height')) || 0;
-                            const paddingLg = parseInt(computedStyle.getPropertyValue('--padding-lg')) || 0;
-                            const scrollOffset = navbarHeight + paddingLg;
-                            // Scroll to position with dynamic offset
-                            appContent.scrollTo({ top: elementTop - scrollOffset, behavior: 'smooth' });
-                        } else {
-                            appContent.scrollTop = 0;
-                        }
-                    } else {
-                        appContent.scrollTop = 0;
-                    }
-                } else {
-                    // For all other navigation, scroll to top
-                    appContent.scrollTop = 0;
-                }
+                if (appContent) appContent.scrollTop = 0;
             });
         });
+        // Each page has its own undo history, arrange mode included (its own address, which is also
+        // what says arrange mode is open: DashboardRegistry.arranging): undo on the dashboard never
+        // changes the layout. Leaving arrange mode drops its history.
+        this.$watch(() => cleanPath(this.currentPath), (path, oldPath) => {
+            const { arrangePath } = NavigationRegistry.dashboardRegistry;
+            if (oldPath === arrangePath) undoRegistry.clearRouteHistory(arrangePath);
+            undoRegistry.setActiveRoute(path);
+        }, { immediate: true });
+        observeDashboardGrid(this.$el.querySelector('#app-content'));
 
         // Watch for notification bus app-level changes to force computed to recalculate
         this.$watch(() => this.notificationBus.getBanners('app'), (newBanners) => {
@@ -315,25 +308,23 @@ const App = {
             if (authState.user?.email) {
                 const bookmarks = (newBanners || [])
                     .filter(b => b.key?.startsWith('bookmark-') && b.bookmarkTarget)
-                    .map(({ key, color, message, dismissible, bookmarkTarget }) => ({ key, color, message, dismissible, bookmarkTarget }));
+                    .map(({ key, severity, color, message, dismissible, bookmarkTarget }) => ({ key, severity, color, message, dismissible, bookmarkTarget }));
                 localStorage.setItem(`bookmarks_${authState.user.email}`, JSON.stringify(bookmarks));
             }
         }, { deep: true });
 
         this.appLoading = false;
 
+        // Local dev tools (window.fakeGoogle). The test suite runs only on command:
+        // fakeGoogle.runTests() in the console.
         if (isLocalhost()) {
-            import('../tests/fakeGoogleDevTools.js').then(devTools => {
-                devTools.installFakeGoogleDevTools();
-                if (devTools.autoTestsEnabled()) {
-                    import('../tests/tests.js').then(m => m.runTests());
-                }
-            });
+            import('../tests/fakeGoogleDevTools.js').then(devTools => devTools.installFakeGoogleDevTools());
         }
     },
     beforeUnmount() {
         // Clean up event listener
         document.removeEventListener('keydown', this.handleGlobalKeyDown);
+        stopObservingDashboardGrid();
         
         // Save any pending dashboard changes before unmounting
         NavigationRegistry.dashboardRegistry.saveNow();
@@ -411,15 +402,32 @@ const App = {
             this.navigateToPath(targetPath);
         },
 
-        async toggleDashboardPresence(containerData) {
-            if (NavigationRegistry.dashboardRegistry.has(containerData.containerPath)) {
-                await NavigationRegistry.dashboardRegistry.remove(containerData.containerPath);
-            } else {
-                await NavigationRegistry.dashboardRegistry.add(containerData.containerPath);
+        arrangeDashboard() {
+            this.navigateToPath(NavigationRegistry.dashboardRegistry.arrangePath);
+        },
+
+        // Open the page the address names, once signed in (a short link resolves now). Until then
+        // an address naming a page draws nothing (startingOnPage), rather than the dashboard.
+        async openStartingPath() {
+            try {
+                const currentUrl = await NavigationRegistry.urlRouter.resolvePathFromURL();
+                if (currentUrl && currentUrl !== 'dashboard') {
+                    await NavigationRegistry.handleNavigateToPath({
+                        targetPath: currentUrl,
+                        isBrowserNavigation: true
+                    }, this);
+                }
+            } finally {
+                this.startingOnPage = false;
             }
         },
-        
+
         handleGlobalKeyDown(event) {
+            // Escape ends arrange mode (when no modal is open to take it)
+            if (event.key === 'Escape' && this.arranging && !this.modals.length) {
+                this.navigateToPath('dashboard');
+                return;
+            }
             // Ctrl+Z or Cmd+Z for undo
             if ((event.ctrlKey || event.metaKey) && event.key === 'z' && !event.shiftKey) {
                 event.preventDefault();
@@ -453,8 +461,13 @@ const App = {
                 @logout="logout">
             </primary-nav>
 
-            <div id="app-content" :class="{ 'dashboard': currentPage === 'dashboard' }">
-                <BannerNotifications :banners="appBanners" scope="app" />
+            <div id="app-content" :class="{ 'dashboard': isDashboard, 'arranging': arranging }" :style="dashboardGrid">
+                <BannerNotifications v-if="showTopBanners" :banners="appBanners" scope="app" :collapsed="collapseTopBanners" />
+
+                <!-- Dashboard first load: loading cards over the grid's cells -->
+                <transition-group name="longfade" appear>
+                    <div v-for="card in loadingCards" :key="card.key" class="loading-card" :style="card.style"></div>
+                </transition-group>
 
                 <!-- Signed out: one card (while sign-in starts up, the loading indicator below shows instead) -->
                 <div v-if="!isAuthenticated && authInitialized" class="container dashboard-card sign-in-card">
@@ -467,47 +480,37 @@ const App = {
                         <button :disabled="isAuthLoading" class="orange" @click="login">{{ isAuthLoading ? 'Signing in…' : 'Log in' }}</button>
                     </div>
                 </div>
-                
-                
-                <!-- App loading indicator -->
-                <div v-else-if="appLoading || (isDashboardInitialLoad && currentPage === 'dashboard')" :class="'container' + (currentPage === 'dashboard' ? ' dashboard-card' : '')" style="display:flex; align-items: center; justify-content: center;">
-                    <div class="loading-message">
-                        <img src="assets/loading.gif" alt="..."/>
-                        <p>{{ isDashboardInitialLoad ? 'Loading dashboard...' : appLoadingMessage }}</p>
-                    </div>
-                </div>
-
-
-                <!-- Dashboard loading indicators >
-                <div v-else-if="dashboardLoading && currentPage === 'dashboard'" class="container dashboard-card" style="display:flex; align-items: center; justify-content: center;">
-                    <div class="loading-message">
-                        <img src="assets/loading.gif" alt="..."/>
-                        <p>loading dashboard...</p>
-                    </div>
-                </div-->
 
                 <!-- No containers message -->
-                <div v-else-if="containers.length === 0" class="empty-message">
-                    open a page to see content
+                <div v-else-if="containers.length === 0 && !arranging && !loadingCards.length && !startingOnPage" class="empty-message">
+                    <template v-if="isDashboard">
+                        <p>add pages to the dashboard from their page menus</p>
+                        <button class="white" @click="arrangeDashboard">Arrange Dashboard</button>
+                    </template>
+                    <template v-else>open a page to see content</template>
                 </div>
-                
-                <!-- Reactive containers -->
+
+                <!-- Reactive containers: each in a DashboardCell (the card's grid cell on the dashboard) -->
                 <template v-else>
-                    <app-container 
-                        v-for="container in containers" 
+                    <DashboardCell
+                        v-for="container in containers"
                         :key="container.key"
+                        :card="container.card"
+                        :title="container.title"
+                        @expand="expandContainer(container)"
+                        v-slot="{ miniature, header, bare }">
+                    <app-container
                         :data-container-id="container.key"
                         :container-id="container.key"
                         :container-type="container.type"
                         :title="container.title"
                         :container-path="container.containerPath"
-                        :card-style="container.cardStyle"
-                        :card-classes="container.cardClasses"
-                        :show-expand-button="container.showExpandButton"
-                        :pinned-to-dashboard="container.isOnDashboard"
+                        :card-style="!!container.card"
+                        :show-header="header"
+                        :bare="bare"
+                        :inert="miniature"
                         @navigate-to-path="navigateToPath"
                         @expand-container="expandContainer"
-                        @toggle-dashboard-state="toggleDashboardPresence"
                     >
                         <template #content>
                             <!-- Inventory Content -->
@@ -533,13 +536,18 @@ const App = {
                             </schedule-content>
                             
                             <!-- Reports Content -->
-                            <reports-content 
+                            <reports-content
                                 v-else-if="container.type === 'reports' || container.containerPath?.startsWith('reports')"
                                 :container-path="container.containerPath"
                                 :navigate-to-path="(path, params) => navigateToPath(path, params)">
                             </reports-content>
+
+                            <!-- Notices (the app banners as a page; the dashboard's notices card) -->
+                            <notices-content v-else-if="container.type === 'notices'"></notices-content>
                         </template>
                     </app-container>
+                    </DashboardCell>
+                    <DashboardArrangeLayer v-if="arranging" />
                 </template>
 
                 <footer>

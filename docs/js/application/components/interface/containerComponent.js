@@ -1,6 +1,7 @@
-import { html, BreadcrumbComponent, NavigationRegistry, BannerNotifications, appSettings, SEVERITY } from '../../index.js';
+import { html, BreadcrumbComponent, NavigationRegistry, BannerNotifications, SEVERITY } from '../../index.js';
 import { PageNoteComponent } from './pageNoteComponent.js';
 import { URLRouter } from '../../utils/urlRouter.js';
+import { viewportChrome } from '../../utils/useContainerSize.js';
 
 // Container component functionality
 export const ContainerComponent = {
@@ -26,20 +27,19 @@ export const ContainerComponent = {
             type: String,
             default: ''
         },
+        // A dashboard card: fills its cell, and its header has an expand button instead of the
+        // page actions (bookmark, share)
         cardStyle: {
             type: Boolean,
             default: false
         },
-        cardClasses: {
-            type: String,
-            default: ''
-        },
-        // Show expand button to open in full page
-        showExpandButton: {
+        // Off for a dashboard card without a header (DashboardCell decides)
+        showHeader: {
             type: Boolean,
-            default: false
+            default: true
         },
-        pinnedToDashboard: {
+        // No box of its own: the content sits straight in its place (the notices card)
+        bare: {
             type: Boolean,
             default: false
         }
@@ -51,36 +51,26 @@ export const ContainerComponent = {
             navigationParameters: () => this.navigationParameters
         };
     },
-    data() {
-        return {
-            isLoading: false, // now managed reactively by this component
-            isScrolling: false,
-            _scrollTimeout: null
-        };
-    },
-    mounted() {
-        // Listen for wheel events on the container
-        const container = this.$el;
-        if (container) {
-            container.addEventListener('wheel', this.handleWheel, { passive: true });
-        }
-    },
-
-    beforeUnmount() {
-        // Clean up event listener and timeout
-        const container = this.$el;
-        if (container) {
-            container.removeEventListener('wheel', this.handleWheel);
-        }
-        if (this._scrollTimeout) {
-            clearTimeout(this._scrollTimeout);
-            this._scrollTimeout = null;
-        }
-    },
     computed: {
-        // Get hamburger menu component from registry
+        // A page in compact chrome: its header has an X back to the dashboard instead of its actions,
+        // which move to the top of its page menu
+        compactPage() {
+            return !this.cardStyle && viewportChrome.compact;
+        },
+        // A page's own actions, in its header or its page menu
+        pageActions() {
+            if (this.cardStyle || !this.containerPath) return [];
+            return [
+                { key: 'bookmark', icon: 'bookmark', label: 'Bookmark', fn: this.bookmarkContainer },
+                { key: 'share', icon: 'share', label: 'Share Link', fn: this.shareContainer }
+            ];
+        },
+        headerActions() {
+            return this.compactPage ? [] : this.pageActions;
+        },
         hamburgerMenuComponent() {
-            return this.hamburgerMenuRegistry.getMenuComponent(this.containerType, this.containerPath);
+            const menuActions = this.compactPage ? this.pageActions : null;
+            return this.hamburgerMenuRegistry.getMenuComponent(this.containerType, this.containerPath, menuActions);
         },
         // Get navigation parameters from NavigationRegistry
         navigationParameters() {
@@ -88,27 +78,9 @@ export const ContainerComponent = {
         },
         containerBanners() {
             return this.$notify.getBanners(this.containerPath);
-        },
-        isScrollingEnabled() {
-            return appSettings.enableDashboardCardScrolling;
-        },
-        shouldShowHeader() {
-            // Dashboard cards respect the header visibility setting
-            // Non-dashboard containers always show headers
-            if (this.cardStyle) {
-                return appSettings.showDashboardHeaders;
-            }
-            // Always show headers on non-dashboard pages
-            return this.containerPath || this.title || this.cardStyle;
         }
     },
     methods: {
-        setLoading(val) {
-            this.isLoading = val;
-        },
-        closeContainer() {
-            this.$emit('navigate-to-path', 'dashboard');
-        },
         openHamburgerMenu() {
             if (this.hamburgerMenuComponent) {
                 this.$modal.custom(
@@ -117,12 +89,6 @@ export const ContainerComponent = {
                     this.title
                 );
             }
-        },
-        toggleDashboardState() {
-            this.$emit('toggle-dashboard-state', {
-                containerPath: this.containerPath,
-                pinned: !this.pinnedToDashboard
-            });
         },
         expandContainer() {
             this.$emit('expand-container', {
@@ -235,31 +201,11 @@ export const ContainerComponent = {
             // Push to app-level notification bus (scope: 'app')
             const currentBanners = this.$notify.getBanners('app') || [];
             this.$notify.setBanners('app', [...currentBanners, bookmarkBanner]);
-        },
-        handleWheel() {
-            // Only set isScrolling if container is clipping content
-            const container = this.$el;
-            // Check for vertical or horizontal overflow
-            const isClipping = (
-                container.scrollHeight > container.clientHeight ||
-                container.scrollWidth > container.clientWidth
-            );
-            if (isClipping) {
-                this.isScrolling = true;
-                if (this._scrollTimeout) {
-                    clearTimeout(this._scrollTimeout);
-                }
-                // After 500ms of no wheel events, set isScrolling to false
-                this._scrollTimeout = setTimeout(() => {
-                    this.isScrolling = false;
-                    this._scrollTimeout = null;
-                }, 500);
-            }
         }
     },
     template: html `
-        <div class="container" :class="(cardStyle ? 'dashboard-card' + cardClasses + (isScrollingEnabled ? ' scrolling-enabled' : '') : '')">
-            <div v-if="shouldShowHeader" class="container-header">
+        <div class="container" :class="{ 'dashboard-card': cardStyle, bare }">
+            <div v-if="showHeader" class="container-header">
                 <BreadcrumbComponent
                     :container-path="containerPath"
                     :title="title"
@@ -267,50 +213,37 @@ export const ContainerComponent = {
                     :container-id="containerId"
                     @navigate-to-path="(path) => $emit('navigate-to-path', path)" />
                 <div style="flex-grow: 1;"></div>
-                <div v-if="hamburgerMenuComponent || showExpandButton || !cardStyle" class="button-group">
-                    <!-- <button v-if="!cardStyle"
-                            class="button-symbol white"
-                            @click="toggleDashboardState" 
-                            title="Pin to dashboard">
-                        <span class="material-symbols-outlined">{{ pinnedToDashboard ? 'keep_off' : 'keep' }}</span>
-                    </button> -->
+                <div class="button-group">
                     <button v-if="hamburgerMenuComponent"
-                            class="button-symbol white" 
-                            @click="openHamburgerMenu" 
+                            class="button-symbol white"
+                            @click="openHamburgerMenu"
                             title="Page Menu">☰</button>
-                    <button v-if="showExpandButton" 
+                    <button v-if="cardStyle"
                             class="button-symbol white" 
                             @click="expandContainer" 
                             title="Expand to page">
                         <span class="material-symbols-outlined">expand_content</span>
                     </button>
-                    <button v-if="containerPath && !cardStyle"
+                    <button v-for="action in headerActions"
+                            :key="action.key"
                             class="button-symbol white"
-                            @click="bookmarkContainer"
-                            title="Create bookmark">
-                        <span class="material-symbols-outlined">bookmark</span>
+                            @click="action.fn"
+                            :title="action.label">
+                        <span class="material-symbols-outlined">{{ action.icon }}</span>
                     </button>
-                    <button v-if="containerPath && !cardStyle"
+                    <button v-if="compactPage"
                             class="button-symbol white"
-                            @click="shareContainer"
-                            title="Share Page Link">
-                        <span class="material-symbols-outlined">share</span>
+                            @click="$emit('navigate-to-path', 'dashboard')"
+                            title="Close (back to the dashboard)">
+                        <span class="material-symbols-outlined">close</span>
                     </button>
-                    <!-- <button v-if="!cardStyle" 
-                            class="button-symbol white" 
-                            @click="closeContainer" 
-                            title="Close"><span class="material-symbols-outlined">close</span></button> -->
                 </div>
             </div>
             
             <div class="content">
                 <PageNoteComponent v-if="containerPath" :container-path="containerPath" />
                 <BannerNotifications :banners="containerBanners" :scope="containerPath" />
-                <div v-if="isLoading" class="loading-message" style="text-align:center; padding:2rem;">
-                    <img src="assets/loading.gif" alt="..."/>
-                    <p>Loading data...</p>
-                </div>
-                <slot v-else name="content">
+                <slot name="content">
                     <div class="content">
                         <div class="card red">
                             <p>nothing found at "{{ containerPath }}"</p>
@@ -318,11 +251,6 @@ export const ContainerComponent = {
                     </div>
                 </slot>
             </div>
-            <transition name="longfade">
-                <div v-if="cardStyle && isScrolling && !isScrollingEnabled" class="container-expand-overlay" @click="expandContainer">
-                    <span class="material-symbols-outlined">expand_content</span>
-                </div>
-            </transition>
         </div>
     `
 };

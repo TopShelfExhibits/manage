@@ -9,30 +9,25 @@
  * Container scope (useContainerSize, CSS @container) covers content and views; it measures the
  * content box of the nearest `container-type: inline-size` ancestor (.container, .modal > .content),
  * with the same thresholds as the CSS, so JS and CSS agree and there is no hysteresis.
- * Viewport scope (useViewportSize, CSS @media) covers app chrome and dashboard layout.
+ * Viewport scope (viewportChrome, CSS @media) covers app chrome. Its thresholds include the
+ * #app-content gutter on the larger side of each boundary, so a viewport tier matches the tier of
+ * a full-width page container.
+ *
+ * Short tier: a height container under BREAKPOINTS.short px tall (CSS only). The height
+ * containers (`container-name: height-container`) are dashboard cards and #app-content. A short
+ * viewport (viewportChrome.short) turns the primary nav onto the left edge.
  *
  * CSS cannot read these constants: every @media / @container rule repeats the literals as
  * calc(600px + 2 * 8px) etc. with a comment pointing here. Keep them in sync with theme.css.
  */
 
-export const BREAKPOINTS = Object.freeze({ narrow: 600, wide: 1000, gutterCompact: 8, gutterFull: 12 });
+export const BREAKPOINTS = Object.freeze({ narrow: 600, wide: 1000, short: 500, gutterCompact: 8, gutterFull: 12 });
 
 /** Tier for a container content-box width. */
 export function containerTier(width) {
     if (!(width >= 0)) return 'wide';
     if (width < BREAKPOINTS.narrow) return 'narrow';
     if (width < BREAKPOINTS.wide) return 'medium';
-    return 'wide';
-}
-
-/**
- * Tier for a viewport width. Thresholds include the #app-content gutter in effect on the larger
- * side of each boundary, so a viewport tier matches the tier of a full-width page container.
- */
-export function viewportTier(width) {
-    if (!(width >= 0)) return 'wide';
-    if (width < BREAKPOINTS.narrow + 2 * BREAKPOINTS.gutterCompact) return 'narrow';
-    if (width < BREAKPOINTS.wide + 2 * BREAKPOINTS.gutterFull) return 'medium';
     return 'wide';
 }
 
@@ -95,20 +90,22 @@ export function useContainerSize() {
 }
 
 /**
- * Observe the viewport tier.
- * @returns {{ tier: import('vue').Ref<string>, width: import('vue').Ref<number>, stop(): void }}
+ * App chrome for the viewport, reactive. The same media conditions as the compact and short
+ * blocks in theme.css and styles.css:
+ *   compact  a medium or narrow viewport, or a short one: the primary nav collapses, and a page's
+ *            header has an X to the dashboard while bookmark and share move into its page menu
+ *   short    height < BREAKPOINTS.short: the primary nav turns onto the left edge
  */
-export function useViewportSize() {
-    const width = Vue.ref(typeof window !== 'undefined' ? window.innerWidth : 0);
-    const tier = Vue.ref(viewportTier(width.value));
-    const onResize = () => {
-        width.value = window.innerWidth;
-        tier.value = viewportTier(width.value);
+export const viewportChrome = Vue.reactive({ compact: false, short: false });
+if (typeof window !== 'undefined' && window.matchMedia) {
+    const short = `(height < ${BREAKPOINTS.short}px)`;
+    const queries = {
+        compact: `(width < ${BREAKPOINTS.wide + 2 * BREAKPOINTS.gutterFull}px), ${short}`,
+        short
     };
-    if (typeof window !== 'undefined') window.addEventListener('resize', onResize, { passive: true });
-    return {
-        tier,
-        width,
-        stop() { if (typeof window !== 'undefined') window.removeEventListener('resize', onResize); }
-    };
+    for (const [key, query] of Object.entries(queries)) {
+        const list = window.matchMedia(query);
+        viewportChrome[key] = list.matches;
+        list.addEventListener('change', event => { viewportChrome[key] = event.matches; });
+    }
 }

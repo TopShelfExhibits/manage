@@ -29,6 +29,28 @@ import { classifyError } from '../../auth/authStatus.js';
 const DEFAULT_CACHE_EXPIRATION_MS = 4 * 60 * 1000;
 
 /**
+ * Early cutoff (opt-in per method: wrapMethods cutoffMethods). An invalidated cutoff key is
+ * recomputed and compared with its last value before the cascade goes on: an equal value stops it,
+ * so nothing computed from the key reruns or is announced. False restores the plain cascade.
+ * This is the first, opt-in slice of phase 3b in docs/notes/incremental-invalidation-plan.md.
+ */
+const EARLY_CUTOFF = true;
+
+/** A 53-bit hash of a value's JSON (cyrb53): cutoff keys compare values by it. */
+function hashValue(value) {
+    const text = JSON.stringify(value) ?? 'undefined';
+    let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+    for (let i = 0; i < text.length; i++) {
+        const ch = text.charCodeAt(i);
+        h1 = Math.imul(h1 ^ ch, 2654435761);
+        h2 = Math.imul(h2 ^ ch, 1597334677);
+    }
+    h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+    h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+    return 4294967296 * (2097151 & h2) + (h1 >>> 0);
+}
+
+/**
  * Lightweight event bus for cache invalidation notifications
  */
 class CacheInvalidationBus {
@@ -110,6 +132,14 @@ class CacheManager {
     static _restoreTried = new Set();
     // Keys invalidated while offline: invalidated on reconnecting
     static _heldInvalidations = new Set();
+    // ── Early cutoff (opt-in per method: wrapMethods cutoffMethods) ──
+    // Cutoff key → its recomputation (the wrapped call with the key's arguments)
+    static _cutoffCalls = new Map();
+    // Cutoff key → hash of its last value. Kept apart from the entry, so values set() doesn't keep
+    // (null, empty) compare too, and a hash survives expire()
+    static valueHashes = new Map();
+    // Cutoff key → { oldHash, again } while its invalidation is being verified
+    static _verifying = new Map();
 
     /**
      * Gets a value from cache with expiration check
@@ -342,6 +372,10 @@ class CacheManager {
      * reload MUST separately repopulate the cache (e.g., via apiCall())
      * to restore the dependency chain before the next external change
      * can be detected.
+     *
+     * Early cutoff: a cutoff key (wrapMethods cutoffMethods) with a value
+     * to compare and dependents does steps 1 and 4 only (_deferCascade).
+     * _verify recomputes it and runs steps 3 and 5 only if it changed.
      * ═══════════════════════════════════════════════════════════════
      *
      * @param {string} key - Cache key to invalidate
@@ -359,57 +393,144 @@ class CacheManager {
         if (invalidationStack.has(key)) {
             return;
         }
-        
+
+        const dependents = CacheManager._dependentsOf(key);
+
+        // A cutoff key is verified first: its dependents are invalidated only if its value changed
+        if (CacheManager._deferCascade(key, dependents.length > 0)) {
+            return;
+        }
+
         // Add this key to the invalidation stack
         invalidationStack.add(key);
-        
+
         // Remove the cache entry and its fill-time record
-        CacheManager.cache.delete(key);
-        CacheManager.filledAt.delete(key);
-        CacheManager.invalidatedAt.set(key, ++CacheManager._generation);
-        
+        CacheManager._dropValue(key);
+        CacheManager._cutoffCalls.delete(key);
+
         // Also clean up any pending calls for this key DO NOT CLEAR PENDING CALLS HERE
         //if (CacheManager.pendingCalls.has(key)) {
         //    CacheManager.pendingCalls.delete(key);
         //}
-        
-        // Find and invalidate all dependent entries
-        const dependents = [];
-        for (const [depKey, deps] of CacheManager.dependencies.entries()) {
-            if (deps.has && deps.has(key)) {
-                dependents.push(depKey);
-            }
-        }
-        
+
         // Recursively invalidate dependents with the same invalidation stack
         for (const depKey of dependents) {
             CacheManager.invalidate(depKey, invalidationStack);
         }
-        
+
         // Clean up dependency registration — MUST come after recursive invalidation above
         // so that the full chain is walked before any records are removed.
         CacheManager.dependencies.delete(key);
-        
-        
+
         // Emit invalidation event for reactive stores (only for 'api' namespace)
         // THIS MUST HAPPEN LAST — all cache entries and dependency records for the entire
         // chain must be cleared before any listener callback fires.
-        // Extract namespace, methodName, and argsString from key
-        // Key format: "namespace:methodName:argsString"
-        // Note: argsString may contain colons (e.g., JSON with {"type":"value"})
-        // So we need to split only on the first two colons
-        const firstColonIndex = key.indexOf(':');
-        const secondColonIndex = key.indexOf(':', firstColonIndex + 1);
-        const namespace = key.substring(0, firstColonIndex);
-        const methodName = key.substring(firstColonIndex + 1, secondColonIndex);
-        const argsString = key.substring(secondColonIndex + 1);
-        
-        if (namespace === 'api') {
-            CacheInvalidationBus.emit(key, namespace, methodName, argsString);
-        }
+        CacheManager._announce(key);
 
         // Remove from invalidation stack when done
         invalidationStack.delete(key);
+    }
+
+    /** Drop a key's value, fill time and hash, and mark it changed (generations). */
+    static _dropValue(key) {
+        CacheManager.cache.delete(key);
+        CacheManager.filledAt.delete(key);
+        CacheManager.valueHashes.delete(key);
+        CacheManager.invalidatedAt.set(key, ++CacheManager._generation);
+    }
+
+    /** The keys whose recorded dependencies include `key`. */
+    static _dependentsOf(key) {
+        const dependents = [];
+        for (const [depKey, deps] of CacheManager.dependencies.entries()) {
+            if (deps.has && deps.has(key)) dependents.push(depKey);
+        }
+        return dependents;
+    }
+
+    /**
+     * Tell the reactive stores that an `api:` key has a new value.
+     * Key format: "namespace:methodName:argsString". argsString may contain colons (JSON), so only
+     * the first two colons split it.
+     */
+    static _announce(key) {
+        const firstColonIndex = key.indexOf(':');
+        const secondColonIndex = key.indexOf(':', firstColonIndex + 1);
+        const namespace = key.substring(0, firstColonIndex);
+        if (namespace !== 'api') return;
+        const methodName = key.substring(firstColonIndex + 1, secondColonIndex);
+        const argsString = key.substring(secondColonIndex + 1);
+        CacheInvalidationBus.emit(key, namespace, methodName, argsString);
+    }
+
+    /**
+     * Early cutoff: hold an invalidated cutoff key's cascade until it is recomputed (_verify).
+     * Applies to a cutoff key with a value to compare and something computed from it; any other key
+     * cascades at once. The key's value and its own dependency records go, as in invalidate (the
+     * recomputation records them again); its dependents keep theirs and their values.
+     * @param {string} key
+     * @param {boolean} hasDependents - Whether anything was computed from the key
+     * @returns {boolean} True when the cascade waits for the verification
+     */
+    static _deferCascade(key, hasDependents) {
+        if (!EARLY_CUTOFF || !CacheManager._cutoffCalls.has(key)) return false;
+        const running = CacheManager._verifying.get(key);
+        if (!running && !(hasDependents && CacheManager.valueHashes.has(key))) return false;
+        const oldHash = CacheManager.valueHashes.get(key);
+        CacheManager._dropValue(key);
+        CacheManager.dependencies.delete(key);
+        if (running) {
+            // Changed again while being verified: verify again once the running computation ends
+            running.again = true;
+            return true;
+        }
+        const state = { oldHash, again: false };
+        state.done = new Promise(resolve => { state.finish = resolve; });
+        CacheManager._verifying.set(key, state);
+        // After the current invalidation and anything run with it (a save's fillCache)
+        setTimeout(() => CacheManager._verify(key, state), 0);
+        return true;
+    }
+
+    /**
+     * Recompute a held cutoff key and compare it with its last value. Equal: done, its dependents
+     * keep their values and nothing is announced. Changed, or not verifiable (an error, a result
+     * not kept): the held cascade runs, as invalidate would have run it. Offline, invalidate keeps
+     * every value, so the cascade would be lost: the key is verified again once the connection is
+     * back, and its dependents keep their values until then, as everything does offline.
+     */
+    static async _verify(key, state) {
+        let changed = await CacheManager._recomputeChanged(key, state);
+        while (changed && networkState.isOffline) {
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            if (!networkState.isOffline) changed = await CacheManager._recomputeChanged(key, state);
+        }
+        CacheManager._verifying.delete(key);
+        if (changed) {
+            const stack = new Set([key]);
+            for (const depKey of CacheManager._dependentsOf(key)) {
+                CacheManager.invalidate(depKey, stack);
+            }
+            CacheManager._announce(key);
+        }
+        state.finish();
+    }
+
+    /**
+     * Recompute a held cutoff key, again while it was invalidated meanwhile, and tell whether it
+     * differs from its last value. Not verifiable (an error, a result not kept) counts as changed.
+     */
+    static async _recomputeChanged(key, state) {
+        try {
+            do {
+                state.again = false;
+                await CacheManager._cutoffCalls.get(key)?.();
+            } while (state.again);
+            // No hash: the result wasn't kept, so it can't be trusted
+            return !CacheManager.valueHashes.has(key) || CacheManager.valueHashes.get(key) !== state.oldHash;
+        } catch {
+            return true;
+        }
     }
     
     /**
@@ -556,9 +677,13 @@ class CacheManager {
      *        (setPersistentStore). Their results must be JSON and depend only on database reads and
      *        ApplicationUtils.getToday, since only those sources are checked when a saved row is
      *        restored. In memory they never expire; their sources invalidate them.
+     * @param {Array<string>} [cutoffMethods] - Early cutoff methods (EARLY_CUTOFF): when one of their
+     *        keys is invalidated, it is recomputed and compared with its last value, and the cascade to
+     *        what was computed from it runs only if the value changed. Their results must be JSON. Use
+     *        for narrow values that many others are computed from and that often come out the same.
      * @returns {Object} - Wrapped class with caching and dependency tracking
      */
-    static wrapMethods(targetClass, namespace, mutationKeys = [], infiniteCacheMethods = [], customCacheDurations = {}, persistentMethods = []) {
+    static wrapMethods(targetClass, namespace, mutationKeys = [], infiniteCacheMethods = [], customCacheDurations = {}, persistentMethods = [], cutoffMethods = []) {
         const wrappedClass = {};
         wrappedClass._namespace = namespace;
         
@@ -578,9 +703,13 @@ class CacheManager {
             }
             
             const persistent = persistentMethods.includes(methodName);
+            const cutoff = cutoffMethods.includes(methodName);
             wrappedClass[methodName] = async function(...args) {
                 const cacheKey = CacheManager.generateCacheKey(namespace, methodName, args);
-                
+                if (cutoff && !CacheManager._cutoffCalls.has(cacheKey)) {
+                    CacheManager._cutoffCalls.set(cacheKey, () => wrappedClass[methodName](...args));
+                }
+
                 // Check cache first
                 const cached = CacheManager.get(cacheKey);
                 if (cached !== CacheManager.CACHE_MISS) {
@@ -650,6 +779,8 @@ class CacheManager {
                     if (!CacheManager._changedSince(cacheKey, pendingPromise.startedGen) && networkState.noAnswers === noAnswersAtStart) {
                         CacheManager.set(cacheKey, result, expirationMs, persistent);
                         if (persistent) CacheManager.persist(cacheKey, result, startedAt);
+                        // Recorded even for results set() doesn't keep (null, empty), so they compare too
+                        if (cutoff) CacheManager.valueHashes.set(cacheKey, hashValue(result));
                     }
 
                     // Resolve the promise for all waiters
@@ -689,6 +820,17 @@ onConnectionChange((state, { reconnected }) => {
     _writeQueuedStamps();
 });
 export const invalidateCache = CacheManager.invalidateCache;
+
+/**
+ * Resolves once no early-cutoff verification is running or waiting, including those a changed value
+ * started further up its chain (tests wait on it before checking what was announced).
+ */
+export async function cutoffSettled() {
+    await new Promise(resolve => setTimeout(resolve, 0));
+    while (CacheManager._verifying.size) {
+        await Promise.all([...CacheManager._verifying.values()].map(state => state.done));
+    }
+}
 
 /**
  * Cache a value a read would return right now, instead of reading it: a write whose response is
@@ -784,6 +926,7 @@ export function clearCache() {
     CacheManager.cache.clear();
     CacheManager.pendingCalls.clear();
     CacheManager.filledAt.clear();
+    CacheManager.valueHashes.clear();
     CacheManager._clearedAt = ++CacheManager._generation;
     // Saved results may be restored again; each is still checked against its sources
     CacheManager._restoreTried.clear();
@@ -1035,10 +1178,17 @@ export async function assertAppCurrent() {
 let _lastPollAt = 0;
 if (typeof document !== 'undefined') {
     document.addEventListener('visibilitychange', () => {
-        if (!document.hidden && _cacheTimestampPollerInterval && Date.now() - _lastPollAt >= _pollerIntervalMs) {
+        if (!document.hidden && !_scheduledPollsHeld && _cacheTimestampPollerInterval && Date.now() - _lastPollAt >= _pollerIntervalMs) {
             _pollCacheTimestamps();
         }
     });
+}
+
+// The test suite holds the scheduled polls while it runs: a poll landing mid-test would reload data
+// a test is arranging. Its tests poll when they mean to (triggerCachePoll runs regardless).
+let _scheduledPollsHeld = false;
+export function holdScheduledPolls(held) {
+    _scheduledPollsHeld = !!held;
 }
 
 export function startCacheTimestampPoller(readFn, intervalMs = 60 * 1000) {
@@ -1046,6 +1196,7 @@ export function startCacheTimestampPoller(readFn, intervalMs = 60 * 1000) {
     _pollerReadFn = readFn;
     _pollerIntervalMs = intervalMs;
     _cacheTimestampPollerInterval = setInterval(() => {
+        if (_scheduledPollsHeld) return;
         if (typeof document === 'undefined' || !document.hidden) _pollCacheTimestamps();
     }, intervalMs);
 }

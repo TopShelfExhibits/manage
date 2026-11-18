@@ -383,7 +383,7 @@ class packListUtils_uncached {
             visited.add(current.toLowerCase());
             try {
                 // Resolve schedule row first — handles both canonical ids and NameOverride tab titles
-                const row = await deps.call(ProductionUtils.getShowDetails, current);
+                const row = await deps.call(ProductionUtils.getShowDates, current);
                 const tabs = await deps.call(Database.getTabs, 'PACK_LISTS');
                 const matchingTabs = row
                     ? await deps.call(ProductionUtils.findPacklistTabsForScheduleRow, row, tabs)
@@ -692,31 +692,24 @@ class packListUtils_uncached {
      */
     static async getOverlappingShowItems(deps, currentProjectId) {
         // Resolve currentProjectId to canonical schedule identifier — handles NameOverride tab titles
-        const currentRow = await deps.call(ProductionUtils.getShowDetails, currentProjectId);
+        const currentRow = await deps.call(ProductionUtils.getShowDates, currentProjectId);
         const currentScheduleId = currentRow
             ? await deps.call(ProductionUtils.getCanonicalIdentifierForScheduleRow, currentRow)
             : currentProjectId;
 
-        // Get all overlapping projects for this project
-        let overlappingProjects = await deps.call(ProductionUtils.getOverlappingShows, {
+        // Canonical ids of the overlapping shows (ScheduleOverrides stores canonical ids), once each
+        const overlappingIds = await deps.call(ProductionUtils.getOverlappingShowIds, {
             dateFilters: [
                 { column: 'Return', value: currentProjectId, type: 'after' },
                 { column: 'Ship', value: currentProjectId, type: 'before' }
             ]
         });
 
-        // Deduplicate to prevent listing the same show multiple times
-        overlappingProjects = await deps.call(ProductionUtils.deduplicateScheduleByShow, overlappingProjects);
-
         // Identify transship source so it is not listed as conflicting demand
         const transshipSourceId = await deps.call(ProductionUtils.getTransshipSourceForShow, currentScheduleId);
 
         const shows = [];
-        for (const projectRow of overlappingProjects) {
-            // Derive canonical schedule identifier — ScheduleOverrides stores canonical ids, not tab titles
-            const scheduleProjectId = await deps.call(ProductionUtils.getCanonicalIdentifierForScheduleRow, projectRow);
-            if (!scheduleProjectId) continue;
-
+        for (const scheduleProjectId of overlappingIds) {
             if (_normalizeId(scheduleProjectId) === _normalizeId(currentScheduleId)) continue;
             if (transshipSourceId && _normalizeId(scheduleProjectId) === _normalizeId(transshipSourceId)) continue;
             // Skip transship destinations — their items are already covered by the chain root's chain items

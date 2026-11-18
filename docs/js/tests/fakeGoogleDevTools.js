@@ -11,7 +11,6 @@ import { FakeGoogleSheetsService, FakeGoogleState } from '../google_sheets_servi
 import { invalidateCache, stampDataChange, triggerCachePoll } from '../data_management/index.js';
 
 const HISTORY_HEADER = 'EditHistory';
-const AUTO_TESTS_STORAGE_KEY = 'fakeGoogle:autoTests';
 const DECISECONDS_PER_HOUR = 36000;
 const MAX_HISTORY_ENTRIES = 10;
 
@@ -75,10 +74,8 @@ export function refreshAppData() {
     ], true);
 }
 
-/** Whether the startup test suite should run (default: yes) */
-export function autoTestsEnabled() {
-    try { return localStorage.getItem(AUTO_TESTS_STORAGE_KEY) !== '0'; } catch { return true; }
-}
+// The last test run asked for: each command waits for the one before it instead of running alongside
+let _testRun = Promise.resolve();
 
 export const fakeGoogleDevTools = {
     help() {
@@ -99,10 +96,15 @@ export const fakeGoogleDevTools = {
     fakeGoogle.setUser('sam@example.com')                 this browser tab's user (reloads; log in again)
     Open a second browser tab to act as another session — local data is shared between tabs.
 
+  Tests (they run only on command)
+    fakeGoogle.runTests()                                 run the whole suite (results in the console)
+    fakeGoogle.runTests('find scopes')                    only groups whose name contains the text
+    fakeGoogle.runTests(['dashboard', 'user data'])       several groups
+    The suite logs out (its AUTH tests do): log in again afterwards.
+
   Local data
     fakeGoogle.persist(false)                             stop saving local data (true to resume)
     fakeGoogle.reset()                                    discard local changes, back to fixtures
-    fakeGoogle.autoTests(false)                           skip the startup test suite (true to resume)
     fakeGoogle.refresh()                                  reload all views from fake data
 `, 'font-weight:bold', '');
     },
@@ -260,9 +262,15 @@ export const fakeGoogleDevTools = {
         console.log('Local data reset to fixtures.');
     },
 
-    autoTests(enabled = true) {
-        try { localStorage.setItem(AUTO_TESTS_STORAGE_KEY, enabled ? '1' : '0'); } catch {}
-        console.log(enabled ? 'Startup tests will run on load.' : 'Startup tests skipped on load.');
+    /**
+     * Run the test suite (tests.js) against pristine fixtures; local data is restored afterwards.
+     * @param {string|string[]} [groups] - run only groups whose name contains one of these (any case)
+     * @returns {Promise<{passed: number, failed: Array<{group, name, error}>}>}
+     */
+    runTests(groups) {
+        const run = _testRun.catch(() => {}).then(() => import('./tests.js')).then(m => m.runTests(groups));
+        _testRun = run;
+        return run;
     },
 
     refresh() {

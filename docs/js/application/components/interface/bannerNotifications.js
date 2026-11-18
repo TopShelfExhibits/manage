@@ -1,5 +1,19 @@
 import { html, statusColor } from '../../index.js';
 
+/**
+ * Dismiss a banner: a banner in the bus is removed from it (which triggers its watchers, such as
+ * the bookmark save); a static one is hidden in the bus's per-scope dismissals, so every
+ * BannerNotifications drawing that scope hides it.
+ */
+function dismissBanner(notify, scope, key) {
+    const current = notify.getBanners(scope) || [];
+    if (current.some(b => b.key === key)) {
+        notify.setBanners(scope, current.filter(b => b.key !== key));
+    } else {
+        notify.dismiss(scope, key);
+    }
+}
+
 
 /**
  * NotificationBubbleOverlay — global fixed overlay showing alert bubbles for all
@@ -19,16 +33,8 @@ export const NotificationBubbleOverlay = {
     },
     methods: {
         showAlertDetails(banner) {
-            const dismissBanner = () => {
-                // Remove the banner from the notification bus
-                const scope = banner._scope;
-                const currentBanners = this.$notify.getBanners(scope) || [];
-                const filtered = currentBanners.filter(b => b.key !== banner.key);
-                this.$notify.setBanners(scope, filtered);
-            };
-
             // Only show dismiss option if the banner is dismissible
-            const onCancel = banner.dismissible !== false ? dismissBanner : null;
+            const onCancel = banner.dismissible !== false ? () => dismissBanner(this.$notify, banner._scope, banner.key) : null;
             const cancelText = banner.dismissible !== false ? 'Dismiss' : null;
 
             this.$modal.confirm(
@@ -103,7 +109,16 @@ export const NotificationBubbleOverlay = {
  *   - An interval is started the first time a banner with `poll` becomes visible.
  *   - The interval is stopped when the banner is no longer visible or the component unmounts.
  *   - Intervals are never duplicated — reconciliation runs on every banners change.
+ *
+ * Corner tray: banners scrolled above their scrolling parent's top are reported to the
+ * notification bus, and NotificationBubbleOverlay shows them as bubbles. `collapsed` draws
+ * nothing and reports every visible banner, so they go straight to the tray (the dashboard
+ * without a notices card).
+ *
+ * Slot `empty`: drawn instead when no banner is visible (the notices page's "No notices").
  */
+let _instanceCount = 0;
+
 export const BannerNotifications = {
     inject: ['$modal', '$notify'],
     props: {
@@ -114,52 +129,52 @@ export const BannerNotifications = {
         scope: {
             type: String,
             default: 'default'
+        },
+        collapsed: {
+            type: Boolean,
+            default: false
         }
     },
     data() {
         return {
-            dismissedKeys: {},
-            bannersScrolledOut: false,
-            scrollableParent: null
+            bannersScrolledOut: false
         };
     },
     created() {
+        this._reportKey = `${this.scope}#${++_instanceCount}`;
         // Store interval IDs outside Vue reactivity — they are implementation detail, not state.
         this._pollIntervals = {};
-        // Bind the scroll handler to preserve 'this' context
-        this._boundScrollHandler = this.checkBannersVisibility.bind(this);
+        // The element whose scrolling last moved these banners (#app-content, or a dashboard
+        // card's content). A page's banners move between the two when a card is expanded, so
+        // it is taken from the scroll event rather than found once.
+        this._scrollParentEl = null;
+        this._boundScrollHandler = (event) => {
+            const target = event.target;
+            if (target instanceof Element && this.$el && target.contains(this.$el)) {
+                this._scrollParentEl = target;
+                this.checkBannersVisibility();
+            }
+        };
     },
     mounted() {
-        // Find the scrollable parent container (typically #app-content)
-        let scrollable = this.$el.parentElement;
-        while (scrollable && scrollable !== document.body) {
-            const style = window.getComputedStyle(scrollable);
-            const overflowY = style.overflowY;
-            if (overflowY === 'auto' || overflowY === 'scroll') {
-                this.scrollableParent = scrollable;
-                break;
-            }
-            scrollable = scrollable.parentElement;
-        }
-        
-        if (!this.scrollableParent) {
-            this.scrollableParent = window;
-        }
-        
-        // Add scroll listener to the actual scrollable container
-        this.scrollableParent.addEventListener('scroll', this._boundScrollHandler);
+        // Scroll events don't bubble: listen in the capture phase for every scrolling element
+        document.addEventListener('scroll', this._boundScrollHandler, { capture: true, passive: true });
         this.$nextTick(() => this.checkBannersVisibility());
     },
     beforeUnmount() {
-        if (this.scrollableParent) {
-            this.scrollableParent.removeEventListener('scroll', this._boundScrollHandler);
-        }
+        document.removeEventListener('scroll', this._boundScrollHandler, { capture: true });
         Object.values(this._pollIntervals).forEach(id => clearInterval(id));
         this._pollIntervals = {};
+        this.$notify.setScrolledOut(this._reportKey, this.scope, false);
     },
     computed: {
         visibleBanners() {
-            return this.banners.filter(b => b.visible && !this.dismissedKeys[b.key]);
+            return this.banners.filter(b => b.visible && !this.$notify.isDismissed(this.scope, b.key));
+        },
+        // What this instance reports to the corner tray
+        trayReport() {
+            const out = this.collapsed || this.bannersScrolledOut;
+            return { out, banners: out ? this.visibleBanners : [] };
         }
     },
     watch: {
@@ -168,9 +183,7 @@ export const BannerNotifications = {
                 // Clear dismissed state for any banner that is no longer visible,
                 // so it will re-show if its condition becomes true again.
                 for (const banner of newBanners) {
-                    if (!banner.visible && this.dismissedKeys[banner.key]) {
-                        delete this.dismissedKeys[banner.key];
-                    }
+                    if (!banner.visible) this.$notify.undismiss(this.scope, banner.key);
                 }
                 this._reconcilePolling(newBanners);
             },
@@ -181,15 +194,21 @@ export const BannerNotifications = {
             // Re-check visibility when visible banners change
             this.$nextTick(() => this.checkBannersVisibility());
         },
-        bannersScrolledOut(newValue) {
-            // Report scroll state to the global notification bus
-            this.$notify.setScrolledOut(this.scope, newValue, this.visibleBanners);
+        collapsed() {
+            this.$nextTick(() => this.checkBannersVisibility());
+        },
+        trayReport: {
+            handler({ out, banners }) {
+                // Report scroll state to the global notification bus
+                this.$notify.setScrolledOut(this._reportKey, this.scope, out, banners);
+            },
+            immediate: true
         }
     },
     methods: {
         checkBannersVisibility() {
             // Only check if we have visible banners and a valid DOM element
-            if (!this.$el || !this.visibleBanners.length) {
+            if (this.collapsed || !this.$el || !this.visibleBanners.length) {
                 this.bannersScrolledOut = false;
                 return;
             }
@@ -213,20 +232,16 @@ export const BannerNotifications = {
             const lastBanner = bannerElements[bannerElements.length - 1];
             const rect = lastBanner.getBoundingClientRect();
             
-            // Consider banners scrolled out if the bottom is above the viewport top
-            this.bannersScrolledOut = rect.bottom < 0;
+            // Scrolled out once the bottom is above the scrolling parent's top: the viewport top
+            // for #app-content (fixed at the top of the window), the card's top in a dashboard card
+            const parentTop = this._scrollParentEl?.isConnected
+                ? Math.max(0, this._scrollParentEl.getBoundingClientRect().top)
+                : 0;
+            this.bannersScrolledOut = rect.bottom < parentTop;
         },
 
         dismiss(key) {
-            const current = this.$notify.getBanners(this.scope) || [];
-            const inBus = current.some(b => b.key === key);
-            if (inBus) {
-                // Remove from bus — triggers any watchers (e.g. localStorage save)
-                this.$notify.setBanners(this.scope, current.filter(b => b.key !== key));
-            } else {
-                // Static banner not in bus — hide locally
-                this.dismissedKeys = { ...this.dismissedKeys, [key]: true };
-            }
+            dismissBanner(this.$notify, this.scope, key);
         },
 
         _reconcilePolling(banners) {
@@ -256,7 +271,7 @@ export const BannerNotifications = {
         statusColor
     },
     template: html`
-        <div v-if="visibleBanners.length" class="banner-notifications-container">
+        <div v-if="visibleBanners.length && !collapsed" class="banner-notifications-container">
             <transition-group name="expand">
                 <template v-for="banner in visibleBanners" :key="banner.key">
                     <div :class="['banner-notification', 'card', statusColor(banner)]" style="display: flex; align-items: center; justify-content: space-between; gap: var(--padding-sm);">
@@ -289,5 +304,6 @@ export const BannerNotifications = {
                 </template>
             </transition-group>
         </div>
+        <slot v-else-if="!collapsed" name="empty"></slot>
     `
 };

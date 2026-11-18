@@ -2384,8 +2384,8 @@ export const TableComponent = {
                 ].filter(Boolean),
                 getIsActive: () => this.stickyActive,
                 canActivate: () => {
-                    const minHeight = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--page-height-card')) || 360;
-                    return (this._rootEl()?.offsetHeight ?? 0) >= minHeight;
+                    // Only tables at least 360px tall get a sticky header
+                    return (this._rootEl()?.offsetHeight ?? 0) >= 360;
                 },
                 onActivate: () => {
                     // Measure spacer height only on first activation (before thead clone is added)
@@ -4307,7 +4307,7 @@ export const TableComponent = {
                             class="button-symbol white"
                             title="Undo"
                         >
-                            ⮢
+                            <span class="material-symbols-outlined">undo</span>
                         </button>
                         <button
                             v-if="isBatchEditing && showUndoRedo"
@@ -4316,7 +4316,7 @@ export const TableComponent = {
                             class="button-symbol white"
                             title="Redo"
                         >
-                            ⮣
+                            <span class="material-symbols-outlined">redo</span>
                         </button>
                     </template>
                 </ContentHeaderComponent>

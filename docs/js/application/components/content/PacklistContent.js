@@ -631,22 +631,9 @@ export const PacklistContent = {
     async mounted() {
         this.initAllPacklistsStore();
 
-        // Register packlist navigation routes
+        // Register packlist navigation routes (packlist/<tab> pages are the pack lists themselves)
         NavigationRegistry.registerNavigation('packlist', {
-            routes: {
-                active: {
-                    displayName: 'Active Packlists',
-                    dashboardTitle: 'Active Pack Lists',
-                },
-                archived: {
-                    displayName: 'Archived Packlists',
-                    dashboardTitle: 'Archived Pack Lists',
-                },
-                templates: {
-                    displayName: 'Automation',
-                    dashboardTitle: 'Pack List Automation',
-                }
-            }
+            routes: {}
         });
 
         // Register hamburger menu for packlist

@@ -24,6 +24,7 @@ Top Shelf Exhibits' live inventory web app. It is plain ES modules and Vue 3 (Op
 
 - **Caching is automatic.** `wrapMethods` caches API and abstraction methods. A cached method takes `deps` as its first parameter and calls other cached methods with `deps.call(...)`, which records the dependency chain.
 - **Mutations invalidate from the bottom.** Database mutation methods invalidate the matching `getData` caches. The invalidation cascades up the recorded chains to the API, and reactive stores reload. Don't invalidate caches by hand.
+- **Early cutoff stops unchanged values.** A method listed in `cutoffMethods` (`wrapMethods`) is recomputed when invalidated, and its cascade goes on only if its value changed. Quantity analysis reads the Production Schedule only through `ProductionUtils` cutoff methods: `getScheduleDateRows` (the date and identity columns), `getShowDates(id)`, `getOverlappingShowIds(filters)` and the chain dates. Don't pass full schedule rows (`getOverlappingShows`, `getShowDetails`) into analysis: an edit to any task column would rerun it. See [docs/notes/incremental-invalidation-plan.md](docs/notes/incremental-invalidation-plan.md).
 - **Tab reads are batched.** Tab reads made at the same moment go out as one request per spreadsheet. Code that reads many tabs in a loop calls `Database.prefetch(tableId, tabNames)` before the loop.
 - **Whole-tab writes refill their own cache.** A whole-tab write's response is the tab as a read returns it. Database caches that response (`fillCache`), so the reload reads nothing. Range writes re-read.
 - **Sheet data never expires.** Each poll reads the spreadsheets' Drive `modifiedTime`, and the Caching tab stamps name the changed tab. Together they keep cached reads current. See "Spreadsheet watch" in [docs/notes/caching-tab-structure.md](docs/notes/caching-tab-structure.md). Don't add expiries to data reads. A source that isn't a spreadsheet joins the same poller with `watchSource` (`caching.js`), as Dropbox listings do through Dropbox's change list.
@@ -61,7 +62,7 @@ Style through shared classes, and adapt them to a context with one scoped rule.
 
 - **Shared structural classes, one job each:**
   - `.content`: a padded column with a gap. It is the modal body and the table's row-details panel.
-  - `.button-bar`: a joined row of controls. Where a bar can get long, draw it as `ButtonBar` (`buttonBar.js`) instead of `<div class="button-bar">`: with more than three children it moves the later ones to a second line rather than overflow (never a third line), so templates stay as they are. The shared table header (`ContentHeaderComponent`) already uses it.
+  - `.button-bar`: a joined row of controls. Where a bar can get long, draw it as `ButtonBar` (`buttonBar.js`) instead of `<div class="button-bar">`: with three or more children it moves the later ones to a second line rather than overflow (never a third line), so templates stay as they are. The shared table header (`ContentHeaderComponent`) already uses it.
   - `.card`: a small labelled block or button.
   - `.details-grid` with `.detail-item`: labelled values.
   - `.cell-button-list`: stacked, full-width buttons in one cell.
@@ -79,7 +80,13 @@ Style through shared classes, and adapt them to a context with one scoped rule.
 
 ## Tests
 
-- **Where they run.** On localhost the app loads `docs/js/tests/tests.js` after it mounts. Results appear in the browser console, grouped, with ✓/✗ per test and a summary line. Tests call `Requests.*` against the FakeGoogle data, with no mocks and no framework. They never run in production.
+- **Where they run.** On localhost, only on command: run `fakeGoogle.runTests()` in the browser console (`docs/js/tests/fakeGoogleDevTools.js`). A page load never runs them.
+  - Results appear in the console, grouped, with ✓/✗ per test and a summary line. The command also returns `{ passed, failed }`.
+  - Tests call `Requests.*` against the FakeGoogle data, with no mocks and no framework. They run against pristine fixtures, and local data is restored afterwards. They never run in production.
+- **Run what you changed, then everything.** `fakeGoogle.runTests('find scopes')` or `fakeGoogle.runTests(['dashboard', 'user data'])` runs only the groups whose name contains the text.
+  - Groups in one section can depend on the groups before them. For example, PERSISTED RESULTS needs SHORTAGE ALERTS, so run them together: `['shortage', 'persisted', 'rollover']`.
+  - Run the whole suite before committing.
+- **The suite owns the app while it runs.** It signs in, and its AUTH tests sign out, so sign in again afterwards. It holds the app's scheduled cache polls (`holdScheduledPolls`, `caching.js`); a test that needs a poll calls `triggerCachePoll()`.
 - **When to add tests:**
   - Add a test group for every new cross-layer feature, such as a new analysis type or a new pack list operation.
   - Add a regression test for any bug whose cause spans more than one file.

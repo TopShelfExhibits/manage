@@ -1,6 +1,7 @@
 import { html, NavigationRegistry, appSettings, runNonessentialAnalysisOnAllStores, SEVERITY, hamburgerMenuRegistry } from '../../index.js';
 import { PriorityQueue } from '../../utils/priorityQueue.js';
-import { viewportTier } from '../../utils/useContainerSize.js';
+import { viewportChrome } from '../../utils/useContainerSize.js';
+import { createScrollHider } from '../../utils/scrollHider.js';
 
 // Settings Menu Component
 const SettingsMenuComponent = {
@@ -13,6 +14,7 @@ const SettingsMenuComponent = {
         toggleEssentialAnalysis: { type: Function, required: true },
         toggleDashboardHeaders: { type: Function, required: true },
         openPageMenu: { type: Function, default: null },
+        arrangeDashboard: { type: Function, default: null },
         isAuthenticated: { type: Boolean, default: false }
     },
     emits: ['close-modal'],
@@ -32,6 +34,10 @@ const SettingsMenuComponent = {
         handleOpenPageMenu() {
             this.$emit('close-modal');
             this.openPageMenu?.();
+        },
+        handleArrangeDashboard() {
+            this.$emit('close-modal');
+            this.arrangeDashboard?.();
         }
     },
     template: html`
@@ -48,6 +54,9 @@ const SettingsMenuComponent = {
                     :class="['page-menu-item', { 'red': !showDashboardHeaders }]">
                 {{ showDashboardHeaders ? 'Hide' : 'Show' }} Dashboard Headers
             </button>
+            <button v-if="arrangeDashboard" @click="handleArrangeDashboard" class="page-menu-item">
+                Arrange Dashboard
+            </button>
             <button v-if="openPageMenu" @click="handleOpenPageMenu" class="page-menu-item" :disabled="!isAuthenticated">
                 Open Page Menu
             </button>
@@ -56,7 +65,7 @@ const SettingsMenuComponent = {
 };
 
 export const PrimaryNavComponent = {
-    inject: ['$modal', '$notify'],
+    inject: ['$modal', '$notify', 'appContext'],
     props: {
         isMenuOpen: {
             type: Boolean,
@@ -93,8 +102,7 @@ export const PrimaryNavComponent = {
         const saved = localStorage.getItem('theme');
         const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
         return {
-            isMenuVisible: true,
-            lastScrollTop: 0,
+            scrollHider: createScrollHider(),
             darkMode: saved === 'dark' ? true : saved === 'light' ? false : prefersDark
         };
     },
@@ -109,9 +117,13 @@ export const PrimaryNavComponent = {
         logoSrc() {
             return this.isDarkMode ? 'assets/logoW.png' : 'assets/logo.png';
         },
+        // Compact chrome: the nav collapses to the current page and a toggle (size model §4.10)
         isMobileView() {
-            // Compact chrome: viewport medium and narrow tiers (size model §4.10, R4.4)
-            return viewportTier(window.innerWidth) !== 'wide';
+            return viewportChrome.compact;
+        },
+        // Scrolling down hides the nav, except on a short screen (the nav is on the left edge)
+        isHidden() {
+            return this.scrollHider.hidden && !this.isMenuOpen && !viewportChrome.short;
         },
         onlyEssentialAnalysis() {
             return appSettings.onlyRunEssentialAnalysis;
@@ -129,7 +141,7 @@ export const PrimaryNavComponent = {
             
             // If actual path changed (not just params), show the navbar
             if (newBase !== oldBase) {
-                this.isMenuVisible = true;
+                this.scrollHider.show();
             }
         }
     },
@@ -145,6 +157,9 @@ export const PrimaryNavComponent = {
                 toggleEssentialAnalysis: this.toggleEssentialAnalysis,
                 toggleDashboardHeaders: this.toggleDashboardHeaders,
                 openPageMenu: this.openCurrentPageMenu,
+                arrangeDashboard: this.currentPage === 'dashboard' && this.isAuthenticated
+                    ? () => this.appContext.arrangeDashboard()
+                    : null,
                 isAuthenticated: this.isAuthenticated
             }, 'Application Settings');
         },
@@ -240,32 +255,16 @@ export const PrimaryNavComponent = {
         if (saved) document.documentElement.dataset.theme = saved;
         document.addEventListener('mouseup', this.handleClickOutside);
         
-        // Add a listener for scroll up or down in #app-content to hide or show the navbar.
-        // Avoid hiding if there's insufficient scrollable content (less than navbar height * 2).
+        // Scrolling #app-content down hides the nav and scrolling up shows it (scrollHider). A page
+        // with less than two nav heights to scroll keeps it shown.
         this._scrollHandler = () => {
             const appContent = document.querySelector('#app-content');
             if (!appContent) return;
-            
-            // Calculate available scrollable height
-            const scrollableHeight = appContent.scrollHeight - appContent.clientHeight;
-            const navbarHeight = parseFloat(
-                getComputedStyle(document.documentElement).getPropertyValue('--navbar-height')
-            );
-            const minScrollThreshold = navbarHeight * 2;
-            
-            // Don't allow hiding if there's not enough scrollable content
-            if (scrollableHeight < minScrollThreshold) {
-                this.isMenuVisible = true;
-                return;
-            }
-            
-            const currentScroll = appContent.scrollTop;
-            if (currentScroll > this.lastScrollTop + 12) {
-                this.isMenuVisible = false;
-                this.lastScrollTop = currentScroll;
-            } else if (currentScroll < this.lastScrollTop - 64 || currentScroll <= 0) {
-                this.isMenuVisible = true;
-                this.lastScrollTop = currentScroll;
+            const navbarHeight = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--navbar-height'));
+            if (appContent.scrollHeight - appContent.clientHeight < navbarHeight * 2) {
+                this.scrollHider.show();
+            } else {
+                this.scrollHider.update(appContent.scrollTop);
             }
         };
         
@@ -282,7 +281,7 @@ export const PrimaryNavComponent = {
     template: html`
         <header>
             <nav 
-                :class="{ 'open': isMenuOpen, 'hidden': !isMenuVisible && !isMenuOpen }"
+                :class="{ 'open': isMenuOpen, 'hidden': isHidden }"
                 >
                 <a @click.prevent="$emit('navigate-to-path', 'dashboard');">
                     <img :src="logoSrc" alt="Top Shelf Exhibits" />
@@ -501,7 +500,8 @@ export const BreadcrumbComponent = {
 
 
 /**
- * Standard Vue component for dashboard toggle functionality
+ * Standard Vue component for dashboard toggle functionality: add or remove the page, and on the
+ * dashboard, open arrange mode (cards are moved and resized there, dashboardComponents.js).
  */
 export const DashboardToggleComponent = {
     props: {
@@ -511,92 +511,53 @@ export const DashboardToggleComponent = {
         title: String
     },
     inject: ['appContext'],
+    emits: ['close-modal'],
     computed: {
+        registry() {
+            return NavigationRegistry.dashboardRegistry;
+        },
         isOnDashboard() {
-            return NavigationRegistry.dashboardRegistry.has(this.containerPath);
+            return this.registry.has(this.containerPath);
         },
-        isLoading() {
-            return NavigationRegistry.dashboardRegistry.isLoading;
+        // On the dashboard but not drawn: no room when it was read (older, larger dashboards)
+        isHidden() {
+            return this.isOnDashboard && !this.registry.getPlaced(this.containerPath);
         },
-        loadingMessage() {
-            return NavigationRegistry.dashboardRegistry.loadingMessage;
+        canAdd() {
+            return !this.registry.isFull;
         },
-        containerClasses() {
-            const classes = NavigationRegistry.dashboardRegistry.getClasses(this.containerPath);
-            return new Set(classes ? classes.split(' ').filter(c => c.length > 0) : []);
-        },
-        canMoveLeft() {
-            if (!this.isOnDashboard) return false;
-            const containers = NavigationRegistry.dashboardRegistry.containers;
-            const index = containers.findIndex(container => 
-                (typeof container === 'string' ? container : container.path) === this.containerPath
-            );
-            return index > 0;
-        },
-        canMoveRight() {
-            if (!this.isOnDashboard) return false;
-            const containers = NavigationRegistry.dashboardRegistry.containers;
-            const index = containers.findIndex(container => 
-                (typeof container === 'string' ? container : container.path) === this.containerPath
-            );
-            return index > -1 && index < containers.length - 1;
+        onDashboardPage() {
+            return this.appContext.currentPage === 'dashboard';
         }
     },
     methods: {
         async toggleDashboardPresence() {
             if (this.isOnDashboard) {
-                await NavigationRegistry.dashboardRegistry.remove(this.containerPath);
-            } else {
-                await NavigationRegistry.dashboardRegistry.add(this.containerPath);
+                await this.registry.remove(this.containerPath);
+            } else if (this.canAdd) {
+                await this.registry.add(this.containerPath);
             }
         },
-        async toggleDashboardClass(className) {
-            if (this.isOnDashboard) {
-                await NavigationRegistry.dashboardRegistry.toggleClass(this.containerPath, className);
-            }
-        },
-        async moveLeft() {
-            if (this.canMoveLeft) {
-                await NavigationRegistry.dashboardRegistry.moveLeft(this.containerPath);
-            }
-        },
-        async moveRight() {
-            if (this.canMoveRight) {
-                await NavigationRegistry.dashboardRegistry.moveRight(this.containerPath);
-            }
+        arrange() {
+            this.appContext.arrangeDashboard();
+            this.$emit('close-modal');
         }
     },
     template: html`
         <div>
-            <!-- Dashboard card styling controls (only show on dashboard page) -->
-            <div v-if="(this.appContext.currentPath?.split('/')[0] === 'dashboard') && isOnDashboard" class="button-bar">
-                <button @click="toggleDashboardClass('wide');" 
-                        :class="{ 'green': containerClasses.has('wide'), 'blue': !containerClasses.has('wide') }">
-                    Wide
-                </button>
-                <button @click="toggleDashboardClass('tall');" 
-                        :class="{ 'green': containerClasses.has('tall'), 'blue': !containerClasses.has('tall') }">
-                    Tall
-                </button>
-            </div>
-            
-            <!-- Dashboard ordering controls (only show on dashboard page) -->
-            <div v-if="(this.appContext.currentPath?.split('/')[0] === 'dashboard') && isOnDashboard" class="button-bar">
-                <button @click="moveLeft" :disabled="!canMoveLeft" 
-                        :class="{ 'blue': canMoveLeft, 'disabled': !canMoveLeft }">
-                    ← Move Left
-                </button>
-                <button @click="moveRight" :disabled="!canMoveRight" 
-                        :class="{ 'blue': canMoveRight, 'disabled': !canMoveRight }">
-                    Move Right →
-                </button>
-            </div>
-            
+            <button v-if="onDashboardPage" @click="arrange" class="blue">
+                Arrange Dashboard
+            </button>
+            <p v-if="isHidden" class="card yellow">
+                Not shown: the dashboard is full. Make room in Arrange Dashboard to show it.
+            </p>
             <!-- Add/Remove from dashboard -->
             <button 
                 @click="toggleDashboardPresence"
-                :class="{ 'red': isOnDashboard, 'green': !isOnDashboard }">
-                {{ isOnDashboard ? 'Remove from Dashboard' : 'Add to Dashboard' }}
+                :disabled="!isOnDashboard && !canAdd"
+                :title="!isOnDashboard && !canAdd ? 'The dashboard is full: remove or shrink a card first' : ''"
+                :class="{ 'red': isOnDashboard, 'green': !isOnDashboard && canAdd }">
+                {{ isOnDashboard ? 'Remove from Dashboard' : (canAdd ? 'Add to Dashboard' : 'Dashboard Full') }}
             </button>
         </div>
     `

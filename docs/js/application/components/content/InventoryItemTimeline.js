@@ -1,7 +1,6 @@
 import { html, Requests, NavigationRegistry, DataView, ScheduleFilterSelect, getReactiveStore, toISODateString, todayISOString, offsetToISO, THUMBNAIL_FIELD, getItemThumbnailsStore, itemThumbnailMap } from '../../index.js';
 import { CellRenderer } from '../interface/cells.js';
-import { useSearch } from '../../utils/useSearch.js';
-import { valueMatchesAny } from '../../utils/views/searchMatch.js';
+import { valueMatchesAny, searchWords } from '../../utils/views/searchMatch.js';
 
 // What each timeline key is (calendarStart/End are derived on a computed copy of the rows)
 const TIMELINE_FIELDS = [
@@ -61,6 +60,9 @@ const TIMELINE_VIEWS = {
  * URL path params used (on the container path):
  *   startDate  YYYY-MM-DD
  *   endDate    YYYY-MM-DD
+ *   searchTerm the timeline's search box (synced like every page's); the item details above the
+ *              timeline highlight the same words. A details button on an inventory table opens
+ *              this page with its search, so the matched values show here.
  */
 export const InventoryItemTimeline = {
     components: { DataView, ScheduleFilterSelect, CellRenderer },
@@ -72,20 +74,6 @@ export const InventoryItemTimeline = {
         itemId: { type: String, default: null },
         startDate: { type: String, default: null },
         endDate: { type: String, default: null }
-    },
-    setup(props) {
-        // Initialize search composable
-        const search = useSearch({
-            syncWithUrl: true,
-            navigationRegistry: NavigationRegistry,
-            containerPath: props.containerPath,
-            appContext: Vue.inject('appContext')
-        });
-
-        // Return search properties and methods to be available in component
-        return {
-            search
-        };
     },
     data() {
         return {
@@ -100,6 +88,12 @@ export const InventoryItemTimeline = {
         };
     },
     computed: {
+        // The search box's words (it writes them to the URL), for highlighting the item details
+        searchWords() {
+            if (!this.containerPath) return [];
+            const params = NavigationRegistry.getParametersForContainer(this.containerPath, this.appContext?.currentPath);
+            return searchWords(params?.searchTerm || '');
+        },
         // The item as a row for the thumbnail cell (no thumbnail field when its tab has none)
         thumbnailRow() {
             const map = itemThumbnailMap(this.itemThumbnailsStore?.data);
@@ -207,14 +201,11 @@ export const InventoryItemTimeline = {
             // timelineStore computed reacts automatically to the filter change
         },
         hasSearchMatch(value) {
-            return valueMatchesAny(value, this.search.searchWords.value);
+            return valueMatchesAny(value, this.searchWords);
         }
     },
     mounted() {
         this.resolveItemIdFromPath();
-        // Initialize search from URL and setup watcher
-        this.search.initializeFromUrl();
-        this.search.setupUrlWatcher();
     },
     template: html`
         <!-- Loading state while resolving identifier -->
@@ -257,7 +248,8 @@ export const InventoryItemTimeline = {
                 :container-path="containerPath"
                 :navigate-to-path="navigateToPath"
                 :details-title="row => [row.event, row.note].filter(Boolean).join(' — ') || 'Event Details'"
-                :show-search="false"
+                :show-search="true"
+                :sync-search-with-url="true"
                 :show-refresh="false"
                 :is-loading="timelineStore?.isLoading ?? false"
                 :loading-message="timelineStore?.loadingMessage || 'Loading timeline...'"

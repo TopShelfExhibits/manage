@@ -170,22 +170,24 @@ routes: {
 - Compares clean paths (without params) for matching
 - Auto-saves changes with 5-second debounce
 - Integrated with NavigationRegistry
+- Places cards on the single-screen 4 × 2 grid (`layout`, from `normalizeLayout` in `dashboardLayout.js`; see "Dashboard grid" in views-and-renderers-plan.md §4.11)
 
 **Key Methods**:
 
 - `has(containerPathWithParams)` - Check if container is on dashboard (compares clean paths)
 - `getContainer(containerPathWithParams)` - Get container with its stored path (compares clean paths)
-- `add(containerPathWithParams)` - Add container to dashboard with parameters
+- `add(containerPathWithParams)` - Add container at the first free cell (false when the dashboard is full)
 - `updatePath(cleanPath, newPathWithParams)` - Update container's path with new parameters
 - `remove(containerPathWithParams)` - Remove container from dashboard
-- `toggleClass(containerPathWithParams, className)` - Toggle CSS class (wide/tall)
+- `getPlaced(path)`, `layout`, `isFull` - The grid: placed cards with their rects, unplaced cards
+- `move(path, rect)`, `resize(path, w, h)`, `placeAt(path, rect)` - Arrange mode's changes (`arranging` turns it on)
 
 **Data Structure**:
 
 ```javascript
 containers: [
-  { path: 'schedule?{"dateFilter":"0,30"}', classes: "wide" },
-  { path: "inventory", classes: "" },
+  { path: 'schedule?{"dateFilter":"0,30"}', classes: "wide", x: 0, y: 0, w: 2, h: 1 },
+  { path: "inventory", classes: "" }, // older entry: placed first-fit when read
 ];
 ```
 
@@ -365,6 +367,32 @@ appContext.currentPath = pathFromURL
   ↓
 Components react to currentPath change
 ```
+
+### What a Page Opens With (search and remembered parameters)
+
+`resolveTargetPath(targetPath, currentPath)` decides the parameters of every navigation:
+
+- **The current page's search** is what its search box holds (`searchOn`), typed or not yet in the URL. Each box notes what it holds as it changes (`noteLiveSearch`, `liveSearches`), so typing never writes the URL or re-renders the page; a box that's gone falls back to its URL.
+- **A dashboard card** opens as its page with what its box holds.
+- **A target with parameters** (`?` in the path) otherwise opens exactly as given. This covers links that name a search (an item number into inventory), dashboard cards opening their page, and shared links.
+- **A bare target** gets the route's remembered parameters (`lastParameters`: view, filters, toggles) **without their search**. It gets a search in one of two ways:
+  - **The current page's search**, when both pages share a **find scope** ([findScopes.js](../js/application/utils/findScopes.js)).
+  - **The search last left in the target's scope**, when that was under 5 minutes ago (`SEARCH_MEMORY_MS`). Every navigation notes the page it leaves (`rememberSearch`, findScopes.js). Leaving with an empty box forgets the scope's search.
+
+  | Find scope | Pages |
+  | --- | --- |
+  | `inventory-items` | `inventory`, `inventory/categories`, `inventory/<category>`, `inventory/<category>/edit-history` |
+  | `shows` | `schedule`, `schedule/design-queue`, and the pack list lists `packlist`, `packlist/pins`, `packlist/unlinked` |
+  | `packlist:<tab>` | `packlist/<tab>` and its subpages (`details`): each pack list separately |
+  | its own path | everything else (item timelines, each report) |
+
+- **Browser back/forward** opens the history entry as it was and carries nothing.
+- **Search box blur** (`useSearch.handleBlur`) writes the box's search to its own path (a card's stored path on the dashboard), only when it changed.
+  - It waits until the click that left the box has run (`afterClick`: after the pointer's release), so the write never re-renders the page under a click.
+  - After a click that navigated it writes nothing: that navigation already carried the search or noted it in its scope.
+- **Item timelines** (`inventory/<category>/<item#>`) have the standard search box. A table's details button opens the timeline with the table's search (`DataView.performAction`). The item details above the timeline highlight the same words, read from the URL.
+
+Only `searchTerm` carries. `searchIndex` (the selected result) belongs to one page's results.
 
 ## Parameter Handling
 
