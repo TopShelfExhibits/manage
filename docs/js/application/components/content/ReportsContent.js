@@ -24,7 +24,7 @@ export const ReportsContent = {
                 { id: 'show-usage', title: 'Show Usage', content: 'View inventory quantities across shows in a matrix.', cardClass: 'blue' },
                 { id: 'item-shortages', title: 'Item Shortages', content: 'View items with quantities that drop below a set threshold.', cardClass: 'blue' },
                 { id: 'index-mismatches', title: 'Index Mismatches', content: 'View and resolve all unmatched client and show names from the production schedule and pack lists.', cardClass: 'blue' },
-                { id: 'inventory-projection', title: 'Inventory Projection', content: 'Items of a category likely to run short over the next 12 months, from expected shows and recent use.', cardClass: 'blue' }
+                { id: 'inventory-projection', title: 'Inventory Projection', content: 'Items of a category likely to run short over the coming year or years, from expected shows and recent use.', cardClass: 'blue' }
             ]
         };
     },

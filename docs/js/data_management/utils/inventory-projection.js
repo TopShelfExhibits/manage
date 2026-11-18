@@ -1,39 +1,44 @@
 /**
  * Inventory projection: pure helpers for the inventory projection report (no data access, no
- * cached calls). Requests.getInventoryProjection gathers the schedule, pack list and inventory
+ * cached calls). Requests.getInventoryProjectionModel gathers the schedule, pack list and inventory
  * figures and passes them to projectInventory.
  *
- * The model, month by month (months are 'YYYY-MM', a show counts in the month it ships):
- * - Volume: a future month's projected square feet is the larger of what is already scheduled and
- *   the same month last year times the trend multiplier times `growthFactor`.
+ * Items are rented to shows for windows: a show has its items out from its ship date to its return
+ * date (both days included). A transship chain counts once, at its root, out from the root's ship
+ * date to the chain's last return; its pack list items are the chain's (the peak across its shows),
+ * and its square feet are the root's. An item runs short when more are out at once than are in
+ * stock.
+ *
+ * The model (months are 'YYYY-MM'; a show counts in the month it ships):
+ * - Months: the next `futureYears` × 12, from this one (the first from today).
+ * - Volume: a future month's projected square feet is the larger of what is already booked and the
+ *   same month in the last past year, times the trend multiplier and `growthFactor` for each year it
+ *   lies ahead of that month (a month 18 months out: the same month last year, two years ahead).
  * - Trend: a straight line through the square feet of each of the past `historyYears` years (the
- *   12 months before this one, the 12 before those, …); the multiplier is the line's next year over
- *   its last year (growthMultiplier). Years before the first show (0 square feet) are left out, and
- *   one year makes no line: the multiplier is 1.
+ *   12 months before this one, the 12 before those, …); the multiplier k years ahead is the line's
+ *   value k years past its last year over its last year (growthMultiplier). Years before the first
+ *   show (0 square feet) are left out, and one year makes no line: the multiplier is 1.
  * - Rate: each item's pack list quantity over the last `usageMonths` full months, per square foot
- *   of the shows in those months that have a pack list.
- * - Use: a month's projected use is what its shows' pack lists already hold, plus the rate times
- *   the projected square feet no pack list covers yet.
- * - Reuse: how many times a month the stock can go out. Learned per item as its monthly use over
- *   its peak concurrent use (at least 1, at most `maxReuse`); `reuseFallback` instead when the item
- *   was used less than `learnMinUsage` times in the window or has less than `learnMinStock` in stock.
- * - Shortage: projected use above stock times reuse by at least `minShortfall`. In items, stock
- *   less the items that use needs (projected use over reuse).
+ *   of the shows in those months that have a pack list and a size.
+ * - Shows out in the projected months:
+ *   - booked, with a pack list: its quantities;
+ *   - booked, without one: rate × its square feet;
+ *   - expected but not booked yet (a month's projected square feet above its booked square feet):
+ *     the shows of that same past month, moved forward the years between, their square feet scaled
+ *     to fill the gap (fillShows), each at rate × its square feet.
+ * - Out at once: per item, the most out on any day of each month (peakByMonth).
+ * - Shortage: that peak above the month's stock (at its start, scheduled changes applied) by at
+ *   least `minShortfall` items. Its size in items is stock less the peak.
  * The report lists each item that runs short once (itemShortages): the first month it does, and the
  * most it falls short by from then on.
- * A transship chain counts once, at its root: its pack list items are the chain's (the peak across
- * its shows), so its square feet are the root's.
  */
 
 /** Preference rows (CACHE/Preferences, page reports/inventory-projection) and their defaults */
 export const PROJECTION_SETTINGS = Object.freeze({
     usageMonths: { id: 'ProjectionUsageMonths', type: 'integer', default: 3, min: 1 },
+    futureYears: { id: 'ProjectionFutureYears', type: 'integer', default: 1, min: 1 },
     historyYears: { id: 'ProjectionHistoryYears', type: 'integer', default: 1, min: 1 },
     growthFactor: { id: 'ProjectionGrowthFactor', type: 'double', default: 1, min: 0 },
-    reuseFallback: { id: 'ProjectionReuseFallback', type: 'double', default: 1, min: 0.1 },
-    maxReuse: { id: 'ProjectionMaxReuse', type: 'double', default: 4, min: 1 },
-    learnMinUsage: { id: 'ProjectionLearnMinUsage', type: 'integer', default: 10, min: 0 },
-    learnMinStock: { id: 'ProjectionLearnMinStock', type: 'integer', default: 5, min: 0 },
     defaultSquareFeet: { id: 'ProjectionDefaultSquareFeet', type: 'integer', default: 0, min: 0 },
     minShortfall: { id: 'ProjectionMinShortfall', type: 'double', default: 1, min: 0 }
 });
@@ -92,54 +97,69 @@ export function monthRange(first, count) {
     return Array.from({ length: count }, (_, i) => addMonths(first, i));
 }
 
-/**
- * The most an item had out at once: the largest sum of quantities whose date ranges overlap
- * (ranges include both ends). A use with no dates counts alone.
- * @param {Array<{start: string|null, end: string|null, qty: number}>} uses
- * @returns {number}
- */
-export function peakConcurrentUse(uses) {
-    const events = [];
-    let peak = 0;
-    for (const { start, end, qty } of uses || []) {
-        if (!(qty > 0)) continue;
-        if (!start) { peak = Math.max(peak, qty); continue; }
-        events.push([start, 0, qty], [end && end >= start ? end : start, 1, qty]);
-    }
-    // Same day: starts before ends, so ranges that meet on a day overlap
-    events.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : a[1] - b[1]));
-    let out = 0;
-    for (const [, kind, qty] of events) {
-        out += kind === 0 ? qty : -qty;
-        peak = Math.max(peak, out);
-    }
-    return peak;
+/** An ISO date `years` years later; Feb 29 becomes Feb 28 in a year without one */
+export function shiftYears(isoDate, years) {
+    const year = Number(isoDate.slice(0, 4)) + years;
+    const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+    const rest = isoDate.slice(4, 10) === '-02-29' && !leap ? '-02-28' : isoDate.slice(4, 10);
+    return `${year}${rest}`;
 }
 
-/**
- * How many times a month an item's stock can go out (see the model above).
- * @param {{ usage: number, peak: number, stock: number|null }} item - usage over the window
- * @param {Object} settings - resolveProjectionSettings
- * @returns {{ reuse: number, learned: boolean }}
- */
-export function itemReuse({ usage, peak, stock }, settings) {
-    const thin = !(peak > 0) || usage < settings.learnMinUsage || !(stock >= settings.learnMinStock);
-    if (thin) return { reuse: settings.reuseFallback, learned: false };
-    const monthly = usage / settings.usageMonths;
-    return { reuse: Math.min(settings.maxReuse, Math.max(1, monthly / peak)), learned: true };
+/** The ISO date after an ISO date */
+function nextDay(isoDate) {
+    const date = new Date(`${isoDate.slice(0, 10)}T00:00:00Z`);
+    date.setUTCDate(date.getUTCDate() + 1);
+    return date.toISOString().slice(0, 10);
 }
 
 const round1 = (n) => Math.round(n * 10) / 10;
 const round3 = (n) => Math.round(n * 1000) / 1000;
 
 /**
- * The growth multiplier of yearly totals: the least-squares line through them, its value one year
- * past the last total over its value at the last total. Leading zero years (before records began)
- * are left out. 1 with fewer than two years or a line at or below 0 at the last year; never below 0.
+ * The most out at once on any day of each month: uses whose date ranges hold the day add up
+ * (ranges include both ends, so ranges meeting on a day overlap). The first month starts at `from`
+ * when that falls in it. A use without a start date is left out; one without an end is out its
+ * start day.
+ * @param {Array<{start: string|null, end: string|null, qty: number}>} uses
+ * @param {string[]} months - In order
+ * @param {string} [from] - ISO date the first month starts at
+ * @returns {Object<string, number>} By month
+ */
+export function peakByMonth(uses, months, from = null) {
+    const events = [];
+    for (const { start, end, qty } of uses || []) {
+        if (!(qty > 0) || !start) continue;
+        events.push([start, qty], [nextDay(end && end >= start ? end : start), -qty]);
+    }
+    events.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+    const peaks = {};
+    let out = 0;
+    let i = 0;
+    months.forEach((month, index) => {
+        const begin = index === 0 && monthOf(from) === month ? from : `${month}-01`;
+        const end = `${addMonths(month, 1)}-01`;
+        while (i < events.length && events[i][0] <= begin) out += events[i++][1];
+        let peak = out;
+        while (i < events.length && events[i][0] < end) {
+            const day = events[i][0];
+            while (i < events.length && events[i][0] === day) out += events[i++][1];
+            peak = Math.max(peak, out);
+        }
+        peaks[month] = round3(peak);
+    });
+    return peaks;
+}
+
+/**
+ * The growth multiplier of yearly totals: the least-squares line through them, its value
+ * `yearsAhead` years past the last total over its value at the last total. Leading zero years
+ * (before records began) are left out. 1 with fewer than two years or a line at or below 0 at the
+ * last year; never below 0.
  * @param {number[]} yearTotals - Square feet by year, oldest first
+ * @param {number} [yearsAhead]
  * @returns {number}
  */
-export function growthMultiplier(yearTotals) {
+export function growthMultiplier(yearTotals, yearsAhead = 1) {
     const first = yearTotals.findIndex(total => total > 0);
     const totals = first < 0 ? [] : yearTotals.slice(first);
     const n = totals.length;
@@ -152,63 +172,114 @@ export function growthMultiplier(yearTotals) {
     const slope = sxy / sxx;
     const last = meanY + slope * (n - 1 - meanX);
     if (!(last > 0)) return 1;
-    return Math.max(0, (last + slope) / last);
+    return Math.max(0, (last + slope * yearsAhead) / last);
+}
+
+/**
+ * Each future month's volume (see the model above).
+ * @param {Object} input
+ * @param {string[]} input.months - The future months, in order
+ * @param {Object<string, {sqft: number, shows: number}>} input.scheduled - Booked, by month
+ * @param {Object<string, number>} input.pastSqft - Square feet by past month
+ * @param {Object} settings - resolveProjectionSettings
+ * @returns {{ rows: Array<{month, shows, scheduledSqft, pastMonth, pastSqft, projectedSqft}>,
+ *            trend: {years: number[], multipliers: number[]} }} pastMonth: the past month it carries
+ *          forward; trend.years: each past year's square feet, oldest first; trend.multipliers: 1, 2,
+ *          … years ahead
+ */
+export function projectVolume({ months, scheduled, pastSqft }, settings) {
+    // Year k back: the 12 months starting 12k months before the first future month
+    const years = Array.from({ length: settings.historyYears }, (_, i) => settings.historyYears - i)
+        .map(k => monthRange(addMonths(months[0], -12 * k), 12).reduce((sum, month) => sum + (pastSqft[month] || 0), 0));
+    const yearsAheadOf = (month) => {
+        let k = 1;
+        while (addMonths(month, -12 * k) >= months[0]) k++;
+        return k;
+    };
+    const multipliers = Array.from({ length: yearsAheadOf(months[months.length - 1]) }, (_, i) => growthMultiplier(years, i + 1));
+    const rows = months.map(month => {
+        const booked = scheduled[month] || { sqft: 0, shows: 0 };
+        const k = yearsAheadOf(month);
+        const pastMonth = addMonths(month, -12 * k);
+        const past = pastSqft[pastMonth] || 0;
+        return {
+            month,
+            shows: booked.shows,
+            scheduledSqft: booked.sqft,
+            pastMonth,
+            pastSqft: past,
+            projectedSqft: Math.round(Math.max(booked.sqft, past * multipliers[k - 1] * settings.growthFactor ** k))
+        };
+    });
+    return { rows, trend: { years, multipliers: multipliers.map(round3) } };
+}
+
+/**
+ * The shows expected but not booked yet: for each month projected above its booked square feet,
+ * the shows of the past month it carries forward, moved forward the years between, their square
+ * feet scaled so they add up to the gap.
+ * @param {Array<{month, pastMonth, scheduledSqft, projectedSqft}>} rows - projectVolume rows
+ * @param {Array<{ship: string, end: string, month: string, sqft: number}>} pastShows
+ * @returns {Array<{start: string, end: string, sqft: number}>}
+ */
+export function fillShows(rows, pastShows) {
+    const filled = [];
+    for (const { month, pastMonth, scheduledSqft, projectedSqft } of rows) {
+        const gap = projectedSqft - scheduledSqft;
+        const models = pastShows.filter(show => show.month === pastMonth && show.sqft > 0);
+        const modelSqft = models.reduce((sum, show) => sum + show.sqft, 0);
+        if (!(gap > 0) || !(modelSqft > 0)) continue;
+        const years = Number(month.slice(0, 4)) - Number(pastMonth.slice(0, 4));
+        for (const show of models) {
+            filled.push({ start: shiftYears(show.ship, years), end: shiftYears(show.end, years), sqft: show.sqft * gap / modelSqft });
+        }
+    }
+    return filled;
 }
 
 /**
  * The projection, month by month.
  * @param {Object} input
  * @param {string[]} input.months - The future months, in order
- * @param {Object<string, {sqft: number, shows: number, coveredSqft: number}>} input.scheduled -
- *        Each future month's shows: square feet, count, and square feet with a pack list
+ * @param {string} input.from - Today: the first month starts here
+ * @param {Object<string, {sqft: number, shows: number}>} input.scheduled - Booked, by month
  * @param {Object<string, number>} input.pastSqft - Square feet by past month
- * @param {number} input.usageSqft - Square feet of the usage window's shows with a pack list
- * @param {Array<{itemId: string, usage: number, peak: number, stockNow: number|null,
- *        known: Object<string, number>, stock: Object<string, number|null>}>} input.items -
- *        Window use and peak, stock today and at each month's start, pack list use by month
+ * @param {Array<{ship, end, month, sqft}>} input.pastShows - Past shows, for fillShows
+ * @param {Array<{start, end, sqft}>} input.unpackedShows - Booked shows out in the projected months
+ *        without a pack list
+ * @param {number} input.usageSqft - Square feet of the usage window's shows learned from
+ * @param {Array<{itemId: string, usage: number, packed: Array<{start, end, qty}>,
+ *        stock: Object<string, number|null>}>} input.items - Window use, the booked pack list
+ *        quantities out in the projected months, stock at each month's start
  * @param {Object} settings - resolveProjectionSettings
- * @returns {{ months: Array<Object>, items: Array<Object>, trend: {years: number[], multiplier: number} }}
- *          trend.years: each past year's square feet, oldest first
+ * @returns {{ months: Array<Object>, items: Array<{itemId, usage, rate}>, trend: Object, filled: number }}
  */
-export function projectInventory({ months, scheduled, pastSqft, usageSqft, items }, settings) {
-    const rated = items.map(item => ({
-        ...item,
-        rate: usageSqft > 0 ? item.usage / usageSqft : 0,
-        ...itemReuse({ usage: item.usage, peak: item.peak, stock: item.stockNow }, settings)
-    }));
-    // Year k back: the 12 months starting 12k months before the first future month
-    const years = Array.from({ length: settings.historyYears }, (_, i) => settings.historyYears - i)
-        .map(k => monthRange(addMonths(months[0], -12 * k), 12).reduce((sum, month) => sum + (pastSqft[month] || 0), 0));
-    const multiplier = growthMultiplier(years);
-    const rows = months.map(month => {
-        const booked = scheduled[month] || { sqft: 0, shows: 0, coveredSqft: 0 };
-        const lastYear = pastSqft[addMonths(month, -12)] || 0;
-        const projectedSqft = Math.max(booked.sqft, lastYear * multiplier * settings.growthFactor);
-        const uncoveredSqft = Math.max(0, projectedSqft - booked.coveredSqft);
-        const shortages = [];
-        for (const item of rated) {
-            const stock = item.stock[month];
-            if (stock === null || stock === undefined) continue;
-            const projected = (item.known[month] || 0) + item.rate * uncoveredSqft;
-            const capacity = stock * item.reuse;
-            if (projected - capacity >= settings.minShortfall && projected > 0) {
-                shortages.push({ itemId: item.itemId, projected: round1(projected), stock, capacity: round1(capacity), reuse: round1(item.reuse), learned: item.learned, short: round3(stock - projected / item.reuse) });
-            }
-        }
-        shortages.sort((a, b) => (b.projected - b.capacity) - (a.projected - a.capacity) || (a.itemId < b.itemId ? -1 : 1));
-        return {
-            month,
-            shows: booked.shows,
-            scheduledSqft: booked.sqft,
-            pastSqft: lastYear,
-            projectedSqft: Math.round(projectedSqft),
-            shortages
-        };
+export function projectInventory({ months, from, scheduled, pastSqft, pastShows, unpackedShows, usageSqft, items }, settings) {
+    const { rows, trend } = projectVolume({ months, scheduled, pastSqft }, settings);
+    const filled = fillShows(rows, pastShows);
+    const modelled = [...unpackedShows, ...filled];
+    const rated = items.map(item => {
+        const rate = usageSqft > 0 ? item.usage / usageSqft : 0;
+        const uses = [...item.packed, ...(rate > 0 ? modelled.map(show => ({ start: show.start, end: show.end, qty: rate * show.sqft })) : [])];
+        return { ...item, rate, peaks: peakByMonth(uses, months, from) };
     });
     return {
-        months: rows,
-        items: rated.map(({ itemId, usage, peak, rate, reuse, learned }) => ({ itemId, usage, peak, rate, reuse, learned })),
-        trend: { years, multiplier: round3(multiplier) }
+        months: rows.map(({ pastMonth, ...row }) => {
+            const shortages = [];
+            for (const item of rated) {
+                const stock = item.stock[row.month];
+                if (stock === null || stock === undefined) continue;
+                const peak = item.peaks[row.month];
+                if (peak > 0 && peak - stock >= settings.minShortfall) {
+                    shortages.push({ itemId: item.itemId, peak: round1(peak), stock, short: round3(stock - peak) });
+                }
+            }
+            shortages.sort((a, b) => (a.short - b.short) || (a.itemId < b.itemId ? -1 : 1));
+            return { ...row, shortages };
+        }),
+        items: rated.map(({ itemId, usage, rate }) => ({ itemId, usage, rate })),
+        trend,
+        filled: filled.length
     };
 }
 

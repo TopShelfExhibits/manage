@@ -38,11 +38,12 @@ const monthLabel = (month) => `${MONTH_NAMES[Number(month.slice(5, 7)) - 1]} ${m
 
 /**
  * Inventory projection report (reports/inventory-projection): for one inventory category, the
- * items likely to run short over the next 12 months, from the shows expected (booked, or the same
- * month in past years) and each item's recent use per square foot. A proposal (URL parameter
- * `proposal`) adds a column with each shortage after its quantity changes. The model and its
- * settings: data_management/utils/inventory-projection.js; the settings are preference rows,
- * shown in the page menu (View Parameters).
+ * items likely to have more out at once than in stock over the coming years (ProjectionFutureYears),
+ * from the booked shows' windows and pack lists, the shows expected but not booked yet, and each
+ * item's recent use per square foot. A proposal (URL parameter `proposal`) adds a column with each
+ * shortage after its quantity changes. The model and its settings:
+ * data_management/utils/inventory-projection.js; the settings are preference rows, shown in the
+ * page menu (View Parameters).
  */
 export const InventoryProjectionReport = {
     components: { DataView, InventoryCategoryFilter },
@@ -99,23 +100,28 @@ export const InventoryProjectionReport = {
             const { settings } = basis;
             const window = `${monthLabel(basis.usageMonths[0])} – ${monthLabel(basis.usageMonths[basis.usageMonths.length - 1])}`;
             return [
-                { label: 'Learned from', value: `${basis.learnedFrom} of ${basis.usageShows} shows shipping ${window} (those with a pack list and a size): ${basis.usageSqft.toLocaleString()} sq ft` },
-                { label: 'Items', value: `${basis.learnedItems} with reuse learned from their use, ${basis.fallbackItems} at ${settings.reuseFallback}× a month` },
-                { label: 'Shows without a size', value: `${basis.unsized} of ${basis.shows}${settings.defaultSquareFeet ? `, counted as ${settings.defaultSquareFeet} sq ft` : ', left out'}` },
-                { label: 'Expected shows', value: `the larger of booked and the same month last year × ${this.trendText} × ${settings.growthFactor} (Growth Factor)` }
+                { label: 'Projected', value: `the next ${12 * settings.futureYears} months: the most of each item out at once, ship to return, against stock` },
+                { label: 'Use per sq ft', value: `learned from ${basis.learnedFrom} of ${basis.usageShows} shows shipping ${window} (those with a pack list and a size): ${basis.usageSqft.toLocaleString()} sq ft` },
+                { label: 'Booked', value: `${basis.outShows} shows out from today, ${basis.packedShows} at their pack lists, the rest at use per sq ft` },
+                { label: 'Not booked yet', value: `${basis.filledShows} past shows a year on, sized to fill each month's expected sq ft` },
+                { label: 'Expected sq ft', value: `the larger of booked and the same month last year × ${this.trendText} × ${settings.growthFactor} (Growth Factor${settings.futureYears > 1 ? ', once per year ahead' : ''})` },
+                { label: 'Shows without a size', value: `${basis.unsized} of ${basis.shows}${settings.defaultSquareFeet ? `, counted as ${settings.defaultSquareFeet} sq ft` : ', left out'}` }
             ];
         },
-        // The trend multiplier and the yearly square feet it is drawn through
+        // The trend multipliers and the yearly square feet they are drawn through
         trendText() {
-            const { years, multiplier } = this.basis.trend || { years: [], multiplier: 1 };
+            const { years, multipliers } = this.basis.trend;
             if (years.length < 2) return '1 (no trend: History Years is 1)';
-            return `${multiplier} (the trend through the past ${years.length} years: ${years.map(sqft => sqft.toLocaleString()).join(', ')} sq ft)`;
+            const ahead = multipliers.length > 1 ? `${multipliers.join(', ')} for 1–${multipliers.length} years ahead` : `${multipliers[0]}`;
+            return `${ahead} (the trend through the past ${years.length} years: ${years.map(sqft => sqft.toLocaleString()).join(', ')} sq ft)`;
         },
         isLoading() {
             return !!(this.projectionStore?.isLoading || this.basisStore?.isLoading);
         },
         emptyMessage() {
-            return this.category ? 'No likely shortages in the next 12 months.' : 'Choose an inventory category to project.';
+            if (!this.category) return 'Choose an inventory category to project.';
+            const months = 12 * (this.basis?.settings.futureYears || 1);
+            return `No likely shortages in the next ${months} months.`;
         }
     },
     watch: {

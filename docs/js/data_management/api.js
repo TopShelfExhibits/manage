@@ -1,4 +1,4 @@
-import { wrapMethods, normalizeHeaderName, Database, InventoryUtils, PackListUtils, ProductionUtils, ApplicationUtils, EditHistoryUtils, InstantWriteUtils, ARCHIVE_TAB_NAME, ARCHIVE_HEADERS, offsetToISO, resolveShortageAlertDays, shortageAlertDateFilters, PREFERENCES_MAPPING, INVENTORY_TAB_PREFERENCES, sanitizeTabName, mapWithConcurrency, ProgressBus, getRandomLoadingQuote, DEFAULT_INVENTORY_MAPPING, ProposalUtils, DropboxUtils, PROPOSALS_TAB_NAME, PROPOSAL_MAPPING, resolveInventoryNoteMaxLength, primaryThumbnailValue, SEVERITY, remainingSeverity, resolveProjectionSettings, monthOf, addMonths, monthRange, peakConcurrentUse, projectInventory, itemShortages } from './index.js';
+import { wrapMethods, normalizeHeaderName, Database, InventoryUtils, PackListUtils, ProductionUtils, ApplicationUtils, EditHistoryUtils, InstantWriteUtils, ARCHIVE_TAB_NAME, ARCHIVE_HEADERS, offsetToISO, resolveShortageAlertDays, shortageAlertDateFilters, PREFERENCES_MAPPING, INVENTORY_TAB_PREFERENCES, sanitizeTabName, mapWithConcurrency, ProgressBus, getRandomLoadingQuote, DEFAULT_INVENTORY_MAPPING, ProposalUtils, DropboxUtils, PROPOSALS_TAB_NAME, PROPOSAL_MAPPING, resolveInventoryNoteMaxLength, primaryThumbnailValue, SEVERITY, remainingSeverity, resolveProjectionSettings, monthOf, addMonths, monthRange, projectInventory, itemShortages } from './index.js';
 import { AuthSession } from './services.js';
 import { instantWriteEntry, identityText, parseColoredName } from './utils/instant-write-config.js';
 import { columnTypesEntry } from './utils/column-types.js';
@@ -1360,11 +1360,12 @@ class Requests_uncached {
 
     /**
      * The inventory projection of one inventory category (the model: utils/inventory-projection.js).
-     * Reads the shows shipping in the usage window, the past years and the next 12 months (one per
-     * transship chain, at its root) with their square feet and whether they have a pack list; each
-     * item's pack list use, peak and stock; then projectInventory. getInventoryProjection and
-     * getInventoryProjectionBasis serve its parts. The schedule is read only through cutoff methods
-     * (show ids, ship and return dates, square feet).
+     * Reads the shows shipping from the start of the usage window or the past years to the last
+     * projected month (one per transship chain, at its root) with their ship and return dates,
+     * square feet and whether they have a pack list; the usage window's pack list quantities; the
+     * pack list quantities of the booked shows out in the projected months; stock at each month's
+     * start; then projectInventory. getInventoryProjection and getInventoryProjectionBasis serve its
+     * parts. The schedule is read only through cutoff methods (show ids, dates, square feet).
      * @param {Object} deps
      * @param {string} category - Inventory tab name
      * @returns {Promise<{months: Array<Object>, items: Array<Object>, settings: Object, basis: Object}|null>}
@@ -1374,7 +1375,7 @@ class Requests_uncached {
         const settings = resolveProjectionSettings(await deps.call(Requests.getPreferences));
         const today = await deps.call(ApplicationUtils.getToday);
         const thisMonth = monthOf(today);
-        const futureMonths = monthRange(thisMonth, 12);
+        const futureMonths = monthRange(thisMonth, 12 * settings.futureYears);
         const usageMonths = monthRange(addMonths(thisMonth, -settings.usageMonths), settings.usageMonths);
         const firstMonth = addMonths(thisMonth, -Math.max(settings.usageMonths, 12 * settings.historyYears));
         const lastMonth = futureMonths[futureMonths.length - 1];
@@ -1390,14 +1391,23 @@ class Requests_uncached {
         ]);
         const packListTabs = allTabs.filter(tab => tab.title !== '_TEMPLATE' && !tab.title.startsWith('_'));
         const shows = (await mapWithConcurrency(ids, async (id) => {
-            // A transship destination's items are its chain root's
+            // A transship destination's items are its chain root's, out until the chain's last return
             if (await deps.call(ProductionUtils.getTransshipSourceForShow, id)) return null;
             const ship = await deps.call(ProductionUtils.getProjectShipDate, id);
             const month = monthOf(ship);
             if (!month || month < firstMonth || month > lastMonth) return null;
+            const [returned, tabs] = await Promise.all([
+                deps.call(ProductionUtils.getProjectReturnDate, id),
+                deps.call(ProductionUtils.findAllPackListTabsForShow, id, packListTabs)
+            ]);
             const size = sqftById[id] ?? null;
-            const tabs = await deps.call(ProductionUtils.findAllPackListTabsForShow, id, packListTabs);
-            return { id, ship, month, sized: size !== null, sqft: size ?? (settings.defaultSquareFeet || 0), hasPackList: tabs.length > 0 };
+            return {
+                id, ship, month,
+                end: returned && returned >= ship ? returned : ship,
+                sized: size !== null,
+                sqft: size ?? (settings.defaultSquareFeet || 0),
+                hasPackList: tabs.length > 0
+            };
         }, 8)).filter(Boolean);
         const showById = new Map(shows.map(show => [show.id, show]));
 
@@ -1405,26 +1415,20 @@ class Requests_uncached {
         const usageShows = shows.filter(show => usageMonths.includes(show.month));
         const learnedFrom = usageShows.filter(show => show.hasPackList && show.sqft > 0);
         const usageSqft = learnedFrom.reduce((sum, show) => sum + show.sqft, 0);
-        const plannedShows = shows.filter(show => show.month >= thisMonth && show.hasPackList);
-        const [usageRows, plannedRows, returnDates] = await Promise.all([
+        // Out in the projected months: the shows whose window reaches today
+        const outShows = shows.filter(show => show.end >= today);
+        const packedShows = outShows.filter(show => show.hasPackList);
+        const [usageRows, packedRows] = await Promise.all([
             learnedFrom.length ? deps.call(PackListUtils.extractItemsFromMultipleShows, learnedFrom.map(show => show.id), [category], false) : [],
-            plannedShows.length ? deps.call(PackListUtils.extractItemsFromMultipleShows, plannedShows.map(show => show.id), [category], false) : [],
-            mapWithConcurrency(learnedFrom, show => deps.call(ProductionUtils.getProjectReturnDate, show.id), 8)
+            packedShows.length ? deps.call(PackListUtils.extractItemsFromMultipleShows, packedShows.map(show => show.id), [category], false) : []
         ]);
-        const returnById = new Map(learnedFrom.map((show, i) => [show.id, returnDates[i] || show.ship]));
+        const usageByItem = new Map(usageRows.map(row => [row.itemId, row.totalQuantity || 0]));
+        const packedByItem = new Map(packedRows.map(row => [row.itemId, Object.entries(row.shows || {})
+            .filter(([id, qty]) => qty > 0 && showById.has(id))
+            .map(([id, qty]) => ({ start: showById.get(id).ship, end: showById.get(id).end, qty: Number(qty) }))]));
+        const itemIds = [...new Set([...usageByItem.keys(), ...packedByItem.keys()])].sort();
 
-        const usageByItem = new Map(usageRows.map(row => [row.itemId, row]));
-        const knownByItem = new Map(plannedRows.map(row => {
-            const known = {};
-            for (const [id, qty] of Object.entries(row.shows || {})) {
-                const month = showById.get(id)?.month;
-                if (month && qty > 0) known[month] = (known[month] || 0) + qty;
-            }
-            return [row.itemId, known];
-        }));
-        const itemIds = [...new Set([...usageByItem.keys(), ...knownByItem.keys()])].sort();
-
-        // Stock today and at each future month's start, scheduled changes applied
+        // Stock at each month's start (the first: today), scheduled changes applied
         const stockOn = async (date) => {
             const info = itemIds.length ? await deps.call(InventoryUtils.getItemInfo, itemIds, ['quantity'], date) : null;
             return new Map((info || []).map(entry => {
@@ -1432,35 +1436,28 @@ class Requests_uncached {
                 return [entry.itemName, Number.isFinite(qty) ? qty : null];
             }));
         };
-        const [stockNow, ...monthStock] = await Promise.all([today, ...futureMonths.map((month, i) => (i === 0 ? today : `${month}-01`))].map(stockOn));
+        const monthStock = await Promise.all(futureMonths.map((month, i) => stockOn(i === 0 ? today : `${month}-01`)));
+        const items = itemIds.map(itemId => ({
+            itemId,
+            usage: usageByItem.get(itemId) || 0,
+            packed: packedByItem.get(itemId) || [],
+            stock: Object.fromEntries(futureMonths.map((month, i) => [month, monthStock[i].get(itemId) ?? null]))
+        }));
 
-        const items = itemIds.map(itemId => {
-            const row = usageByItem.get(itemId);
-            const uses = Object.entries(row?.shows || {}).map(([id, qty]) => ({ start: showById.get(id)?.ship || null, end: returnById.get(id) || null, qty: Number(qty) || 0 }));
-            return {
-                itemId,
-                usage: row?.totalQuantity || 0,
-                peak: peakConcurrentUse(uses),
-                stockNow: stockNow.get(itemId) ?? null,
-                known: knownByItem.get(itemId) || {},
-                stock: Object.fromEntries(futureMonths.map((month, i) => [month, monthStock[i].get(itemId) ?? null]))
-            };
-        });
-
-        const scheduled = Object.fromEntries(futureMonths.map(month => [month, { sqft: 0, shows: 0, coveredSqft: 0 }]));
+        const scheduled = Object.fromEntries(futureMonths.map(month => [month, { sqft: 0, shows: 0 }]));
         const pastSqft = {};
         for (const show of shows) {
             if (show.month >= thisMonth) {
-                const booked = scheduled[show.month];
-                booked.shows++;
-                booked.sqft += show.sqft;
-                if (show.hasPackList) booked.coveredSqft += show.sqft;
+                scheduled[show.month].shows++;
+                scheduled[show.month].sqft += show.sqft;
             } else {
                 pastSqft[show.month] = (pastSqft[show.month] || 0) + show.sqft;
             }
         }
+        const pastShows = shows.filter(show => show.month < thisMonth);
+        const unpackedShows = outShows.filter(show => !show.hasPackList && show.sqft > 0).map(show => ({ start: show.ship, end: show.end, sqft: show.sqft }));
 
-        const projection = projectInventory({ months: futureMonths, scheduled, pastSqft, usageSqft, items }, settings);
+        const projection = projectInventory({ months: futureMonths, from: today, scheduled, pastSqft, pastShows, unpackedShows, usageSqft, items }, settings);
         return {
             ...projection,
             settings,
@@ -1473,15 +1470,16 @@ class Requests_uncached {
                 usageSqft,
                 shows: shows.length,
                 unsized: shows.filter(show => !show.sized).length,
-                trend: projection.trend,
-                learnedItems: projection.items.filter(item => item.learned).length,
-                fallbackItems: projection.items.filter(item => !item.learned).length
+                outShows: outShows.length,
+                packedShows: packedShows.length,
+                filledShows: projection.filled,
+                trend: projection.trend
             }
         };
     }
 
     /**
-     * The items of a category likely to run short in the next 12 months (getInventoryProjectionModel,
+     * The items of a category likely to run short in the projected months (getInventoryProjectionModel,
      * itemShortages): one row per item, the first month it runs short and its shortage (negative).
      * With a proposal, `proposed` is the shortage after the proposal's quantity changes in this
      * category (its active entries). Persisted (CACHE/Analytics).
