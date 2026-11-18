@@ -389,13 +389,12 @@ export const DashboardCell = {
  */
 export const DashboardArrangeLayer = {
     components: { DashboardCell },
-    inject: ['appContext'],
     computed: {
         canUndo() {
-            return undoRegistry.canUndo(this.registry.arrangePath);
+            return undoRegistry.canUndo(this.registry.arrangeUndoKey);
         },
         canRedo() {
-            return undoRegistry.canRedo(this.registry.arrangePath);
+            return undoRegistry.canRedo(this.registry.arrangeUndoKey);
         },
         registry() {
             return NavigationRegistry.dashboardRegistry;
@@ -430,6 +429,9 @@ export const DashboardArrangeLayer = {
         },
         preview() {
             return dashboardDrag.path && dashboardDrag.rect ? dashboardDrag : null;
+        },
+        showHeaders() {
+            return appSettings.showDashboardHeaders;
         }
     },
     methods: {
@@ -441,15 +443,20 @@ export const DashboardArrangeLayer = {
             if (option.onDashboard) await this.registry.placeAt(option.path, cell);
             else await this.registry.add(option.path, cell);
         },
-        // Arrange mode is its own page: undo and redo act on its layout history (and save)
+        // Undo and redo act on arrange mode's layout history (and save)
         undo() {
-            undoRegistry.undo();
+            this.registry.undoLayout();
         },
         redo() {
-            undoRegistry.redo();
+            this.registry.undoLayout(true);
         },
         done() {
-            this.appContext.navigateToPath('dashboard');
+            this.registry.stopArranging();
+        },
+        // Card headers on the dashboard: a per-device setting (appSettings, kept in localStorage)
+        toggleHeaders() {
+            appSettings.showDashboardHeaders = !appSettings.showDashboardHeaders;
+            try { localStorage.setItem('showDashboardHeaders', appSettings.showDashboardHeaders); } catch { /* kept for this session */ }
         }
     },
     template: html`
@@ -476,6 +483,7 @@ export const DashboardArrangeLayer = {
              :style="gridAreaStyle(preview.rect)"></div>
         <div class="button-bar dashboard-arrange-bar">
             <span>Drag a card to move it, an edge or corner to resize it</span>
+            <button class="white" :aria-pressed="showHeaders" @click="toggleHeaders">{{ showHeaders ? 'Hide' : 'Show' }} Headers</button>
             <button class="button-symbol white" title="Undo" :disabled="!canUndo" @click="undo"><span class="material-symbols-outlined">undo</span></button>
             <button class="button-symbol white" title="Redo" :disabled="!canRedo" @click="redo"><span class="material-symbols-outlined">redo</span></button>
             <button class="green" @click="done">Done</button>

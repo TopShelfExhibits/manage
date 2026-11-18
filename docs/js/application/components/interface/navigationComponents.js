@@ -9,10 +9,8 @@ const SettingsMenuComponent = {
     props: {
         darkMode: { type: Boolean, required: true },
         onlyEssentialAnalysis: { type: Boolean, required: true },
-        showDashboardHeaders: { type: Boolean, required: true },
         toggleDarkMode: { type: Function, required: true },
         toggleEssentialAnalysis: { type: Function, required: true },
-        toggleDashboardHeaders: { type: Function, required: true },
         openPageMenu: { type: Function, default: null },
         arrangeDashboard: { type: Function, default: null },
         isAuthenticated: { type: Boolean, default: false }
@@ -25,10 +23,6 @@ const SettingsMenuComponent = {
         },
         handleToggleDarkMode() {
             this.toggleDarkMode();
-            this.$emit('close-modal');
-        },
-        handleToggleDashboardHeaders() {
-            this.toggleDashboardHeaders();
             this.$emit('close-modal');
         },
         handleOpenPageMenu() {
@@ -49,10 +43,6 @@ const SettingsMenuComponent = {
             <button @click="handleToggleDarkMode" 
                     class="page-menu-item">
                 {{ darkMode ? 'Light' : 'Dark' }} Mode
-            </button>
-            <button @click="handleToggleDashboardHeaders" 
-                    :class="['page-menu-item', { 'red': !showDashboardHeaders }]">
-                {{ showDashboardHeaders ? 'Hide' : 'Show' }} Dashboard Headers
             </button>
             <button v-if="arrangeDashboard" @click="handleArrangeDashboard" class="page-menu-item">
                 Arrange Dashboard
@@ -127,9 +117,6 @@ export const PrimaryNavComponent = {
         },
         onlyEssentialAnalysis() {
             return appSettings.onlyRunEssentialAnalysis;
-        },
-        showDashboardHeaders() {
-            return appSettings.showDashboardHeaders;
         }
     },
     watch: {
@@ -152,12 +139,11 @@ export const PrimaryNavComponent = {
                 size: 'card',
                 darkMode: this.darkMode,
                 onlyEssentialAnalysis: this.onlyEssentialAnalysis,
-                showDashboardHeaders: this.showDashboardHeaders,
                 toggleDarkMode: this.toggleDarkMode,
                 toggleEssentialAnalysis: this.toggleEssentialAnalysis,
-                toggleDashboardHeaders: this.toggleDashboardHeaders,
                 openPageMenu: this.openCurrentPageMenu,
-                arrangeDashboard: this.currentPage === 'dashboard' && this.isAuthenticated
+                // Not on an empty dashboard: pages are added from their own menus
+                arrangeDashboard: this.currentPage === 'dashboard' && this.isAuthenticated && NavigationRegistry.dashboardRegistry.containers.length
                     ? () => this.appContext.arrangeDashboard()
                     : null,
                 isAuthenticated: this.isAuthenticated
@@ -228,10 +214,6 @@ export const PrimaryNavComponent = {
             const theme = this.darkMode ? 'dark' : 'light';
             document.documentElement.dataset.theme = theme;
             localStorage.setItem('theme', theme);
-        },
-        toggleDashboardHeaders() {
-            appSettings.showDashboardHeaders = !appSettings.showDashboardHeaders;
-            localStorage.setItem('showDashboardHeaders', appSettings.showDashboardHeaders);
         },
         handleNavClick(item) {
             // In mobile view: if menu is closed, open it first; if open, then navigate
@@ -500,8 +482,9 @@ export const BreadcrumbComponent = {
 
 
 /**
- * Standard Vue component for dashboard toggle functionality: add or remove the page, and on the
- * dashboard, open arrange mode (cards are moved and resized there, dashboardComponents.js).
+ * Standard Vue component for dashboard toggle functionality: add or remove the page. On the
+ * dashboard, and right after the page is added from its menu, it is a bar with Arrange Dashboard
+ * (arrange mode: cards are moved and resized there, dashboardComponents.js) and Remove.
  */
 export const DashboardToggleComponent = {
     props: {
@@ -512,6 +495,11 @@ export const DashboardToggleComponent = {
     },
     inject: ['appContext'],
     emits: ['close-modal'],
+    inheritAttrs: false,
+    data() {
+        // The menu is built each time it opens, so this is only set by an add in this opening
+        return { justAdded: false };
+    },
     computed: {
         registry() {
             return NavigationRegistry.dashboardRegistry;
@@ -526,39 +514,39 @@ export const DashboardToggleComponent = {
         canAdd() {
             return !this.registry.isFull;
         },
-        onDashboardPage() {
-            return this.appContext.currentPage === 'dashboard';
+        showArrangeBar() {
+            return this.isOnDashboard && (this.appContext.currentPage === 'dashboard' || this.justAdded);
         }
     },
     methods: {
-        async toggleDashboardPresence() {
-            if (this.isOnDashboard) {
-                await this.registry.remove(this.containerPath);
-            } else if (this.canAdd) {
-                await this.registry.add(this.containerPath);
-            }
+        async add() {
+            if (!this.canAdd) return;
+            this.justAdded = await this.registry.add(this.containerPath);
+        },
+        async remove() {
+            this.justAdded = false;
+            await this.registry.remove(this.containerPath);
         },
         arrange() {
-            this.appContext.arrangeDashboard();
             this.$emit('close-modal');
+            this.appContext.arrangeDashboard();
         }
     },
     template: html`
-        <div>
-            <button v-if="onDashboardPage" @click="arrange" class="blue">
-                Arrange Dashboard
-            </button>
-            <p v-if="isHidden" class="card yellow">
-                Not shown: the dashboard is full. Make room in Arrange Dashboard to show it.
-            </p>
-            <!-- Add/Remove from dashboard -->
-            <button 
-                @click="toggleDashboardPresence"
-                :disabled="!isOnDashboard && !canAdd"
-                :title="!isOnDashboard && !canAdd ? 'The dashboard is full: remove or shrink a card first' : ''"
-                :class="{ 'red': isOnDashboard, 'green': !isOnDashboard && canAdd }">
-                {{ isOnDashboard ? 'Remove from Dashboard' : (canAdd ? 'Add to Dashboard' : 'Dashboard Full') }}
-            </button>
+        <p v-if="isHidden" class="card yellow">
+            Not shown: the dashboard is full. Make room in Arrange Dashboard to show it.
+        </p>
+        <div v-if="showArrangeBar" class="button-bar">
+            <button @click="arrange" class="blue">Arrange Dashboard</button>
+            <button @click="remove" class="red">Remove</button>
         </div>
+        <button v-else-if="isOnDashboard" @click="remove" class="red">Remove from Dashboard</button>
+        <button v-else
+            @click="add"
+            :disabled="!canAdd"
+            :title="canAdd ? '' : 'The dashboard is full: remove or shrink a card first'"
+            :class="{ green: canAdd }">
+            {{ canAdd ? 'Add to Dashboard' : 'Dashboard Full' }}
+        </button>
     `
 };

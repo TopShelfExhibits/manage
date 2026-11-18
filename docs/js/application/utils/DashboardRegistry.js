@@ -4,16 +4,20 @@ import { authState } from './auth.js';
 import { getReactiveStore } from './reactiveStores.js';
 import { Requests } from '../../data_management/api.js';
 import { undoRegistry } from './undoRegistry.js';
-import { entryPath, findCard, groupPath, normalizeLayout, firstFreeSlot, freeGroupSlots, isFull, classesForSize, planMove, planResize, planSlotDrop, planSlotResize, fits } from './dashboardLayout.js';
+import { redirectPath } from './urlRouter.js';
+import { DEFAULT_DASHBOARD, entryPath, findCard, groupPath, normalizeLayout, firstFreeSlot, freeGroupSlots, isFull, classesForSize, planMove, planResize, planSlotDrop, planSlotResize, fits } from './dashboardLayout.js';
 
 export const DashboardRegistry = Vue.reactive({
     store: null,
     saveTimeout: null,
     isSaving: false, // Track save state to prevent invalidation-triggered reloads
     SAVE_DELAY_MS: 5000, // 5 seconds
-    // Arrange mode is a page of its own (cards drawn as miniatures that can be moved and resized),
-    // so its layout changes have their own undo history
-    arrangePath: 'dashboard/arrange',
+    // Arrange mode: the dashboard's cards drawn as miniatures that can be moved and resized. It is
+    // a mode of the dashboard page, not an address: app.js ends it when the page changes. Its
+    // layout changes have their own undo history, under arrangeUndoKey, the dashboard's only one
+    // (undo on the dashboard works only while arranging, app.js).
+    arranging: false,
+    arrangeUndoKey: 'dashboard/arrange',
 
     /**
      * Initialize the dashboard registry
@@ -52,6 +56,16 @@ export const DashboardRegistry = Vue.reactive({
                 });
             }
 
+            // Once loaded: cards of moved pages follow them, and a user who has never saved a
+            // dashboard gets the default one
+            const store = this.store;
+            const unwatchLoad = Vue.watch(() => store.initialLoad || store.isLoading, (loading) => {
+                if (loading) return;
+                Vue.nextTick(() => unwatchLoad());
+                this._redirectMovedPages(store);
+                this._storeDefaultIfNeverSaved(store);
+            }, { immediate: true });
+
             // Override handleInvalidation to prevent reloads during save
             const originalHandleInvalidation = this.store.handleInvalidation.bind(this.store);
             this.store.handleInvalidation = async () => {
@@ -65,12 +79,57 @@ export const DashboardRegistry = Vue.reactive({
         }
     },
 
+    /** Open arrange mode */
+    startArranging() {
+        this.arranging = true;
+    },
+
     /**
-     * Whether arrange mode is open. The active undo route is the app's address (app.js and every
-     * table set it from the path), so it is the one place this is read from.
+     * Undo (or redo) a layout change of arrange mode. Its history is named, not taken from the
+     * active route, which a table mounting in a card may have changed.
      */
-    get arranging() {
-        return undoRegistry.currentRouteKey === this.arrangePath;
+    undoLayout(redo = false) {
+        undoRegistry.setActiveRoute(this.arrangeUndoKey);
+        return redo ? undoRegistry.redo() : undoRegistry.undo();
+    },
+
+    /** End arrange mode: its undo history goes with it */
+    stopArranging() {
+        if (!this.arranging) return;
+        this.arranging = false;
+        undoRegistry.clearRouteHistory(this.arrangeUndoKey);
+    },
+
+    /** Point the cards of moved pages (redirectPath) at their new paths, and save */
+    _redirectMovedPages(store) {
+        if (store !== this.store || store.error) return;
+        let moved = false;
+        this.containers.forEach((entry, index) => {
+            const path = entryPath(entry);
+            const target = redirectPath(path);
+            if (target === path) return;
+            moved = true;
+            if (typeof entry === 'string') store.data[index] = target;
+            else entry.path = target;
+        });
+        if (moved) this.saveNow();
+    },
+
+    /**
+     * Store the default dashboard (DEFAULT_DASHBOARD) for a user with no saved one: no stored entry
+     * at all, as opposed to one emptied on purpose, which stays empty. A failed read stores nothing.
+     */
+    async _storeDefaultIfNeverSaved(store) {
+        if (store !== this.store || store.error || this.containers.length) return;
+        try {
+            if (await Requests.hasUserDataKey(authState.user.email, 'dashboard_containers')) return;
+        } catch (error) {
+            console.warn('[DashboardRegistry] Could not check for a saved dashboard:', error);
+            return;
+        }
+        if (store !== this.store || this.containers.length) return;
+        store.data = DEFAULT_DASHBOARD.map(entry => ({ ...entry }));
+        await this.saveNow();
     },
 
     /**
@@ -255,7 +314,7 @@ export const DashboardRegistry = Vue.reactive({
     _begin() {
         if (!Array.isArray(this.store.data)) this.store.data = [];
         if (this.arranging) {
-            undoRegistry.capture(this.store.data, this.arrangePath, { type: 'dashboard-layout', onRestore: () => this.save() });
+            undoRegistry.capture(this.store.data, this.arrangeUndoKey, { type: 'dashboard-layout', onRestore: () => this.save() });
         }
         const { placed, unplaced } = this.layout;
         for (const card of placed) this._writeRect(this._entry(card.path), card);

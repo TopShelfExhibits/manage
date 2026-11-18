@@ -180,7 +180,10 @@ routes: {
 - `updatePath(cleanPath, newPathWithParams)` - Update container's path with new parameters
 - `remove(containerPathWithParams)` - Remove container from dashboard
 - `getPlaced(path)`, `layout`, `isFull` - The grid: placed cards with their rects, unplaced cards
-- `move(path, rect)`, `resize(path, w, h)`, `placeAt(path, rect)` - Arrange mode's changes (`arranging` turns it on)
+- `move(path, rect)`, `resize(path, w, h)`, `placeAt(path, rect)` - Arrange mode's changes
+- `startArranging()`, `stopArranging()`, `arranging` - Arrange mode, a mode of the dashboard page (not an address); stopping drops its undo history
+- `undoLayout(redo)` - Undo or redo a layout change of arrange mode (its history, `arrangeUndoKey`)
+- Once loaded, a user with no stored dashboard gets `DEFAULT_DASHBOARD`, and cards of moved pages follow them (`redirectPath`)
 
 **Data Structure**:
 

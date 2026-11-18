@@ -48,6 +48,8 @@ import { rowsToCards, bucketRowsToCards } from '../application/utils/views/cards
 import { applyColorRule, colorFor, rowColorFor } from '../application/utils/views/viewColor.js';
 import { containerTier, BREAKPOINTS } from '../application/utils/useContainerSize.js';
 import { createScrollHider } from '../application/utils/scrollHider.js';
+import { DEFAULT_DASHBOARD } from '../application/utils/dashboardLayout.js';
+import { redirectPath } from '../application/utils/urlRouter.js';
 import { todayISOString, setTestToday, startOfTodayMs, resolveShortageAlertDays, shortageAlertDateFilters, INVENTORY_TAB_PREFERENCES, resolveInventoryTabList, itemVariantBase, resolveItemVariant, itemVariantFamilies, itemVariantKey, parseItemVariants, searchFilter, textFiltersToSearchParams, parseSearchParameters } from '../data_management/utils/helpers.js';
 import { instantWriteEntry, identityKey, cellKey, joinKey } from '../data_management/utils/instant-write-config.js';
 import { estimateShipDate } from '../data_management/utils/ship-date.js';
@@ -2023,17 +2025,21 @@ const _oldDashboard = () => ['schedule', { path: 'inventory', classes: 'tall' },
 
 async function withDashboard(entries, fn) {
     const registry = NavigationRegistry.dashboardRegistry;
-    const saved = { store: registry.store, save: registry.save, route: undoRegistry.currentRouteKey };
-    const counts = { saves: 0 };
+    const saved = { store: registry.store, save: registry.save, saveNow: registry.saveNow, arranging: registry.arranging, route: undoRegistry.currentRouteKey };
+    const counts = { saves: 0, savesNow: 0 };
     registry.store = { data: entries };
     registry.save = async () => { counts.saves++; };
+    registry.saveNow = async () => { counts.savesNow++; };
     try {
         await fn(registry, counts);
     } finally {
-        undoRegistry.clearRouteHistory(registry.arrangePath);
+        registry.arranging = false;
+        undoRegistry.clearRouteHistory(registry.arrangeUndoKey);
         undoRegistry.setActiveRoute(saved.route);
         registry.store = saved.store;
         registry.save = saved.save;
+        registry.saveNow = saved.saveNow;
+        registry.arranging = saved.arranging;
     }
 }
 
@@ -2049,13 +2055,14 @@ test('DASHBOARD REGISTRY', "the first change writes every card's rect into old e
 }));
 
 test('DASHBOARD REGISTRY', 'adding at a free cell in arrange mode is one undo step', () => withDashboard(_oldDashboard(), async (registry) => {
-    undoRegistry.setActiveRoute(registry.arrangePath);
-    assertEqual(registry.arranging, true, 'the arrange page is arrange mode');
+    registry.startArranging();
+    assertEqual(registry.arranging, true, 'arrange mode is open');
     await registry.add('notices', { x: 3, y: 1, w: 1, h: 1 });
     assertEqual(registry.getContainer('notices'), { path: 'notices', classes: '', x: 3, y: 1, w: 1, h: 1 }, 'at the cell asked for');
-    assertEqual(undoRegistry.canUndo(registry.arrangePath), true, 'an undo step');
-    undoRegistry.undo();
-    assertEqual([registry.has('notices'), undoRegistry.canUndo(registry.arrangePath)], [false, false], 'one undo removes it');
+    assertEqual(undoRegistry.canUndo(registry.arrangeUndoKey), true, 'an undo step');
+    undoRegistry.setActiveRoute('inventory'); // a table mounting in a card takes the active route
+    registry.undoLayout();
+    assertEqual([registry.has('notices'), undoRegistry.canUndo(registry.arrangeUndoKey)], [false, false], 'one undo removes it, whatever the active route');
     await registry.add('notices', { x: 0, y: 0, w: 1, h: 1 });
     assertEqual(registry.getPlaced('notices'), { path: 'notices', index: 3, x: 0, y: 1, w: 1, h: 1 }, 'cell taken: the first free cell');
 }));
@@ -2089,6 +2096,77 @@ test('DASHBOARD REGISTRY', 'removing a plain-string entry removes that entry', (
     await registry.remove('schedule');
     assertEqual(registry.store.data.map(e => e.path), ['inventory', 'packlist'], 'schedule removed, nothing else');
 }));
+
+// Arrange mode is a mode of the dashboard, not an address. Free cells of the old dashboard: (0,1), (3,1).
+test('DASHBOARD REGISTRY', 'only arrange mode records layout undo steps, and ending it drops them', () => withDashboard(_oldDashboard(), async (registry) => {
+    await registry.add('notices', { x: 3, y: 1, w: 1, h: 1 });
+    assertEqual(undoRegistry.canUndo(registry.arrangeUndoKey), false, 'added from a page menu: no undo step');
+    registry.startArranging();
+    assertEqual(await registry.move('notices', { x: 0, y: 1, w: 1, h: 1 }), true, 'moved in arrange mode');
+    assertEqual(undoRegistry.canUndo(registry.arrangeUndoKey), true, 'an undo step');
+    registry.stopArranging();
+    assertEqual([registry.arranging, undoRegistry.canUndo(registry.arrangeUndoKey)], [false, false], 'arrange mode ended, its history gone');
+    assertEqual(registry.getContainer('notices'), { path: 'notices', classes: '', x: 0, y: 1, w: 1, h: 1 }, 'the move stays');
+}));
+
+// Proposals moved from reports/inventory-proposals to inventory/proposals (PATH_REDIRECTS, urlRouter.js)
+test('DASHBOARD REGISTRY', "a moved page's links and stored cards follow it", () => withDashboard([
+    { path: 'reports/inventory-proposals', classes: '', x: 0, y: 0, w: 1, h: 1 },
+    'reports/inventory-proposals/spring-refresh',
+    { path: 'reports', classes: '', x: 2, y: 0, w: 1, h: 1 }
+], async (registry, counts) => {
+    assertEqual([
+        redirectPath('reports/inventory-proposals?{"searchTerm":"chair"}'),
+        redirectPath('reports/inventory-proposals/spring-refresh'),
+        redirectPath('reports/inventory-proposalsx'),
+        redirectPath('reports/index-mismatches')
+    ], [
+        'inventory/proposals?{"searchTerm":"chair"}',
+        'inventory/proposals/spring-refresh',
+        'reports/inventory-proposalsx',
+        'reports/index-mismatches'
+    ], 'the old prefix (with parameters or a child) is replaced; other paths are kept');
+    registry._redirectMovedPages(registry.store);
+    assertEqual(registry.store.data, [
+        { path: 'inventory/proposals', classes: '', x: 0, y: 0, w: 1, h: 1 },
+        'inventory/proposals/spring-refresh',
+        { path: 'reports', classes: '', x: 2, y: 0, w: 1, h: 1 }
+    ], 'stored cards rewritten in place, a plain string kept a string');
+    assertEqual(counts.savesNow, 1, 'saved once');
+    registry._redirectMovedPages(registry.store);
+    assertEqual(counts.savesNow, 1, 'nothing left to move: no save');
+}));
+
+// The default dashboard goes to a user with no stored 'dashboard_containers' at all. Users whose
+// UserData tab doesn't exist have none; test@example.com's fixture tab stores one.
+test('DASHBOARD REGISTRY', 'a user who never saved a dashboard gets the default; an emptied one stays empty', async () => {
+    const previous = authState.user;
+    try {
+        authState.user = { email: 'never-saved@example.com' };
+        await withDashboard([], async (registry, counts) => {
+            await registry._storeDefaultIfNeverSaved(registry.store);
+            assertEqual(registry.store.data.map(e => e.path), [
+                'inventory',
+                'packlist?{"dateFilters":[{"column":"Date","value":0,"type":"after"}]}',
+                'schedule?{"dateFilters":[{"column":"Date","value":0,"type":"after"}]}',
+                'notices',
+                'reports'
+            ], 'the default cards');
+            assertEqual(registry.layout.placed.map(c => [c.path.split('?')[0], c.x, c.y, c.w, c.h]), [
+                ['inventory', 0, 0, 1, 2], ['packlist', 1, 0, 1, 2], ['schedule', 2, 0, 1, 2], ['notices', 3, 0, 1, 1], ['reports', 3, 1, 1, 1]
+            ], 'placed where the default says, filling the grid');
+            assertEqual(counts.savesNow, 1, 'stored at once');
+            assertEqual(DEFAULT_DASHBOARD[0].path, 'inventory', 'the default itself is untouched');
+        });
+        authState.user = { email: 'test@example.com' };
+        await withDashboard([], async (registry, counts) => {
+            await registry._storeDefaultIfNeverSaved(registry.store);
+            assertEqual([registry.store.data.length, counts.savesNow], [0, 0], 'a stored dashboard, even an empty one, is kept');
+        });
+    } finally {
+        authState.user = previous;
+    }
+});
 
 // ── Group 25: Hardware Inventory Resolution ───────────────────────────────────
 // Hardware items use non-standard item number formats that fail the prefix lookup

@@ -322,13 +322,13 @@ const App = {
                 if (appContent) appContent.scrollTop = 0;
             });
         });
-        // Each page has its own undo history, arrange mode included (its own address, which is also
-        // what says arrange mode is open: DashboardRegistry.arranging): undo on the dashboard never
-        // changes the layout. Leaving arrange mode drops its history.
-        this.$watch(() => cleanPath(this.currentPath), (path, oldPath) => {
-            const { arrangePath } = NavigationRegistry.dashboardRegistry;
-            if (oldPath === arrangePath) undoRegistry.clearRouteHistory(arrangePath);
-            undoRegistry.setActiveRoute(path);
+        // Each page has its own undo history. The dashboard's is arrange mode's layout history
+        // (DashboardRegistry.arrangeUndoKey); outside arrange mode undo does nothing there
+        // (handleGlobalKeyDown). Leaving the dashboard ends arrange mode, and its history.
+        this.$watch(() => [cleanPath(this.currentPath), this.currentPage, NavigationRegistry.dashboardRegistry.arranging], ([path, page, arranging]) => {
+            const registry = NavigationRegistry.dashboardRegistry;
+            if (arranging && page !== 'dashboard') return registry.stopArranging();
+            undoRegistry.setActiveRoute(arranging ? registry.arrangeUndoKey : path);
         }, { immediate: true });
         observeDashboardGrid(this.$el.querySelector('#app-content'));
 
@@ -438,8 +438,11 @@ const App = {
             this.navigateToPath(targetPath);
         },
 
+        // Open arrange mode, going to the dashboard first from any other page (navigation sets the
+        // path at once, so the watcher above sees the dashboard)
         arrangeDashboard() {
-            this.navigateToPath(NavigationRegistry.dashboardRegistry.arrangePath);
+            if (this.currentPage !== 'dashboard') this.navigateToPath('dashboard');
+            NavigationRegistry.dashboardRegistry.startArranging();
         },
 
         // Open the page the address names, once signed in (a short link resolves now). Until then
@@ -461,21 +464,19 @@ const App = {
         handleGlobalKeyDown(event) {
             // Escape ends arrange mode (when no modal is open to take it)
             if (event.key === 'Escape' && this.arranging && !this.modals.length) {
-                this.navigateToPath('dashboard');
+                NavigationRegistry.dashboardRegistry.stopArranging();
                 return;
             }
-            // Ctrl+Z or Cmd+Z for undo
-            if ((event.ctrlKey || event.metaKey) && event.key === 'z' && !event.shiftKey) {
-                event.preventDefault();
-                const alert = undoRegistry.undo();
-                if (alert) modalManager.confirm(alert, () => {}, null, 'Note', 'OK', null, '');
-            }
-            // Ctrl+Y or Ctrl+Shift+Z or Cmd+Shift+Z for redo
-            else if ((event.ctrlKey || event.metaKey) && (event.key === 'y' || (event.shiftKey && event.key === 'z'))) {
-                event.preventDefault();
-                const alert = undoRegistry.redo();
-                if (alert) modalManager.confirm(alert, () => {}, null, 'Note', 'OK', null, '');
-            }
+            const isUndo = (event.ctrlKey || event.metaKey) && event.key === 'z' && !event.shiftKey;
+            const isRedo = (event.ctrlKey || event.metaKey) && (event.key === 'y' || (event.shiftKey && event.key === 'z'));
+            if (!isUndo && !isRedo) return;
+            // On the dashboard, undo and redo act only in arrange mode, on its layout
+            if (this.isDashboard && !this.arranging) return;
+            event.preventDefault();
+            const alert = this.arranging
+                ? NavigationRegistry.dashboardRegistry.undoLayout(isRedo)
+                : (isRedo ? undoRegistry.redo() : undoRegistry.undo());
+            if (alert) modalManager.confirm(alert, () => {}, null, 'Note', 'OK', null, '');
         },
     },
     setup() {
@@ -519,10 +520,7 @@ const App = {
 
                 <!-- No containers message -->
                 <div v-else-if="containers.length === 0 && !arranging && !loadingCards.length && !startingOnPage" class="empty-message">
-                    <template v-if="isDashboard">
-                        <p>add pages to the dashboard from their page menus</p>
-                        <button class="white" @click="arrangeDashboard">Arrange Dashboard</button>
-                    </template>
+                    <template v-if="isDashboard">add pages to the dashboard from their page menus</template>
                     <template v-else>open a page to see content</template>
                 </div>
 

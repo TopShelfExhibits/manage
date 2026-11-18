@@ -24,6 +24,21 @@
  */
 
 export const GRID = Object.freeze({ cols: 4, rows: 2 });
+
+// Upcoming shows: dated after today (a number is days from today)
+const UPCOMING = JSON.stringify({ dateFilters: [{ column: 'Date', value: 0, type: 'after' }] });
+
+/**
+ * The dashboard of a user who has never saved one (DashboardRegistry stores it on their first
+ * load): inventory, upcoming pack lists and upcoming shows as tall cards, then notices over reports.
+ */
+export const DEFAULT_DASHBOARD = Object.freeze([
+    { path: 'inventory', classes: 'tall', x: 0, y: 0, w: 1, h: 2 },
+    { path: `packlist?${UPCOMING}`, classes: 'tall', x: 1, y: 0, w: 1, h: 2 },
+    { path: `schedule?${UPCOMING}`, classes: 'tall', x: 2, y: 0, w: 1, h: 2 },
+    { path: 'notices', classes: '', x: 3, y: 0, w: 1, h: 1 },
+    { path: 'reports', classes: '', x: 3, y: 1, w: 1, h: 1 }
+].map(Object.freeze));
 export const GROUP_SIDE = 2;
 
 /**
