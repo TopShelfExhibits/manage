@@ -548,7 +548,7 @@ export const PacklistTable = {
                     ['Description', 'Packing/shop notes'], // Source columns for nested detection (use existing columns, not generated ones)
                     [this.tabName], // Additional parameter: current project ID
                     null, // No targetColumn - results go to AppData
-                    ['Extracted Item'], // passFullItem: only the field it reads (a stable cache key)
+                    ['Extracted Item'], // passFields: only the field it reads (a stable cache key)
                     Priority.ANALYSIS,
                     false,
                     false // nonessential
@@ -562,7 +562,7 @@ export const PacklistTable = {
                     ['Description', 'Packing/shop notes'],
                     [this.tabName],
                     null,
-                    ['Extracted Item', 'Description', 'Packing/shop notes'], // passFullItem: the fields it reads
+                    ['Extracted Item', 'Description', 'Packing/shop notes'], // passFields: the fields it reads
                     Priority.ANALYSIS,
                     false,
                     false // nonessential

@@ -1,10 +1,11 @@
 # Incremental Invalidation Plan
 
-**Branch:** api-separation (main merged in again at 718ab08)
+**Branches:** built on api-separation, merged into main (74119af) and into auth-apps-script
+(cd359f5), where phase 2 was finished.
 **Status:** Phase 1 done (commit 28a87dd). The first, opt-in slice of phase 3b is done: early cutoff
 for listed methods, applied to how quantity analysis reads the Production Schedule (see "Phase 3b,
-first slice" below). Phase 2, 3a, the rest of 3b and phase 4 remain. The questions at the end still
-need answers before those.
+first slice" below). Phase 2 is done (auth-apps-script, 3831c80): cached values are frozen. 3a, the
+rest of 3b and phase 4 remain; questions 3–5 and 7–9 at the end still need answers before those.
 
 ## Goal
 
@@ -51,8 +52,19 @@ It doesn't change how invalidation propagates.
   `keepEmpty` caches "nothing found".
 
 **Unchanged:** `invalidate` still deletes the chain top-down, deletes dependency records, finds
-dependents by scanning every key, and announces every `api:` key it deleted. Phases 2–4 are
+dependents by scanning every key, and announces every `api:` key it deleted. Phases 3–4 are
 still needed. Main makes phase 3 both more valuable and cheaper, as described below.
+
+**What the auth branch adds** (connection notes in caching-tab-structure.md, "Connection"):
+
+- **Invalidations wait for the connection.** While Google is unreachable or the browser offline,
+  `invalidate` keeps every value and holds the key (`_heldInvalidations`); the held keys are
+  invalidated on reconnecting. Any verification phase 3 adds inherits this: a cascade found during
+  an outage is held, never lost.
+- **No-answer results aren't cached.** A computation during which a request went unanswered keeps
+  no value and, for cutoff keys, no hash (`networkState.noAnswers`), so it counts as unverifiable.
+- **Cached values are frozen** (phase 2 below). A value can't change after it is cached, which is
+  what lets phase 3 compare lazily.
 
 ## Phase 1 — targeted re-analysis (done)
 
@@ -63,9 +75,10 @@ still needed. Main makes phase 3 both more valuable and cheaper, as described be
   re-render.
 - Targets that arrive during a full run are queued until it ends. Targets that arrive during a
   main reload are dropped, because analysis runs after the reload.
-- Configs whose key can't be predicted (`passFullItem`) re-run all their rows, without blanking.
+- Every key can be predicted: an analysis gets its source value, or only the fields it names
+  (`passFields`, phase 2), never the whole row. An event that names no args re-runs all of a
+  config's rows, without blanking.
 - Tests: the TARGETED ANALYSIS group in tests.js, three tests that fail on the old store code.
-  The suite passes with main merged (343 tests).
 
 **Limit:** a cascade that reaches the main data still reloads and blanks everything. On the
 Schedule page this is now the common case: any hand edit anywhere in the Production Schedule
@@ -83,7 +96,8 @@ every edit. Narrowing the inputs is what avoids the recompute; cutoff is what st
 
 - `wrapMethods` takes `cutoffMethods`. A cutoff key records its recomputation and a hash of each
   value it keeps. The hash is kept apart from the entry, so null and empty results compare too, and
-  a hash survives `expire()` (this is phase 2's item 4, for cutoff keys only).
+  a hash survives `expire()`. 3b replaces these hashes with a lazy comparison of the kept values
+  ("Compare lazily" below).
 - When a cutoff key with dependents is invalidated, its own value and dependency records go as
   usual. Its dependents keep theirs, and nothing is announced (`_deferCascade`).
 - After the current invalidation (a `setTimeout`, so a save's `fillCache` lands first), the key is
@@ -91,10 +105,11 @@ every edit. Narrowing the inputs is what avoids the recompute; cutoff is what st
   kept (generations): the held cascade runs and the key is announced, as before.
 - A key that changes again while it is being verified is verified again. Generations guard joins
   and caching exactly as before. `cutoffSettled()` resolves once no verification is running (tests).
-- Offline, `invalidate` keeps every value, so a held cascade would be lost (a connection that drops
-  while the key re-reads its tab). A key found changed or unverifiable while offline is verified
-  again once the connection is back; its dependents keep their values until then.
-- `EARLY_CUTOFF = false` restores the plain cascade (question 6: a code constant for now).
+- A connection that drops while the key re-reads its tab leaves it unverifiable (no answer keeps no
+  hash). Its cascade runs through `invalidate`, which holds each dependent for the reconnect, and the
+  key is held too, without its hash: on reconnecting it cascades and is announced without a second
+  check. The dependents keep their values until then.
+- `EARLY_CUTOFF = false` restores the plain cascade (question 6: a code constant).
 
 **Applied to the schedule** (production-utils.js):
 
@@ -138,7 +153,7 @@ reads the full rows; getShowDetails gives the full row of getShowDates' match). 
 INVALIDATION, the transship test (an unrelated link announces nothing; a real one announces the
 source and timeline) and the name override and abbreviation tests (an unrelated entry leaves
 getShowDetails unannounced and unchanged). With `EARLY_CUTOFF = false` the transship test and the
-first two EARLY CUTOFF tests fail; with it on, the suite passes (412 tests).
+first two EARLY CUTOFF tests fail; with it on, the suite passes.
 
 Edge cases, in EARLY CUTOFF: the date rows and the full rows give the same ids for 145 date filters
 (every date column, both directions, ISO dates, day offsets, shows across a year boundary, a transship
@@ -151,42 +166,46 @@ show to another year ends its old id; a row without a Client is listed by its st
 both paths. In EARLY CUTOFF MECHANISM (synthetic
 `wrapMethods` chains): a change undone before verification, a change made or undone during
 verification, a failed
-verification, the connection dropping during verification, a cutoff key without dependents, a chain
+verification, the connection dropping during verification (held for the reconnect), a cutoff key without dependents, a chain
 of cutoff keys, null and empty values, a dependent running when the value changes, and an argument
 object changed after the call.
 
 Known conservative case: `getOverlappingShowIds` keeps schedule order, so sorting the sheet changes
 every id list and reruns the windows (show dates still cut off).
 
-## Phase 2 — an immutability boundary (still needed)
+## Phase 2 — an immutability boundary (done)
 
-Early cutoff compares a recomputed value with the cached one, so cached values must not be
-mutated. Both problems found before the merge remain, and the first matters more now that sheet
-reads stay cached indefinitely:
+Every reader of a cached value gets the same object, so a change to it would change it for every
+later reader. (The cutoff slice was never exposed to this: it records each value's hash when the
+value is cached, before any caller has it.) Done on auth-apps-script (3831c80):
 
-- `store.load` runs `appDataInit` on the API result before `setData` clones it
-  (reactiveStores.js, `appDataInit(dataToSet, false)`), so the cached array gains `AppData`.
-- The packlist `checkInventoryLevel` config still uses `passFullItem`. Its cache key is the whole
-  reactive row, `AppData` included, so the key changes whenever `AppData` does.
+1. **Frozen in production** (question 1): `CacheManager.set`, which `fillCache` and restored
+   persisted results go through, deep-freezes every value (`FREEZE_CACHED_VALUES`). A change throws
+   a TypeError where it is made (`classifyError` 'integrity') and the value stays as read.
+   `reportIntegrityError` announces it, the app banner offers a refresh, and one inside a write
+   turns data writes off until then (caching-tab-structure.md, "A blocked change is not an
+   outage"). A full test run and a browse of the main pages found no other code writing into
+   cached values.
+2. **The store boundary:** `setData` copies the cached rows and gives the copy its row ids;
+   `originalData` copies those rows. The cached result is never written.
+3. **Analysis gets fields, not rows** (question 2): `passFields` names the fields an analysis
+   reads; the pack list's `checkInventoryLevel` and `checkVariantLevel` pass only theirs. Passing
+   the whole row is gone.
+4. **The lock grid:** `lockSheet` appended new keys to the cached grid. It no longer does, and a
+   session's lock acquisitions run one at a time (two new keys at once claimed the same row).
 
-Work:
-
-1. Clone at the store boundary: run `appDataInit` only on the store's own copy.
-2. Give `checkInventoryLevel` the fields it reads (see question 2).
-3. In development, deep-freeze values on `CacheManager.set` and `fillCache`, so remaining
-   mutations throw in tests.
-4. Store a value hash per entry (computed on set and on `fillCache`), kept when a value expires,
-   so comparisons stay cheap and survive `expire()`.
-5. Record a hash for results `set()` doesn't keep (null, empty, boolean), so these keys can be
-   compared too. Main's `keepEmpty` already caches empties for persisted methods.
+The plan's per-entry hashes (computed on set, kept through `expire()`, recorded for results `set()`
+doesn't keep) exist for cutoff keys only. 3b doesn't need them for every key: see "Compare lazily"
+below.
 
 ## Phase 3 — early cutoff, in two steps
 
 ### 3a. Cutoff at the sources
 
 When a source is invalidated by the poller (stamp or hand edit) or by the date rollover, read
-the new value first and compare its hash with the old one. Only a source whose value changed
-runs today's cascade. An unchanged source announces nothing.
+the new value first and compare it with the old one, which is kept (frozen) until the new read
+arrives. Only a source whose value changed runs today's cascade. An unchanged source announces
+nothing.
 
 - **Cost:** none extra. These reads happen anyway when the stores reload, and they're batched
   per spreadsheet.
@@ -203,14 +222,22 @@ runs today's cascade. An unchanged source announces nothing.
 ### 3b. Cutoff through the graph
 
 The first slice is done ("Phase 3b, first slice" above): listed methods verify before they
-cascade. The rest of 3b widens that from listed methods to every key, and needs phase 2 first,
-since an unlisted key's value may be mutated after it is cached.
+cascade. The rest of 3b widens that from listed methods to every key. Phase 2, which it needed, is
+done: no cached value can change after it is cached.
+
+**Compare lazily.** Because cached values are frozen, a stale value is still exactly what was
+computed. So 3b keeps the old value of a key marked stale and compares it with the recomputed one
+only when the key is verified, instead of hashing every value as it is cached (a large tab costs
+milliseconds to serialize, on every fill, for keys that may never change). Two values compare by a
+structural equality that stops at the first difference; identical objects (a refill that returned
+the cached value) compare equal at once. The first slice still hashes its keys on set; moving it to
+the same comparison is the first step of 3b, after which `valueHashes` goes.
 
 1. **Mark, don't delete.** A changed source marks its transitive dependents stale (the
    `expire()` idea: keep dependency records, don't announce) and keeps their values for
    comparison.
 2. **Verify bottom-up.** Recompute the direct dependents of what changed and compare each with
-   its old hash. Where a value comes out the same, stop. A dependent with several dependencies
+   its old value. Where a value comes out the same, stop. A dependent with several dependencies
    recomputes once, after all of them are verified. Generations guard every step, as
    `_changedSince` does today.
 3. **Announce changes only.** The bus emits for an `api:` key only when its value changed.
@@ -220,12 +247,14 @@ since an unlisted key's value may be mutated after it is cached.
    and `expire`.
 6. **Who verifies:** keys with a live store subscriber are verified right away. Others stay
    stale until their next read (see question 4).
-7. **Persisted results:** a restored value is hashed like any other. Its re-linked sources cut
+7. **Persisted results:** a restored value is compared like any other. Its re-linked sources cut
    it off the same way.
 8. **Contracts to restate:** the ordering rules in `invalidate`'s comment block, the poller's
    use of `filled`/`filledAt` (it becomes "verified at"), the stamp ordering in
    `stampDataChange`, and `fillCache`'s "a read still in flight keeps its result" rule.
-9. **Switch:** a setting that falls back to delete-cascade (see question 6).
+9. **Switch:** `EARLY_CUTOFF` falls back to delete-cascade (question 6: a code constant).
+10. **Outages:** a verification that finds a change while Google is unreachable cascades through
+    `invalidate`, which holds it for the reconnect, as the first slice does.
 
 ## Phase 4 — row matching on main-data reloads (simpler than planned)
 
@@ -260,23 +289,26 @@ Production Schedule rows (no history column) match by content.
 
 ## Questions
 
-**Phase 2**
+**Phase 2** (answered 2026-11-18)
 
-1. **Freezing:** is dev-only deep freezing acceptable, or should values be frozen in production
-   too? Freezing large tabs costs time on every cache fill.
-2. **Full-item analysis:** may I give `checkInventoryLevel` the fields it actually reads,
-   instead of the whole packlist row?
+1. **Freezing:** ~~dev-only, or production too?~~ Production too: a change that could corrupt live
+   data must surface, recoverably (a banner with a refresh; saving off after a blocked write). The
+   cost measured under 1 µs per object frozen.
+2. **Full-item analysis:** ~~may `checkInventoryLevel` get only the fields it reads?~~ Yes, and
+   passing the whole row is gone: an analysis that needs several fields names them all
+   (`passFields`).
 
 **Phase 3**
 
 3. **Ship 3a first?** It handles the Production Schedule hand-edit case alone, at low risk. 3b
    then follows separately.
 4. **Silent expiry:** main expires unconfirmed reads silently, by design, so stores keep showing
-   their data until something else reloads them. With hashes, a refill that comes back different
-   could announce it. Should it, or should expiry stay silent?
+   their data until something else reloads them. With old values kept for comparison, a refill
+   that comes back different could announce it. Should it, or should expiry stay silent?
 5. **Unwatched keys:** is it OK that keys no store watches stay stale until their next read?
-6. **Rollout switch:** do you want the fallback setting in Preferences, so a live session can
-   turn early cutoff off, or only as a code constant?
+6. **Rollout switch:** ~~a setting in Preferences, or a code constant?~~ A code constant
+   (`EARLY_CUTOFF`; answered 2026-11-18): a deploy takes about a minute, so a revert is the
+   rollback.
 7. **Lock listener:** sheetLockMixin re-checks locks on `api:getSheetLock` events. Under 3b it
    would hear only real changes. Please confirm nothing relies on the event firing for an
    unchanged lock.
@@ -293,10 +325,10 @@ Production Schedule rows (no history column) match by content.
 
 | Phase | Work | Risk |
 |---|---|---|
-| 2 | Small to medium | Low; boundary cleanup with tests |
+| 2 | Done | Cached values frozen in production; blocked changes surface |
 | 3a | Small to medium | Low; sources only, today's cascade otherwise |
 | 3b | Large | Medium; behind a switch, with cutoff and randomized tests |
 | 4 | Medium, less than first planned | Medium; touches undo and editable stores |
 
-3a needs only phase 2's hashes for source values. 3b needs all of phase 2. Phase 4 is
-independent and could run alongside 3a.
+3a and 3b compare old values lazily, which phase 2's freezing makes safe; 3b starts by moving the
+first slice off its hashes. Phase 4 is independent and could run alongside 3a.

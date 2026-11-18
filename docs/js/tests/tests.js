@@ -3553,21 +3553,17 @@ test('EARLY CUTOFF MECHANISM', 'a verification that fails runs the held cascade'
     assertEqual([value, rig.runs], [{ narrow: [1, 2] }, { narrow: 3, top: 2 }], 'not verifiable, so top reruns');
 });
 
-test('EARLY CUTOFF MECHANISM', 'offline during the verification, the cascade waits for the connection', async () => {
+test('EARLY CUTOFF MECHANISM', 'unreachable during the verification, the cascade is held for the reconnect', () => _withConnectionReset(async () => {
     const rig = _cutoffRig();
     await rig.top.top();
-    try {
-        rig.onNarrow = () => { networkState.isOffline = true; throw new Error('Failed to fetch'); };
-        rig.change(source => { source.dates = [6]; });
-        await _sleep(30);
-        const offline = await rig.top.top();
-        networkState.isOffline = false;
-        await cutoffSettled();
-        assertEqual([offline, await rig.top.top()], [{ narrow: [1, 2] }, { narrow: [6] }], 'kept while offline, recomputed once back online');
-    } finally {
-        networkState.isOffline = false;
-    }
-});
+    rig.onNarrow = () => { _dropConnection(); throw _noAnswer(); };
+    rig.change(source => { source.dates = [6]; });
+    await cutoffSettled();
+    const unreachable = await rig.top.top();
+    await _restoreConnection();
+    await cutoffSettled();
+    assertEqual([unreachable, await rig.top.top()], [{ narrow: [1, 2] }, { narrow: [6] }], 'kept while unreachable, recomputed once back');
+}));
 
 test('EARLY CUTOFF MECHANISM', 'a cutoff key nothing was computed from is dropped, not recomputed', async () => {
     const rig = _cutoffRig();

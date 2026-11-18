@@ -86,7 +86,7 @@ export const appSettings = Vue.reactive({
  *      stays until the new one arrives, and a result equal to the old one is not written
  *   3. If main reload is active, the targets are dropped (analysis runs after reload);
  *      if a full analysis is running, they run when it finishes
- *   4. Configs whose key can't be predicted (passFullItem: true) re-run every row they ran on
+ *   4. An event that names no args (no argsString) re-runs every row the config ran on
  * - This prevents analysis from running on empty/stale data during reload, and keeps
  *   one row's invalidation (from any page) from blanking a column on every row
  * 
@@ -253,16 +253,15 @@ function analysisArgsString(apiParams) {
 }
 
 /**
- * The first argument an analysis call gets: the value from its source columns, the whole row
- * (passFullItem: true), or only the named fields of the row (passFullItem: ['Field', ...]). Naming
- * the fields keeps the cache key to what the call reads, so a change elsewhere in the row (AppData
- * included) neither misses the cache nor re-runs it.
+ * The first argument an analysis call gets: the value from its source columns, or, with passFields,
+ * an object of just those fields of the row ({ Field: value|null, ... }). Never the whole row: its
+ * cache key would hold every field, AppData included, so any change to the row would miss the cache
+ * and its re-analysis couldn't be targeted.
  */
 function analysisInput(config, item, inputValue) {
-    if (Array.isArray(config.passFullItem)) {
-        return Object.fromEntries(config.passFullItem.map(field => [field, item?.[field] ?? null]));
-    }
-    return config.passFullItem ? item : inputValue;
+    return config.passFields
+        ? Object.fromEntries(config.passFields.map(field => [field, item?.[field] ?? null]))
+        : inputValue;
 }
 
 /**
@@ -423,7 +422,7 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
         const id = analysisConfigId(config);
         if (!analysisKeyIndex.has(id)) analysisKeyIndex.set(id, new Map());
         const byArgs = analysisKeyIndex.get(id);
-        const key = config.passFullItem === true ? '*' : analysisArgsString(apiParams);
+        const key = analysisArgsString(apiParams);
         if (!byArgs.has(key)) byArgs.set(key, new Map());
         byArgs.get(key).set(item, parentItem);
     }
@@ -1083,8 +1082,8 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
                             try {
                                 const inputValue = findSourceValue(item, config.sourceColumns, null, config.extractColumnsAsObject);
                                 
-                                if (inputValue !== null || config.passFullItem) {
-                                    // The extracted value, the whole row, or the named fields (analysisInput)
+                                if (inputValue !== null || config.passFields) {
+                                    // The extracted value, or the named fields (analysisInput)
                                     const firstParam = analysisInput(config, item, inputValue);
                                     const apiParams = [firstParam, ...(config.additionalParams || [])];
                                     recordAnalysisKey(config, apiParams, item);
@@ -1159,8 +1158,8 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
                                         const inputValue = findSourceValue(nestedItem, config.sourceColumns, 
                                             config.needsParentContext ? parentItem : null, config.extractColumnsAsObject);
                                         
-                                        if (inputValue !== null || config.passFullItem) {
-                                            // The extracted value, the whole row, or the named fields (analysisInput)
+                                        if (inputValue !== null || config.passFields) {
+                                            // The extracted value, or the named fields (analysisInput)
                                             const firstParam = analysisInput(config, nestedItem, inputValue);
                                             const apiParams = [firstParam, ...(config.additionalParams || [])];
                                             recordAnalysisKey(config, apiParams, nestedItem, config.needsParentContext ? parentItem : null);
@@ -1252,7 +1251,7 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
                     const byArgs = analysisKeyIndex.get(id);
                     if (!config || !byArgs) continue;
                     const seen = new Set();
-                    const wanted = keys.has('*') || config.passFullItem === true ? [...byArgs.keys()] : [...keys];
+                    const wanted = keys.has('*') ? [...byArgs.keys()] : [...keys];
                     for (const k of wanted) {
                         for (const [item, parentItem] of byArgs.get(k) || []) {
                             if (seen.has(item) || !this._data.length) continue;
@@ -1268,7 +1267,7 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
                         if (!item.AppData) item.AppData = {};
                         try {
                             const inputValue = findSourceValue(item, config.sourceColumns, parentItem, config.extractColumnsAsObject);
-                            if (inputValue === null && !config.passFullItem) return;
+                            if (inputValue === null && !config.passFields) return;
                             const apiParams = [analysisInput(config, item, inputValue), ...(config.additionalParams || [])];
                             recordAnalysisKey(config, apiParams, item, parentItem);
                             const result = await PriorityQueue.enqueue(
@@ -2331,16 +2330,16 @@ function setupCacheInvalidationListeners(store, apiCall, apiArgs, analysisConfig
  * @param {string|Array<string>} sourceColumns - Column(s) to extract value from (ordered array for priority)
  * @param {Array} additionalParams - Additional parameters to pass to API function
  * @param {string} targetColumn - Optional: column name to store results directly in data (not AppData)
- * @param {boolean|Array<string>} passFullItem - True: pass the entire item as first param instead of
- *   the extracted value. An array of field names: pass only those fields of the item (analysisInput),
- *   which keeps the cache key to what the call reads. sourceColumns still pick the rows it runs on.
+ * @param {Array<string>|null} passFields - Field names: pass { field: value, ... } of the item as the
+ *   first param instead of the extracted value (analysisInput), as many fields as the call reads.
+ *   sourceColumns still pick the rows it runs on.
  * @param {number} priority - Priority level (0-9, default: Priority.ANALYSIS=1)
  * @param {boolean} extractColumnsAsObject - If true and sourceColumns has multiple items, extract all as {col1, col2, ...} object
  * @param {boolean} essential - If true (default), this analysis is essential and runs even when onlyRunEssentialAnalysis is enabled
  * @returns {Object} Analysis configuration object. Set `keepWhileRefreshing: true` on it to keep the
  *   last result until a re-run replaces it (reloads carry it to rows with the same sourceColumns values).
  */
-export function createAnalysisConfig(apiFunction, resultKey, label, sourceColumns = null, additionalParams = [], targetColumn = null, passFullItem = false, priority = Priority.ANALYSIS, extractColumnsAsObject = false, essential = true) {
+export function createAnalysisConfig(apiFunction, resultKey, label, sourceColumns = null, additionalParams = [], targetColumn = null, passFields = null, priority = Priority.ANALYSIS, extractColumnsAsObject = false, essential = true) {
     return {
         apiFunction,
         resultKey,
@@ -2348,7 +2347,7 @@ export function createAnalysisConfig(apiFunction, resultKey, label, sourceColumn
         sourceColumns: Array.isArray(sourceColumns) ? sourceColumns : (sourceColumns ? [sourceColumns] : []),
         additionalParams,
         targetColumn, // If set, results go to this column instead of AppData
-        passFullItem, // True: the entire item even when sourceColumns specified; field names: only those
+        passFields, // If set, the first param is these fields of the item, not the extracted value
         extractColumnsAsObject, // If true, extract multiple sourceColumns into {col1, col2, ...} object
         priority, // Priority level for queue processing
         essential // If true, runs even when onlyRunEssentialAnalysis is enabled

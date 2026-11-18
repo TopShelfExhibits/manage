@@ -1,8 +1,15 @@
 # Identifier Matching Refactor Plan
 
+> **Historical:** this plan describes the code as it was; the design below was built differently,
+> and the document may be removed.
+>
 > **Since then:** Direction 2 lives in `ProductionUtils.getShowDates` (matching on the schedule's
 > date and identity columns, with early cutoff), and `getShowDetails` returns the matched row's full
 > columns. `findScheduleRowsForPacklist` below is gone. See incremental-invalidation-plan.md.
+> Client and show names resolve through one index lookup, `resolveIndexName` (the canonical name
+> when the name or an abbreviation matches, else the name itself): `computeIdentifier` uses it with
+> the fuzzy fallback (skipped for tokens under 6 characters), pack list identifier matching
+> strictly.
 
 ## Summary of the Two Matching Directions
 

@@ -526,23 +526,26 @@ class CacheManager {
     /**
      * Recompute a held cutoff key and compare it with its last value. Equal: done, its dependents
      * keep their values and nothing is announced. Changed, or not verifiable (an error, a result
-     * not kept): the held cascade runs, as invalidate would have run it. Offline, invalidate keeps
-     * every value, so the cascade would be lost: the key is verified again once the connection is
-     * back, and its dependents keep their values until then, as everything does offline.
+     * not kept): the held cascade runs, as invalidate would have run it. During an outage that
+     * cascade is held for the reconnect (_heldInvalidations), like every invalidation then.
      */
     static async _verify(key, state) {
-        let changed = await CacheManager._recomputeChanged(key, state);
-        while (changed && networkState.isOffline) {
-            await new Promise(resolve => setTimeout(resolve, 1000));
-            if (!networkState.isOffline) changed = await CacheManager._recomputeChanged(key, state);
-        }
+        const changed = await CacheManager._recomputeChanged(key, state);
         CacheManager._verifying.delete(key);
         if (changed) {
+            // During an outage invalidate holds each dependent for the reconnect, as it holds every
+            // invalidation then, and they keep their values until then. The key is held too, without
+            // its hash, so on reconnecting it cascades and is announced without a second check.
             const stack = new Set([key]);
             for (const depKey of CacheManager._dependentsOf(key)) {
                 CacheManager.invalidate(depKey, stack);
             }
-            CacheManager._announce(key);
+            if (networkState.isOffline) {
+                CacheManager.valueHashes.delete(key);
+                CacheManager._heldInvalidations.add(key);
+            } else {
+                CacheManager._announce(key);
+            }
         }
         state.finish();
     }
