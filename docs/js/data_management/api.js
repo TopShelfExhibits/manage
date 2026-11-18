@@ -1473,6 +1473,7 @@ class Requests_uncached {
                 usageSqft,
                 shows: shows.length,
                 unsized: shows.filter(show => !show.sized).length,
+                trend: projection.trend,
                 learnedItems: projection.items.filter(item => item.learned).length,
                 fallbackItems: projection.items.filter(item => !item.learned).length
             }

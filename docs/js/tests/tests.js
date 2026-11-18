@@ -49,7 +49,7 @@ import { applyColorRule, colorFor, rowColorFor } from '../application/utils/view
 import { containerTier, BREAKPOINTS } from '../application/utils/useContainerSize.js';
 import { createScrollHider } from '../application/utils/scrollHider.js';
 import { DEFAULT_DASHBOARD } from '../application/utils/dashboardLayout.js';
-import { parseBoothSquareFeet, monthOf, addMonths, monthRange, peakConcurrentUse, resolveProjectionSettings, itemReuse, projectInventory, itemShortages } from '../data_management/utils/inventory-projection.js';
+import { parseBoothSquareFeet, monthOf, addMonths, monthRange, peakConcurrentUse, resolveProjectionSettings, itemReuse, growthMultiplier, projectInventory, itemShortages } from '../data_management/utils/inventory-projection.js';
 import { redirectPath } from '../application/utils/urlRouter.js';
 import { todayISOString, setTestToday, startOfTodayMs, resolveShortageAlertDays, shortageAlertDateFilters, INVENTORY_TAB_PREFERENCES, resolveInventoryTabList, itemVariantBase, resolveItemVariant, itemVariantFamilies, itemVariantKey, parseItemVariants, searchFilter, textFiltersToSearchParams, parseSearchParameters } from '../data_management/utils/helpers.js';
 import { instantWriteEntry, identityKey, cellKey, joinKey } from '../data_management/utils/instant-write-config.js';
@@ -6354,6 +6354,9 @@ test('INVENTORY TAB PREFERENCES', 'custom item numbers match whole item numbers 
 //   (1200 sq ft) has pack lists holding 12 CAB-004, so CAB-004 = 12 + 22/1200 × 1400 = 37.7.
 //   Jan 2026: 2 shows booked (300 sq ft, no pack lists); Jan 2025 shipped 5700 sq ft (500 + 900 +
 //   600 + 600 + 2400 + 600 + 100) → projected 5700: CAB-004 22/1200 × 5700 = 104.5, CAB-005 9.5.
+//   Trend: the 12 months to Mar 2025 shipped 9300 sq ft, the 12 before 2300, the 12 before none.
+//   History Years 2: line through 2300, 9300 → 16300 / 9300 = 1.753; Jan 2026 5700 × 1.753 = 9990,
+//   CAB-004 10 - 22/1200 × 9990 → -174. History Years 3 leaves out the empty first year: the same.
 //   Report rows: CAB-004 first short in Aug 2025, deepest in Jan 2026: 10 - 104.5 → -95; CAB-005
 //   short only in Jan 2026: 6 - 9.5 → -4. The proposal test saves its own proposal (the proposal
 //   groups before it change the fixture proposals): CAB-004 +100 → 5, CAB-005 +2 → -2.
@@ -6380,6 +6383,13 @@ test('INVENTORY PROJECTION', 'peak concurrent use: overlapping ranges add, a sha
     assertEqual(peakConcurrentUse(uses), 20, 'the later use alone is the peak');
     assertEqual(peakConcurrentUse(uses.slice(0, 2)), 16, 'meeting on 1/31: 11 + 5');
     assertEqual([peakConcurrentUse([{ start: null, end: null, qty: 7 }]), peakConcurrentUse([])], [7, 0], 'undated use counts alone; none is 0');
+});
+
+test('INVENTORY PROJECTION', 'growth multiplier: the line through yearly totals, next year over last', () => {
+    assertEqual([growthMultiplier([]), growthMultiplier([5000]), growthMultiplier([0, 0])], [1, 1, 1], 'no line');
+    assertEqual([growthMultiplier([1000, 2000]), growthMultiplier([0, 1000, 2000])], [1.5, 1.5], 'two years; a leading empty year left out');
+    assertEqual(Math.round(growthMultiplier([1000, 2000, 1500]) * 1000) / 1000, 1.143, 'line 1250, 1500, 1750 → 2000 / 1750');
+    assertEqual([growthMultiplier([3000, 2000, 1000]), growthMultiplier([2000, 1000, 100]), growthMultiplier([3000, 0, 0])], [0, 0, 1], 'falling to 0; never below 0; a line at or below 0 last year is no trend');
 });
 
 test('INVENTORY PROJECTION', 'settings: defaults, preference values, minimums', () => {
@@ -6428,8 +6438,11 @@ test('INVENTORY PROJECTION', 'projectInventory: expected volume, pack list use p
         { itemId: 'B', month: '2025-07', shortage: -1, proposed: null }
     ], 'one row per item: its first short month, its deepest shortage (A: 20 - 100 / 1.67 in July)');
     assertEqual(itemShortages(months, { A: 45, B: 0.5 }).map(r => [r.itemId, r.proposed]), [['A', 5], ['B', -1]], 'proposed: the shortage after the changes, rounded down');
-    const twoYears = projectInventory({ months: ['2025-07'], scheduled: {}, pastSqft: { '2024-07': 2000, '2023-07': 1000 }, usageSqft: 0, items: [] }, { ...DEFAULT_PROJECTION_SETTINGS, historyYears: 2, growthFactor: 1.2 });
-    assertEqual(twoYears.months[0].projectedSqft, 1800, 'two years averaged (1500), times growth 1.2');
+    const twoYears = projectInventory({ months: ['2025-07'], scheduled: {}, pastSqft: { '2024-07': 2000, '2024-12': 500, '2023-07': 1000 }, usageSqft: 0, items: [] }, { ...DEFAULT_PROJECTION_SETTINGS, historyYears: 2, growthFactor: 1.2 });
+    assertEqual(twoYears.trend, { years: [1000, 2500], multiplier: 1.6 }, 'years of 12 months back from the first month; line 1000 → 2500 → 4000');
+    assertEqual(twoYears.months[0].projectedSqft, 3840, 'last July 2000 × trend 1.6 × growth 1.2');
+    assertEqual(months[0].pastSqft, 800, 'one year: last year\'s month');
+    assertEqual(projectInventory({ months: ['2025-07'], scheduled: {}, pastSqft: { '2024-07': 2000 }, usageSqft: 0, items: [] }, DEFAULT_PROJECTION_SETTINGS).trend, { years: [2000], multiplier: 1 }, 'one year: no trend');
 });
 
 async function _withProjectionToday(fn) {
@@ -6506,9 +6519,20 @@ test('INVENTORY PROJECTION', 'preference rows tune the projection', () => _withP
         await setPreference('ProjectionGrowthFactor', '1');
         await setPreference('ProjectionReuseFallback', '2');
         assertEqual((await january()).shortages.map(s => [s.itemId, s.capacity]), [['CAB-004', 10]], 'fallback reuse 2: CAB-005 covers 12, CAB-004 keeps its learned reuse');
+        await setPreference('ProjectionReuseFallback', '1');
+        const trend = async () => {
+            const model = await Requests.getInventoryProjectionModel('CABINETS');
+            const [cab004] = await Requests.getInventoryProjection('CABINETS');
+            return [model.trend, model.months.find(m => m.month === '2026-01').projectedSqft, cab004.shortage];
+        };
+        await setPreference('ProjectionHistoryYears', '2');
+        assertEqual(await trend(), [{ years: [2300, 9300], multiplier: 1.753 }, 9990, -174], 'history years 2: the trend through two years');
+        await setPreference('ProjectionHistoryYears', '3');
+        assertEqual(await trend(), [{ years: [0, 2300, 9300], multiplier: 1.753 }, 9990, -174], 'history years 3: the empty first year left out');
     } finally {
         await setPreference('ProjectionGrowthFactor', '1');
         await setPreference('ProjectionReuseFallback', '1');
+        await setPreference('ProjectionHistoryYears', '1');
     }
 }));
 

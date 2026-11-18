@@ -5,7 +5,11 @@
  *
  * The model, month by month (months are 'YYYY-MM', a show counts in the month it ships):
  * - Volume: a future month's projected square feet is the larger of what is already scheduled and
- *   the same month in past years (averaged over `historyYears`) times `growthFactor`.
+ *   the same month last year times the trend multiplier times `growthFactor`.
+ * - Trend: a straight line through the square feet of each of the past `historyYears` years (the
+ *   12 months before this one, the 12 before those, …); the multiplier is the line's next year over
+ *   its last year (growthMultiplier). Years before the first show (0 square feet) are left out, and
+ *   one year makes no line: the multiplier is 1.
  * - Rate: each item's pack list quantity over the last `usageMonths` full months, per square foot
  *   of the shows in those months that have a pack list.
  * - Use: a month's projected use is what its shows' pack lists already hold, plus the rate times
@@ -129,6 +133,29 @@ const round1 = (n) => Math.round(n * 10) / 10;
 const round3 = (n) => Math.round(n * 1000) / 1000;
 
 /**
+ * The growth multiplier of yearly totals: the least-squares line through them, its value one year
+ * past the last total over its value at the last total. Leading zero years (before records began)
+ * are left out. 1 with fewer than two years or a line at or below 0 at the last year; never below 0.
+ * @param {number[]} yearTotals - Square feet by year, oldest first
+ * @returns {number}
+ */
+export function growthMultiplier(yearTotals) {
+    const first = yearTotals.findIndex(total => total > 0);
+    const totals = first < 0 ? [] : yearTotals.slice(first);
+    const n = totals.length;
+    if (n < 2) return 1;
+    const meanX = (n - 1) / 2;
+    const meanY = totals.reduce((sum, y) => sum + y, 0) / n;
+    let sxy = 0;
+    let sxx = 0;
+    totals.forEach((y, x) => { sxy += (x - meanX) * (y - meanY); sxx += (x - meanX) ** 2; });
+    const slope = sxy / sxx;
+    const last = meanY + slope * (n - 1 - meanX);
+    if (!(last > 0)) return 1;
+    return Math.max(0, (last + slope) / last);
+}
+
+/**
  * The projection, month by month.
  * @param {Object} input
  * @param {string[]} input.months - The future months, in order
@@ -140,7 +167,8 @@ const round3 = (n) => Math.round(n * 1000) / 1000;
  *        known: Object<string, number>, stock: Object<string, number|null>}>} input.items -
  *        Window use and peak, stock today and at each month's start, pack list use by month
  * @param {Object} settings - resolveProjectionSettings
- * @returns {{ months: Array<Object>, items: Array<Object> }}
+ * @returns {{ months: Array<Object>, items: Array<Object>, trend: {years: number[], multiplier: number} }}
+ *          trend.years: each past year's square feet, oldest first
  */
 export function projectInventory({ months, scheduled, pastSqft, usageSqft, items }, settings) {
     const rated = items.map(item => ({
@@ -148,11 +176,14 @@ export function projectInventory({ months, scheduled, pastSqft, usageSqft, items
         rate: usageSqft > 0 ? item.usage / usageSqft : 0,
         ...itemReuse({ usage: item.usage, peak: item.peak, stock: item.stockNow }, settings)
     }));
+    // Year k back: the 12 months starting 12k months before the first future month
+    const years = Array.from({ length: settings.historyYears }, (_, i) => settings.historyYears - i)
+        .map(k => monthRange(addMonths(months[0], -12 * k), 12).reduce((sum, month) => sum + (pastSqft[month] || 0), 0));
+    const multiplier = growthMultiplier(years);
     const rows = months.map(month => {
         const booked = scheduled[month] || { sqft: 0, shows: 0, coveredSqft: 0 };
-        const years = Array.from({ length: settings.historyYears }, (_, i) => pastSqft[addMonths(month, -12 * (i + 1))] || 0);
-        const pastAverage = years.reduce((sum, sqft) => sum + sqft, 0) / years.length;
-        const projectedSqft = Math.max(booked.sqft, pastAverage * settings.growthFactor);
+        const lastYear = pastSqft[addMonths(month, -12)] || 0;
+        const projectedSqft = Math.max(booked.sqft, lastYear * multiplier * settings.growthFactor);
         const uncoveredSqft = Math.max(0, projectedSqft - booked.coveredSqft);
         const shortages = [];
         for (const item of rated) {
@@ -169,14 +200,15 @@ export function projectInventory({ months, scheduled, pastSqft, usageSqft, items
             month,
             shows: booked.shows,
             scheduledSqft: booked.sqft,
-            pastSqft: Math.round(pastAverage),
+            pastSqft: lastYear,
             projectedSqft: Math.round(projectedSqft),
             shortages
         };
     });
     return {
         months: rows,
-        items: rated.map(({ itemId, usage, peak, rate, reuse, learned }) => ({ itemId, usage, peak, rate, reuse, learned }))
+        items: rated.map(({ itemId, usage, peak, rate, reuse, learned }) => ({ itemId, usage, peak, rate, reuse, learned })),
+        trend: { years, multiplier: round3(multiplier) }
     };
 }
 

@@ -102,8 +102,14 @@ export const InventoryProjectionReport = {
                 { label: 'Learned from', value: `${basis.learnedFrom} of ${basis.usageShows} shows shipping ${window} (those with a pack list and a size): ${basis.usageSqft.toLocaleString()} sq ft` },
                 { label: 'Items', value: `${basis.learnedItems} with reuse learned from their use, ${basis.fallbackItems} at ${settings.reuseFallback}× a month` },
                 { label: 'Shows without a size', value: `${basis.unsized} of ${basis.shows}${settings.defaultSquareFeet ? `, counted as ${settings.defaultSquareFeet} sq ft` : ', left out'}` },
-                { label: 'Expected shows', value: `the larger of booked and the same month over the past ${settings.historyYears === 1 ? 'year' : `${settings.historyYears} years`} × ${settings.growthFactor}` }
+                { label: 'Expected shows', value: `the larger of booked and the same month last year × ${this.trendText} × ${settings.growthFactor} (Growth Factor)` }
             ];
+        },
+        // The trend multiplier and the yearly square feet it is drawn through
+        trendText() {
+            const { years, multiplier } = this.basis.trend || { years: [], multiplier: 1 };
+            if (years.length < 2) return '1 (no trend: History Years is 1)';
+            return `${multiplier} (the trend through the past ${years.length} years: ${years.map(sqft => sqft.toLocaleString()).join(', ')} sq ft)`;
         },
         isLoading() {
             return !!(this.projectionStore?.isLoading || this.basisStore?.isLoading);

@@ -1125,8 +1125,8 @@ export class FakeGoogleSheetsService {
                 ['InventoryShortageAlertDays', 'Shortage Alert Days', 'days ahead the inventory shortage alerts look; 0 turns them off', 'inventory*', 'integer', '120', ''],
                 // Inventory projection (data_management/utils/inventory-projection.js, PROJECTION_SETTINGS)
                 ['ProjectionUsageMonths', 'Usage Months', 'full months of pack list use that item rates are learned from', 'reports/inventory-projection', 'integer', '3', ''],
-                ['ProjectionHistoryYears', 'History Years', "past years whose same month sets a future month's expected square feet (averaged)", 'reports/inventory-projection', 'integer', '1', ''],
-                ['ProjectionGrowthFactor', 'Growth Factor', "multiplies past years' square feet for a future month", 'reports/inventory-projection', 'double', '1', ''],
+                ['ProjectionHistoryYears', 'History Years', "past years whose square feet set the growth trend (a straight line through each year's total); 1 is no trend", 'reports/inventory-projection', 'integer', '1', ''],
+                ['ProjectionGrowthFactor', 'Growth Factor', "multiplies last year's square feet for a future month, on top of the trend", 'reports/inventory-projection', 'double', '1', ''],
                 ['ProjectionReuseFallback', 'Fallback Reuse', 'times a month stock can go out, for items with too little use or stock to learn it', 'reports/inventory-projection', 'double', '1', ''],
                 ['ProjectionMaxReuse', 'Max Learned Reuse', 'most times a month stock can go out, however often it was used', 'reports/inventory-projection', 'double', '4', ''],
                 ['ProjectionLearnMinUsage', 'Min Use To Learn', 'items used fewer times than this in the usage months take the fallback reuse', 'reports/inventory-projection', 'integer', '10', ''],
