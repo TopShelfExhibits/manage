@@ -963,7 +963,8 @@ class Requests_uncached {
      * alert: a declared variant that runs short or has no spare, or a base line whose unmodified
      * pieces run short (a soft warning). Tabs in InventorySuppressCategoryAnalysis are skipped.
      * @param {Object} deps - Dependency decorator for tracking calls
-     * @param {Object} item - Item object from packlist
+     * @param {Object} item - The pack list item's 'Extracted Item', Description and 'Packing/shop notes'
+     *   (the pack list passes only these)
      * @param {string} currentProjectId - Current project identifier
      * @returns {Promise<Object|null>} Alert object, or null
      */
@@ -1443,13 +1444,12 @@ class Requests_uncached {
     /**
      * Check inventory levels for an item and return alert if low/shortage
      * @param {Object} deps - Dependency decorator for tracking calls
-     * @param {Object} item - Item object from packlist
+     * @param {Object} item - The pack list item's fields this reads (the pack list passes only these)
      * @param {string} item['Extracted Item'] - The item number to check
      * @param {string} currentProjectId - Current project identifier
      * @returns {Promise<Object|null>} Alert object if inventory is low/shortage, null if sufficient
      */
     static async checkInventoryLevel(deps, item, currentProjectId) {
-        // item is the full item object (needed for all fields for context)
         const itemNumber = item['Extracted Item'];
         
         if (!itemNumber || !currentProjectId) {

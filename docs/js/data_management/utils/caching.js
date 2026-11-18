@@ -36,6 +36,36 @@ const DEFAULT_CACHE_EXPIRATION_MS = 4 * 60 * 1000;
  */
 const EARLY_CUTOFF = true;
 
+/**
+ * Cached values are frozen, all the way down, as they are cached: every reader gets the same
+ * object, so code that changed one would change it for every later reader. A change now throws
+ * a TypeError where it is made (classifyError 'integrity', reported by reportIntegrityError), and
+ * the value stays as it was read. Copy a cached value before changing it. False turns freezing
+ * off (a redeploy).
+ */
+const FREEZE_CACHED_VALUES = true;
+
+/**
+ * Freeze a value and everything it holds. Skips what freezing can't or mustn't touch: typed arrays
+ * and buffers (freezing one with elements throws), Blobs, and Vue reactive objects (a store's own
+ * rows, which its edits change).
+ */
+function deepFreeze(value) {
+    const seen = new Set();
+    const stack = [value];
+    while (stack.length) {
+        const item = stack.pop();
+        if (!item || typeof item !== 'object' || seen.has(item)) continue;
+        seen.add(item);
+        if (ArrayBuffer.isView(item) || item instanceof ArrayBuffer) continue;
+        if (typeof Blob !== 'undefined' && item instanceof Blob) continue;
+        if (item.__v_raw !== undefined || item.__v_skip) continue;
+        Object.freeze(item);
+        for (const key of Object.keys(item)) stack.push(item[key]);
+    }
+    return value;
+}
+
 /** A 53-bit hash of a value's JSON (cyrb53): cutoff keys compare values by it. */
 function hashValue(value) {
     const text = JSON.stringify(value) ?? 'undefined';
@@ -193,7 +223,8 @@ class CacheManager {
         ) {
             return;
         }
-        
+
+        if (FREEZE_CACHED_VALUES) deepFreeze(value);
         const now = Date.now();
         CacheManager.cache.set(key, {
             value,
@@ -695,7 +726,22 @@ class CacheManager {
             // Skip wrapping for mutation methods - pass them through directly without modification
             // This preserves their original signatures (no deps parameter) and prevents circular dependencies
             if (mutationKeys.includes(methodName)) {
-                wrappedClass[methodName] = targetClass[methodName];
+                // Passed through as it is (sync stays sync), except that a change to a frozen cached
+                // value inside it is reported as a write: data writes stop until a refresh. The few
+                // uncached reads listed with the mutations count as writes too (the safe side).
+                const original = targetClass[methodName];
+                const source = `${namespace}.${methodName}`;
+                wrappedClass[methodName] = function(...args) {
+                    try {
+                        const result = original.apply(this, args);
+                        return typeof result?.then === 'function'
+                            ? result.catch(error => { reportIntegrityError(error, { write: true, source }); throw error; })
+                            : result;
+                    } catch (error) {
+                        reportIntegrityError(error, { write: true, source });
+                        throw error;
+                    }
+                };
                 // Store method name for extractMethodName to retrieve
                 wrappedClass[methodName]._namespace = namespace;
                 wrappedClass[methodName]._methodName = methodName;
@@ -787,6 +833,8 @@ class CacheManager {
                     promiseResolve(result);
                     return result;
                 } catch (error) {
+                    // A change to a frozen cached value inside a read: reported (a banner), not a write
+                    reportIntegrityError(error, { write: false, source: `${namespace}.${methodName}` });
                     // Reject the promise for all waiters
                     promiseReject(error);
                     throw error;
@@ -1165,12 +1213,63 @@ export function checkAppVersion() {
  * (a closed laptop, a background tab) is caught before it writes.
  */
 export async function assertAppCurrent() {
+    if (_writesHeld) {
+        const error = new Error('Saving is turned off: the app blocked a change to data it holds. Click Refresh Now in the banner at the top: your unsaved table edits are kept.');
+        error.code = 'DATA_INTEGRITY';
+        throw error;
+    }
     if (Date.now() - _versionCheckedAt > VERSION_RECHECK_MS) await checkAppVersion();
     if (isAppOutdated()) {
         const error = new Error('The app has been updated, so saving is turned off. Click Refresh Now in the banner at the top: your unsaved table edits are kept.');
         error.code = 'APP_OUTDATED';
         throw error;
     }
+}
+
+// ─── Data integrity ──────────────────────────────────────────────────────────
+// Cached values are frozen (FREEZE_CACHED_VALUES), so code that changes one throws where it does it
+// (classifyError 'integrity'), and the blocked change never happens: the cached data, and the sheets,
+// stay as they were. What may be off is the operation that threw: anything it did before the
+// blocked change has happened, and what it meant to do after hasn't. So each one is announced
+// ('dataIntegrityError': { write, source, message }), never retried or taken for a lost
+// connection, and the app banner offers a refresh, which reloads everything and keeps unsaved
+// edits (their backups). One inside a write also holds data writes until that refresh
+// (assertAppCurrent, code 'DATA_INTEGRITY'); bookkeeping writes (backups, locks) still run.
+
+let _writesHeld = false;
+const _reportedIntegrity = new WeakMap();  // error → reported as a write
+
+/**
+ * Announce a blocked change to a frozen cached value, once per error. Any other error is ignored.
+ * An error reported from a read and then again from the write it ran in is announced again, as a
+ * write. Called by wrapMethods (reads and writes) and by the stores and the app for their own code.
+ * @param {*} error
+ * @param {{write?: boolean, source?: string}} [context] - write: it happened inside a data write
+ * @returns {boolean} Whether the error was a blocked change
+ */
+export function reportIntegrityError(error, { write = false, source = '' } = {}) {
+    if (classifyError(error) !== 'integrity') return false;
+    const reported = _reportedIntegrity.get(error);
+    if (reported === true || (reported === false && !write)) return true;
+    _reportedIntegrity.set(error, write);
+    if (write) _writesHeld = true;
+    console.error(`[DataIntegrity] ${source || 'app'} tried to change cached data; the change was blocked${write ? ' and saving is off until a refresh' : ''}:`, error);
+    if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('dataIntegrityError', {
+            detail: { write, source, message: error.message }
+        }));
+    }
+    return true;
+}
+
+/** True once a blocked change inside a data write has turned saving off (until a refresh). */
+export function areWritesHeld() {
+    return _writesHeld;
+}
+
+/** Tests: turn saving back on after a test that blocked a write. */
+export function releaseWritesHeld() {
+    _writesHeld = false;
 }
 
 // A hidden browser tab skips its polls: each one reads the Caching tab, and open-but-unseen tabs

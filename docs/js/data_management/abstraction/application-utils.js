@@ -10,6 +10,9 @@ import { AuthSession, GoogleSheetsService, classifyError } from '../services.js'
 // written), done: the latest batch's write } (storeUserData)
 const _userDataQueues = new Map();
 
+// This session's lock acquisitions, one at a time (lockSheet)
+let _lockWrites = Promise.resolve();
+
 function isActiveLockTimestamp(timestamp) {
     const ts = timestamp?.split('|')[0];
     return !!(ts && ts !== '0');
@@ -268,37 +271,42 @@ class applicationUtils_uncached {
      * @param {string} user - The user email claiming the lock
      * @returns {Promise<boolean>} Success status
      */
-    static async lockSheet(spreadsheet, tab, user, deviceId = null) {
+    static lockSheet(spreadsheet, tab, user, deviceId = null) {
+        // One at a time in this session: a lock on a new key adds a row (a new user, a column), and
+        // two at once would read the same grid and claim the same row. Each reads the grid the one
+        // before it refreshed.
+        const run = _lockWrites.then(() => this._lockSheet(spreadsheet, tab, user, deviceId));
+        _lockWrites = run.catch(() => {});
+        return run;
+    }
+
+    static async _lockSheet(spreadsheet, tab, user, deviceId) {
         try {
             const timestamp = new Date().toISOString();
             const lockKey = `${spreadsheet}:${tab}`;
-            
-            // Get current locks data
+
+            // Get current locks data (cached, so frozen: read only)
             const locksGrid = await ApplicationUtils.getLocksData();
-            
+
             // Resolve the effective lock: oldest active timestamp wins.
             const existingLock = getOldestActiveLock(locksGrid.locks, spreadsheet, tab);
-            
+
             if (existingLock && existingLock.user !== user) {
                 console.warn(`Sheet ${spreadsheet}/${tab} is locked by ${existingLock.user}`);
                 return false;
             }
-            
-            // Find or create lock key row
+
+            // Find or create lock key row (a new one goes after the last)
             let lockRowIndex = locksGrid.lockKeys.indexOf(lockKey);
             if (lockRowIndex === -1) {
-                // Add new lock key to the grid
                 lockRowIndex = locksGrid.lockKeys.length;
-                locksGrid.lockKeys.push(lockKey);
                 await this._writeLockKeyRow(lockKey, lockRowIndex + 2); // +2 for header row
             }
-            
+
             // Find or create user column
             let userColIndex = locksGrid.users.indexOf(user);
             if (userColIndex === -1) {
-                // Add new user column
                 userColIndex = locksGrid.users.length;
-                locksGrid.users.push(user);
                 await this._writeUserColumn(user, userColIndex + 2); // +2 for "Lock Key" column (B=2)
             }
             
@@ -808,9 +816,10 @@ class applicationUtils_uncached {
                 .filter(row => Array.isArray(row) && row[0] && row[1])
                 .map(row => ({ key: row[0], timestamp: row[1] }));
         } catch (err) {
-            // Sign-in and access failures stop the poller (caching.js)
+            // Sign-in and access failures stop the poller (caching.js); a blocked change to cached
+            // data is reported, never read as "no stamps"
             const kind = classifyError(err);
-            if (kind === 'auth' || kind === 'permission') throw err;
+            if (kind === 'auth' || kind === 'permission' || kind === 'integrity') throw err;
 
             console.warn('[readCacheTimestamps] Failed to read cache timestamps:', err);
             return [];
@@ -911,7 +920,7 @@ class applicationUtils_uncached {
 export const ApplicationUtils = wrapMethods(
     applicationUtils_uncached, 
     'app_utils', 
-    ['storeUserData', '_writeUserData', 'initializeDefaultSavedSearches', 'lockSheet', 'unlockSheet', 'forceUnlockSheet', 'releaseAllUserLocks', '_writeUserColumn', '_writeLockKeyRow', '_writeLockCell', '_numberToColumnLetter', '_initializeLocksSheet', 'writeCacheTimestamps', 'writeCacheTimestamp', 'readCacheTimestamps', 'getShortLink', 'expandShortLink'], // Mutation methods
+    ['storeUserData', '_writeUserData', 'initializeDefaultSavedSearches', 'lockSheet', '_lockSheet', 'unlockSheet', 'forceUnlockSheet', 'releaseAllUserLocks', '_writeUserColumn', '_writeLockKeyRow', '_writeLockCell', '_numberToColumnLetter', '_initializeLocksSheet', 'writeCacheTimestamps', 'writeCacheTimestamp', 'readCacheTimestamps', 'getShortLink', 'expandShortLink'], // Mutation methods
     ['expandShortLink', 'getToday'], // Infinite cache methods
     { 'getSheetLock': 10000, 'getLocksData': 10000 } // Custom cache durations (10 seconds for getSheetLock and getLocksData)
 );

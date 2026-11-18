@@ -1,4 +1,4 @@
-import { Requests, authState, CacheInvalidationBus, undoRegistry, isNetworkError } from '../index.js';
+import { Requests, authState, CacheInvalidationBus, undoRegistry, isNetworkError, reportIntegrityError } from '../index.js';
 import { whenConnected } from '../../data_management/utils/networkState.js';
 
 /**
@@ -278,6 +278,8 @@ export const sheetLockMixin = {
                     }
                 }
             } catch (error) {
+                // A blocked change to cached data: the app banner says so and offers the refresh
+                if (reportIntegrityError(error, { write: true, source: 'sheet lock' })) return;
                 console.error(`[sheetLockMixin] Lock operation failed for ${this.lockKey}:`, error);
                 this.$modal.alert(
                     error.message?.includes('Failed to acquire write lock')
@@ -315,7 +317,8 @@ export const sheetLockMixin = {
          * Take the edit lock, or confirm it's held. Calls made while a request is out (several
          * quick edits, the isDirty watcher) share that one request.
          * @returns {Promise<boolean|null>} whether this session holds the lock; null when Google
-         *   didn't answer (the lock is asked for again on reconnecting)
+         *   didn't answer (the lock is asked for again on reconnecting), or when the app blocked a
+         *   change to cached data (saving is off until a refresh)
          */
         acquireLockForEdit() {
             if (this.isLocked) return Promise.resolve(true);
@@ -344,7 +347,8 @@ export const sheetLockMixin = {
             apply();
             const held = await this.acquireLockForEdit();
             if (held) return true;
-            // No answer: the edit stands, and the lock is asked for again on reconnecting
+            // No answer: the edit stands, and the lock is asked for again on reconnecting. A blocked
+            // change to cached data: the edit stands unsaved, and saving waits for the refresh
             if (held === null) return true;
             revert();
             if (routeKey) undoRegistry.discardLastSnapshotIfUnchanged(rows, routeKey);
@@ -381,6 +385,9 @@ export const sheetLockMixin = {
                     this._retryLockWhenConnected();
                     return null;
                 }
+                // The app blocked a change to cached data: saving is off until the banner's refresh,
+                // so the edit stays unsaved (its backup keeps it through the refresh), never retried
+                if (reportIntegrityError(error, { write: true, source: 'sheet lock' })) return null;
                 console.error(`[sheetLockMixin] acquireLockForEdit failed for ${this.lockKey}:`, error);
                 return false;
             }

@@ -1,5 +1,5 @@
 // caching
-export { invalidateCache, cutoffSettled, fillCache, wrapMethods, clearCache, stampDataChange, ProgressBus, CacheInvalidationBus, triggerCachePoll, holdScheduledPolls, watchSpreadsheets, watchSource, isAppOutdated, checkAppVersion, assertAppCurrent } from './utils/caching.js';
+export { invalidateCache, cutoffSettled, fillCache, wrapMethods, clearCache, stampDataChange, ProgressBus, CacheInvalidationBus, triggerCachePoll, holdScheduledPolls, watchSpreadsheets, watchSource, isAppOutdated, checkAppVersion, assertAppCurrent, reportIntegrityError, areWritesHeld, releaseWritesHeld } from './utils/caching.js';
 export { networkState, CONNECTION, checkConnection, onConnectionChange, whenConnected } from './utils/networkState.js';
 
 // Data management components

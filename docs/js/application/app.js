@@ -12,7 +12,8 @@ import { Requests, getReactiveStore, appSettings, saveDirtyStoresToUserData, get
 import { BannerNotifications, NotificationBubbleOverlay, notificationBus } from './index.js';
 import { SEVERITY } from './index.js';
 import { isLocalhost } from '../data_management/utils/helpers.js';
-import { CONNECTION, checkConnection } from '../data_management/utils/networkState.js';
+import { CONNECTION, checkConnection, networkState, whenConnected } from '../data_management/utils/networkState.js';
+import { reportIntegrityError } from './index.js';
 
 const { createApp } = Vue;
 
@@ -61,7 +62,9 @@ const App = {
             globalLocksStore: null, // Global reactive store for ALL locks
             shortageAlertsStore: null, // Inventory shortage alerts (app banner)
             notificationBus: notificationBus, // Reference for reactivity
-            updateAvailable: false // A newer version is deployed: editing is off until a refresh (assertAppCurrent)
+            updateAvailable: false, // A newer version is deployed: editing is off until a refresh (assertAppCurrent)
+            dataIntegrity: null,    // { write } once the app blocked a change to cached data (reportIntegrityError)
+            refreshQueued: false    // The integrity banner's refresh waits for the connection
         };
     },
     computed: {
@@ -115,6 +118,26 @@ const App = {
             }
             return { ...banner, visible: true, severity: SEVERITY.critical, message: 'Your sign-in has ended. Sign in again to keep working: your unsaved changes are kept.', action: { label: 'Sign in', fn: () => Auth.renew() } };
         },
+        // The app blocked a change to data it holds (reportIntegrityError): nothing was saved by it.
+        // A refresh reloads everything and keeps unsaved table edits (backed up first); inside a
+        // write, saving is off until then. A refresh needs the connection, so offline it waits.
+        integrityBanner() {
+            const integrity = this.dataIntegrity;
+            const banner = { key: 'data-integrity', severity: SEVERITY.critical, dismissible: false, visible: !!integrity };
+            if (!integrity) return banner;
+            const message = integrity.write
+                ? 'The app blocked a change to data it had loaded, so nothing wrong reached the sheets. Saving is turned off until you refresh; your unsaved edits are kept.'
+                : 'The app blocked a change to data it had loaded, so part of a page may be missing. Refresh to reload it; your unsaved edits are kept.';
+            if (this.refreshQueued) return { ...banner, message: `${message} Refreshing when the connection is back…` };
+            return {
+                ...banner,
+                message,
+                dismissible: !integrity.write,
+                action: authState.isOffline
+                    ? { label: 'Refresh when connected', fn: () => this.refreshWhenConnected() }
+                    : { label: 'Refresh Now', fn: () => this.refreshToLatest() }
+            };
+        },
         appBanners() {
             const staticBanners = [
                 this.connectionBanner,
@@ -147,7 +170,8 @@ const App = {
                         label: 'Refresh Now',
                         fn: () => this.refreshToLatest()
                     }
-                }
+                },
+                this.integrityBanner
             ];
             
             // Created after authentication, like the preferences store getShortageAlertDays reads
@@ -224,6 +248,12 @@ const App = {
         }
     },
     async mounted() {
+        // A blocked change to cached data (reportIntegrityError): the integrity banner. Listened for
+        // first, so one during sign-in is shown too; one inside a write turns saving off.
+        window.addEventListener('dataIntegrityError', (event) => {
+            this.dataIntegrity = { write: !!(this.dataIntegrity?.write || event.detail.write) };
+        });
+
         // Initialize authentication on app mount
         await Auth.initialize();
 
@@ -348,6 +378,12 @@ const App = {
                 .map(url => fetch(url, { cache: 'reload' })));
             await Promise.race([refetch, new Promise(resolve => setTimeout(resolve, 10000))]);
             window.location.reload();
+        },
+        /** Refresh once requests can go out: a reload with no connection would leave a blank page. */
+        refreshWhenConnected() {
+            if (!networkState.isOffline) return this.refreshToLatest();
+            this.refreshQueued = true;
+            whenConnected(() => this.refreshToLatest());
         },
         // App-wide stores, created once after authentication: all locks, and the shortage alerts
         initializeGlobalStores() {
@@ -586,4 +622,14 @@ const App = {
 
 // Initialize the app
 const app = createApp(App);
+
+// Backstops: a blocked change to cached data in code no data call or store wraps (a component, a
+// timer) is still announced. Vue's own logging of component errors is kept.
+app.config.errorHandler = (error, instance, info) => {
+    reportIntegrityError(error, { source: `component (${info})` });
+    console.error(error);
+};
+window.addEventListener('unhandledrejection', (event) => reportIntegrityError(event.reason, { source: 'unhandled rejection' }));
+window.addEventListener('error', (event) => reportIntegrityError(event.error, { source: 'uncaught error' }));
+
 app.mount('body');

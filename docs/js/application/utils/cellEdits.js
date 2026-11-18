@@ -3,6 +3,7 @@ import { escapeHtml } from './views/fieldFormat.js';
 import { isCheckedValue } from '../../data_management/utils/checkbox-values.js';
 import { describeWriteFailure, joinKey } from '../../data_management/utils/instant-write-config.js';
 import { networkState, onConnectionChange } from '../../data_management/utils/networkState.js';
+import { reportIntegrityError } from '../../data_management/utils/caching.js';
 
 /**
  * Cell edits — how tables edit, in both edit modes (views-and-renderers-plan §4.16).
@@ -331,13 +332,17 @@ export function useInstantEdits(host) {
         report(problems);
     }
 
-    // The page's write; a thrown error fails every entry
+    // The page's write; a thrown error fails every entry. A blocked change to cached data is
+    // announced (the app banner: saving is off until a refresh), and its reason says so.
     async function commit(entries, values) {
         try {
             const results = await host.commitCells(entries.map((e, n) => ({ row: e.row, key: e.key, value: values[n] })));
             return Array.isArray(results) ? results : [];
         } catch (e) {
-            return entries.map(() => ({ ok: false, reason: e?.message || 'error' }));
+            const reason = reportIntegrityError(e, { write: true, source: 'instant edit' })
+                ? 'the app blocked a change to data it holds, so saving is off until you refresh (the banner at the top)'
+                : (e?.message || 'error');
+            return entries.map(() => ({ ok: false, reason }));
         }
     }
 

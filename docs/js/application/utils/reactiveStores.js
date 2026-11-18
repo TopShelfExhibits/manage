@@ -1,4 +1,4 @@
-import { CacheInvalidationBus, ProgressBus, Requests, authState, Auth, isAuthError, isNetworkError, resolveInventoryNoteMaxLength, resolveInventoryTabList, EditHistoryUtils, readRowMetadata, writeRowMetadata } from '../index.js';
+import { CacheInvalidationBus, ProgressBus, Requests, authState, Auth, isAuthError, isNetworkError, reportIntegrityError, resolveInventoryNoteMaxLength, resolveInventoryTabList, EditHistoryUtils, readRowMetadata, writeRowMetadata } from '../index.js';
 import { PriorityQueue, Priority } from './priorityQueue.js';
 import { networkState, onConnectionChange, CONNECTION } from '../../data_management/utils/networkState.js';
 
@@ -7,6 +7,9 @@ const WAIT_NOTICE_MS = 10 * 1000;
 const NO_ANSWER_LOAD = "Can't reach Google, so this couldn't load. It reloads when the connection is back.";
 const NO_ANSWER_RELOAD = "Can't reach Google: showing what was loaded before. It reloads when the connection is back.";
 const NO_ANSWER_SAVE = "Can't reach Google, so nothing was saved. Your edits are kept: save again when the connection is back.";
+// The app blocked a change to cached data (reportIntegrityError): the banner offers the refresh
+const INTEGRITY_LOAD = "This didn't load: the app blocked a change to data it holds. Refresh Now in the banner at the top reloads it.";
+const INTEGRITY_SAVE = "Nothing was saved: the app blocked a change to data it holds, and saving is off. Refresh Now in the banner at the top keeps your edits.";
 
 // Re-export Priority for component use
 export { Priority };
@@ -83,7 +86,7 @@ export const appSettings = Vue.reactive({
  *      stays until the new one arrives, and a result equal to the old one is not written
  *   3. If main reload is active, the targets are dropped (analysis runs after reload);
  *      if a full analysis is running, they run when it finishes
- *   4. Configs whose key can't be predicted (passFullItem) re-run every row they ran on
+ *   4. Configs whose key can't be predicted (passFullItem: true) re-run every row they ran on
  * - This prevents analysis from running on empty/stale data during reload, and keeps
  *   one row's invalidation (from any page) from blanking a column on every row
  * 
@@ -250,6 +253,19 @@ function analysisArgsString(apiParams) {
 }
 
 /**
+ * The first argument an analysis call gets: the value from its source columns, the whole row
+ * (passFullItem: true), or only the named fields of the row (passFullItem: ['Field', ...]). Naming
+ * the fields keeps the cache key to what the call reads, so a change elsewhere in the row (AppData
+ * included) neither misses the cache nor re-runs it.
+ */
+function analysisInput(config, item, inputValue) {
+    if (Array.isArray(config.passFullItem)) {
+        return Object.fromEntries(config.passFullItem.map(field => [field, item?.[field] ?? null]));
+    }
+    return config.passFullItem ? item : inputValue;
+}
+
+/**
  * Value to pass to an analysis function from ordered source columns.
  * With extractAsObject and several columns: { col: value|null, ... }. Otherwise the first
  * non-empty value (item first, then parentItem). No source columns: the item itself.
@@ -407,7 +423,7 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
         const id = analysisConfigId(config);
         if (!analysisKeyIndex.has(id)) analysisKeyIndex.set(id, new Map());
         const byArgs = analysisKeyIndex.get(id);
-        const key = config.passFullItem ? '*' : analysisArgsString(apiParams);
+        const key = config.passFullItem === true ? '*' : analysisArgsString(apiParams);
         if (!byArgs.has(key)) byArgs.set(key, new Map());
         byArgs.get(key).set(item, parentItem);
     }
@@ -642,14 +658,14 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
                 }
                 // Handle null, undefined, or empty results by initializing empty arrays
                 const dataToSet = (result && Array.isArray(result)) ? result : [];
-                // Pre-assign stable row IDs before splitting into data and originalData.
-                appDataInit(dataToSet, false);
-                // Read-only stores skip originalData entirely — no second deep clone needed.
-                if (!isReadOnly) {
-                    this.setOriginalData(dataToSet);
-                }
                 const kept = keptResults(this._data);
+                // The result is cached (frozen): setData copies it and gives the copy its row IDs.
+                // originalData copies those rows, so both share the IDs. Read-only stores skip
+                // originalData entirely — no second deep clone needed.
                 this.setData(dataToSet);
+                if (!isReadOnly) {
+                    this.setOriginalData(this._data);
+                }
                 restoreKept(this._data, kept);
                 // The edits were discarded (Discard, Refresh, edits sent to a proposal): so is
                 // their autosave backup, or a later load would restore them
@@ -667,9 +683,12 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
             } catch (err) {
                 // A sign-in failure: the session banner asks the user, and the store reloads once
                 // the session is active again (reloadErrorStores). No answer: the store keeps what
-                // it loaded before, and reloads when the connection is back (auth.js).
-                const kept = isNetworkError(err) && this._data?.length > 0 && !this.isModified;
+                // it loaded before, and reloads when the connection is back (auth.js). A blocked
+                // change to cached data: the app banner offers the refresh; the rows loaded before stay.
+                const blocked = reportIntegrityError(err, { source: 'store load' });
+                const kept = (blocked || isNetworkError(err)) && this._data?.length > 0 && !this.isModified;
                 this.setError(isAuthError(err) ? 'Sign in again to load this data.'
+                    : blocked ? INTEGRITY_LOAD
                     : isNetworkError(err) ? (kept ? NO_ANSWER_RELOAD : NO_ANSWER_LOAD)
                     : (err.message || 'Failed to load data'));
                 if (!kept) {
@@ -731,6 +750,9 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
                 if (lockMatch) {
                     this.lockConflictOwner = lockMatch[1];
                     this.setError(null);
+                } else if (reportIntegrityError(err, { write: true, source: 'store save' })) {
+                    // Saving is off until a refresh (the app banner), which keeps these edits
+                    this.setError(INTEGRITY_SAVE);
                 } else {
                     this.setError(isNetworkError(err) ? NO_ANSWER_SAVE : (err.message || 'Failed to save data'));
                 }
@@ -1062,8 +1084,8 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
                                 const inputValue = findSourceValue(item, config.sourceColumns, null, config.extractColumnsAsObject);
                                 
                                 if (inputValue !== null || config.passFullItem) {
-                                    // Use full item if passFullItem is true, otherwise use extracted value
-                                    const firstParam = config.passFullItem ? item : inputValue;
+                                    // The extracted value, the whole row, or the named fields (analysisInput)
+                                    const firstParam = analysisInput(config, item, inputValue);
                                     const apiParams = [firstParam, ...(config.additionalParams || [])];
                                     recordAnalysisKey(config, apiParams, item);
 
@@ -1138,8 +1160,8 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
                                             config.needsParentContext ? parentItem : null, config.extractColumnsAsObject);
                                         
                                         if (inputValue !== null || config.passFullItem) {
-                                            // Use full item if passFullItem is true, otherwise use extracted value
-                                            const firstParam = config.passFullItem ? nestedItem : inputValue;
+                                            // The extracted value, the whole row, or the named fields (analysisInput)
+                                            const firstParam = analysisInput(config, nestedItem, inputValue);
                                             const apiParams = [firstParam, ...(config.additionalParams || [])];
                                             recordAnalysisKey(config, apiParams, nestedItem, config.needsParentContext ? parentItem : null);
 
@@ -1230,7 +1252,7 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
                     const byArgs = analysisKeyIndex.get(id);
                     if (!config || !byArgs) continue;
                     const seen = new Set();
-                    const wanted = keys.has('*') || config.passFullItem ? [...byArgs.keys()] : [...keys];
+                    const wanted = keys.has('*') || config.passFullItem === true ? [...byArgs.keys()] : [...keys];
                     for (const k of wanted) {
                         for (const [item, parentItem] of byArgs.get(k) || []) {
                             if (seen.has(item) || !this._data.length) continue;
@@ -1247,7 +1269,7 @@ export function createReactiveStore(apiCall = null, saveCall = null, apiArgs = [
                         try {
                             const inputValue = findSourceValue(item, config.sourceColumns, parentItem, config.extractColumnsAsObject);
                             if (inputValue === null && !config.passFullItem) return;
-                            const apiParams = [config.passFullItem ? item : inputValue, ...(config.additionalParams || [])];
+                            const apiParams = [analysisInput(config, item, inputValue), ...(config.additionalParams || [])];
                             recordAnalysisKey(config, apiParams, item, parentItem);
                             const result = await PriorityQueue.enqueue(
                                 config.apiFunction,
@@ -2309,7 +2331,9 @@ function setupCacheInvalidationListeners(store, apiCall, apiArgs, analysisConfig
  * @param {string|Array<string>} sourceColumns - Column(s) to extract value from (ordered array for priority)
  * @param {Array} additionalParams - Additional parameters to pass to API function
  * @param {string} targetColumn - Optional: column name to store results directly in data (not AppData)
- * @param {boolean} passFullItem - If true, pass entire item as first param instead of extracted value
+ * @param {boolean|Array<string>} passFullItem - True: pass the entire item as first param instead of
+ *   the extracted value. An array of field names: pass only those fields of the item (analysisInput),
+ *   which keeps the cache key to what the call reads. sourceColumns still pick the rows it runs on.
  * @param {number} priority - Priority level (0-9, default: Priority.ANALYSIS=1)
  * @param {boolean} extractColumnsAsObject - If true and sourceColumns has multiple items, extract all as {col1, col2, ...} object
  * @param {boolean} essential - If true (default), this analysis is essential and runs even when onlyRunEssentialAnalysis is enabled
@@ -2324,7 +2348,7 @@ export function createAnalysisConfig(apiFunction, resultKey, label, sourceColumn
         sourceColumns: Array.isArray(sourceColumns) ? sourceColumns : (sourceColumns ? [sourceColumns] : []),
         additionalParams,
         targetColumn, // If set, results go to this column instead of AppData
-        passFullItem, // If true, pass entire item even when sourceColumns specified
+        passFullItem, // True: the entire item even when sourceColumns specified; field names: only those
         extractColumnsAsObject, // If true, extract multiple sourceColumns into {col1, col2, ...} object
         priority, // Priority level for queue processing
         essential // If true, runs even when onlyRunEssentialAnalysis is enabled

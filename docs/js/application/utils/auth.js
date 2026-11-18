@@ -8,7 +8,7 @@ import { reloadErrorStores } from './reactiveStores.js';
 import { restartCacheTimestampPoller } from '../../data_management/utils/caching.js';
 import { networkState, onConnectionChange } from '../../data_management/utils/networkState.js';
 
-export { AUTH_STATUS, isAuthError, isNetworkError } from '../../data_management/services.js';
+export { AUTH_STATUS, isAuthError, isNetworkError, isIntegrityError } from '../../data_management/services.js';
 
 /**
  * Reactive authentication state, mirrored from the session.

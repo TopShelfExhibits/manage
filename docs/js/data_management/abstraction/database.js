@@ -182,7 +182,8 @@ class database_uncached {
 
     /* MUTATION FUNCTIONS */
     // Every write (uploadItemImage too) starts with assertAppCurrent(): a session running an
-    // out-of-date version (a newer deploy is live) never writes shared data. Only the session's own
+    // out-of-date version (a newer deploy is live), or one where a write tried to change a frozen
+    // cached value (reportIntegrityError), never writes shared data. Only the session's own
     // bookkeeping (user data, short links) passes `bookkeeping: true` to setData and createTab.
 
 
@@ -195,7 +196,7 @@ class database_uncached {
      * @param {Object} [mapping] - Optional mapping for object keys to sheet headers
      * @param {Object} [options] - Optional parameters for edithistory tracking
      * @param {boolean} [options.bookkeeping] - The session's own bookkeeping (user data, short links):
-     *   allowed while the app is out of date (assertAppCurrent)
+     *   allowed while saving is off (assertAppCurrent)
      * @param {string} [options.username] - Username making the change
      * @param {boolean} [options.skipMetadata] - Skip edithistory generation (caller manages EditHistory itself)
      * @param {string} [options.source] - Source for history entries ('web' | 'cad', or an inventory note)

@@ -29,7 +29,7 @@
  */
 
 import { Requests } from '../data_management/api.js';
-import { isAppOutdated, checkAppVersion, holdScheduledPolls } from '../data_management/index.js';
+import { isAppOutdated, checkAppVersion, holdScheduledPolls, reportIntegrityError, areWritesHeld, releaseWritesHeld } from '../data_management/index.js';
 import { FakeSignInService, FakeSignInWindow, FakeGoogleSheetsService, FakeGoogleState, FakeDropboxFiles, setFakeDelaysEnabled } from '../google_sheets_services/FakeGoogle.js';
 import { AuthSession } from '../auth/AuthSession.js';
 import { refreshAppData } from './fakeGoogleDevTools.js';
@@ -52,14 +52,15 @@ import { todayISOString, setTestToday, startOfTodayMs, resolveShortageAlertDays,
 import { instantWriteEntry, identityKey, cellKey, joinKey } from '../data_management/utils/instant-write-config.js';
 import { estimateShipDate } from '../data_management/utils/ship-date.js';
 import { parseA1Range, gridNeeded, clipRangeToGrid, isGridLimitError } from '../google_sheets_services/gridRanges.js';
-import { AUTH_STATUS, classifyError, isAuthError, isNetworkError } from '../auth/authStatus.js';
+import { AUTH_STATUS, classifyError, isAuthError, isNetworkError, isIntegrityError } from '../auth/authStatus.js';
 import { GoogleSheetsService as RealSheetsService } from '../google_sheets_services/GoogleSheetsData.js';
 import { networkState, CONNECTION, trackRequest, checkConnection, onConnectionChange, resetConnection } from '../data_management/utils/networkState.js';
 import { SEVERITY, remainingSeverity } from '../data_management/utils/severity.js';
 import { severityColor, statusColor } from '../application/utils/severity.js';
 import { getAutoColorClass } from '../application/utils/autoColor.js';
 import { getReactiveStore, createAnalysisConfig, itemVariantCards, itemShortageCards, NavigationRegistry, isMarkedForDeletion, paramToggleValue, isTemporaryAdmin, undoRegistry } from '../application/index.js';
-import { calculateStoreDiff, applyDiffToData, saveDirtyStoresToUserData } from '../application/utils/reactiveStores.js';
+import { calculateStoreDiff, applyDiffToData, saveDirtyStoresToUserData, createReactiveStore } from '../application/utils/reactiveStores.js';
+import { sheetLockMixin } from '../application/utils/sheetLockMixin.js';
 import { notificationBus } from '../application/utils/notificationBus.js';
 import { findScope, carriesSearch, withoutSearch } from '../application/utils/findScopes.js';
 import { normalizeLayout, freeCells, freeGroupSlots, isFull, firstFreeSlot, planMove, planResize, planSlotDrop, planSlotResize, resizeRect, transpose, clampRect, classesForSize, sizeFromClasses } from '../application/utils/dashboardLayout.js';
@@ -428,6 +429,192 @@ test('CONNECTION', 'a lock read with no answer fails; it is not cached as nothin
     await _restoreConnection();
     assertEqual((await Requests.getSheetLock('PACK_LISTS', 'ATSC 2025 NAB'))?.user, 'locked.user@example.com', 'the lock, once back');
 }));
+
+// ── Data integrity ───────────────────────────────────────────────────────────
+// Cached values are frozen (caching.js), so code that changes one throws a TypeError where it
+// does (classifyError 'integrity') and the value stays as read. reportIntegrityError announces it
+// once ('dataIntegrityError'); one inside a write turns saving off (assertAppCurrent: DATA_INTEGRITY)
+// until a refresh, while bookkeeping still writes. It is never taken for a lost connection, retried,
+// or shown as "can't reach Google". _integrityRig builds a synthetic cached read
+// ([{ item: 'A-1', qty: 1 }]) with a buggy read (changes what it read) and a buggy write (appends to
+// it). Expected: frozen values, one announcement per error, saving off only after a write, the app
+// banner's refresh waiting for the connection while unreachable, locks taken one at a time (two new
+// keys get their own rows), stores holding their own copies of cached rows, and an analysis given
+// field names receiving only those fields.
+
+let _integrityCount = 0;
+function _integrityRig() {
+    const ns = `integrityRig${++_integrityCount}`;
+    const T = wrapMethods(class {
+        static async read() { return [{ item: 'A-1', qty: 1 }]; }
+        static async badRead(deps) { const rows = await deps.call(T.read); rows[0].qty++; return rows; }
+        static async badWrite() { const rows = await T.read(); rows.push({ item: 'B-2', qty: 1 }); return true; }
+    }, ns, ['badWrite']);
+    return { T, ns };
+}
+// Collects the announcements made during fn, then turns saving back on and clears the app banner
+async function _withIntegrityEvents(fn) {
+    const heard = [];
+    const listen = (event) => heard.push(event.detail);
+    window.addEventListener('dataIntegrityError', listen);
+    try {
+        return await fn(heard);
+    } finally {
+        window.removeEventListener('dataIntegrityError', listen);
+        releaseWritesHeld();
+        const app = document.body._vnode?.component?.proxy;
+        if (app) { app.dataIntegrity = null; app.refreshQueued = false; }
+    }
+}
+const _caught = (fn) => { try { fn(); } catch (e) { return e; } return null; };
+
+test('DATA INTEGRITY', 'classifyError: a blocked change is integrity, a failed fetch is network, any other TypeError a bug', async () => {
+    const frozen = Object.freeze({ list: Object.freeze([1]) });
+    const engine = [
+        _caught(() => { frozen.list.push(2); }),
+        _caught(() => { frozen.extra = 1; }),
+        _caught(() => { delete frozen.list; }),
+        _caught(() => { frozen.list[0] = 5; })
+    ];
+    const kinds = [
+        ...engine.map(classifyError),
+        ...['"x" is read-only', 'Attempted to assign to readonly property.', 'can\'t define property "x": Object is not extensible'].map(m => classifyError(new TypeError(m))),
+        ...['Failed to fetch', 'NetworkError when attempting to fetch resource.', 'Load failed'].map(m => classifyError(new TypeError(m))),
+        classifyError(_caught(() => { const nothing = null; return nothing.field; }))
+    ];
+    assertEqual(kinds, ['integrity', 'integrity', 'integrity', 'integrity', 'integrity', 'integrity', 'integrity', 'network', 'network', 'network', 'other'], 'kinds');
+});
+
+test('DATA INTEGRITY', 'a cached value is frozen all the way down; a change throws and every reader keeps the value as read', async () => {
+    const { T } = _integrityRig();
+    const first = await T.read();
+    const error = _caught(() => { first[0].qty = 99; });
+    const again = await T.read();
+    assertEqual([Object.isFrozen(first), Object.isFrozen(first[0]), isIntegrityError(error), again[0].qty, again === first], [true, true, true, 1, true], 'frozen, blocked, unchanged');
+});
+
+test('DATA INTEGRITY', 'a blocked change in a read is announced once; saving stays on, the connection online', () => _withConnectionReset(() => _withIntegrityEvents(async (heard) => {
+    const { T, ns } = _integrityRig();
+    let error = null;
+    try { await T.badRead(); } catch (e) { error = e; }
+    assertEqual([isIntegrityError(error), isNetworkError(error), heard.map(h => [h.write, h.source]), areWritesHeld(), networkState.status],
+        [true, false, [[false, `${ns}.badRead`]], false, CONNECTION.ONLINE], 'announced as a read');
+})));
+
+test('DATA INTEGRITY', 'a blocked change in a write turns saving off: data writes refuse, bookkeeping still writes', () => _withIntegrityEvents(async (heard) => {
+    const { T } = _integrityRig();
+    const shelves = await Database.getData('INVENTORY', 'SHELVES', DEFAULT_INVENTORY_MAPPING);
+    let error = null;
+    try { await T.badWrite(); } catch (e) { error = e; }
+    // The same rows written back: harmless if the refusal failed
+    let refused = null;
+    try { await Database.setData('INVENTORY', 'SHELVES', shelves, DEFAULT_INVENTORY_MAPPING, { skipMetadata: true }); } catch (e) { refused = e; }
+    let backup = 'written';
+    try { await Requests.storeUserData({ probe: 1 }, 'test@example.com', 'integrity_probe'); } catch (e) { backup = e.message; }
+    assertEqual([isIntegrityError(error), heard.map(h => h.write), areWritesHeld(), refused?.code, backup], [true, [true], true, 'DATA_INTEGRITY', 'written'], 'saving off, backups on');
+}));
+
+test('DATA INTEGRITY', 'the Sheets service throws a blocked change at once; it never counts as no answer', () => _withConnectionReset(async () => {
+    const frozen = Object.freeze([]);
+    let calls = 0;
+    let error = null;
+    // Two in a row would mark Google unreachable if they counted as no answer
+    for (let i = 0; i < 2; i++) {
+        try { await RealSheetsService.withExponentialBackoff(async () => { calls++; frozen.push(1); }, { initialDelay: 1 }); } catch (e) { error = e; }
+    }
+    let bugCalls = 0;
+    let bug = null;
+    try { await RealSheetsService.withExponentialBackoff(async () => { bugCalls++; const nothing = null; return nothing.field; }, { initialDelay: 1 }); } catch (e) { bug = e; }
+    assertEqual([isIntegrityError(error), calls, classifyError(bug), bugCalls, networkState.status], [true, 2, 'other', 1, CONNECTION.ONLINE], 'thrown at once, still online');
+}));
+
+test('DATA INTEGRITY', "a store load that hits a blocked change says so, never \"can't reach Google\"", () => _withConnectionReset(() => _withIntegrityEvents(async (heard) => {
+    const { T } = _integrityRig();
+    const store = createReactiveStore(T.badRead, null, []);
+    await store.load('Loading...');
+    assertEqual([String(store.error).startsWith("This didn't load: the app blocked a change"), heard.map(h => h.write), networkState.status], [true, [false], CONNECTION.ONLINE], 'load');
+})));
+
+test('DATA INTEGRITY', 'a store save that hits a blocked change keeps its edits and turns saving off; the cache holds no AppData', () => _withIntegrityEvents(async (heard) => {
+    const { T } = _integrityRig();
+    const store = createReactiveStore(T.read, T.badWrite, []);
+    await store.load('Loading...');
+    store.data[0].qty = 2;                       // the store's own copy: editable
+    const saved = await store.save('Saving...');
+    const cached = await T.read();
+    assertEqual([saved, store.data[0].qty, store.isModified, String(store.error).startsWith('Nothing was saved'), areWritesHeld(), heard.map(h => h.write), 'AppData' in cached[0]],
+        [false, 2, true, true, true, [true], false], 'edits kept, saving off');
+}));
+
+test('DATA INTEGRITY', 'a blocked change while taking a lock keeps the edit, never retries, and turns saving off', () => _withIntegrityEvents(async (heard) => {
+    const grid = await ApplicationUtils.getLocksData();   // cached: frozen
+    let retried = false;
+    let reverted = false;
+    const page = {
+        lockNamespace: 'INTEGRITY_TEST', lockKey: 'C', isLocked: false, _lockRequest: null,
+        setLockState() {}, _retryLockWhenConnected() { retried = true; }, $modal: { alert() {} },
+        acquireLockForEdit: sheetLockMixin.methods.acquireLockForEdit,
+        _requestLock: sheetLockMixin.methods._requestLock
+    };
+    // A bug in the lock write: it changes the cached grid
+    FakeGoogleSheetsService.faults = { beforeWrite: () => { grid.lockKeys.push('stray'); } };
+    let stands;
+    try {
+        stands = await _asUser(() => sheetLockMixin.methods.editWithLock.call(page, () => {}, () => { reverted = true; }));
+    } finally {
+        FakeGoogleSheetsService.faults = null;
+    }
+    assertEqual([stands, reverted, retried, areWritesHeld(), heard.map(h => h.write)], [true, false, false, true, [true]], 'kept, not retried, saving off');
+}));
+
+test('DATA INTEGRITY', 'two locks on new keys taken at once get their own rows', async () => {
+    const user = 'test@example.com';
+    const [a, b] = await Promise.all([Requests.lockSheet('INTEGRITY_TEST', 'A', user), Requests.lockSheet('INTEGRITY_TEST', 'B', user)]);
+    const grid = await ApplicationUtils.getLocksData();
+    const rows = ['INTEGRITY_TEST:A', 'INTEGRITY_TEST:B'].map(key => grid.lockKeys.indexOf(key));
+    const owners = ['A', 'B'].map(tab => grid.locks.find(lock => lock.spreadsheet === 'INTEGRITY_TEST' && lock.tab === tab && lock.timestamp && lock.timestamp !== '0')?.user);
+    await Requests.unlockSheet('INTEGRITY_TEST', 'A', user);
+    await Requests.unlockSheet('INTEGRITY_TEST', 'B', user);
+    assertEqual([a, b, rows[0] >= 0 && rows[1] >= 0 && rows[0] !== rows[1], owners], [true, true, true, [user, user]], 'both locked, each on its own row');
+});
+
+test('DATA INTEGRITY', 'stores copy cached rows: each store its own row ids, the original sharing them, the cache none', async () => {
+    const args = ['SHELVES', undefined, undefined, undefined];
+    const editable = createReactiveStore(Requests.getInventoryTabData, Requests.saveInventoryTabData, args);
+    const readOnly = createReactiveStore(Requests.getInventoryTabData, null, args);
+    await editable.load('Loading...');
+    await readOnly.load('Loading...');
+    const cached = await Requests.getInventoryTabData(...args);
+    assertEqual([editable.data[0].AppData._rowId === readOnly.data[0].AppData._rowId, editable.originalData[0].AppData._rowId === editable.data[0].AppData._rowId, 'AppData' in cached[0], Object.isFrozen(cached[0])],
+        [false, true, false, true], 'own ids, a frozen cache without them');
+});
+
+test('DATA INTEGRITY', 'an analysis given field names gets only those fields of the row', async () => {
+    const calls = [];
+    const A = wrapMethods(class {
+        static async check(deps, item, extra) { calls.push([item, extra]); return item.Code ? `ok ${item.Code}` : null; }
+    }, `integrityAnalysis${++_integrityCount}`);
+    const store = createReactiveStore(async () => [{ Description: 'x', Code: 'C-1', Other: 'y' }], null, [],
+        [createAnalysisConfig(A.check, 'checked', 'Checking', ['Description'], ['P'], null, ['Code'])]);
+    await store.load('Loading...');
+    for (let i = 0; i < 100 && store.isAnalyzing; i++) await _sleep(20);
+    assertEqual([calls, store.data[0].AppData.checked], [[[{ Code: 'C-1' }, 'P']], 'ok C-1'], 'only Code');
+});
+
+test('DATA INTEGRITY', 'the app banner offers Refresh Now; while Google is unreachable the refresh waits for it', () => _withConnectionReset(() => _withIntegrityEvents(async () => {
+    const app = document.body._vnode.component.proxy;
+    reportIntegrityError(new TypeError('Cannot add property 0, object is not extensible'), { source: 'test read' });
+    await Vue.nextTick();
+    const read = { ...app.integrityBanner };
+    reportIntegrityError(new TypeError('Cannot add property 0, object is not extensible'), { write: true, source: 'test write' });
+    await Vue.nextTick();
+    const write = { ...app.integrityBanner };
+    _dropConnection();
+    await Vue.nextTick();
+    const offline = { ...app.integrityBanner };
+    assertEqual([read.visible, read.dismissible, read.action?.label, write.dismissible, write.action?.label, offline.action?.label],
+        [true, true, 'Refresh Now', false, 'Refresh Now', 'Refresh when connected'], 'banner');
+})));
 
 // ── Dropbox ──────────────────────────────────────────────────────────────────
 // A show's output PDFs from the company Dropbox (DropboxUtils, through the sign-in service; faked

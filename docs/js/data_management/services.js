@@ -17,7 +17,7 @@ export const { GoogleSheetsService, DropboxFiles } = services;
 if (isLocalhost()) AuthSession.use(services.fakeSignIn);
 
 export { AuthSession };
-export { AUTH_STATUS, classifyError, isAuthError, isNetworkError } from '../auth/authStatus.js';
+export { AUTH_STATUS, classifyError, isAuthError, isNetworkError, isIntegrityError } from '../auth/authStatus.js';
 
 // The connection monitor asks the services whether Google answers (networkState.js)
 setConnectionProbe(() => GoogleSheetsService.probeConnection());

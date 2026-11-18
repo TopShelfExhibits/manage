@@ -25,8 +25,8 @@ function _loadScript(src) {
         const script = document.createElement('script');
         script.src = src;
         script.onload = resolve;
-        // A TypeError, like fetch's: no connection (classifyError → 'network')
-        script.onerror = () => reject(new TypeError(`Could not load ${src}`));
+        // No answer, marked as the API library marks one (code -1): classifyError → 'network'
+        script.onerror = () => reject(Object.assign(new Error(`Could not load ${src}`), { status: -1 }));
         document.head.appendChild(script);
     });
 }
@@ -156,8 +156,9 @@ export class GoogleSheetsService {
                     }
                     throw err;
                 }
-                // Retrying won't help: the account lacks access
-                if (kind === 'permission') throw err;
+                // Retrying won't help: the account lacks access, or the code has a bug (a blocked
+                // change to cached data, or any TypeError that isn't a failed fetch)
+                if (kind === 'permission' || kind === 'integrity' || (kind === 'other' && err instanceof TypeError)) throw err;
                 // No answer: once Google is known to be unreachable, waiting callers take over
                 // (held edits, stores reloading on reconnect)
                 if (kind === 'network' && (once || networkState.isOffline)) throw err;
