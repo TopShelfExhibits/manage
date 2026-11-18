@@ -664,7 +664,7 @@ There are two scopes, each with the same three tiers.
   - Both bands are harmless because views follow the container, not the viewport.
 - **Height:** one CSS-only tier, `short`: height < 500px (`BREAKPOINTS.short`, the R3.1 threshold). The `short` view flag stays dropped (R6.6): it changes styles, not views.
   - The height containers are named `height-container`: each dashboard card (`container-type: size`; its size comes from its grid cell) and `#app-content` (its size comes from its fixed insets), so on a full page it is the viewport below the navbar. Modals have no height container and are never short.
-  - Short containers draw table headers compact: `.content-header` and `thead th` lose most of their top and bottom padding.
+  - Short containers draw bars and table headers compact: `.content-header`, `.content-footer` and `thead th` lose most of their top and bottom padding. The bars' padding is one property, `--bar-padding-block`, which their absolutely placed buttons (`.column-button`, such as a card's pin) read, so they stay inside the shorter bar.
 
 **Constants**
 

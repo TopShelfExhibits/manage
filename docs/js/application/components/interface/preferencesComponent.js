@@ -162,10 +162,15 @@ const PreferencesEditModal = {
     `
 };
 
+// The page's global parameters in its menu: a View Parameters button first, then their values with
+// Edit. The menu is built each time it opens, so it opens on the button again.
 export const PreferencesMenuComponent = {
     name: 'PreferencesMenuComponent',
     props: {
         containerPath: { type: String, required: true }
+    },
+    data() {
+        return { showing: false };
     },
     computed: {
         prefsStore() {
@@ -199,7 +204,8 @@ export const PreferencesMenuComponent = {
         }
     },
     template: html`
-        <div v-if="matchingPreferences.length > 0" class="preferences-menu-section">
+        <button v-if="matchingPreferences.length > 0 && !showing" @click="showing = true">View Parameters</button>
+        <div v-else-if="matchingPreferences.length > 0" class="preferences-menu-section">
             <button @click="openEditModal">Edit Global Parameters</button>
             <div class="card details-grid" style="--details-grid-min-column-width: 140px;">
                 <div v-for="pref in matchingPreferences" :key="pref.id" class="detail-item">

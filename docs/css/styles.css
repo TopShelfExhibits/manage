@@ -580,13 +580,16 @@ div#app-content > .sign-in-card {
     box-sizing: border-box;
 }
 
+/* Header and footer bars: their top and bottom padding is --bar-padding-block, which the short tier
+   reduces and their absolutely placed buttons (.column-button) read */
 .content-header {
+    --bar-padding-block: var(--padding-md);
     display: flex;
     flex-wrap: wrap;
     gap: var(--padding-sm);
     justify-content: space-between;
     align-items: center;
-    padding: var(--padding-md);
+    padding: var(--bar-padding-block) var(--padding-md);
     background-color: var(--color-gray-bg);
     border: 1px solid var(--color-border);
     width: 100%;
@@ -597,6 +600,14 @@ div#app-content > .sign-in-card {
 .content-header:has(.button-bar:only-child) {
     justify-content: right;
 } 
+/* Bars sized by their content (a page's header-area bar, the arrange bar), where width 100% (every
+   button's) would wrap a text button's label: it sizes to its label, kept on one line (a header
+   bar moves to its own line instead) */
+.content-header > .button-bar > button:not(.button-symbol),
+.dashboard-arrange-bar > button:not(.button-symbol) {
+    width: auto;
+    white-space: nowrap;
+}
 .content-header:has(+ .content-footer),
 .content-header:has(+ .content-header),
 .sticky-header-wrapper:has(+ .content-footer) .content-header,
@@ -609,12 +620,13 @@ div#app-content > .sign-in-card {
     border-radius: 0;
 }
 .content-footer {
+    --bar-padding-block: var(--padding-md);
     display: flex;
     flex-wrap: wrap;
     gap: var(--padding-md);
     justify-content: right;/*space-between;*/
     align-items: center;
-    padding: var(--padding-md);
+    padding: var(--bar-padding-block) var(--padding-md);
     background-color: var(--color-gray-bg);
     border: 1px solid var(--color-border);
     width: 100%;
@@ -1248,7 +1260,7 @@ td:has(.item-image-container) {
 
 .content-header > .column-button, .card > .column-button {
     right: var(--padding-md);
-    top: var(--padding-md);
+    top: var(--bar-padding-block, var(--padding-md));
 }
 
 thead:hover .column-button:not(.active), .input-container:hover .column-button:not(.active), div:hover>.column-button:not(.active), div:hover>.content-header>.column-button:not(.active) {
@@ -2111,6 +2123,7 @@ button.search-highlight {
     text-align: center;
     color: var(--color-text-light);
     font-style: italic;
+    user-select: none; /* status text, not content */
 }
 .loading-message img {
     display: inline-block;
@@ -2680,12 +2693,12 @@ td .cell-button-list > .card {
 }
 
 
-/* Short container tier (height < BREAKPOINTS.short): table headers lose most of their top and
-   bottom padding. The height container is the dashboard card, or #app-content on a full page
-   (modals have none, so they keep full headers). */
+/* Short container tier (height < BREAKPOINTS.short): header and footer bars and table headers lose
+   most of their top and bottom padding. The height container is the dashboard card, or
+   #app-content on a full page (modals have none, so they keep full bars). */
 @container height-container (height < 500px) {
-    .content-header {
-        padding-block: var(--padding-sm);
+    .content-header, .content-footer {
+        --bar-padding-block: var(--padding-sm);
     }
     thead th {
         padding-block: 0.15rem;
