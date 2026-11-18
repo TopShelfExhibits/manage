@@ -1,18 +1,19 @@
-import { html, DataView, Requests, getReactiveStore, InventoryCategoryFilter, invalidateCache } from '../../index.js';
+import { html, DataView, Requests, getReactiveStore, InventoryCategoryFilter, invalidateCache, NavigationRegistry, ProposalUtils, THUMBNAIL_FIELD, getItemThumbnailsStore, itemThumbnailMap, withItemThumbnails } from '../../index.js';
+import { thumbnailStyle } from '../../utils/views/viewStyles.js';
+import { getProposalsStore } from '../../utils/inventoryProposals.js';
 
-// What each projection month key is (Requests.getInventoryProjection). monthLabel is derived on a
-// computed copy; shortages is a list of { itemId, projected, stock, capacity, reuse, learned }.
+// What each projection row key is (Requests.getInventoryProjection): one item that runs short.
+// monthLabel is derived on a computed copy; thumbnail is the item's, joined by item number.
 const PROJECTION_FIELDS = [
     { key: 'monthLabel', label: 'Month' },
-    { key: 'shows', label: 'Shows booked', format: 'number', type: 'number' },
-    { key: 'scheduledSqft', label: 'Booked sq ft', format: 'number', type: 'number' },
-    { key: 'pastSqft', label: 'Past sq ft', format: 'number', type: 'number' },
-    { key: 'projectedSqft', label: 'Projected sq ft', format: 'number', type: 'number' },
-    { key: 'shortages', label: 'Likely shortages' }
+    THUMBNAIL_FIELD,
+    { key: 'itemId', label: 'Item#', type: 'item' },
+    { key: 'shortage', label: 'Shortage', format: 'number', type: 'number' },
+    { key: 'proposed', label: 'Proposed', format: 'number', type: 'number' }
 ];
 
-// Inventory projection view (views-and-renderers-plan §5): one row per month; the page draws the
-// shortage list (#cell)
+// Inventory projection view (views-and-renderers-plan §5): one row per item that runs short, the
+// soonest month first. Item# opens the item page; Proposed shows only with a proposal selected.
 const PROJECTION_VIEWS = {
     id: 'inventory-projection',
     default: 'table',
@@ -21,8 +22,14 @@ const PROJECTION_VIEWS = {
         id: 'table',
         name: 'Projection',
         layout: 'table',
-        columns: ['monthLabel', 'shows', 'scheduledSqft', 'pastSqft', 'projectedSqft', 'shortages'],
-        style: { monthLabel: { width: 90 }, shortages: { cell: 'slot' } }
+        columns: ['monthLabel', 'thumbnail', 'itemId', 'shortage', 'proposed'],
+        style: {
+            monthLabel: { width: 90 },
+            thumbnail: thumbnailStyle('itemId'),
+            itemId: { cell: 'action', cellOptions: { class: 'purple' } },
+            shortage: { color: 'sign:green:red' },
+            proposed: { color: 'sign:green:red' }
+        }
     }]
 };
 
@@ -31,13 +38,15 @@ const monthLabel = (month) => `${MONTH_NAMES[Number(month.slice(5, 7)) - 1]} ${m
 
 /**
  * Inventory projection report (reports/inventory-projection): for one inventory category, the
- * items likely to run short in each of the next 12 months, from the shows expected (booked, or the
- * same month in past years) and each item's recent use per square foot. The model and its
+ * items likely to run short over the next 12 months, from the shows expected (booked, or the same
+ * month in past years) and each item's recent use per square foot. A proposal (URL parameter
+ * `proposal`) adds a column with each shortage after its quantity changes. The model and its
  * settings: data_management/utils/inventory-projection.js; the settings are preference rows,
  * shown in the page menu (View Parameters).
  */
 export const InventoryProjectionReport = {
     components: { DataView, InventoryCategoryFilter },
+    inject: ['appContext'],
     props: {
         containerPath: { type: String, default: 'reports/inventory-projection' },
         navigateToPath: Function
@@ -47,13 +56,38 @@ export const InventoryProjectionReport = {
             category: null,
             projectionStore: null,
             basisStore: null,
+            proposalsStore: getProposalsStore(),
+            itemThumbnailsStore: getItemThumbnailsStore(),
             PROJECTION_FIELDS,
             PROJECTION_VIEWS
         };
     },
     computed: {
+        proposal() {
+            return NavigationRegistry.getParametersForContainer(this.containerPath, this.appContext?.currentPath)?.proposal || '';
+        },
+        // Active proposals, most recently updated first
+        proposalNames() {
+            return ProposalUtils.groupProposals(this.proposalsStore?.data || []).filter(p => !p.committed).map(p => p.name);
+        },
+        projectionKey() {
+            return this.category ? JSON.stringify([this.category, this.proposal]) : '';
+        },
         rows() {
-            return (this.projectionStore?.data || []).map(row => ({ ...row, monthLabel: monthLabel(row.month) }));
+            const rows = (this.projectionStore?.data || []).map(row => ({ ...row, monthLabel: monthLabel(row.month) }));
+            return withItemThumbnails(rows, 'itemId', itemThumbnailMap(this.itemThumbnailsStore?.data));
+        },
+        // Proposed shows only with a proposal selected
+        viewPatches() {
+            if (this.proposal) return [];
+            return [{ patch: { columns: PROJECTION_VIEWS.views[0].columns.filter(k => k !== 'proposed'), hidden: ['proposed'] } }];
+        },
+        // Item# opens the item page
+        itemAction() {
+            return {
+                to: (row) => (this.category && row.itemId ? `inventory/${this.category.toLowerCase()}/${row.itemId}` : null),
+                title: 'View item'
+            };
         },
         basis() {
             return this.basisStore?.data?.[0] || null;
@@ -75,14 +109,24 @@ export const InventoryProjectionReport = {
             return !!(this.projectionStore?.isLoading || this.basisStore?.isLoading);
         },
         emptyMessage() {
-            return this.category ? 'No months to show.' : 'Choose an inventory category to project.';
+            return this.category ? 'No likely shortages in the next 12 months.' : 'Choose an inventory category to project.';
+        }
+    },
+    watch: {
+        projectionKey: {
+            immediate: true,
+            handler() {
+                this.projectionStore = this.category ? getReactiveStore(Requests.getInventoryProjection, null, [this.category, this.proposal]) : null;
+            }
         }
     },
     methods: {
         handleCategorySelected(category) {
             this.category = category || null;
-            this.projectionStore = this.category ? getReactiveStore(Requests.getInventoryProjection, null, [this.category]) : null;
             this.basisStore = this.category ? getReactiveStore(Requests.getInventoryProjectionBasis, null, [this.category]) : null;
+        },
+        selectProposal(name) {
+            NavigationRegistry.updateContainerParams(this.containerPath, this.appContext?.currentPath, { proposal: name || undefined }, this.navigateToPath);
         },
         handleRefresh() {
             invalidateCache([
@@ -91,11 +135,6 @@ export const InventoryProjectionReport = {
                 { namespace: 'database', methodName: 'getData', args: ['PACK_LISTS'] },
                 { namespace: 'database', methodName: 'getTabs', args: ['PACK_LISTS'] }
             ]);
-        },
-        shortageTitle(shortage) {
-            return shortage.learned
-                ? `Reuse ${shortage.reuse}× a month, learned from recent use`
-                : `Reuse ${shortage.reuse}× a month (fallback: too little recent use or stock to learn it)`;
         }
     },
     template: html`
@@ -109,6 +148,8 @@ export const InventoryProjectionReport = {
             :fields="PROJECTION_FIELDS"
             :rows="rows"
             :registry="PROJECTION_VIEWS"
+            :patches="viewPatches"
+            :action="itemAction"
             :container-path="containerPath"
             :navigate-to-path="navigateToPath"
             title="Inventory Projection"
@@ -125,15 +166,11 @@ export const InventoryProjectionReport = {
                         :navigate-to-path="navigateToPath"
                         @category-selected="handleCategorySelected"
                     />
+                    <select :value="proposal" title="Apply a proposal's quantity changes" @change="selectProposal($event.target.value)">
+                        <option value="">Select Proposal</option>
+                        <option v-for="name in proposalNames" :key="name" :value="name">{{ name }}</option>
+                    </select>
                 </div>
-            </template>
-            <template #cell="{ row, field }">
-                <span v-if="field.key === 'shortages' && !row.shortages.length">—</span>
-                <ul v-else-if="field.key === 'shortages'">
-                    <li v-for="shortage in row.shortages" :key="shortage.itemId" :title="shortageTitle(shortage)">
-                        <strong>{{ shortage.itemId }}</strong>: about {{ shortage.projected }} needed, {{ shortage.stock }} in stock
-                    </li>
-                </ul>
             </template>
         </DataView>
     `,

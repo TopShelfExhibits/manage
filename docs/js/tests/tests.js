@@ -49,7 +49,7 @@ import { applyColorRule, colorFor, rowColorFor } from '../application/utils/view
 import { containerTier, BREAKPOINTS } from '../application/utils/useContainerSize.js';
 import { createScrollHider } from '../application/utils/scrollHider.js';
 import { DEFAULT_DASHBOARD } from '../application/utils/dashboardLayout.js';
-import { parseBoothSquareFeet, monthOf, addMonths, monthRange, peakConcurrentUse, resolveProjectionSettings, itemReuse, projectInventory } from '../data_management/utils/inventory-projection.js';
+import { parseBoothSquareFeet, monthOf, addMonths, monthRange, peakConcurrentUse, resolveProjectionSettings, itemReuse, projectInventory, itemShortages } from '../data_management/utils/inventory-projection.js';
 import { redirectPath } from '../application/utils/urlRouter.js';
 import { todayISOString, setTestToday, startOfTodayMs, resolveShortageAlertDays, shortageAlertDateFilters, INVENTORY_TAB_PREFERENCES, resolveInventoryTabList, itemVariantBase, resolveItemVariant, itemVariantFamilies, itemVariantKey, parseItemVariants, searchFilter, textFiltersToSearchParams, parseSearchParameters } from '../data_management/utils/helpers.js';
 import { instantWriteEntry, identityKey, cellKey, joinKey } from '../data_management/utils/instant-write-config.js';
@@ -6354,6 +6354,9 @@ test('INVENTORY TAB PREFERENCES', 'custom item numbers match whole item numbers 
 //   (1200 sq ft) has pack lists holding 12 CAB-004, so CAB-004 = 12 + 22/1200 × 1400 = 37.7.
 //   Jan 2026: 2 shows booked (300 sq ft, no pack lists); Jan 2025 shipped 5700 sq ft (500 + 900 +
 //   600 + 600 + 2400 + 600 + 100) → projected 5700: CAB-004 22/1200 × 5700 = 104.5, CAB-005 9.5.
+//   Report rows: CAB-004 first short in Aug 2025, deepest in Jan 2026: 10 - 104.5 → -95; CAB-005
+//   short only in Jan 2026: 6 - 9.5 → -4. The proposal test saves its own proposal (the proposal
+//   groups before it change the fixture proposals): CAB-004 +100 → 5, CAB-005 +2 → -2.
 
 const PROJECTION_TODAY = '2025-04-01';
 const DEFAULT_PROJECTION_SETTINGS = { usageMonths: 3, historyYears: 1, growthFactor: 1, reuseFallback: 1, maxReuse: 4, learnMinUsage: 10, learnMinStock: 5, defaultSquareFeet: 0, minShortfall: 1 };
@@ -6417,9 +6420,14 @@ test('INVENTORY PROJECTION', 'projectInventory: expected volume, pack list use p
         { month: '2025-06', shows: 2, scheduledSqft: 1000, pastSqft: 800, projectedSqft: 1000 },
         { month: '2025-07', shows: 0, scheduledSqft: 0, pastSqft: 2000, projectedSqft: 2000 }
     ], 'booked when larger, else the past year');
-    assertEqual(months[0].shortages, [{ itemId: 'A', projected: 35, stock: 20, capacity: 33.3, reuse: 1.7, learned: true }], 'June: A 5 + 0.05 × 600 = 35 over 33.3; B 1.2 within 3');
+    assertEqual(months[0].shortages, [{ itemId: 'A', projected: 35, stock: 20, capacity: 33.3, reuse: 1.7, learned: true, short: -1 }], 'June: A 5 + 0.05 × 600 = 35 over 33.3 (needs 21 items, has 20); B 1.2 within 3');
     assertEqual(months[1].shortages.map(s => [s.itemId, s.projected, s.capacity]), [['A', 100, 33.3], ['B', 4, 3]], 'July: largest shortfall first; B short by exactly the minimum');
     assertEqual(items.map(i => [i.itemId, i.rate, i.learned]), [['A', 0.05, true], ['B', 0.002, false], ['C', 0.01, false]], 'rates and reuse');
+    assertEqual(itemShortages(months), [
+        { itemId: 'A', month: '2025-06', shortage: -40, proposed: null },
+        { itemId: 'B', month: '2025-07', shortage: -1, proposed: null }
+    ], 'one row per item: its first short month, its deepest shortage (A: 20 - 100 / 1.67 in July)');
+    assertEqual(itemShortages(months, { A: 45, B: 0.5 }).map(r => [r.itemId, r.proposed]), [['A', 5], ['B', -1]], 'proposed: the shortage after the changes, rounded down');
     const twoYears = projectInventory({ months: ['2025-07'], scheduled: {}, pastSqft: { '2024-07': 2000, '2023-07': 1000 }, usageSqft: 0, items: [] }, { ...DEFAULT_PROJECTION_SETTINGS, historyYears: 2, growthFactor: 1.2 });
     assertEqual(twoYears.months[0].projectedSqft, 1800, 'two years averaged (1500), times growth 1.2');
 });
@@ -6447,7 +6455,7 @@ test('INVENTORY PROJECTION', 'what the CABINETS projection learned from', () => 
 }));
 
 test('INVENTORY PROJECTION', 'CABINETS months: booked or past volume, pack list use plus rate', () => _withProjectionToday(async () => {
-    const months = await Requests.getInventoryProjection('CABINETS');
+    const { months } = await Requests.getInventoryProjectionModel('CABINETS');
     assertEqual(months.map(m => m.month), monthRange('2025-04', 12), 'the next 12 months');
     const brief = (m) => ({ shows: m.shows, scheduledSqft: m.scheduledSqft, pastSqft: m.pastSqft, projectedSqft: m.projectedSqft, short: m.shortages.map(s => [s.itemId, s.projected, s.stock]) });
     const byMonth = Object.fromEntries(months.map(m => [m.month, brief(m)]));
@@ -6455,8 +6463,42 @@ test('INVENTORY PROJECTION', 'CABINETS months: booked or past volume, pack list 
     assertEqual(byMonth['2026-01'], { shows: 2, scheduledSqft: 300, pastSqft: 5700, projectedSqft: 5700, short: [['CAB-004', 104.5, 10], ['CAB-005', 9.5, 6]] }, 'January: last January sets the volume');
 }));
 
+test('INVENTORY PROJECTION', 'CABINETS report rows, with and without a proposal', () => _withProjectionToday(async () => {
+    assertEqual(await Requests.getInventoryProjection('CABINETS'), [
+        { itemId: 'CAB-004', month: '2025-08', shortage: -95, proposed: null },
+        { itemId: 'CAB-005', month: '2026-01', shortage: -4, proposed: null }
+    ], 'soonest first; the deepest shortage, rounded down');
+    const name = 'Projection test';
+    const proposed = async () => (await Requests.getInventoryProjection('CABINETS', name)).map(r => [r.itemId, r.shortage, r.proposed]);
+    try {
+        await _asUser(() => Requests.saveInventoryProposalTable([
+            { category: 'CABINETS', itemNumber: 'CAB-004', quantityChange: '100' },
+            { category: 'CABINETS', itemNumber: 'CAB-005', quantityChange: '2' },
+            { category: 'FURNITURE', itemNumber: 'CAB-005', quantityChange: '50' }
+        ], name));
+        assertEqual(await proposed(), [['CAB-004', -95, 5], ['CAB-005', -4, -2]], 'shortage after the proposal; its other tabs ignored');
+        await _asUser(() => Requests.saveInventoryProposalTable([{ category: 'CABINETS', itemNumber: 'CAB-005', quantityChange: '10' }], name));
+        assertEqual(await proposed(), [['CAB-004', -95, -95], ['CAB-005', -4, 6]], 'an edit to the proposal reaches the report');
+    } finally {
+        await _asUser(() => Requests.saveInventoryProposalTable([], name));
+    }
+}));
+
+test('INVENTORY PROJECTION', 'proposal quantity changes by item, active entries of one tab', () => {
+    const entries = ProposalUtils.parseRows([
+        { proposal: 'Buy', category: 'CABINETS', itemNumber: 'A', changes: '[{"n":"quantity","ne":"+3"},{"n":"notes","ne":"x"}]' },
+        { proposal: 'Buy', category: 'CABINETS', itemNumber: 'B', changes: '[{"n":"notes","ne":"y"}]' },
+        { proposal: 'Buy', category: 'FURNITURE', itemNumber: 'C', changes: '[{"n":"quantity","ne":"+5"}]' },
+        { proposal: 'Old', category: 'CABINETS', itemNumber: 'A', changes: '[{"n":"quantity","ne":"-2"}]', committed: '17890000000' }
+    ]);
+    assertEqual([
+        ProposalUtils.quantityDeltas(entries, 'BUY', 'CABINETS'),
+        ProposalUtils.quantityDeltas(entries, 'Old', 'CABINETS')
+    ], [{ A: 3 }, {}], 'names match ignoring case; no quantity change, other tabs and committed rows left out');
+});
+
 test('INVENTORY PROJECTION', 'preference rows tune the projection', () => _withProjectionToday(async () => {
-    const january = async () => (await Requests.getInventoryProjection('CABINETS')).find(m => m.month === '2026-01');
+    const january = async () => (await Requests.getInventoryProjectionModel('CABINETS')).months.find(m => m.month === '2026-01');
     try {
         await setPreference('ProjectionGrowthFactor', '2');
         const grown = await january();

@@ -13,7 +13,10 @@
  * - Reuse: how many times a month the stock can go out. Learned per item as its monthly use over
  *   its peak concurrent use (at least 1, at most `maxReuse`); `reuseFallback` instead when the item
  *   was used less than `learnMinUsage` times in the window or has less than `learnMinStock` in stock.
- * - Shortage: projected use above stock times reuse by at least `minShortfall`.
+ * - Shortage: projected use above stock times reuse by at least `minShortfall`. In items, stock
+ *   less the items that use needs (projected use over reuse).
+ * The report lists each item that runs short once (itemShortages): the first month it does, and the
+ * most it falls short by from then on.
  * A transship chain counts once, at its root: its pack list items are the chain's (the peak across
  * its shows), so its square feet are the root's.
  */
@@ -123,6 +126,7 @@ export function itemReuse({ usage, peak, stock }, settings) {
 }
 
 const round1 = (n) => Math.round(n * 10) / 10;
+const round3 = (n) => Math.round(n * 1000) / 1000;
 
 /**
  * The projection, month by month.
@@ -157,7 +161,7 @@ export function projectInventory({ months, scheduled, pastSqft, usageSqft, items
             const projected = (item.known[month] || 0) + item.rate * uncoveredSqft;
             const capacity = stock * item.reuse;
             if (projected - capacity >= settings.minShortfall && projected > 0) {
-                shortages.push({ itemId: item.itemId, projected: round1(projected), stock, capacity: round1(capacity), reuse: round1(item.reuse), learned: item.learned });
+                shortages.push({ itemId: item.itemId, projected: round1(projected), stock, capacity: round1(capacity), reuse: round1(item.reuse), learned: item.learned, short: round3(stock - projected / item.reuse) });
             }
         }
         shortages.sort((a, b) => (b.projected - b.capacity) - (a.projected - a.capacity) || (a.itemId < b.itemId ? -1 : 1));
@@ -174,4 +178,29 @@ export function projectInventory({ months, scheduled, pastSqft, usageSqft, items
         months: rows,
         items: rated.map(({ itemId, usage, peak, rate, reuse, learned }) => ({ itemId, usage, peak, rate, reuse, learned }))
     };
+}
+
+/**
+ * One row per item that runs short (projectInventory months): the first month it does, and its
+ * shortage, the most it falls short by in that month or a later one, so adding that many covers
+ * the whole projection. Rounded down (short by 27.3 is -28). With quantity changes (a proposal's),
+ * `proposed` is the shortage after them; null without. Soonest month first, then the largest
+ * shortage.
+ * @param {Array<{month: string, shortages: Array<{itemId: string, short: number}>}>} months
+ * @param {Object<string, number>|null} [deltas] - Quantity change by item number
+ * @returns {Array<{itemId: string, month: string, shortage: number, proposed: number|null}>}
+ */
+export function itemShortages(months, deltas = null) {
+    const byItem = new Map();
+    for (const { month, shortages } of months) {
+        for (const { itemId, short } of shortages) {
+            const row = byItem.get(itemId);
+            if (row) row.short = Math.min(row.short, short);
+            else byItem.set(itemId, { itemId, month, short });
+        }
+    }
+    const down = (n) => Math.floor(n + 1e-9);
+    return [...byItem.values()]
+        .map(({ itemId, month, short }) => ({ itemId, month, shortage: down(short), proposed: deltas ? down(short + (deltas[itemId] || 0)) : null }))
+        .sort((a, b) => (a.month < b.month ? -1 : a.month > b.month ? 1 : (a.shortage - b.shortage) || (a.itemId < b.itemId ? -1 : 1)));
 }

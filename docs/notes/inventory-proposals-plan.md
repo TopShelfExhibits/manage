@@ -25,7 +25,7 @@
 
 ## Storage
 
-`CACHE` spreadsheet → `InventoryProposals` tab (created on first write). No other system reads CACHE tabs it does not know, and the tab has no `EditHistory` column, so proposals never reach edit history, pending changes, or reports.
+`CACHE` spreadsheet → `InventoryProposals` tab (created on first write). No other system reads CACHE tabs it does not know, and the tab has no `EditHistory` column, so proposals never reach edit history, pending changes, or quantity analysis. The one report that reads them does so on request: the inventory projection's proposal select (below).
 
 One row per proposed item change:
 
@@ -72,6 +72,10 @@ The inventory overview table and the category cards show a **View Proposals** bu
 
 The pages were reports first (`reports/inventory-proposals`). Links, browser history and stored dashboard cards to that path open the new one (`redirectPath`, `urlRouter.js`); an old address in the browser is replaced.
 
+### Inventory projection
+
+The inventory projection report (`reports/inventory-projection`) has a **Select Proposal** select beside its category filter, listing the active proposals; the choice is the page's `proposal` URL parameter. With one selected, a **Proposed** column shows each shortage after the proposal's quantity changes in that category (`ProposalUtils.quantityDeltas`, active entries only: a committed proposal is already in stock).
+
 ### Proposal page
 
 One table: image (read-only, as on the overview table), Category, Item#, Current Qty, Change (green `+` / red `-`), Projected Qty, Description, Notes, and a trash button that marks the item for removal (saving removes it; CLAUDE.md "Deleting rows").
@@ -89,12 +93,12 @@ One table: image (read-only, as on the overview table), Category, Item#, Current
 
 | Area | File |
 |---|---|
-| Constants and all entry logic as pure helpers: names, slugs, diff, merge, replace (page save), mark committed, apply, projection | `docs/js/data_management/utils/proposal-utils.js` |
+| Constants and all entry logic as pure helpers: names, slugs, diff, merge, replace (page save), mark committed, apply, projection, quantity changes by item | `docs/js/data_management/utils/proposal-utils.js` |
 | Read and write the tab | `docs/js/data_management/api.js`: `getInventoryProposals`, `getInventoryProposalTable`; the three mutations are one-line wrappers over `_updateProposalEntries(transform)` (read → pure helper → write) |
 | Shared proposal store, routes, two-pass commit | `docs/js/application/utils/inventoryProposals.js` |
 | Save dialog, proposal rows | `docs/js/application/components/content/InventoryTable.js` |
 | Menu item | `docs/js/application/components/content/InventoryContent.js` |
-| Cards grid and proposal page | `docs/js/application/components/content/InventoryProposals.js`, routed from `ReportsContent.js` |
+| Cards grid and proposal page | `docs/js/application/components/content/InventoryProposals.js`, routed from `InventoryContent.js` |
 | Note length | `InventoryNoteMaxLength` preference (CACHE/Preferences, integer, default 25): `resolveInventoryNoteMaxLength` in `metadata-utils.js`, `Requests.getInventoryNoteMaxLength` for saves, `getInventoryNoteMaxLength()` (reactive) for the UI |
 
 ---

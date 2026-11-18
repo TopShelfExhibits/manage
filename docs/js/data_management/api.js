@@ -1,4 +1,4 @@
-import { wrapMethods, normalizeHeaderName, Database, InventoryUtils, PackListUtils, ProductionUtils, ApplicationUtils, EditHistoryUtils, InstantWriteUtils, ARCHIVE_TAB_NAME, ARCHIVE_HEADERS, offsetToISO, resolveShortageAlertDays, shortageAlertDateFilters, PREFERENCES_MAPPING, INVENTORY_TAB_PREFERENCES, sanitizeTabName, mapWithConcurrency, ProgressBus, getRandomLoadingQuote, DEFAULT_INVENTORY_MAPPING, ProposalUtils, DropboxUtils, PROPOSALS_TAB_NAME, PROPOSAL_MAPPING, resolveInventoryNoteMaxLength, primaryThumbnailValue, SEVERITY, remainingSeverity, resolveProjectionSettings, monthOf, addMonths, monthRange, peakConcurrentUse, projectInventory } from './index.js';
+import { wrapMethods, normalizeHeaderName, Database, InventoryUtils, PackListUtils, ProductionUtils, ApplicationUtils, EditHistoryUtils, InstantWriteUtils, ARCHIVE_TAB_NAME, ARCHIVE_HEADERS, offsetToISO, resolveShortageAlertDays, shortageAlertDateFilters, PREFERENCES_MAPPING, INVENTORY_TAB_PREFERENCES, sanitizeTabName, mapWithConcurrency, ProgressBus, getRandomLoadingQuote, DEFAULT_INVENTORY_MAPPING, ProposalUtils, DropboxUtils, PROPOSALS_TAB_NAME, PROPOSAL_MAPPING, resolveInventoryNoteMaxLength, primaryThumbnailValue, SEVERITY, remainingSeverity, resolveProjectionSettings, monthOf, addMonths, monthRange, peakConcurrentUse, projectInventory, itemShortages } from './index.js';
 import { AuthSession } from './services.js';
 import { instantWriteEntry, identityText, parseColoredName } from './utils/instant-write-config.js';
 import { columnTypesEntry } from './utils/column-types.js';
@@ -1480,15 +1480,20 @@ class Requests_uncached {
     }
 
     /**
-     * The inventory projection's months (getInventoryProjectionModel): each of the next 12 with its
-     * scheduled shows and square feet, past square feet, projected square feet, and likely
-     * shortages ({ itemId, projected, stock, capacity, reuse, learned }). Persisted (CACHE/Analytics).
+     * The items of a category likely to run short in the next 12 months (getInventoryProjectionModel,
+     * itemShortages): one row per item, the first month it runs short and its shortage (negative).
+     * With a proposal, `proposed` is the shortage after the proposal's quantity changes in this
+     * category (its active entries). Persisted (CACHE/Analytics).
      * @param {Object} deps
      * @param {string} category - Inventory tab name
-     * @returns {Promise<Array<Object>>} Empty without a category
+     * @param {string} [proposal] - Proposal name; '' for none
+     * @returns {Promise<Array<{itemId, month, shortage, proposed}>>} Empty without a category
      */
-    static async getInventoryProjection(deps, category) {
-        return (await deps.call(Requests.getInventoryProjectionModel, category))?.months || [];
+    static async getInventoryProjection(deps, category, proposal = '') {
+        const model = await deps.call(Requests.getInventoryProjectionModel, category);
+        if (!model) return [];
+        const deltas = proposal ? ProposalUtils.quantityDeltas(await deps.call(Requests.getInventoryProposals), proposal, category) : null;
+        return itemShortages(model.months, deltas);
     }
 
     /**
