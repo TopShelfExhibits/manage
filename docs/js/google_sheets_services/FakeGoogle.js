@@ -1122,7 +1122,17 @@ export class FakeGoogleSheetsService {
                 ['InventoryCustomItemNumbers', 'Allow Nonstandard Item#s', 'these inventories have nonstandard item numbers and can slow down the system', 'inventory*', 'json', '["HARDWARE"]', ''],
                 ['InventoryDescriptionOnly', 'Omit Quantity Column', 'list of inventories that omit the quantity column, added to packlists as descriptions only', 'inventory*', 'json', '["ADDITIONS"]', ''],
                 ['InventoryNoteMaxLength', 'Inventory Note Length', 'maximum characters in an inventory save note (edit history, scheduled changes, proposal commits)', 'inventory*', 'integer', '25', ''],
-                ['InventoryShortageAlertDays', 'Shortage Alert Days', 'days ahead the inventory shortage alerts look; 0 turns them off', 'inventory*', 'integer', '120', '']
+                ['InventoryShortageAlertDays', 'Shortage Alert Days', 'days ahead the inventory shortage alerts look; 0 turns them off', 'inventory*', 'integer', '120', ''],
+                // Inventory projection (data_management/utils/inventory-projection.js, PROJECTION_SETTINGS)
+                ['ProjectionUsageMonths', 'Usage Months', 'full months of pack list use that item rates are learned from', 'reports/inventory-projection', 'integer', '3', ''],
+                ['ProjectionHistoryYears', 'History Years', "past years whose same month sets a future month's expected square feet (averaged)", 'reports/inventory-projection', 'integer', '1', ''],
+                ['ProjectionGrowthFactor', 'Growth Factor', "multiplies past years' square feet for a future month", 'reports/inventory-projection', 'double', '1', ''],
+                ['ProjectionReuseFallback', 'Fallback Reuse', 'times a month stock can go out, for items with too little use or stock to learn it', 'reports/inventory-projection', 'double', '1', ''],
+                ['ProjectionMaxReuse', 'Max Learned Reuse', 'most times a month stock can go out, however often it was used', 'reports/inventory-projection', 'double', '4', ''],
+                ['ProjectionLearnMinUsage', 'Min Use To Learn', 'items used fewer times than this in the usage months take the fallback reuse', 'reports/inventory-projection', 'integer', '10', ''],
+                ['ProjectionLearnMinStock', 'Min Stock To Learn', 'items with less stock than this take the fallback reuse', 'reports/inventory-projection', 'integer', '5', ''],
+                ['ProjectionDefaultSquareFeet', 'Default Square Feet', "square feet for a show whose size can't be read; 0 leaves it out", 'reports/inventory-projection', 'integer', '0', ''],
+                ['ProjectionMinShortfall', 'Min Shortfall', 'projected use must pass what stock can cover by this much to list an item', 'reports/inventory-projection', 'double', '1', '']
             ]
         }
     };

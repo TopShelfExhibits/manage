@@ -1,5 +1,6 @@
 import { Database, ApplicationUtils, offsetToISO, parseDate, toISODateString, toUSDateString, wrapMethods, searchFilter, GetTopFuzzyMatch, normalizeHeaderName, normalizeText, normalizeMatchKey, SEVERITY } from '../index.js';
 import { estimateShipDate as _calculateShipDate } from '../utils/ship-date.js'; // ship date with fallbacks
+import { parseBoothSquareFeet } from '../utils/inventory-projection.js';
 
 /**
  * Keyword used in NameOverrides table to indicate "ignore forever" (permanently suppress alerts).
@@ -15,6 +16,11 @@ const SCHEDULE_TAB = 'Production Schedule';
  * _calculateReturnDate). Quantity analysis reads only these (getScheduleDateRows), so edits to the
  * other columns, the task columns, don't rerun it.
  */
+// The identity columns and Size: what show square feet read (getShowSquareFeet)
+const SCHEDULE_SIZE_MAPPING = Object.fromEntries(
+    ['Show', 'Client', 'Year', 'Identifier', 'Size'].map(header => [header, header])
+);
+
 const SCHEDULE_DATE_MAPPING = Object.fromEntries(
     ['Show', 'Client', 'Year', 'Identifier', 'Ship', 'S. Install', 'S. Start', 'S. End', 'S. Dismantle', 'Recieved']
         .map(header => [header, header])
@@ -71,6 +77,25 @@ class productionUtils_uncached {
      */
     static async getScheduleDateRows(deps) {
         return deps.call(Database.getData, 'PROD_SCHED', SCHEDULE_TAB, SCHEDULE_DATE_MAPPING);
+    }
+
+    /**
+     * Square feet by canonical show identifier, from the Size column (parseBoothSquareFeet). Rows
+     * sharing an identifier (a multi-booth show) add up; a show whose sizes can't be read is null.
+     * Early cutoff: an edit to a column other than Size or the identity columns leaves this equal.
+     * @param {Object} deps
+     * @returns {Promise<Object<string, number|null>>}
+     */
+    static async getShowSquareFeet(deps) {
+        const rows = await deps.call(Database.getData, 'PROD_SCHED', SCHEDULE_TAB, SCHEDULE_SIZE_MAPPING);
+        const byId = {};
+        for (const row of rows) {
+            const identifier = await deps.call(ProductionUtils.getCanonicalIdentifierForScheduleRow, row);
+            if (!identifier) continue;
+            const sqft = parseBoothSquareFeet(row.Size);
+            byId[identifier] = sqft === null ? (byId[identifier] ?? null) : (byId[identifier] || 0) + sqft;
+        }
+        return byId;
     }
 
     /**
@@ -1268,6 +1293,7 @@ export const ProductionUtils = wrapMethods(
     // edit stops at getScheduleDateRows; a date edit stops at the shows and windows it didn't change.
     [
         'getScheduleDateRows',
+        'getShowSquareFeet',
         'getShowDates',
         'getOverlappingShowIds',
         'getProjectShipDate',

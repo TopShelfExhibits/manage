@@ -49,6 +49,7 @@ import { applyColorRule, colorFor, rowColorFor } from '../application/utils/view
 import { containerTier, BREAKPOINTS } from '../application/utils/useContainerSize.js';
 import { createScrollHider } from '../application/utils/scrollHider.js';
 import { DEFAULT_DASHBOARD } from '../application/utils/dashboardLayout.js';
+import { parseBoothSquareFeet, monthOf, addMonths, monthRange, peakConcurrentUse, resolveProjectionSettings, itemReuse, projectInventory } from '../data_management/utils/inventory-projection.js';
 import { redirectPath } from '../application/utils/urlRouter.js';
 import { todayISOString, setTestToday, startOfTodayMs, resolveShortageAlertDays, shortageAlertDateFilters, INVENTORY_TAB_PREFERENCES, resolveInventoryTabList, itemVariantBase, resolveItemVariant, itemVariantFamilies, itemVariantKey, parseItemVariants, searchFilter, textFiltersToSearchParams, parseSearchParameters } from '../data_management/utils/helpers.js';
 import { instantWriteEntry, identityKey, cellKey, joinKey } from '../data_management/utils/instant-write-config.js';
@@ -4067,7 +4068,7 @@ test('TAB READS', 'getAllInventoryData reads every inventory tab in one request'
 });
 
 // ── Group 35: Preferences ─────────────────────────────────────────────────────
-// FakeGoogle CACHE/Preferences has 13 rows, among them:
+// FakeGoogle CACHE/Preferences has 22 rows, among them:
 //   4 schedule* integer prefs (offsets 14, 14, 7, 7)
 //   3 inventory* json tab lists (InventorySuppressCategoryAnalysis, InventoryCustomItemNumbers,
 //     InventoryDescriptionOnly), the only source of those settings
@@ -4079,7 +4080,7 @@ test('PREFERENCES', 'getPreferences returns an array', async () => {
 
 test('PREFERENCES', 'getPreferences returns every fixture row', async () => {
     const result = await Requests.getPreferences();
-    assertEqual(result.length, 13, 'getPreferences row count');
+    assertEqual(result.length, 22, 'getPreferences row count');
 });
 
 test('PREFERENCES', 'all rows have required fields', async () => {
@@ -6341,6 +6342,133 @@ test('INVENTORY TAB PREFERENCES', 'custom item numbers match whole item numbers 
         await setPreference(INVENTORY_TAB_PREFERENCES.customItemNumbers, '["HARDWARE"]');
     }
 });
+
+// ── Inventory projection (data_management/utils/inventory-projection.js) ──────
+// Pure helpers first, on hand-made figures. Then the report on the fixture, with today pinned to
+// 2025-04-01 and CABINETS:
+//   Usage window Jan–Mar 2025: 18 shows ship (by ship month); 2 have pack lists, GEARFIRE 2025 SHOT
+//   and ATSC 2025 NAB, 600 sq ft each: 1200 sq ft. CAB-004: 11 + 11 = 22, both out 1/10–1/31 (peak
+//   22), stock 10 → reuse learned, max(1, (22 / 3) / 22) = 1. CAB-005: 2 (CAB-005b on GEARFIRE),
+//   below ProjectionLearnMinUsage (10) → fallback reuse 1; stock 6.
+//   Aug 2025: 6 shows, 2600 sq ft booked, nothing a year before; LOCKHEED MARTIN 2025 NGAUS
+//   (1200 sq ft) has pack lists holding 12 CAB-004, so CAB-004 = 12 + 22/1200 × 1400 = 37.7.
+//   Jan 2026: 2 shows booked (300 sq ft, no pack lists); Jan 2025 shipped 5700 sq ft (500 + 900 +
+//   600 + 600 + 2400 + 600 + 100) → projected 5700: CAB-004 22/1200 × 5700 = 104.5, CAB-005 9.5.
+
+const PROJECTION_TODAY = '2025-04-01';
+const DEFAULT_PROJECTION_SETTINGS = { usageMonths: 3, historyYears: 1, growthFactor: 1, reuseFallback: 1, maxReuse: 4, learnMinUsage: 10, learnMinStock: 5, defaultSquareFeet: 0, minShortfall: 1 };
+
+test('INVENTORY PROJECTION', 'square feet from a size: every W x D summed', () => {
+    assertEqual(['20x30', '10x40 & 10x10', "20' x 20'", '10 X 10', 'TBD', "x18'", '', null].map(parseBoothSquareFeet),
+        [600, 500, 400, 100, null, null, null, null], 'sizes');
+});
+
+test('INVENTORY PROJECTION', 'months: ISO month, shift, range', () => {
+    assertEqual([monthOf('2025-04-01'), addMonths('2025-11', 3), addMonths('2025-01', -1), addMonths('2025-12', -24)], ['2025-04', '2026-02', '2024-12', '2023-12'], 'month arithmetic');
+    assertEqual(monthRange('2025-11', 3), ['2025-11', '2025-12', '2026-01'], 'range');
+});
+
+test('INVENTORY PROJECTION', 'peak concurrent use: overlapping ranges add, a shared day overlaps', () => {
+    const uses = [
+        { start: '2025-01-10', end: '2025-01-31', qty: 11 },
+        { start: '2025-01-31', end: '2025-02-05', qty: 5 },
+        { start: '2025-02-06', end: '2025-02-07', qty: 20 }
+    ];
+    assertEqual(peakConcurrentUse(uses), 20, 'the later use alone is the peak');
+    assertEqual(peakConcurrentUse(uses.slice(0, 2)), 16, 'meeting on 1/31: 11 + 5');
+    assertEqual([peakConcurrentUse([{ start: null, end: null, qty: 7 }]), peakConcurrentUse([])], [7, 0], 'undated use counts alone; none is 0');
+});
+
+test('INVENTORY PROJECTION', 'settings: defaults, preference values, minimums', () => {
+    assertEqual(resolveProjectionSettings([]), DEFAULT_PROJECTION_SETTINGS, 'no rows: defaults');
+    const settings = resolveProjectionSettings([
+        { id: 'ProjectionGrowthFactor', value: '1.5' },
+        { id: 'ProjectionUsageMonths', value: '0' },
+        { id: 'ProjectionMaxReuse', value: 'abc' }
+    ]);
+    assertEqual([settings.growthFactor, settings.usageMonths, settings.maxReuse], [1.5, 1, 4], 'value kept, raised to its minimum, invalid takes the default');
+});
+
+test('INVENTORY PROJECTION', 'reuse: learned from monthly use over peak, within 1 and the max; fallback on thin data', () => {
+    const reuse = (usage, peak, stock) => itemReuse({ usage, peak, stock }, DEFAULT_PROJECTION_SETTINGS);
+    assertEqual(reuse(30, 5, 10), { reuse: 2, learned: true }, '10 a month over a peak of 5');
+    assertEqual(reuse(300, 5, 10), { reuse: 4, learned: true }, 'capped at ProjectionMaxReuse');
+    assertEqual(reuse(12, 12, 10), { reuse: 1, learned: true }, 'at least once a month');
+    assertEqual([reuse(9, 5, 10), reuse(30, 5, 4), reuse(30, 5, null), reuse(30, 0, 10)].map(r => r.learned), [false, false, false, false], 'too little use, too little or unknown stock, no peak');
+    assertEqual(reuse(9, 5, 10).reuse, 1, 'fallback is ProjectionReuseFallback');
+});
+
+// June: booked 1000 (400 with pack lists) vs 800 a year before → 1000, 600 uncovered.
+// July: nothing booked vs 2000 → 2000 uncovered. A: rate 50/1000, reuse (50/3)/10 = 1.67, stock 20.
+// B: rate 2/1000, fallback reuse 1, stock 3. C has no stock figures, so it is never listed.
+test('INVENTORY PROJECTION', 'projectInventory: expected volume, pack list use plus rate, capacity', () => {
+    const { months, items } = projectInventory({
+        months: ['2025-06', '2025-07'],
+        scheduled: { '2025-06': { sqft: 1000, shows: 2, coveredSqft: 400 } },
+        pastSqft: { '2024-06': 800, '2024-07': 2000 },
+        usageSqft: 1000,
+        items: [
+            { itemId: 'A', usage: 50, peak: 10, stockNow: 20, known: { '2025-06': 5 }, stock: { '2025-06': 20, '2025-07': 20 } },
+            { itemId: 'B', usage: 2, peak: 2, stockNow: 3, known: {}, stock: { '2025-06': 3, '2025-07': 3 } },
+            { itemId: 'C', usage: 10, peak: 1, stockNow: null, known: {}, stock: {} }
+        ]
+    }, DEFAULT_PROJECTION_SETTINGS);
+    assertEqual(months.map(({ shortages, ...row }) => row), [
+        { month: '2025-06', shows: 2, scheduledSqft: 1000, pastSqft: 800, projectedSqft: 1000 },
+        { month: '2025-07', shows: 0, scheduledSqft: 0, pastSqft: 2000, projectedSqft: 2000 }
+    ], 'booked when larger, else the past year');
+    assertEqual(months[0].shortages, [{ itemId: 'A', projected: 35, stock: 20, capacity: 33.3, reuse: 1.7, learned: true }], 'June: A 5 + 0.05 × 600 = 35 over 33.3; B 1.2 within 3');
+    assertEqual(months[1].shortages.map(s => [s.itemId, s.projected, s.capacity]), [['A', 100, 33.3], ['B', 4, 3]], 'July: largest shortfall first; B short by exactly the minimum');
+    assertEqual(items.map(i => [i.itemId, i.rate, i.learned]), [['A', 0.05, true], ['B', 0.002, false], ['C', 0.01, false]], 'rates and reuse');
+    const twoYears = projectInventory({ months: ['2025-07'], scheduled: {}, pastSqft: { '2024-07': 2000, '2023-07': 1000 }, usageSqft: 0, items: [] }, { ...DEFAULT_PROJECTION_SETTINGS, historyYears: 2, growthFactor: 1.2 });
+    assertEqual(twoYears.months[0].projectedSqft, 1800, 'two years averaged (1500), times growth 1.2');
+});
+
+async function _withProjectionToday(fn) {
+    try {
+        pinToday(PROJECTION_TODAY);
+        await fn();
+    } finally {
+        pinToday(null);
+    }
+}
+
+test('INVENTORY PROJECTION', 'show square feet: rows of one show add up', async () => {
+    const sqft = await ProductionUtils.getShowSquareFeet();
+    assertEqual([sqft['ALLEN ARMS 2025 SHOT'], sqft['MOJO 2025 SHOT'], sqft['MULTIBOOTHCO 2026 MULTI BOOTH']], [500, 900, 1200], 'two booths in one Size; two rows of one show');
+});
+
+test('INVENTORY PROJECTION', 'what the CABINETS projection learned from', () => _withProjectionToday(async () => {
+    const [basis] = await Requests.getInventoryProjectionBasis('CABINETS');
+    assertEqual({ usageMonths: basis.usageMonths, usageShows: basis.usageShows, learnedFrom: basis.learnedFrom, usageSqft: basis.usageSqft },
+        { usageMonths: ['2025-01', '2025-02', '2025-03'], usageShows: 18, learnedFrom: 2, usageSqft: 1200 }, 'usage window');
+    assertEqual(basis.items.map(i => [i.itemId, i.usage, i.peak, i.reuse, i.learned]), [['CAB-004', 22, 22, 1, true], ['CAB-005', 2, 2, 1, false]], 'items');
+    assertEqual(await Requests.getInventoryProjection(''), [], 'no category, no projection');
+}));
+
+test('INVENTORY PROJECTION', 'CABINETS months: booked or past volume, pack list use plus rate', () => _withProjectionToday(async () => {
+    const months = await Requests.getInventoryProjection('CABINETS');
+    assertEqual(months.map(m => m.month), monthRange('2025-04', 12), 'the next 12 months');
+    const brief = (m) => ({ shows: m.shows, scheduledSqft: m.scheduledSqft, pastSqft: m.pastSqft, projectedSqft: m.projectedSqft, short: m.shortages.map(s => [s.itemId, s.projected, s.stock]) });
+    const byMonth = Object.fromEntries(months.map(m => [m.month, brief(m)]));
+    assertEqual(byMonth['2025-08'], { shows: 6, scheduledSqft: 2600, pastSqft: 0, projectedSqft: 2600, short: [['CAB-004', 37.7, 10]] }, 'August: NGAUS pack lists plus the rate on the rest');
+    assertEqual(byMonth['2026-01'], { shows: 2, scheduledSqft: 300, pastSqft: 5700, projectedSqft: 5700, short: [['CAB-004', 104.5, 10], ['CAB-005', 9.5, 6]] }, 'January: last January sets the volume');
+}));
+
+test('INVENTORY PROJECTION', 'preference rows tune the projection', () => _withProjectionToday(async () => {
+    const january = async () => (await Requests.getInventoryProjection('CABINETS')).find(m => m.month === '2026-01');
+    try {
+        await setPreference('ProjectionGrowthFactor', '2');
+        const grown = await january();
+        assertEqual([grown.projectedSqft, grown.shortages[0].projected], [11400, 209], 'growth 2: twice last January');
+        await setPreference('ProjectionGrowthFactor', '1');
+        await setPreference('ProjectionReuseFallback', '2');
+        assertEqual((await january()).shortages.map(s => [s.itemId, s.capacity]), [['CAB-004', 10]], 'fallback reuse 2: CAB-005 covers 12, CAB-004 keeps its learned reuse');
+    } finally {
+        await setPreference('ProjectionGrowthFactor', '1');
+        await setPreference('ProjectionReuseFallback', '1');
+    }
+}));
 
 // ── App update: an out-of-date session refuses data writes ───────────────────
 // A newer deploy is simulated by changing the version this session loaded (window.__deployedVersion),

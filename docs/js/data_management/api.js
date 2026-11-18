@@ -1,4 +1,4 @@
-import { wrapMethods, normalizeHeaderName, Database, InventoryUtils, PackListUtils, ProductionUtils, ApplicationUtils, EditHistoryUtils, InstantWriteUtils, ARCHIVE_TAB_NAME, ARCHIVE_HEADERS, offsetToISO, resolveShortageAlertDays, shortageAlertDateFilters, PREFERENCES_MAPPING, INVENTORY_TAB_PREFERENCES, sanitizeTabName, mapWithConcurrency, ProgressBus, getRandomLoadingQuote, DEFAULT_INVENTORY_MAPPING, ProposalUtils, DropboxUtils, PROPOSALS_TAB_NAME, PROPOSAL_MAPPING, resolveInventoryNoteMaxLength, primaryThumbnailValue, SEVERITY, remainingSeverity } from './index.js';
+import { wrapMethods, normalizeHeaderName, Database, InventoryUtils, PackListUtils, ProductionUtils, ApplicationUtils, EditHistoryUtils, InstantWriteUtils, ARCHIVE_TAB_NAME, ARCHIVE_HEADERS, offsetToISO, resolveShortageAlertDays, shortageAlertDateFilters, PREFERENCES_MAPPING, INVENTORY_TAB_PREFERENCES, sanitizeTabName, mapWithConcurrency, ProgressBus, getRandomLoadingQuote, DEFAULT_INVENTORY_MAPPING, ProposalUtils, DropboxUtils, PROPOSALS_TAB_NAME, PROPOSAL_MAPPING, resolveInventoryNoteMaxLength, primaryThumbnailValue, SEVERITY, remainingSeverity, resolveProjectionSettings, monthOf, addMonths, monthRange, peakConcurrentUse, projectInventory } from './index.js';
 import { AuthSession } from './services.js';
 import { instantWriteEntry, identityText, parseColoredName } from './utils/instant-write-config.js';
 import { columnTypesEntry } from './utils/column-types.js';
@@ -1359,6 +1359,152 @@ class Requests_uncached {
     }
 
     /**
+     * The inventory projection of one inventory category (the model: utils/inventory-projection.js).
+     * Reads the shows shipping in the usage window, the past years and the next 12 months (one per
+     * transship chain, at its root) with their square feet and whether they have a pack list; each
+     * item's pack list use, peak and stock; then projectInventory. getInventoryProjection and
+     * getInventoryProjectionBasis serve its parts. The schedule is read only through cutoff methods
+     * (show ids, ship and return dates, square feet).
+     * @param {Object} deps
+     * @param {string} category - Inventory tab name
+     * @returns {Promise<{months: Array<Object>, items: Array<Object>, settings: Object, basis: Object}|null>}
+     */
+    static async getInventoryProjectionModel(deps, category) {
+        if (!category) return null;
+        const settings = resolveProjectionSettings(await deps.call(Requests.getPreferences));
+        const today = await deps.call(ApplicationUtils.getToday);
+        const thisMonth = monthOf(today);
+        const futureMonths = monthRange(thisMonth, 12);
+        const usageMonths = monthRange(addMonths(thisMonth, -settings.usageMonths), settings.usageMonths);
+        const firstMonth = addMonths(thisMonth, -Math.max(settings.usageMonths, 12 * settings.historyYears));
+        const lastMonth = futureMonths[futureMonths.length - 1];
+
+        const filter = { dateFilters: [
+            { column: 'Date', value: `${firstMonth}-01`, type: 'after' },
+            { column: 'Date', value: `${addMonths(lastMonth, 1)}-01`, type: 'before' }
+        ] };
+        const [ids, sqftById, allTabs] = await Promise.all([
+            deps.call(ProductionUtils.getOverlappingShowIds, filter),
+            deps.call(ProductionUtils.getShowSquareFeet),
+            deps.call(Database.getTabs, 'PACK_LISTS')
+        ]);
+        const packListTabs = allTabs.filter(tab => tab.title !== '_TEMPLATE' && !tab.title.startsWith('_'));
+        const shows = (await mapWithConcurrency(ids, async (id) => {
+            // A transship destination's items are its chain root's
+            if (await deps.call(ProductionUtils.getTransshipSourceForShow, id)) return null;
+            const ship = await deps.call(ProductionUtils.getProjectShipDate, id);
+            const month = monthOf(ship);
+            if (!month || month < firstMonth || month > lastMonth) return null;
+            const size = sqftById[id] ?? null;
+            const tabs = await deps.call(ProductionUtils.findAllPackListTabsForShow, id, packListTabs);
+            return { id, ship, month, sized: size !== null, sqft: size ?? (settings.defaultSquareFeet || 0), hasPackList: tabs.length > 0 };
+        }, 8)).filter(Boolean);
+        const showById = new Map(shows.map(show => [show.id, show]));
+
+        // Learned from: the usage window's shows with a pack list and square feet
+        const usageShows = shows.filter(show => usageMonths.includes(show.month));
+        const learnedFrom = usageShows.filter(show => show.hasPackList && show.sqft > 0);
+        const usageSqft = learnedFrom.reduce((sum, show) => sum + show.sqft, 0);
+        const plannedShows = shows.filter(show => show.month >= thisMonth && show.hasPackList);
+        const [usageRows, plannedRows, returnDates] = await Promise.all([
+            learnedFrom.length ? deps.call(PackListUtils.extractItemsFromMultipleShows, learnedFrom.map(show => show.id), [category], false) : [],
+            plannedShows.length ? deps.call(PackListUtils.extractItemsFromMultipleShows, plannedShows.map(show => show.id), [category], false) : [],
+            mapWithConcurrency(learnedFrom, show => deps.call(ProductionUtils.getProjectReturnDate, show.id), 8)
+        ]);
+        const returnById = new Map(learnedFrom.map((show, i) => [show.id, returnDates[i] || show.ship]));
+
+        const usageByItem = new Map(usageRows.map(row => [row.itemId, row]));
+        const knownByItem = new Map(plannedRows.map(row => {
+            const known = {};
+            for (const [id, qty] of Object.entries(row.shows || {})) {
+                const month = showById.get(id)?.month;
+                if (month && qty > 0) known[month] = (known[month] || 0) + qty;
+            }
+            return [row.itemId, known];
+        }));
+        const itemIds = [...new Set([...usageByItem.keys(), ...knownByItem.keys()])].sort();
+
+        // Stock today and at each future month's start, scheduled changes applied
+        const stockOn = async (date) => {
+            const info = itemIds.length ? await deps.call(InventoryUtils.getItemInfo, itemIds, ['quantity'], date) : null;
+            return new Map((info || []).map(entry => {
+                const qty = parseInt(entry.quantity, 10);
+                return [entry.itemName, Number.isFinite(qty) ? qty : null];
+            }));
+        };
+        const [stockNow, ...monthStock] = await Promise.all([today, ...futureMonths.map((month, i) => (i === 0 ? today : `${month}-01`))].map(stockOn));
+
+        const items = itemIds.map(itemId => {
+            const row = usageByItem.get(itemId);
+            const uses = Object.entries(row?.shows || {}).map(([id, qty]) => ({ start: showById.get(id)?.ship || null, end: returnById.get(id) || null, qty: Number(qty) || 0 }));
+            return {
+                itemId,
+                usage: row?.totalQuantity || 0,
+                peak: peakConcurrentUse(uses),
+                stockNow: stockNow.get(itemId) ?? null,
+                known: knownByItem.get(itemId) || {},
+                stock: Object.fromEntries(futureMonths.map((month, i) => [month, monthStock[i].get(itemId) ?? null]))
+            };
+        });
+
+        const scheduled = Object.fromEntries(futureMonths.map(month => [month, { sqft: 0, shows: 0, coveredSqft: 0 }]));
+        const pastSqft = {};
+        for (const show of shows) {
+            if (show.month >= thisMonth) {
+                const booked = scheduled[show.month];
+                booked.shows++;
+                booked.sqft += show.sqft;
+                if (show.hasPackList) booked.coveredSqft += show.sqft;
+            } else {
+                pastSqft[show.month] = (pastSqft[show.month] || 0) + show.sqft;
+            }
+        }
+
+        const projection = projectInventory({ months: futureMonths, scheduled, pastSqft, usageSqft, items }, settings);
+        return {
+            ...projection,
+            settings,
+            basis: {
+                category,
+                today,
+                usageMonths,
+                usageShows: usageShows.length,
+                learnedFrom: learnedFrom.length,
+                usageSqft,
+                shows: shows.length,
+                unsized: shows.filter(show => !show.sized).length,
+                learnedItems: projection.items.filter(item => item.learned).length,
+                fallbackItems: projection.items.filter(item => !item.learned).length
+            }
+        };
+    }
+
+    /**
+     * The inventory projection's months (getInventoryProjectionModel): each of the next 12 with its
+     * scheduled shows and square feet, past square feet, projected square feet, and likely
+     * shortages ({ itemId, projected, stock, capacity, reuse, learned }). Persisted (CACHE/Analytics).
+     * @param {Object} deps
+     * @param {string} category - Inventory tab name
+     * @returns {Promise<Array<Object>>} Empty without a category
+     */
+    static async getInventoryProjection(deps, category) {
+        return (await deps.call(Requests.getInventoryProjectionModel, category))?.months || [];
+    }
+
+    /**
+     * What the inventory projection is based on (getInventoryProjectionModel), as one row: the
+     * usage window and the shows learned from, shows without a readable size, items learned and at
+     * the fallback reuse, the settings, and each item's use, peak, rate and reuse. Persisted.
+     * @param {Object} deps
+     * @param {string} category - Inventory tab name
+     * @returns {Promise<Array<Object>>} One row; empty without a category
+     */
+    static async getInventoryProjectionBasis(deps, category) {
+        const model = await deps.call(Requests.getInventoryProjectionModel, category);
+        return model ? [{ ...model.basis, settings: model.settings, items: model.items }] : [];
+    }
+
+    /**
      * Resolve a packlist identifier to its actual tab name
      * Handles abbreviations, case variations, and fuzzy matching
      * @param {Object} deps - Dependency decorator for tracking calls
@@ -1869,5 +2015,5 @@ export const Requests = wrapMethods(
     ], // Mutation methods (and fresh reads that must not be cached)
     ['computeIdentifier'], // Infinite cache methods
     {}, // No custom cache durations needed - lock methods delegate to ApplicationUtils caching
-    ['getInventoryShortageAlerts', 'getItemThumbnails'] // Persisted methods (CACHE/Analytics)
+    ['getInventoryShortageAlerts', 'getItemThumbnails', 'getInventoryProjection', 'getInventoryProjectionBasis'] // Persisted methods (CACHE/Analytics)
 );
