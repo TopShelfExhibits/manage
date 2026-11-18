@@ -1180,6 +1180,11 @@ let _latestVersion = null;
 let _versionCheckedAt = 0;
 let _versionCheck = null;
 
+/** The deploy this session's code came from (version.json at load); null when unknown */
+export function loadedAppVersion() {
+    return window.__deployedVersion || null;
+}
+
 /** True once version.json names a newer deploy than the one this session loaded. */
 export function isAppOutdated() {
     const loaded = window.__deployedVersion;

@@ -6108,9 +6108,11 @@ async function savedAlertsRow(expected) {
     throw new Error(`the saved alerts row never held ${JSON.stringify(expected)}`);
 }
 
-function setSavedAlertsRow(savedAt, sources, value) {
+// version: the deploy that saved it (default this one); null for a row from before the Version column
+function setSavedAlertsRow(savedAt, sources, value, version = window.__deployedVersion) {
     const rows = FakeGoogleSheetsService.mockData.CACHE.Analytics;
-    const line = [ALERTS_KEY, savedAt, JSON.stringify(sources), JSON.stringify(value)];
+    const line = [ALERTS_KEY, savedAt, JSON.stringify(sources), JSON.stringify(value), version];
+    if (version === null) line.pop();
     const index = rows.findIndex(r => r[0] === ALERTS_KEY);
     if (index === -1) rows.push(line); else rows[index] = line;
 }
@@ -6170,6 +6172,7 @@ test('PERSISTED RESULTS', 'a computed result is saved with its value and source 
         if (!sources.some(source => source.startsWith(prefix))) throw new Error(`no source under ${prefix}`);
     }
     if (isNaN(new Date(row[1]).getTime())) throw new Error(`SavedAt is not a date: ${row[1]}`);
+    if (!window.__deployedVersion || row[4] !== window.__deployedVersion) throw new Error(`Version is not this deploy's (${window.__deployedVersion}): ${row[4]}`);
 });
 
 test('PERSISTED RESULTS', 'only data reads and app_utils sources are saved, not pure cached leaves', async () => {
@@ -6182,6 +6185,16 @@ test('PERSISTED RESULTS', 'only data reads and app_utils sources are saved, not 
 test('PERSISTED RESULTS', 'a new session restores a row no source has changed since', async () => {
     setSavedAlertsRow(new Date(Date.now() + 60000).toISOString(), _alertSources, RESTORED_MARKER);
     assertEqual(await restoreAlerts(), RESTORED_MARKER, 'restored');
+});
+
+// Regression: a deploy that changed a persisted result's shape restored the old shape
+// (InventoryProjectionReport read basis.trend, which the saved row lacked)
+test('PERSISTED RESULTS', 'a row saved by another deploy, or before rows had a version, means a recompute', async () => {
+    for (const version of ['an-older-deploy', null]) {
+        setSavedAlertsRow(new Date(Date.now() + 60000).toISOString(), _alertSources, RESTORED_MARKER, version);
+        assertEqual(await restoreAlerts(), [CAB_004_ALERT], `${version ?? 'no version'}: recomputed`);
+        await savedAlertsRow([CAB_004_ALERT]);
+    }
 });
 
 test('PERSISTED RESULTS', 'a source stamped after the row is saved means a recompute', async () => {

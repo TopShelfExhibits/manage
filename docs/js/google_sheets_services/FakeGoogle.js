@@ -769,7 +769,7 @@ export class FakeGoogleSheetsService {
             ],
             // Persisted analytics (caching.js persistentMethods): one row per saved result
             'Analytics': [
-                ['Key', 'SavedAt', 'Sources', 'Value']
+                ['Key', 'SavedAt', 'Sources', 'Value', 'Version']
             ],
             'Locks': [
                 ['Lock Key', 'locked.user@example.com', 'another.user@example.com'], // Row 0: Headers with users
