@@ -40,11 +40,11 @@ const PROPOSAL_GRID_VIEWS = {
     }]
 };
 
-/** reports/inventory-proposals — one card per proposal */
+/** inventory/proposals — one card per proposal */
 export const InventoryProposalsGrid = {
     components: { DataView },
     props: {
-        containerPath: { type: String, default: 'reports/inventory-proposals' },
+        containerPath: { type: String, default: 'inventory/proposals' },
         navigateToPath: Function
     },
     data() {
@@ -134,7 +134,7 @@ const PROPOSAL_TABLE_VIEWS = {
 const COMMITTED_COLUMNS = PROPOSAL_TABLE_VIEWS.views[0].columns.filter(key => key !== '_projected' && key !== '_remove');
 
 /**
- * reports/inventory-proposals/<slug> — one table of the proposal's item changes.
+ * inventory/proposals/<slug> — one table of the proposal's item changes.
  * Editable with the standard lock and Save/Discard; Commit applies it to inventory.
  */
 export const InventoryProposalTable = {

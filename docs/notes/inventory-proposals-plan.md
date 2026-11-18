@@ -53,23 +53,24 @@ Text fields are applied as plain values; only `quantity` goes through `applyNeVa
 3. If the edits include new rows: confirm, then save those rows to inventory at quantity 0 (note `proposal: <name>`).
 4. Add the diff (vs. the saved rows) to the proposal the way the proposal page saves (`saveToProposal` in `inventoryProposals.js`): load the proposal's table store, refuse if it has unsaved edits, take the proposal lock (`INVENTORY_PROPOSALS:<name>`; refuse if someone else holds it, or this user does on another device), merge each item's changes into its row (one row per item, `ProposalUtils.mergeChanges`) or add a row, run the store's save, release the lock. New and existing proposals take the same path; every proposal write is a table save (`saveInventoryProposalTable`).
    Then reload the category store (dropping the edits), which releases the category lock.
-5. New proposal → navigate to `reports/inventory-proposals/<slug>`.
+5. New proposal → navigate to `inventory/proposals/<slug>`.
 
 ### Category table
 
 Under each item, after scheduled-change rows: one row per active proposal entry, labeled `<Name> proposal`, showing the quantity change (`+8`) and any new description/notes, with an info button that opens that proposal.
 
-### Hamburger menu
+### View Proposals
 
-Inventory pages show **View Proposals** when an active proposal exists → `reports/inventory-proposals`.
+The inventory overview table and the category cards show a **View Proposals** button in their header area, always → `inventory/proposals`. (The page menus no longer have it.)
 
-### Reports
+### Pages
 
-- `reports` landing gets an **Inventory Proposals** card.
-- `reports/inventory-proposals` — cards grid, one card per proposal (active first, committed gray at the end).
-- `reports/inventory-proposals/<slug>` — the proposal page. `<slug>` is the lowercase name with non-alphanumerics as `-`.
+- `inventory/proposals` — cards grid, one card per proposal (active first, committed gray at the end).
+- `inventory/proposals/<slug>` — the proposal page. `<slug>` is the lowercase name with non-alphanumerics as `-`.
 
-`ReportsContent` (which hosts both pages) registers one child route per proposal from the shared proposal list, so breadcrumbs and deep links work on every Reports path.
+`InventoryContent` (which hosts both pages) registers the `proposals` route and one child route per proposal from the shared proposal list, so breadcrumbs and deep links work. A category tab named PROPOSALS would get no route of its own.
+
+The pages were reports first (`reports/inventory-proposals`). Links, browser history and stored dashboard cards to that path open the new one (`redirectPath`, `urlRouter.js`); an old address in the browser is replaced.
 
 ### Proposal page
 

@@ -6,8 +6,10 @@ import { Requests, authState, getReactiveStore, getInventoryNoteMaxLength, Propo
  * registration, and the two-pass commit. Plan: docs/notes/inventory-proposals-plan.md
  */
 
-export const PROPOSALS_ROUTE = 'inventory-proposals';
-export const PROPOSALS_PATH = `reports/${PROPOSALS_ROUTE}`;
+// Proposals are a page under Inventory. They were a report (reports/inventory-proposals): links and
+// dashboard cards to that path are redirected (redirectPath, urlRouter.js).
+export const PROPOSALS_ROUTE = 'proposals';
+export const PROPOSALS_PATH = `inventory/${PROPOSALS_ROUTE}`;
 
 /** Shared read-only store of every proposal entry (see ProposalUtils.parseRows) */
 export function getProposalsStore() {
@@ -23,12 +25,12 @@ export async function reloadProposals() {
 }
 
 /**
- * Register one child route of reports/inventory-proposals per proposal (breadcrumb names, deep links).
- * The parent route is registered by ReportsContent, which calls this whenever the list changes.
+ * Register one child route of inventory/proposals per proposal (breadcrumb names, deep links).
+ * The parent route is registered by InventoryContent, which calls this whenever the list changes.
  */
 export function registerProposalRoutes(proposals = []) {
     // getRoute returns the deepest existing ancestor for a missing child, so read children directly
-    const registered = NavigationRegistry.getRoute('reports')?.children?.[PROPOSALS_ROUTE]?.children || {};
+    const registered = NavigationRegistry.getRoute('inventory')?.children?.[PROPOSALS_ROUTE]?.children || {};
     for (const proposal of proposals) {
         if (registered[proposal.slug]?.displayName !== proposal.name) {
             NavigationRegistry.addDynamicRoute(PROPOSALS_PATH, proposal.slug, { displayName: proposal.name });

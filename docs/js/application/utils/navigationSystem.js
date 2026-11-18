@@ -1,6 +1,6 @@
 import { html } from '../index.js';
 import { authState } from '../index.js';
-import { URLRouter } from './urlRouter.js';
+import { URLRouter, redirectPath } from './urlRouter.js';
 import { DashboardRegistry } from './DashboardRegistry.js';
 import { parseSearchParameters } from '../../data_management/utils/helpers.js';
 import { carriesSearch, withoutSearch, rememberSearch, recallSearch } from './findScopes.js';
@@ -535,8 +535,12 @@ export const NavigationRegistry = {
     async handleNavigateToPath(navigationData, appContext) {
         let { targetPath, isBrowserNavigation, replaceHistory } = navigationData;
 
+        // A moved page's old path opens the new one; an old address in the browser is replaced
+        const redirected = redirectPath(targetPath);
+        const replaceOldAddress = isBrowserNavigation && redirected !== targetPath;
+
         // Which parameters (view, filters, search) the page opens with
-        targetPath = this.resolveTargetPath(targetPath, appContext.currentPath, { carry: !isBrowserNavigation });
+        targetPath = this.resolveTargetPath(redirected, appContext.currentPath, { carry: !isBrowserNavigation });
         const pathInfo = this.parsePath(targetPath);
 
         const currentPathInfo = this.parsePath(appContext.currentPath || '');
@@ -572,8 +576,8 @@ export const NavigationRegistry = {
         }
         
         // Update URL if not browser navigation
-        if (!isBrowserNavigation && this.urlRouter) {
-            this.urlRouter.updateURL(pathInfo.fullPath, !replaceHistory);
+        if ((!isBrowserNavigation || replaceOldAddress) && this.urlRouter) {
+            this.urlRouter.updateURL(pathInfo.fullPath, !replaceHistory && !replaceOldAddress);
         }
         
         return { 

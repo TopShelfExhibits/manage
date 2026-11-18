@@ -2,9 +2,26 @@
  * URL Router - Synchronizes application navigation with browser URLs
  * Uses hash-based routing for compatibility with static hosting
  */
-
 import { ApplicationUtils } from '../../data_management/index.js';
 import { authState } from '../utils/auth.js';
+
+// Pages that moved: an old path (and everything under it) opens the new one. Navigation
+// (handleNavigateToPath: links, browser history) and stored dashboard cards (DashboardRegistry)
+// go through redirectPath.
+const PATH_REDIRECTS = {
+    'reports/inventory-proposals': 'inventory/proposals'
+};
+
+/** A path with a moved page's old prefix replaced (PATH_REDIRECTS); parameters are kept */
+export function redirectPath(path) {
+    if (typeof path !== 'string') return path;
+    for (const [from, to] of Object.entries(PATH_REDIRECTS)) {
+        if (path.startsWith(from) && (path.length === from.length || '/?'.includes(path[from.length]))) {
+            return to + path.slice(from.length);
+        }
+    }
+    return path;
+}
 
 export class URLRouter {
     constructor(navigationRegistry, appContext) {

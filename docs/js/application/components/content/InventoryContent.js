@@ -1,22 +1,25 @@
-import { html, InventoryTableComponent, hamburgerMenuRegistry, NavigationRegistry, Requests, DataView, DashboardToggleComponent, getReactiveStore, findMatchingStores, createAnalysisConfig, generateStoreKey, authState, invalidateCache, todayISOString, getInventoryTabList, INVENTORY_TAB_PREFERENCES, getShortageAlertsStore, getShortageAlertDays, shortagesByItem, itemShortageCards, categoryShortageCards, itemVariantCards, itemVariantFamilies, THUMBNAIL_FIELD, ParamToggles } from '../../index.js';
+import { html, InventoryTableComponent, hamburgerMenuRegistry, NavigationRegistry, Requests, DataView, DashboardToggleComponent, ProposalUtils, getReactiveStore, findMatchingStores, createAnalysisConfig, generateStoreKey, authState, invalidateCache, todayISOString, getInventoryTabList, INVENTORY_TAB_PREFERENCES, getShortageAlertsStore, getShortageAlertDays, shortagesByItem, itemShortageCards, categoryShortageCards, itemVariantCards, itemVariantFamilies, THUMBNAIL_FIELD, ParamToggles } from '../../index.js';
 import { ShowInventoryReport } from './ShowInventoryReport.js';
 import { InventoryItemReport } from './InventoryItemReport.js';
 import { InventoryItemTimeline } from './InventoryItemTimeline.js';
-import { getProposalsStore, PROPOSALS_PATH } from '../../utils/inventoryProposals.js';
+import { getProposalsStore, registerProposalRoutes, PROPOSALS_PATH, PROPOSALS_ROUTE } from '../../utils/inventoryProposals.js';
+import { InventoryProposalsGrid, InventoryProposalTable } from './InventoryProposals.js';
 import { openInventorySaveDialog, INVENTORY_DETAIL_TOGGLES } from './InventoryTable.js';
 
 /** Route key of the per-category history page: inventory/<category>/edit-history */
 export const EDIT_HISTORY_ROUTE = 'edit-history';
 
 /**
- * Split an inventory path into its category slug and sub-route.
+ * Split an inventory path into its category slug and sub-route. The proposals page
+ * (inventory/proposals, and inventory/proposals/<slug> for one proposal) is no category.
  * @param {string} path - Container path (query parameters allowed)
- * @returns {{ category: string|null, subRoute: string|null }}
+ * @returns {{ category: string|null, subRoute: string|null, proposals: boolean, proposalSlug: string|null }}
  */
 function parseInventoryPath(path) {
     const segments = String(path || '').split('?')[0].split('/').filter(Boolean);
-    if (segments[0] !== 'inventory') return { category: null, subRoute: null };
-    return { category: segments[1] || null, subRoute: segments[2] || null };
+    if (segments[0] !== 'inventory') return { category: null, subRoute: null, proposals: false, proposalSlug: null };
+    if (segments[1] === PROPOSALS_ROUTE) return { category: null, subRoute: null, proposals: true, proposalSlug: segments[2] || null };
+    return { category: segments[1] || null, subRoute: segments[2] || null, proposals: false, proposalSlug: null };
 }
 import { thumbnailStyle } from '../../utils/views/viewStyles.js';
 
@@ -82,12 +85,9 @@ export const InventoryMenuComponent = {
     },
     inject: ['$modal', 'appContext'],
     data() {
-        return { proposalsStore: getProposalsStore(), INVENTORY_DETAIL_TOGGLES };
+        return { INVENTORY_DETAIL_TOGGLES };
     },
     computed: {
-        hasActiveProposals() {
-            return (this.proposalsStore?.data || []).some(entry => !entry.committed);
-        },
         // Derived from the menu's current containerPath (supplied fresh each time the menu opens)
         inventoryLocation() {
             const { category, subRoute } = parseInventoryPath(this.containerPath);
@@ -125,10 +125,6 @@ export const InventoryMenuComponent = {
                 items.push({ label: 'Back to Table', action: 'closeEditHistory' });
             }
 
-            if (this.hasActiveProposals) {
-                items.push({ label: 'View Proposals', action: 'viewProposals' });
-            }
-
             return items;
         }
     },
@@ -160,10 +156,6 @@ export const InventoryMenuComponent = {
                     this.$emit('close-modal');
                     break;
                 }
-                case 'viewProposals':
-                    this.navigateToPath?.(PROPOSALS_PATH);
-                    this.$emit('close-modal');
-                    break;
                 default:
                     this.$modal.alert(`Action ${action} not implemented yet.`, 'Info');
             }
@@ -192,7 +184,9 @@ export const InventoryContent = {
         DataView,
         'show-inventory-report': ShowInventoryReport,
         'inventory-item-report': InventoryItemReport,
-        'inventory-item-timeline': InventoryItemTimeline
+        'inventory-item-timeline': InventoryItemTimeline,
+        'inventory-proposals-grid': InventoryProposalsGrid,
+        'inventory-proposal-table': InventoryProposalTable
     },
     props: {
         containerPath: {
@@ -207,6 +201,8 @@ export const InventoryContent = {
             categoriesStore: null, // Reactive store for inventory categories (lock analysis)
             inventoryStore: null, // All inventory item rows (overview table and category card members)
             autoSavedCategories: new Set(), // Track which categories have auto-saved data
+            proposalsStore: getProposalsStore(),
+            PROPOSALS_PATH,
             shortageAlertsStore: getShortageAlertsStore(),
             itemDecorationKeys: ['itemNumber', 'description'],
             INVENTORY_FIELDS,
@@ -228,6 +224,14 @@ export const InventoryContent = {
         // Centralized clean path without parameters
         cleanContainerPath() {
             return this.containerPath.split('?')[0];
+        },
+        // The proposals page (inventory/proposals) and one proposal (inventory/proposals/<slug>)
+        proposalsLocation() {
+            return parseInventoryPath(this.cleanContainerPath);
+        },
+        // Every proposal (reads each entry, so in-place store updates re-register routes)
+        proposals() {
+            return ProposalUtils.groupProposals(this.proposalsStore.data || []);
         },
         // Category names (bucketKeys) and per-category state from the categories store
         categoryList() {
@@ -290,7 +294,7 @@ export const InventoryContent = {
         },
         // Get current category name from path for specific category views
         currentCategoryName() {
-            if (this.cleanContainerPath.startsWith('inventory/')) {
+            if (this.cleanContainerPath.startsWith('inventory/') && !this.proposalsLocation.proposals) {
                 const parts = this.cleanContainerPath.split('/');
                 if (parts.length >= 2) {
                     const categorySlug = parts[1];
@@ -353,6 +357,13 @@ export const InventoryContent = {
                 this.initializeCategoriesStore();
             }
         },
+        // One child route per proposal (breadcrumb names, deep links)
+        proposals: {
+            handler(proposals) {
+                registerProposalRoutes(proposals);
+            },
+            immediate: true
+        },
         // Register category routes (and their history pages) whenever the category list changes
         categoryTitles: {
             handler(titles) {
@@ -373,8 +384,8 @@ export const InventoryContent = {
     methods: {
         registerCategoryRoutes(titles) {
             for (const title of titles || []) {
-                if (title === 'INDEX' || title.startsWith('_')) continue;
                 const slug = title.toLowerCase();
+                if (title === 'INDEX' || title.startsWith('_') || slug === PROPOSALS_ROUTE) continue;
                 const displayName = title.charAt(0).toUpperCase() + title.slice(1).toLowerCase();
                 NavigationRegistry.addDynamicRoute('inventory', slug, { displayName });
                 NavigationRegistry.addDynamicRoute(`inventory/${slug}`, EDIT_HISTORY_ROUTE, { displayName: 'Edit History' });
@@ -524,7 +535,9 @@ export const InventoryContent = {
 
         // Register inventory navigation routes
         NavigationRegistry.registerNavigation('inventory', {
-            routes: {}
+            routes: {
+                [PROPOSALS_ROUTE]: { displayName: 'Proposals', dashboardTitle: 'Inventory Proposals' }
+            }
         });
 
         // Register hamburger menu for inventory
@@ -587,7 +600,9 @@ export const InventoryContent = {
                 @refresh="handleRefresh"
             >
                 <template #header-area>
-                    <div class="button-bar" style="display: none;"></div>
+                    <div class="button-bar">
+                        <button class="white" @click="navigateToPath(PROPOSALS_PATH)">View Proposals</button>
+                    </div>
                 </template>
                 <template #cell="{ row, field }">
                     <button
@@ -597,6 +612,20 @@ export const InventoryContent = {
                     >{{ formatCategoryLabel(row.tab) }}</button>
                 </template>
             </DataView>
+
+            <!-- Proposals: cards, then one proposal -->
+            <inventory-proposals-grid
+                v-else-if="proposalsLocation.proposals && !proposalsLocation.proposalSlug"
+                :container-path="containerPath"
+                :navigate-to-path="navigateToPath"
+            />
+            <inventory-proposal-table
+                v-else-if="proposalsLocation.proposalSlug"
+                :key="proposalsLocation.proposalSlug"
+                :proposal-slug="proposalsLocation.proposalSlug"
+                :container-path="containerPath"
+                :navigate-to-path="navigateToPath"
+            />
 
             <!-- inventory/<cat>/<segment>: wait for registered sub-routes before resolving -->
             <div v-else-if="isInventorySubPath && !categoryRoutesReady" class="loading-message">

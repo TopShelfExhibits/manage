@@ -1,17 +1,13 @@
-import { html, hamburgerMenuRegistry, NavigationRegistry, DashboardToggleComponent, ProposalUtils } from '../../index.js';
+import { html, hamburgerMenuRegistry, NavigationRegistry, DashboardToggleComponent } from '../../index.js';
 import { ShowInventoryReport } from './ShowInventoryReport.js';
 import { InventoryItemReport } from './InventoryItemReport.js';
 import { IndexMismatchReport } from './IndexMismatchReport.js';
-import { InventoryProposalsGrid, InventoryProposalTable } from './InventoryProposals.js';
-import { PROPOSALS_PATH, PROPOSALS_ROUTE, getProposalsStore, registerProposalRoutes } from '../../utils/inventoryProposals.js';
 
 export const ReportsContent = {
     components: {
         'show-inventory-report': ShowInventoryReport,
         'inventory-item-report': InventoryItemReport,
-        'index-mismatch-report': IndexMismatchReport,
-        'inventory-proposals-grid': InventoryProposalsGrid,
-        'inventory-proposal-table': InventoryProposalTable
+        'index-mismatch-report': IndexMismatchReport
     },
     props: {
         containerPath: {
@@ -22,37 +18,16 @@ export const ReportsContent = {
     },
     data() {
         return {
-            proposalsStore: getProposalsStore(),
             items: [
                 { id: 'show-usage', title: 'Show Usage', content: 'View inventory quantities across shows in a matrix.', cardClass: 'blue' },
                 { id: 'item-shortages', title: 'Item Shortages', content: 'View items with quantities that drop below a set threshold.', cardClass: 'blue' },
-                { id: 'index-mismatches', title: 'Index Mismatches', content: 'View and resolve all unmatched client and show names from the production schedule and pack lists.', cardClass: 'blue' },
-                { id: PROPOSALS_ROUTE, title: 'Inventory Proposals', content: 'Review, edit and commit proposed inventory changes.', cardClass: 'blue' }
+                { id: 'index-mismatches', title: 'Index Mismatches', content: 'View and resolve all unmatched client and show names from the production schedule and pack lists.', cardClass: 'blue' }
             ]
         };
     },
     computed: {
-        // Every proposal (reads each entry, so in-place store updates re-register routes)
-        proposals() {
-            return ProposalUtils.groupProposals(this.proposalsStore.data || []);
-        },
         cleanContainerPath() {
             return this.containerPath.split('?')[0];
-        },
-        isProposalsGrid() {
-            return this.cleanContainerPath === PROPOSALS_PATH;
-        },
-        // reports/inventory-proposals/<slug>
-        proposalSlug() {
-            const prefix = `${PROPOSALS_PATH}/`;
-            return this.cleanContainerPath.startsWith(prefix)
-                ? this.cleanContainerPath.slice(prefix.length).split('/')[0]
-                : null;
-        }
-    },
-    watch: {
-        proposals(proposals) {
-            registerProposalRoutes(proposals);
         }
     },
     methods: {
@@ -81,16 +56,9 @@ export const ReportsContent = {
                 'index-mismatches': {
                     displayName: 'Index Mismatches',
                     dashboardTitle: 'Index Mismatches Report'
-                },
-                [PROPOSALS_ROUTE]: {
-                    displayName: 'Inventory Proposals',
-                    dashboardTitle: 'Inventory Proposals'
                 }
             }
         });
-
-        // One child route per proposal (breadcrumb names, deep links); kept current by the watcher
-        registerProposalRoutes(this.proposals);
 
         // Register hamburger menu for reports
         hamburgerMenuRegistry.registerMenu('reports', {
@@ -143,20 +111,6 @@ export const ReportsContent = {
             <!-- Index Mismatch Report View -->
             <index-mismatch-report
                 v-else-if="cleanContainerPath === 'reports/index-mismatches'"
-                :container-path="containerPath"
-                :navigate-to-path="navigateToPath"
-            />
-
-            <!-- Inventory Proposals: cards, then one proposal -->
-            <inventory-proposals-grid
-                v-else-if="isProposalsGrid"
-                :container-path="containerPath"
-                :navigate-to-path="navigateToPath"
-            />
-            <inventory-proposal-table
-                v-else-if="proposalSlug"
-                :key="proposalSlug"
-                :proposal-slug="proposalSlug"
                 :container-path="containerPath"
                 :navigate-to-path="navigateToPath"
             />

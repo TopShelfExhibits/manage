@@ -201,6 +201,7 @@ containers: [
 - Space encoding (replaces spaces with `+` in URL)
 - Browser back/forward support via `popstate` event
 - Distinguishes browser navigation from app navigation
+- Moved pages: `redirectPath(path)` (exported) replaces a moved page's old prefix (`PATH_REDIRECTS`, e.g. `reports/inventory-proposals` → `inventory/proposals`). `handleNavigateToPath` applies it to every navigation, and replaces an old address in the browser
 
 **Key Methods**:
 
