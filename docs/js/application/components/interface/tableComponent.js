@@ -24,17 +24,21 @@ function normalizeItemSortWords(value) {
 /**
  * Sort key for one value, parsed once per sort (same ordering as the former pairwise compare):
  * missing values last; item type by words; two dates by time; two numbers numerically; else text.
+ * A plain number ('40', '+150', 2.5) is never a date: the browser's Date reads some as years
+ * ('40' as 2040, '150' as the year 150), which sorted them apart from the rest.
  */
-function sortKeyFor(value, column) {
+const PLAIN_NUMBER = /^\s*[+-]?(\d+\.?\d*|\.\d+)\s*$/;
+export function sortKeyFor(value, column) {
     if (value === null || value === undefined) return { missing: true };
     const type = String(column.type || '').toLowerCase();
     if (type === 'item') return { item: value };
-    const date = parseDate(value);
     const num = parseFloat(value);
+    if (typeof value === 'number' || PLAIN_NUMBER.test(value)) return { raw: value, time: null, num: isNaN(num) ? null : num };
+    const date = parseDate(value);
     return { raw: value, time: date ? date.getTime() : null, num: isNaN(num) ? null : num };
 }
 
-function compareSortKeys(a, b, direction) {
+export function compareSortKeys(a, b, direction) {
     if (a.missing) return 1;
     if (b.missing) return -1;
     let comparison;

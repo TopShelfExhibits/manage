@@ -41,6 +41,7 @@ import { commitInventoryProposal, saveToProposal, proposalTableStore, sendEditsT
 import { hasQuantityChanges } from '../application/components/content/InventoryTable.js';
 import { evaluateArithmetic } from '../application/components/interface/cells.js';
 import { balancedSplit } from '../application/components/interface/buttonBar.js';
+import { sortKeyFor, compareSortKeys } from '../application/components/interface/tableComponent.js';
 import { resolveView, resolveAction, pickView, mergeView, matchesKeyPattern, setViewWarningHandler, withRegistryDefaults, searchTiers } from '../application/utils/views/resolveView.js';
 import { SEARCH_LIMITS, searchWords, matchRow, matchRows, makeHighlighter } from '../application/utils/views/searchMatch.js';
 import { formatValue, formatText } from '../application/utils/views/fieldFormat.js';
@@ -5153,6 +5154,19 @@ test('VIEWS FORMAT', 'formatValue matches the table formatter', async () => {
     assertEqual(formatValue('12.5', { format: 'currency' }), '$12.50', 'currency');
     assertEqual(formatValue('abc', {}), 'abc', 'passthrough');
     assertEqual(formatText(['a', 'b'], {}), 'a, b', 'array text');
+});
+
+// A proposal's Change column sorted 40, 60, 150, 144, 30, 25, 20 (high to low): Chrome's Date read
+// '40' as 2040, '60' as 1960, '150' and '144' as years, so those sorted as dates apart from the rest
+test('VIEWS SORT', 'plain numbers sort as numbers, never as dates', async () => {
+    const sorted = (values, column, direction) => values
+        .map(value => ({ value, key: sortKeyFor(value, column) }))
+        .sort((a, b) => compareSortKeys(a.key, b.key, direction))
+        .map(entry => entry.value);
+    const column = { key: 'quantityChange', type: 'number' };
+    assertEqual(sorted(['40', '60', '150', '144', '30', '25', '20'], column, 'desc'), ['150', '144', '60', '40', '30', '25', '20'], 'high to low');
+    assertEqual(sorted(['+40', '-5', '150', 2.5], column, 'asc'), ['-5', 2.5, '+40', '150'], 'signs and numbers, low to high');
+    assertEqual(sorted(['3/5/2026', '2026-01-10', '12/1/2025'], { key: 'date' }, 'asc'), ['12/1/2025', '2026-01-10', '3/5/2026'], 'dates still by date');
 });
 
 test('VIEWS COLOR', 'colour rules: auto numbers/dates, value, literal; rowColor fallback', async () => {

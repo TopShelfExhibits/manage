@@ -601,7 +601,7 @@ export const InventoryContent = {
             >
                 <template #header-area>
                     <div class="button-bar">
-                        <button class="white" @click="navigateToPath(PROPOSALS_PATH)">View Proposals</button>
+                        <button class="purple" @click="navigateToPath(PROPOSALS_PATH)">View Proposals</button>
                     </div>
                 </template>
                 <template #cell="{ row, field }">
