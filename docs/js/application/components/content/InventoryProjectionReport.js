@@ -118,7 +118,8 @@ const InventoryProjectionMonths = {
             :rows="rows"
             :registry="MONTH_VIEWS"
             :is-loading="monthsStore.isLoading"
-            loading-message="Projecting inventory..."
+            :loading-message="monthsStore.loadingMessage || 'Projecting inventory...'"
+            :loading-progress="monthsStore.loadingProgress ?? -1"
             :show-refresh="false"
             empty-message="No months to show."
         >
@@ -220,6 +221,16 @@ export const InventoryProjectionReport = {
         isLoading() {
             return !!(this.projectionStore?.isLoading || this.basisStore?.isLoading);
         },
+        // The model's steps (Requests.getInventoryProjectionModel), from whichever store is loading
+        loadingStore() {
+            return [this.projectionStore, this.basisStore].find(store => store?.isLoading) || null;
+        },
+        loadingMessage() {
+            return this.loadingStore?.loadingMessage || 'Projecting inventory...';
+        },
+        loadingProgress() {
+            return this.loadingStore?.loadingProgress ?? -1;
+        },
         emptyMessage() {
             if (!this.category) return 'Choose an inventory category to project.';
             const months = 12 * (this.basis?.settings.futureYears || 1);
@@ -271,7 +282,8 @@ export const InventoryProjectionReport = {
             :navigate-to-path="navigateToPath"
             title="Inventory Projection"
             :is-loading="isLoading"
-            loading-message="Projecting inventory..."
+            :loading-message="loadingMessage"
+            :loading-progress="loadingProgress"
             :show-refresh="!!category"
             :empty-message="emptyMessage"
             @refresh="handleRefresh"

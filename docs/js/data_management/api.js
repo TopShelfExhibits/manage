@@ -10,6 +10,23 @@ const signedInEmail = () => AuthSession.state.email || null;
 const NOTES_MAPPING = { Path: 'Path', Note: 'Note', Color: 'Color', Size: 'Size', edithistory: 'EditHistory' };
 
 /**
+ * Runs `run` while relaying a sub-method's progress (ProgressBus topic `from`): to a topic, the
+ * calling method's own, so the store loading it follows along; or to a function.
+ * @param {string} from
+ * @param {string|Function} to
+ * @param {Function} run
+ */
+async function relayProgress(from, to, run) {
+    const relay = typeof to === 'function' ? to : (data) => ProgressBus.emit(to, data);
+    ProgressBus.on(from, relay);
+    try {
+        return await run();
+    } finally {
+        ProgressBus.off(from, relay);
+    }
+}
+
+/**
  * CACHING ARCHITECTURE NOTES:
  * 
  * This API layer uses automatic caching via wrapMethods() decorator. Most methods are cached,
@@ -1166,15 +1183,8 @@ class Requests_uncached {
         // Extract items from the identified shows
         // Convert string filter to array as extractItemsFromMultipleShows expects an array
         const categoryFilterArray = ctgFilter ? [ctgFilter] : undefined;
-        // Relay sub-function progress onto this function's topic so the loading indicator updates
-        const _onExtractProgress = (data) => ProgressBus.emit('api:getMultipleShowsItemsSummary', data);
-        ProgressBus.on('packlist:extractItemsFromMultipleShows', _onExtractProgress);
-        let rawItemRows;
-        try {
-            rawItemRows = await deps.call(PackListUtils.extractItemsFromMultipleShows, projectIdentifiers, categoryFilterArray, includeEmptyShows);
-        } finally {
-            ProgressBus.off('packlist:extractItemsFromMultipleShows', _onExtractProgress);
-        }
+        const rawItemRows = await relayProgress('packlist:extractItemsFromMultipleShows', 'api:getMultipleShowsItemsSummary',
+            () => deps.call(PackListUtils.extractItemsFromMultipleShows, projectIdentifiers, categoryFilterArray, includeEmptyShows));
 
         // Leave out items in tabs the InventorySuppressCategoryAnalysis preference lists
         const skippedTabs = await deps.call(InventoryUtils.getPreferenceTabs, INVENTORY_TAB_PREFERENCES.skipAnalysis);
@@ -1366,12 +1376,17 @@ class Requests_uncached {
      * pack list quantities of the booked shows out in the projected months; stock at each month's
      * start; then projectInventory. getInventoryProjection and getInventoryProjectionBasis serve its
      * parts. The schedule is read only through cutoff methods (show ids, dates, square feet).
+     * Reports its four steps on its ProgressBus topic; the methods serving it relay them.
      * @param {Object} deps
      * @param {string} category - Inventory tab name
      * @returns {Promise<{months: Array<Object>, items: Array<Object>, settings: Object, basis: Object}|null>}
      */
     static async getInventoryProjectionModel(deps, category) {
         if (!category) return null;
+        // Step n of 4, `done` of `total` through it
+        const progress = (step, message, done = 0, total = 1) =>
+            ProgressBus.emit('api:getInventoryProjectionModel', { current: step - 1 + done / total, total: 4, message: `Step ${step}/4: ${message}` });
+        progress(1, 'Reading the schedule...');
         const settings = resolveProjectionSettings(await deps.call(Requests.getPreferences));
         const today = await deps.call(ApplicationUtils.getToday);
         const thisMonth = monthOf(today);
@@ -1408,7 +1423,7 @@ class Requests_uncached {
                 sqft: size ?? (settings.defaultSquareFeet || 0),
                 hasPackList: tabs.length > 0
             };
-        }, 8)).filter(Boolean);
+        }, 8, ({ processed, total }) => progress(1, `Reading the schedule: ${processed} of ${total} shows...`, processed, total))).filter(Boolean);
         const showById = new Map(shows.map(show => [show.id, show]));
 
         // Learned from: the usage window's shows with a pack list and square feet
@@ -1418,19 +1433,24 @@ class Requests_uncached {
         // Out in the projected months: the shows whose window reaches today
         const outShows = shows.filter(show => show.end >= today);
         const packedShows = outShows.filter(show => show.hasPackList);
-        const [usageRows, packedRows] = await Promise.all([
-            learnedFrom.length ? deps.call(PackListUtils.extractItemsFromMultipleShows, learnedFrom.map(show => show.id), [category], false) : [],
-            packedShows.length ? deps.call(PackListUtils.extractItemsFromMultipleShows, packedShows.map(show => show.id), [category], false) : []
-        ]);
-        // Each item's quantity in each learned show that packed it, with the show's square feet
+        // Both sets of pack lists in one read
+        const readIds = [...new Set([...learnedFrom, ...packedShows].map(show => show.id))];
+        progress(2, 'Reading pack lists...');
+        const itemRows = readIds.length ? await relayProgress('packlist:extractItemsFromMultipleShows',
+            ({ current, total }) => progress(2, `Reading pack lists: ${current} of ${total} shows...`, current, total),
+            () => deps.call(PackListUtils.extractItemsFromMultipleShows, readIds, [category], false)) : [];
+        // Each item's quantity in each learned show that packed it, with the show's square feet; and
+        // in each booked show out in the projected months, with its window
         const learnedById = new Map(learnedFrom.map(show => [show.id, show]));
-        const usedByItem = new Map(usageRows.map(row => [row.itemId, Object.entries(row.shows || {})
-            .filter(([id, qty]) => qty > 0 && learnedById.has(id))
+        const packedIds = new Set(packedShows.map(show => show.id));
+        const quantities = (row, keep) => Object.entries(row.shows || {}).filter(([id, qty]) => qty > 0 && keep(id));
+        const usedByItem = new Map(itemRows.map(row => [row.itemId, quantities(row, id => learnedById.has(id))
             .map(([id, qty]) => ({ qty: Number(qty), sqft: learnedById.get(id).sqft }))]));
-        const packedByItem = new Map(packedRows.map(row => [row.itemId, Object.entries(row.shows || {})
-            .filter(([id, qty]) => qty > 0 && showById.has(id))
+        const packedByItem = new Map(itemRows.map(row => [row.itemId, quantities(row, id => packedIds.has(id))
             .map(([id, qty]) => ({ start: showById.get(id).ship, end: showById.get(id).end, qty: Number(qty) }))]));
-        const itemIds = [...new Set([...usedByItem.keys(), ...packedByItem.keys()])].sort();
+        const itemIds = itemRows.map(row => row.itemId)
+            .filter(itemId => usedByItem.get(itemId).length || packedByItem.get(itemId).length)
+            .sort();
 
         // Stock at each month's start (the first: today), scheduled changes applied
         const stockOn = async (date) => {
@@ -1440,10 +1460,17 @@ class Requests_uncached {
                 return [entry.itemName, Number.isFinite(qty) ? qty : null];
             }));
         };
-        const monthStock = await Promise.all(futureMonths.map((month, i) => stockOn(i === 0 ? today : `${month}-01`)));
+        let stocked = 0;
+        progress(3, 'Reading stock...');
+        const monthStock = await Promise.all(futureMonths.map(async (month, i) => {
+            const stock = await stockOn(i === 0 ? today : `${month}-01`);
+            stocked++;
+            progress(3, `Reading stock: ${stocked} of ${futureMonths.length} months...`, stocked, futureMonths.length);
+            return stock;
+        }));
         const items = itemIds.map(itemId => ({
             itemId,
-            used: usedByItem.get(itemId) || [],
+            used: usedByItem.get(itemId),
             packed: packedByItem.get(itemId) || [],
             stock: Object.fromEntries(futureMonths.map((month, i) => [month, monthStock[i].get(itemId) ?? null]))
         }));
@@ -1463,6 +1490,7 @@ class Requests_uncached {
         const packedWindows = packedShows.filter(show => show.sqft > 0).map(asWindow);
         const unpackedShows = outShows.filter(show => !show.hasPackList && show.sqft > 0).map(asWindow);
 
+        progress(4, 'Projecting...');
         const projection = projectInventory({ months: futureMonths, from: today, scheduled, pastSqft, pastShows, packedShows: packedWindows, unpackedShows, learned: learnedFrom.length, items }, settings);
         return {
             ...projection,
@@ -1495,7 +1523,8 @@ class Requests_uncached {
      * @returns {Promise<Array<{itemId, month, shortage, proposed}>>} Empty without a category
      */
     static async getInventoryProjection(deps, category, proposal = '') {
-        const model = await deps.call(Requests.getInventoryProjectionModel, category);
+        const model = await relayProgress('api:getInventoryProjectionModel', 'api:getInventoryProjection',
+            () => deps.call(Requests.getInventoryProjectionModel, category));
         if (!model) return [];
         const deltas = proposal ? ProposalUtils.quantityDeltas(await deps.call(Requests.getInventoryProposals), proposal, category) : null;
         return itemShortages(model.months, deltas);
@@ -1511,7 +1540,8 @@ class Requests_uncached {
      * @returns {Promise<Array<Object>>} Empty without a category
      */
     static async getInventoryProjectionMonths(deps, category) {
-        const model = await deps.call(Requests.getInventoryProjectionModel, category);
+        const model = await relayProgress('api:getInventoryProjectionModel', 'api:getInventoryProjectionMonths',
+            () => deps.call(Requests.getInventoryProjectionModel, category));
         return (model?.months || []).map(({ shortages, ...month }) => ({ ...month, shortCount: shortages.length, shortages: shortages.slice(0, 5) }));
     }
 
@@ -1525,7 +1555,8 @@ class Requests_uncached {
      * @returns {Promise<Array<Object>>} One row; empty without a category
      */
     static async getInventoryProjectionBasis(deps, category) {
-        const model = await deps.call(Requests.getInventoryProjectionModel, category);
+        const model = await relayProgress('api:getInventoryProjectionModel', 'api:getInventoryProjectionBasis',
+            () => deps.call(Requests.getInventoryProjectionModel, category));
         return model ? [{ ...model.basis, settings: model.settings, items: model.items }] : [];
     }
 

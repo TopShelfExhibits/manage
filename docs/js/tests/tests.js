@@ -29,7 +29,7 @@
  */
 
 import { Requests } from '../data_management/api.js';
-import { isAppOutdated, checkAppVersion, holdScheduledPolls, reportIntegrityError, areWritesHeld, releaseWritesHeld } from '../data_management/index.js';
+import { isAppOutdated, checkAppVersion, holdScheduledPolls, reportIntegrityError, areWritesHeld, releaseWritesHeld, ProgressBus } from '../data_management/index.js';
 import { FakeSignInService, FakeSignInWindow, FakeGoogleSheetsService, FakeGoogleState, FakeDropboxFiles, setFakeDelaysEnabled } from '../google_sheets_services/FakeGoogle.js';
 import { AuthSession } from '../auth/AuthSession.js';
 import { refreshAppData } from './fakeGoogleDevTools.js';
@@ -6614,6 +6614,20 @@ test('INVENTORY PROJECTION', 'CABINETS report rows, with and without a proposal'
     } finally {
         await _asUser(() => Requests.saveInventoryProposalTable([], name));
     }
+}));
+
+// FURNITURE is projected nowhere else, so its model is computed here and reports its steps
+test('INVENTORY PROJECTION', 'progress: the four model steps reach the method a store loads', () => _withProjectionToday(async () => {
+    const seen = [];
+    const listen = ({ current, total, message }) => seen.push([message.slice(0, 8), current >= 0 && current <= total && total === 4]);
+    ProgressBus.on('api:getInventoryProjectionMonths', listen);
+    try {
+        await Requests.getInventoryProjectionMonths('FURNITURE');
+    } finally {
+        ProgressBus.off('api:getInventoryProjectionMonths', listen);
+    }
+    assertEqual([...new Set(seen.map(([step]) => step))], ['Step 1/4', 'Step 2/4', 'Step 3/4', 'Step 4/4'], 'each step, in order');
+    assertEqual(seen.every(([, inRange]) => inRange), true, 'progress within 0–4 of 4');
 }));
 
 test('INVENTORY PROJECTION', 'proposal quantity changes by item, active entries of one tab', () => {
