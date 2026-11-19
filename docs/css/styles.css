@@ -770,6 +770,7 @@ div:has(span:empty)+.card {
 
 button.card {
     width: 100%;
+    text-align: left;
 }
 
 /* Cards Grid Component */
