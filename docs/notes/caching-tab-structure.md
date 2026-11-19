@@ -142,27 +142,28 @@ Set up at the bottom of `database.js` (`watchSpreadsheets`) and run by the polle
 
 # Analytics Tab: Persisted Results
 
-Some cached API results take long enough to compute that a new session should start from the last saved copy. A method opts in through `wrapMethods`' last argument, `persistentMethods` (see the bottom of `api.js`). The persisted methods are `getInventoryShortageAlerts` and `getItemThumbnails` (item thumbnails for report pages; it reads every inventory tab).
+Some cached API results take long enough to compute that a new session should start from the last saved copy. A method opts in through `wrapMethods`' last argument, `persistentMethods` (see the bottom of `api.js`). The persisted methods are `getInventoryShortageAlerts`, `getItemThumbnails` (item thumbnails for report pages; it reads every inventory tab), and `getInventoryProjection` with `getInventoryProjectionBasis` and `getInventoryProjectionMonths` (the inventory projection report: the items likely to run short, one entry per category and selected proposal; what the projection learned from, and its months in words, one each per category; the model is in `utils/inventory-projection.js`).
 
 ## Tab location and layout
 
 Spreadsheet `CACHE`, tab `Analytics`. Row 1 holds the headers; each later row holds one saved result.
 
-| A (Key)                            | B (SavedAt)                | C (Sources)                                         | D (Value)               |
-| ---------------------------------- | -------------------------- | --------------------------------------------------- | ----------------------- |
-| `api:getInventoryShortageAlerts:` | `2026-11-04T16:19:54.842Z` | `["database:getData:\"CACHE\",\"Preferences\",…"]` | `[{"itemId":"CAB-004"…}]` |
+| A (Key)                            | B (SavedAt)                | C (Sources)                                         | D (Value)               | E (Version)            |
+| ---------------------------------- | -------------------------- | --------------------------------------------------- | ----------------------- | ---------------------- |
+| `api:getInventoryShortageAlerts:` | `2026-11-04T16:19:54.842Z` | `["database:getData:\"CACHE\",\"Preferences\",…"]` | `[{"itemId":"CAB-004"…}]` | `2026-11-06T15:05:52Z` |
 
 - **Key:** the method's cache key, from `generateCacheKey`.
 - **SavedAt:** an ISO timestamp, written like the Caching tab's. This is when the oldest source read was filled, which can be earlier than the save itself.
 - **Sources:** a JSON list of the leaf cache keys the result was computed from, gathered from the recorded dependency chain (`collectSourceKeys`). Only keys a stamp can name are kept (the store's `sourcePrefixes`: `database:` reads and the `app_utils:` sources, the clock and the locks). Pure cached leaves such as `findBestProjectIdentifierMatch` are left out: their keys embed every show name and can never mark the row stale.
 - **Value:** the result as JSON. A row is written only if every cell stays under the 50,000-character Sheets cell limit; otherwise the save is skipped with a console warning.
+- **Version:** the deploy that saved the row (`version.json` as the session loaded it, `loadedAppVersion` in `caching.js`). A session that doesn't know its version neither saves nor restores. Saving into a tab whose header row lacks the column writes the header first.
 
 Reads and writes use `GoogleSheetsService` directly, in `application-utils.js` (`setPersistentStore`), the same way as the Caching tab. Saving a result therefore never invalidates cached reads. If the tab is missing, restores and saves fail quietly (with a console warning) and results are computed as before.
 
 ## Rules
 
 - **Saving.** Every computation of a persisted method writes its row, after the result is cached in memory. The write isn't awaited.
-- **Restoring.** Only the first cache miss of a session (or after `clearCache`) reads the row. The row is used only if no source has a newer timestamp than `SavedAt`. A source is checked against every Caching tab key it starts with, and `app_utils:getToday:` is checked against local midnight. When a row is restored, its sources are linked back as dependencies and marked as filled at `SavedAt`. From then on, a local save or a timestamp the poller picks up invalidates the restored value exactly as if it had been computed in this session.
+- **Restoring.** Only the first cache miss of a session (or after `clearCache`) reads the row. The row is used only if it was saved by this session's deploy (a new deploy may change a result's shape, so each deploy computes its persisted results once), and no source has a newer timestamp than `SavedAt`. A source is checked against every Caching tab key it starts with, and `app_utils:getToday:` is checked against local midnight. When a row is restored, its sources are linked back as dependencies and marked as filled at `SavedAt`. From then on, a local save or a timestamp the poller picks up invalidates the restored value exactly as if it had been computed in this session.
 - **Stale rows** are never deleted. A stale row is ignored on read and overwritten by the next computation.
 - **Allowed sources.** A persisted method's result must be JSON, and it may depend only on `Database` reads and `ApplicationUtils.getToday`, since only those are checked on restore. In memory, persisted results never expire; only their sources invalidate them.
 - **Self-stamped writes.** `writeCacheTimestamp` adds one second to every stamp, so a result computed in the second after a source was saved is seen as stale by the next session. That costs one extra computation and never restores stale data.
@@ -191,5 +192,5 @@ Reads and writes use `GoogleSheetsService` directly, in `application-utils.js` (
 
 ## Live data to add before deploying
 
-1. A `CACHE/Analytics` tab with the headers `Key | SavedAt | Sources | Value` in row 1.
+1. A `CACHE/Analytics` tab with the headers `Key | SavedAt | Sources | Value | Version` in row 1 (the first save adds `Version` to an older tab).
 2. A `CACHE/Preferences` row: ID `InventoryShortageAlertDays`, Name `Shortage Alert Days`, Description `days ahead the inventory shortage alerts look; 0 turns them off`, Page `inventory*`, Type `integer`, Value set to the number of days (for example `60`).

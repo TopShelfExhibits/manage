@@ -12,6 +12,7 @@ export { InstantWriteUtils } from './abstraction/instant-write-utils.js';
 export { DropboxUtils } from './abstraction/dropbox-utils.js';
 
 // Utility classes
+export { PROJECTION_SETTINGS, PROJECTION_PAGE, resolveProjectionSettings, parseBoothSquareFeet, monthOf, addMonths, monthRange, shiftYears, peakByMonth, itemUse, itemQuantity, growthMultiplier, projectVolume, fillShows, projectInventory, itemShortages } from './utils/inventory-projection.js';
 export { parseDate, toISODateString, toUSDateString, currentDate, setTestToday, todayISOString, startOfTodayMs, offsetToISO, SHORTAGE_ALERT_DAYS_PREFERENCE, resolveShortageAlertDays, PREFERENCES_MAPPING, INVENTORY_TAB_PREFERENCES, resolveInventoryTabList, shortageAlertDateFilters, searchFilter, mapWithConcurrency, GetTopFuzzyMatch, GetParagraphMatchRating, ITEM_NUMBER_CHAR, itemVariantBase, resolveItemVariant, itemVariantFamilies, itemVariantKey, parseItemVariants, normalizeHeaderName, resolveSheetMapping, isLocalhost, sanitizeTabName, normalizeText, normalizeMatchKey, getRandomLoadingQuote } from './utils/helpers.js';
 export { SEVERITY, remainingSeverity } from './utils/severity.js';
 export { EditHistoryUtils, MAX_HISTORY_ENTRIES, ARCHIVE_TAB_NAME, ARCHIVE_HEADERS, INVENTORY_NOTE_MAX_LENGTH_PREFERENCE, DEFAULT_INVENTORY_NOTE_MAX_LENGTH, resolveInventoryNoteMaxLength, readRowMetadata, writeRowMetadata } from './utils/metadata-utils.js';

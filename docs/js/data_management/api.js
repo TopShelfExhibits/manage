@@ -1,4 +1,4 @@
-import { wrapMethods, normalizeHeaderName, Database, InventoryUtils, PackListUtils, ProductionUtils, ApplicationUtils, EditHistoryUtils, InstantWriteUtils, ARCHIVE_TAB_NAME, ARCHIVE_HEADERS, offsetToISO, resolveShortageAlertDays, shortageAlertDateFilters, PREFERENCES_MAPPING, INVENTORY_TAB_PREFERENCES, sanitizeTabName, mapWithConcurrency, ProgressBus, getRandomLoadingQuote, DEFAULT_INVENTORY_MAPPING, ProposalUtils, DropboxUtils, PROPOSALS_TAB_NAME, PROPOSAL_MAPPING, resolveInventoryNoteMaxLength, primaryThumbnailValue, SEVERITY, remainingSeverity } from './index.js';
+import { wrapMethods, normalizeHeaderName, Database, InventoryUtils, PackListUtils, ProductionUtils, ApplicationUtils, EditHistoryUtils, InstantWriteUtils, ARCHIVE_TAB_NAME, ARCHIVE_HEADERS, offsetToISO, resolveShortageAlertDays, shortageAlertDateFilters, PREFERENCES_MAPPING, INVENTORY_TAB_PREFERENCES, sanitizeTabName, mapWithConcurrency, ProgressBus, getRandomLoadingQuote, DEFAULT_INVENTORY_MAPPING, ProposalUtils, DropboxUtils, PROPOSALS_TAB_NAME, PROPOSAL_MAPPING, resolveInventoryNoteMaxLength, primaryThumbnailValue, SEVERITY, remainingSeverity, resolveProjectionSettings, monthOf, addMonths, monthRange, projectInventory, itemShortages } from './index.js';
 import { AuthSession } from './services.js';
 import { instantWriteEntry, identityText, parseColoredName } from './utils/instant-write-config.js';
 import { columnTypesEntry } from './utils/column-types.js';
@@ -8,6 +8,23 @@ const signedInEmail = () => AuthSession.state.email || null;
 
 // CACHE tabs with tracked history. EditHistory is always mapped to the key 'edithistory'.
 const NOTES_MAPPING = { Path: 'Path', Note: 'Note', Color: 'Color', Size: 'Size', edithistory: 'EditHistory' };
+
+/**
+ * Runs `run` while relaying a sub-method's progress (ProgressBus topic `from`): to a topic, the
+ * calling method's own, so the store loading it follows along; or to a function.
+ * @param {string} from
+ * @param {string|Function} to
+ * @param {Function} run
+ */
+async function relayProgress(from, to, run) {
+    const relay = typeof to === 'function' ? to : (data) => ProgressBus.emit(to, data);
+    ProgressBus.on(from, relay);
+    try {
+        return await run();
+    } finally {
+        ProgressBus.off(from, relay);
+    }
+}
 
 /**
  * CACHING ARCHITECTURE NOTES:
@@ -1166,15 +1183,8 @@ class Requests_uncached {
         // Extract items from the identified shows
         // Convert string filter to array as extractItemsFromMultipleShows expects an array
         const categoryFilterArray = ctgFilter ? [ctgFilter] : undefined;
-        // Relay sub-function progress onto this function's topic so the loading indicator updates
-        const _onExtractProgress = (data) => ProgressBus.emit('api:getMultipleShowsItemsSummary', data);
-        ProgressBus.on('packlist:extractItemsFromMultipleShows', _onExtractProgress);
-        let rawItemRows;
-        try {
-            rawItemRows = await deps.call(PackListUtils.extractItemsFromMultipleShows, projectIdentifiers, categoryFilterArray, includeEmptyShows);
-        } finally {
-            ProgressBus.off('packlist:extractItemsFromMultipleShows', _onExtractProgress);
-        }
+        const rawItemRows = await relayProgress('packlist:extractItemsFromMultipleShows', 'api:getMultipleShowsItemsSummary',
+            () => deps.call(PackListUtils.extractItemsFromMultipleShows, projectIdentifiers, categoryFilterArray, includeEmptyShows));
 
         // Leave out items in tabs the InventorySuppressCategoryAnalysis preference lists
         const skippedTabs = await deps.call(InventoryUtils.getPreferenceTabs, INVENTORY_TAB_PREFERENCES.skipAnalysis);
@@ -1356,6 +1366,189 @@ class Requests_uncached {
             minQty: row.minQty,
             shows: Object.keys(row.shows || {}).filter(show => (row.shows[show] || 0) > 0)
         }), 8);
+    }
+
+    /**
+     * The inventory projection of one inventory category (the model: utils/inventory-projection.js).
+     * Reads the shows shipping from the start of the usage window or the past years to the last
+     * projected month (one per transship chain, at its root) with their ship and return dates,
+     * square feet and whether they have a pack list; the usage window's pack list quantities; the
+     * pack list quantities of the booked shows out in the projected months; stock at each month's
+     * start; then projectInventory. getInventoryProjection and getInventoryProjectionBasis serve its
+     * parts. The schedule is read only through cutoff methods (show ids, dates, square feet).
+     * Reports its four steps on its ProgressBus topic; the methods serving it relay them.
+     * @param {Object} deps
+     * @param {string} category - Inventory tab name
+     * @returns {Promise<{months: Array<Object>, items: Array<Object>, settings: Object, basis: Object}|null>}
+     */
+    static async getInventoryProjectionModel(deps, category) {
+        if (!category) return null;
+        // Step n of 4, `done` of `total` through it
+        const progress = (step, message, done = 0, total = 1) =>
+            ProgressBus.emit('api:getInventoryProjectionModel', { current: step - 1 + done / total, total: 4, message: `Step ${step}/4: ${message}` });
+        progress(1, 'Reading the schedule...');
+        const settings = resolveProjectionSettings(await deps.call(Requests.getPreferences));
+        const today = await deps.call(ApplicationUtils.getToday);
+        const thisMonth = monthOf(today);
+        const futureMonths = monthRange(thisMonth, 12 * settings.futureYears);
+        const usageMonths = monthRange(addMonths(thisMonth, -settings.usageMonths), settings.usageMonths);
+        const firstMonth = addMonths(thisMonth, -Math.max(settings.usageMonths, 12 * settings.historyYears));
+        const lastMonth = futureMonths[futureMonths.length - 1];
+
+        const filter = { dateFilters: [
+            { column: 'Date', value: `${firstMonth}-01`, type: 'after' },
+            { column: 'Date', value: `${addMonths(lastMonth, 1)}-01`, type: 'before' }
+        ] };
+        const [ids, sqftById, allTabs] = await Promise.all([
+            deps.call(ProductionUtils.getOverlappingShowIds, filter),
+            deps.call(ProductionUtils.getShowSquareFeet),
+            deps.call(Database.getTabs, 'PACK_LISTS')
+        ]);
+        const packListTabs = allTabs.filter(tab => tab.title !== '_TEMPLATE' && !tab.title.startsWith('_'));
+        const shows = (await mapWithConcurrency(ids, async (id) => {
+            // A transship destination's items are its chain root's, out until the chain's last return
+            if (await deps.call(ProductionUtils.getTransshipSourceForShow, id)) return null;
+            const ship = await deps.call(ProductionUtils.getProjectShipDate, id);
+            const month = monthOf(ship);
+            if (!month || month < firstMonth || month > lastMonth) return null;
+            const [returned, tabs] = await Promise.all([
+                deps.call(ProductionUtils.getProjectReturnDate, id),
+                deps.call(ProductionUtils.findAllPackListTabsForShow, id, packListTabs)
+            ]);
+            const size = sqftById[id] ?? null;
+            return {
+                id, ship, month,
+                end: returned && returned >= ship ? returned : ship,
+                sized: size !== null,
+                sqft: size ?? (settings.defaultSquareFeet || 0),
+                hasPackList: tabs.length > 0
+            };
+        }, 8, ({ processed, total }) => progress(1, `Reading the schedule: ${processed} of ${total} shows...`, processed, total))).filter(Boolean);
+        const showById = new Map(shows.map(show => [show.id, show]));
+
+        // Learned from: the usage window's shows with a pack list and square feet
+        const usageShows = shows.filter(show => usageMonths.includes(show.month));
+        const learnedFrom = usageShows.filter(show => show.hasPackList && show.sqft > 0);
+        const usageSqft = learnedFrom.reduce((sum, show) => sum + show.sqft, 0);
+        // Out in the projected months: the shows whose window reaches today
+        const outShows = shows.filter(show => show.end >= today);
+        const packedShows = outShows.filter(show => show.hasPackList);
+        // Both sets of pack lists in one read
+        const readIds = [...new Set([...learnedFrom, ...packedShows].map(show => show.id))];
+        progress(2, 'Reading pack lists...');
+        const itemRows = readIds.length ? await relayProgress('packlist:extractItemsFromMultipleShows',
+            ({ current, total }) => progress(2, `Reading pack lists: ${current} of ${total} shows...`, current, total),
+            () => deps.call(PackListUtils.extractItemsFromMultipleShows, readIds, [category], false)) : [];
+        // Each item's quantity in each learned show that packed it, with the show's square feet; and
+        // in each booked show out in the projected months, with its window
+        const learnedById = new Map(learnedFrom.map(show => [show.id, show]));
+        const packedIds = new Set(packedShows.map(show => show.id));
+        const quantities = (row, keep) => Object.entries(row.shows || {}).filter(([id, qty]) => qty > 0 && keep(id));
+        const usedByItem = new Map(itemRows.map(row => [row.itemId, quantities(row, id => learnedById.has(id))
+            .map(([id, qty]) => ({ qty: Number(qty), sqft: learnedById.get(id).sqft }))]));
+        const packedByItem = new Map(itemRows.map(row => [row.itemId, quantities(row, id => packedIds.has(id))
+            .map(([id, qty]) => ({ start: showById.get(id).ship, end: showById.get(id).end, qty: Number(qty) }))]));
+        const itemIds = itemRows.map(row => row.itemId)
+            .filter(itemId => usedByItem.get(itemId).length || packedByItem.get(itemId).length)
+            .sort();
+
+        // Stock at each month's start (the first: today), scheduled changes applied
+        const stockOn = async (date) => {
+            const info = itemIds.length ? await deps.call(InventoryUtils.getItemInfo, itemIds, ['quantity'], date) : null;
+            return new Map((info || []).map(entry => {
+                const qty = parseInt(entry.quantity, 10);
+                return [entry.itemName, Number.isFinite(qty) ? qty : null];
+            }));
+        };
+        let stocked = 0;
+        progress(3, 'Reading stock...');
+        const monthStock = await Promise.all(futureMonths.map(async (month, i) => {
+            const stock = await stockOn(i === 0 ? today : `${month}-01`);
+            stocked++;
+            progress(3, `Reading stock: ${stocked} of ${futureMonths.length} months...`, stocked, futureMonths.length);
+            return stock;
+        }));
+        const items = itemIds.map(itemId => ({
+            itemId,
+            used: usedByItem.get(itemId),
+            packed: packedByItem.get(itemId) || [],
+            stock: Object.fromEntries(futureMonths.map((month, i) => [month, monthStock[i].get(itemId) ?? null]))
+        }));
+
+        const scheduledShows = shows.filter(show => show.month >= thisMonth);
+        const pastShows = shows.filter(show => show.month < thisMonth);
+        const asWindow = (show) => ({ start: show.ship, end: show.end, sqft: show.sqft });
+        const packedWindows = packedShows.filter(show => show.sqft > 0).map(asWindow);
+        const unpackedShows = outShows.filter(show => !show.hasPackList && show.sqft > 0).map(asWindow);
+
+        progress(4, 'Projecting...');
+        const projection = projectInventory({ months: futureMonths, from: today, scheduledShows, pastShows, packedShows: packedWindows, unpackedShows, learned: learnedFrom.length, items }, settings);
+        return {
+            ...projection,
+            settings,
+            basis: {
+                category,
+                today,
+                usageMonths,
+                usageShows: usageShows.length,
+                learnedFrom: learnedFrom.length,
+                usageSqft,
+                shows: shows.length,
+                unsized: shows.filter(show => !show.sized).length,
+                outShows: outShows.length,
+                packedShows: packedShows.length,
+                filledShows: projection.filled,
+                trend: projection.trend
+            }
+        };
+    }
+
+    /**
+     * The items of a category likely to run short in the projected months (getInventoryProjectionModel,
+     * itemShortages): one row per item, the first month it runs short and its shortage (negative).
+     * With a proposal, `proposed` is the shortage after the proposal's quantity changes in this
+     * category (its active entries). Persisted (CACHE/Analytics).
+     * @param {Object} deps
+     * @param {string} category - Inventory tab name
+     * @param {string} [proposal] - Proposal name; '' for none
+     * @returns {Promise<Array<{itemId, month, shortage, proposed}>>} Empty without a category
+     */
+    static async getInventoryProjection(deps, category, proposal = '') {
+        const model = await relayProgress('api:getInventoryProjectionModel', 'api:getInventoryProjection',
+            () => deps.call(Requests.getInventoryProjectionModel, category));
+        if (!model) return [];
+        const deltas = proposal ? ProposalUtils.quantityDeltas(await deps.call(Requests.getInventoryProposals), proposal, category) : null;
+        return itemShortages(model.months, deltas);
+    }
+
+    /**
+     * The inventory projection month by month (getInventoryProjectionModel), to show how it works:
+     * shows and square feet booked, the past month carried forward and its multiplier, projected
+     * square feet, the shows filled in, the most square feet out on one day, and the items short
+     * (shortCount, and the largest shortages, at most 5). Persisted.
+     * @param {Object} deps
+     * @param {string} category - Inventory tab name
+     * @returns {Promise<Array<Object>>} Empty without a category
+     */
+    static async getInventoryProjectionMonths(deps, category) {
+        const model = await relayProgress('api:getInventoryProjectionModel', 'api:getInventoryProjectionMonths',
+            () => deps.call(Requests.getInventoryProjectionModel, category));
+        return (model?.months || []).map(({ shortages, ...month }) => ({ ...month, shortCount: shortages.length, shortages: shortages.slice(0, 5) }));
+    }
+
+    /**
+     * What the inventory projection is based on (getInventoryProjectionModel), as one row: the
+     * usage window and the shows learned from, shows without a readable size, the trend, the
+     * settings, and each item's use (the learned shows that packed it, its scale with square feet,
+     * its typical quantity at 1000 sq ft). Persisted.
+     * @param {Object} deps
+     * @param {string} category - Inventory tab name
+     * @returns {Promise<Array<Object>>} One row; empty without a category
+     */
+    static async getInventoryProjectionBasis(deps, category) {
+        const model = await relayProgress('api:getInventoryProjectionModel', 'api:getInventoryProjectionBasis',
+            () => deps.call(Requests.getInventoryProjectionModel, category));
+        return model ? [{ ...model.basis, settings: model.settings, items: model.items }] : [];
     }
 
     /**
@@ -1869,5 +2062,5 @@ export const Requests = wrapMethods(
     ], // Mutation methods (and fresh reads that must not be cached)
     ['computeIdentifier'], // Infinite cache methods
     {}, // No custom cache durations needed - lock methods delegate to ApplicationUtils caching
-    ['getInventoryShortageAlerts', 'getItemThumbnails'] // Persisted methods (CACHE/Analytics)
+    ['getInventoryShortageAlerts', 'getItemThumbnails', 'getInventoryProjection', 'getInventoryProjectionBasis', 'getInventoryProjectionMonths'] // Persisted methods (CACHE/Analytics)
 );

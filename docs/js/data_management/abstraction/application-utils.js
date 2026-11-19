@@ -1,5 +1,5 @@
 import { Database, wrapMethods, invalidateCache, stampDataChange, normalizeHeaderName } from '../index.js';
-import { setTimestampWriter, setPersistentStore, startCacheTimestampPoller, startCacheCleanup } from '../utils/caching.js';
+import { setTimestampWriter, setPersistentStore, startCacheTimestampPoller, startCacheCleanup, loadedAppVersion } from '../utils/caching.js';
 import { networkState } from '../utils/networkState.js';
 
 import { isLocalhost, todayISOString, startOfTodayMs } from '../utils/helpers.js';
@@ -948,7 +948,7 @@ setInterval(checkDateRollover, 60 * 1000);
 // Read and written directly, like the Caching tab, so saving a result never invalidates cached
 // reads. Validity is checked against the Caching tab timestamps, plus local midnight for getToday.
 const ANALYTICS_TAB = 'Analytics';
-const ANALYTICS_HEADERS = ['Key', 'SavedAt', 'Sources', 'Value'];
+const ANALYTICS_HEADERS = ['Key', 'SavedAt', 'Sources', 'Value', 'Version'];
 const SHEETS_CELL_LIMIT = 50000;
 const TAB_READ_PREFIX = 'database:getData:';
 
@@ -962,13 +962,17 @@ setPersistentStore({
     // locks. Pure cached leaves such as findBestProjectIdentifierMatch carry long argument lists
     // and can never mark a row stale
     sourcePrefixes: ['database:', 'app_utils:'],
+    // A row is restored only by the deploy that saved it: a new deploy may change a result's shape
     async read(key) {
+        const version = loadedAppVersion();
         const row = (await readAnalyticsRows()).slice(1).find(r => Array.isArray(r) && r[0] === key);
-        if (!row || !row[1] || !row[3]) return null;
+        if (!row || !row[1] || !row[3] || !version || row[4] !== version) return null;
         return { savedAt: row[1], sources: JSON.parse(row[2] || '[]'), value: JSON.parse(row[3]) };
     },
     async write({ key, value, savedAt, sources }) {
-        const line = [key, savedAt, JSON.stringify(sources), JSON.stringify(value)];
+        const version = loadedAppVersion();
+        if (!version) return;
+        const line = [key, savedAt, JSON.stringify(sources), JSON.stringify(value), version];
         const oversize = line.findIndex(cell => cell.length > SHEETS_CELL_LIMIT);
         if (oversize !== -1) {
             console.warn(`[Analytics] Not saved: ${key} ${ANALYTICS_HEADERS[oversize]} is ${line[oversize].length} characters; a sheet cell holds ${SHEETS_CELL_LIMIT}`);
@@ -979,9 +983,13 @@ setPersistentStore({
             await GoogleSheetsService.setSheetData('CACHE', ANALYTICS_TAB, [ANALYTICS_HEADERS, line], null);
             return;
         }
+        // A tab made before the Version column gets its header
+        if (raw[0].length < ANALYTICS_HEADERS.length) {
+            await GoogleSheetsService.setSheetData('CACHE', `${ANALYTICS_TAB}!A1:E1`, [ANALYTICS_HEADERS], null);
+        }
         const rowIndex = raw.slice(1).findIndex(r => Array.isArray(r) && r[0] === key);
         const sheetRow = rowIndex === -1 ? raw.length + 1 : rowIndex + 2;
-        await GoogleSheetsService.setSheetData('CACHE', `${ANALYTICS_TAB}!A${sheetRow}:D${sheetRow}`, [line], null);
+        await GoogleSheetsService.setSheetData('CACHE', `${ANALYTICS_TAB}!A${sheetRow}:E${sheetRow}`, [line], null);
     },
     async readSourceTimestamps() {
         const stamps = await ApplicationUtils.readCacheTimestamps();

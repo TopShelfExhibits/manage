@@ -173,6 +173,20 @@ export class ProposalUtils {
     }
 
     /**
+     * Quantity changes of a proposal's active entries in one inventory tab, by item number.
+     * @returns {Object<string, number>}
+     */
+    static quantityDeltas(entries, name, category) {
+        const deltas = {};
+        for (const entry of this.activeEntries(entries, name)) {
+            if (entry.category !== category) continue;
+            const delta = toNumber(entry.changes.find(ch => ch.n === 'quantity')?.ne);
+            if (delta) deltas[entry.itemNumber] = (deltas[entry.itemNumber] || 0) + delta;
+        }
+        return deltas;
+    }
+
+    /**
      * Proposal changes from a saved inventory row to an edited one.
      * @returns {Array<{n, ne}>} quantity as a signed delta ("+8"), other fields as the new value
      */

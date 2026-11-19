@@ -29,7 +29,7 @@
  */
 
 import { Requests } from '../data_management/api.js';
-import { isAppOutdated, checkAppVersion, holdScheduledPolls, reportIntegrityError, areWritesHeld, releaseWritesHeld } from '../data_management/index.js';
+import { isAppOutdated, checkAppVersion, holdScheduledPolls, reportIntegrityError, areWritesHeld, releaseWritesHeld, ProgressBus } from '../data_management/index.js';
 import { FakeSignInService, FakeSignInWindow, FakeGoogleSheetsService, FakeGoogleState, FakeDropboxFiles, setFakeDelaysEnabled } from '../google_sheets_services/FakeGoogle.js';
 import { AuthSession } from '../auth/AuthSession.js';
 import { refreshAppData } from './fakeGoogleDevTools.js';
@@ -41,6 +41,7 @@ import { commitInventoryProposal, saveToProposal, proposalTableStore, sendEditsT
 import { hasQuantityChanges } from '../application/components/content/InventoryTable.js';
 import { evaluateArithmetic } from '../application/components/interface/cells.js';
 import { balancedSplit } from '../application/components/interface/buttonBar.js';
+import { sortKeyFor, compareSortKeys } from '../application/components/interface/tableComponent.js';
 import { resolveView, resolveAction, pickView, mergeView, matchesKeyPattern, setViewWarningHandler, withRegistryDefaults, searchTiers } from '../application/utils/views/resolveView.js';
 import { SEARCH_LIMITS, searchWords, matchRow, matchRows, makeHighlighter } from '../application/utils/views/searchMatch.js';
 import { formatValue, formatText } from '../application/utils/views/fieldFormat.js';
@@ -49,6 +50,7 @@ import { applyColorRule, colorFor, rowColorFor } from '../application/utils/view
 import { containerTier, BREAKPOINTS } from '../application/utils/useContainerSize.js';
 import { createScrollHider } from '../application/utils/scrollHider.js';
 import { DEFAULT_DASHBOARD } from '../application/utils/dashboardLayout.js';
+import { parseBoothSquareFeet, monthOf, addMonths, monthRange, shiftYears, peakByMonth, itemUse, itemQuantity, resolveProjectionSettings, growthMultiplier, projectVolume, fillShows, projectInventory, itemShortages } from '../data_management/utils/inventory-projection.js';
 import { redirectPath } from '../application/utils/urlRouter.js';
 import { todayISOString, setTestToday, startOfTodayMs, resolveShortageAlertDays, shortageAlertDateFilters, INVENTORY_TAB_PREFERENCES, resolveInventoryTabList, itemVariantBase, resolveItemVariant, itemVariantFamilies, itemVariantKey, parseItemVariants, searchFilter, textFiltersToSearchParams, parseSearchParameters } from '../data_management/utils/helpers.js';
 import { instantWriteEntry, identityKey, cellKey, joinKey } from '../data_management/utils/instant-write-config.js';
@@ -4067,7 +4069,7 @@ test('TAB READS', 'getAllInventoryData reads every inventory tab in one request'
 });
 
 // ── Group 35: Preferences ─────────────────────────────────────────────────────
-// FakeGoogle CACHE/Preferences has 13 rows, among them:
+// FakeGoogle CACHE/Preferences has 19 rows, among them:
 //   4 schedule* integer prefs (offsets 14, 14, 7, 7)
 //   3 inventory* json tab lists (InventorySuppressCategoryAnalysis, InventoryCustomItemNumbers,
 //     InventoryDescriptionOnly), the only source of those settings
@@ -4079,7 +4081,7 @@ test('PREFERENCES', 'getPreferences returns an array', async () => {
 
 test('PREFERENCES', 'getPreferences returns every fixture row', async () => {
     const result = await Requests.getPreferences();
-    assertEqual(result.length, 13, 'getPreferences row count');
+    assertEqual(result.length, 19, 'getPreferences row count');
 });
 
 test('PREFERENCES', 'all rows have required fields', async () => {
@@ -5154,6 +5156,19 @@ test('VIEWS FORMAT', 'formatValue matches the table formatter', async () => {
     assertEqual(formatText(['a', 'b'], {}), 'a, b', 'array text');
 });
 
+// A proposal's Change column sorted 40, 60, 150, 144, 30, 25, 20 (high to low): Chrome's Date read
+// '40' as 2040, '60' as 1960, '150' and '144' as years, so those sorted as dates apart from the rest
+test('VIEWS SORT', 'plain numbers sort as numbers, never as dates', async () => {
+    const sorted = (values, column, direction) => values
+        .map(value => ({ value, key: sortKeyFor(value, column) }))
+        .sort((a, b) => compareSortKeys(a.key, b.key, direction))
+        .map(entry => entry.value);
+    const column = { key: 'quantityChange', type: 'number' };
+    assertEqual(sorted(['40', '60', '150', '144', '30', '25', '20'], column, 'desc'), ['150', '144', '60', '40', '30', '25', '20'], 'high to low');
+    assertEqual(sorted(['+40', '-5', '150', 2.5], column, 'asc'), ['-5', 2.5, '+40', '150'], 'signs and numbers, low to high');
+    assertEqual(sorted(['3/5/2026', '2026-01-10', '12/1/2025'], { key: 'date' }, 'asc'), ['12/1/2025', '2026-01-10', '3/5/2026'], 'dates still by date');
+});
+
 test('VIEWS COLOR', 'colour rules: auto numbers/dates, value, literal; rowColor fallback', async () => {
     assertEqual(applyColorRule('auto', -1, { format: 'number' }), 'red', 'negative');
     assertEqual(applyColorRule('auto', 0, { format: 'number' }), 'orange', 'zero');
@@ -6107,9 +6122,11 @@ async function savedAlertsRow(expected) {
     throw new Error(`the saved alerts row never held ${JSON.stringify(expected)}`);
 }
 
-function setSavedAlertsRow(savedAt, sources, value) {
+// version: the deploy that saved it (default this one); null for a row from before the Version column
+function setSavedAlertsRow(savedAt, sources, value, version = window.__deployedVersion) {
     const rows = FakeGoogleSheetsService.mockData.CACHE.Analytics;
-    const line = [ALERTS_KEY, savedAt, JSON.stringify(sources), JSON.stringify(value)];
+    const line = [ALERTS_KEY, savedAt, JSON.stringify(sources), JSON.stringify(value), version];
+    if (version === null) line.pop();
     const index = rows.findIndex(r => r[0] === ALERTS_KEY);
     if (index === -1) rows.push(line); else rows[index] = line;
 }
@@ -6169,6 +6186,7 @@ test('PERSISTED RESULTS', 'a computed result is saved with its value and source 
         if (!sources.some(source => source.startsWith(prefix))) throw new Error(`no source under ${prefix}`);
     }
     if (isNaN(new Date(row[1]).getTime())) throw new Error(`SavedAt is not a date: ${row[1]}`);
+    if (!window.__deployedVersion || row[4] !== window.__deployedVersion) throw new Error(`Version is not this deploy's (${window.__deployedVersion}): ${row[4]}`);
 });
 
 test('PERSISTED RESULTS', 'only data reads and app_utils sources are saved, not pure cached leaves', async () => {
@@ -6181,6 +6199,16 @@ test('PERSISTED RESULTS', 'only data reads and app_utils sources are saved, not 
 test('PERSISTED RESULTS', 'a new session restores a row no source has changed since', async () => {
     setSavedAlertsRow(new Date(Date.now() + 60000).toISOString(), _alertSources, RESTORED_MARKER);
     assertEqual(await restoreAlerts(), RESTORED_MARKER, 'restored');
+});
+
+// Regression: a deploy that changed a persisted result's shape restored the old shape
+// (InventoryProjectionReport read basis.trend, which the saved row lacked)
+test('PERSISTED RESULTS', 'a row saved by another deploy, or before rows had a version, means a recompute', async () => {
+    for (const version of ['an-older-deploy', null]) {
+        setSavedAlertsRow(new Date(Date.now() + 60000).toISOString(), _alertSources, RESTORED_MARKER, version);
+        assertEqual(await restoreAlerts(), [CAB_004_ALERT], `${version ?? 'no version'}: recomputed`);
+        await savedAlertsRow([CAB_004_ALERT]);
+    }
 });
 
 test('PERSISTED RESULTS', 'a source stamped after the row is saved means a recompute', async () => {
@@ -6341,6 +6369,380 @@ test('INVENTORY TAB PREFERENCES', 'custom item numbers match whole item numbers 
         await setPreference(INVENTORY_TAB_PREFERENCES.customItemNumbers, '["HARDWARE"]');
     }
 });
+
+// ── Inventory projection (data_management/utils/inventory-projection.js) ──────
+// Pure helpers first, on hand-made figures. Then the report on the fixture, with today pinned to
+// 2025-04-01 and CABINETS (use per sq ft 22/1200 for CAB-004, 2/1200 for CAB-005):
+//   Usage window Jan–Mar 2025: 18 shows ship (by ship month); 2 have pack lists, GEARFIRE 2025 SHOT
+//   and ATSC 2025 NAB, 600 sq ft each: 1200 sq ft. CAB-004: 11 + 11 = 22; CAB-005: 2 (CAB-005b on
+//   GEARFIRE). Stock: CAB-004 10, CAB-005 6.
+//   Aug 2025: 6 shows (2600 sq ft) all out Aug 24–31; LOCKHEED MARTIN 2025 NGAUS (1200 sq ft) packs
+//   12 CAB-004, the other 1400 sq ft have no pack lists: 12 + 22/1200 × 1400 = 37.7.
+//   Sep 2025: 8 shows ship (2800 sq ft). Most out on Sep 5: NGAUS's 12, plus 3000 sq ft without pack
+//   lists (F365 100, STENO 200, ASP 900, QGENDA ACEP 200, SOFTWRITERS 600, PAYACTIV 200, MARMON 400,
+//   BECKMAN-COULTER 400; the two EPIC UGM shows came back Sep 4): 12 + 55 = 67.
+//   Oct 2025: nothing ships, but on Oct 1 SOFTWRITERS 600, PAYACTIV 200, BECKMAN-COULTER 400 and
+//   AUSTAL 100 are still out: 22/1200 × 1300 = 23.8 (the monthly model this replaces saw none).
+//   Jan 2026: 2 shows booked (300 sq ft, no pack lists); Jan 2025 shipped 5700 sq ft (500 + 900 +
+//   600 + 600 + 2400 + 600 + 100) → projected 5700. Its 7 shows return a year on, sized to fill
+//   5400 sq ft, and all 9 overlap: CAB-004 22/1200 × 5700 = 104.5, CAB-005 9.5. The 18 shows of
+//   Jan–Mar 2025 fill Jan–Mar 2026 (each month's past above its booked).
+//   Trend: the 12 months to Mar 2025 shipped 9300 sq ft, the 12 before 2300, the 12 before none.
+//   History Years 2: line through 2300, 9300 → 16300 / 9300 = 1.753; Jan 2026 5700 × 1.753 = 9990,
+//   CAB-004 10 - 22/1200 × 9990 → -174. History Years 3 leaves out the empty first year: the same.
+//   Report rows: CAB-004 first short in Aug 2025, deepest in Jan 2026: 10 - 104.5 → -95; CAB-005
+//   short only in Jan 2026: 6 - 9.5 → -4. The proposal test saves its own proposal (the proposal
+//   groups before it change the fixture proposals): CAB-004 +100 → 5, CAB-005 +2 → -2.
+
+const PROJECTION_TODAY = '2025-04-01';
+const DEFAULT_PROJECTION_SETTINGS = { usageMonths: 3, futureYears: 1, historyYears: 1, growthFactor: 1, defaultSquareFeet: 0, minShortfall: 1 };
+
+test('INVENTORY PROJECTION', 'square feet from a size: every W x D summed', () => {
+    assertEqual(['20x30', '10x40 & 10x10', "20' x 20'", '10 X 10', 'TBD', "x18'", '', null].map(parseBoothSquareFeet),
+        [600, 500, 400, 100, null, null, null, null], 'sizes');
+});
+
+test('INVENTORY PROJECTION', 'months and dates: ISO month, shift, range, years on', () => {
+    assertEqual([monthOf('2025-04-01'), addMonths('2025-11', 3), addMonths('2025-01', -1), addMonths('2025-12', -24)], ['2025-04', '2026-02', '2024-12', '2023-12'], 'month arithmetic');
+    assertEqual(monthRange('2025-11', 3), ['2025-11', '2025-12', '2026-01'], 'range');
+    assertEqual([shiftYears('2024-07-10', 1), shiftYears('2024-02-29', 1), shiftYears('2024-02-29', 4)], ['2025-07-10', '2025-02-28', '2028-02-29'], 'Feb 29 only in leap years');
+});
+
+test('INVENTORY PROJECTION', 'peak by month: the most out on any day, ship to return', () => {
+    const months = ['2025-01', '2025-02', '2025-03'];
+    assertEqual(peakByMonth([{ start: '2025-01-01', end: '2025-01-08', qty: 10 }, { start: '2025-01-15', end: '2025-01-22', qty: 10 }], months),
+        { '2025-01': 10, '2025-02': 0, '2025-03': 0 }, 'two shows in one month, back in between: 10 out at most');
+    assertEqual(peakByMonth([{ start: '2025-01-25', end: '2025-02-10', qty: 10 }, { start: '2025-02-01', end: '2025-02-15', qty: 10 }], months),
+        { '2025-01': 10, '2025-02': 20, '2025-03': 0 }, 'a window into the next month overlaps that month\'s show');
+    assertEqual(peakByMonth([{ start: '2025-01-20', end: '2025-03-05', qty: 6 }], months),
+        { '2025-01': 6, '2025-02': 6, '2025-03': 6 }, 'out in every month of a long window');
+    assertEqual(peakByMonth([{ start: '2025-01-10', end: '2025-01-31', qty: 11 }, { start: '2025-01-31', end: '2025-02-05', qty: 5 }, { start: '2025-02-06', end: null, qty: 2 }, { start: null, end: null, qty: 50 }], months),
+        { '2025-01': 16, '2025-02': 5, '2025-03': 0 }, 'meeting on 1/31 overlaps; no return: its ship day; no ship date: left out');
+    const early = [{ start: '2024-12-20', end: '2025-01-03', qty: 4 }, { start: '2025-01-02', end: '2025-01-09', qty: 3 }];
+    assertEqual([peakByMonth(early, months)['2025-01'], peakByMonth(early, months, '2025-01-05')['2025-01']], [7, 3], 'the first month from today: back on Jan 3 no longer counts');
+});
+
+test('INVENTORY PROJECTION', 'growth multiplier: the line through yearly totals, next year over last', () => {
+    assertEqual([growthMultiplier([]), growthMultiplier([5000]), growthMultiplier([0, 0])], [1, 1, 1], 'no line');
+    assertEqual([growthMultiplier([1000, 2000]), growthMultiplier([0, 1000, 2000]), growthMultiplier([1000, 2000], 3)], [1.5, 1.5, 2.5], 'two years; a leading empty year left out; three years ahead');
+    assertEqual(Math.round(growthMultiplier([1000, 2000, 1500]) * 1000) / 1000, 1.143, 'line 1250, 1500, 1750 → 2000 / 1750');
+    assertEqual([growthMultiplier([3000, 2000, 1000]), growthMultiplier([2000, 1000, 100]), growthMultiplier([3000, 0, 0])], [0, 0, 1], 'falling to 0; never below 0; a line at or below 0 last year is no trend');
+});
+
+test('INVENTORY PROJECTION', 'settings: defaults, preference values, minimums', () => {
+    assertEqual(resolveProjectionSettings([]), DEFAULT_PROJECTION_SETTINGS, 'no rows: defaults');
+    const settings = resolveProjectionSettings([
+        { id: 'ProjectionGrowthFactor', value: '1.5' },
+        { id: 'ProjectionUsageMonths', value: '0' },
+        { id: 'ProjectionMinShortfall', value: 'abc' }
+    ]);
+    assertEqual([settings.growthFactor, settings.usageMonths, settings.minShortfall], [1.5, 1, 1], 'value kept, raised to its minimum, invalid takes the default');
+});
+
+test('INVENTORY PROJECTION', 'volume: booked or the past month carried forward, with the trend', () => {
+    const { rows, trend } = projectVolume({ months: ['2025-06', '2025-07'], scheduled: { '2025-06': { sqft: 1000, shows: 2 } }, pastSqft: { '2024-06': 800, '2024-07': 2000 } }, DEFAULT_PROJECTION_SETTINGS);
+    assertEqual(rows, [
+        { month: '2025-06', shows: 2, scheduledSqft: 1000, pastMonth: '2024-06', pastSqft: 800, seasonalSqft: 800, seasonalYears: 1, multiplier: 1, projectedSqft: 1000 },
+        { month: '2025-07', shows: 0, scheduledSqft: 0, pastMonth: '2024-07', pastSqft: 2000, seasonalSqft: 2000, seasonalYears: 1, multiplier: 1, projectedSqft: 2000 }
+    ], 'booked when larger, else last year');
+    assertEqual(trend, { years: [2800], multipliers: [1] }, 'one year: no trend');
+    const twoYears = projectVolume({ months: ['2025-07'], scheduled: {}, pastSqft: { '2024-07': 2000, '2024-12': 500, '2023-07': 1000 } }, { ...DEFAULT_PROJECTION_SETTINGS, historyYears: 2, growthFactor: 1.2 });
+    assertEqual([twoYears.trend, twoYears.rows[0].seasonalSqft, twoYears.rows[0].projectedSqft], [{ years: [1000, 2500], multipliers: [1.6] }, 2250, 4320],
+        'years of 12 months back from the first month; line 1000 → 2500 → 4000; July 100% and 80% of its year: 90% of 2500, × 1.6 × 1.2');
+    // Two years ahead: years 1000 (Jul 2023 – Jun 2024), 2000; line → 3000, 4000: 1.5, 2
+    const ahead = projectVolume({ months: ['2025-07', '2026-06', '2026-07'], scheduled: {}, pastSqft: { '2024-07': 2000, '2023-07': 1000 } }, { ...DEFAULT_PROJECTION_SETTINGS, historyYears: 2, growthFactor: 1.1 });
+    assertEqual(ahead.trend.multipliers, [1.5, 2], 'the trend one and two years ahead');
+    assertEqual(ahead.rows.map(r => [r.month, r.pastMonth, r.multiplier, r.projectedSqft]), [['2025-07', '2024-07', 1.65, 3300], ['2026-06', '2025-06', 1.65, 0], ['2026-07', '2024-07', 2.42, 4840]],
+        'Jul 2026 carries Jul 2024 two years: 2000 × 2 × 1.1²; Jun 2026 is a year past Jun 2025');
+});
+
+// An unusual July: 3000 of last year's 4000 sq ft (75%), 500 of the 2000 the year before (25%).
+// Averaged, July is 50% of a year: 2000 at last year's 4000; the line 2000 → 4000 → 6000 gives 1.5.
+test('INVENTORY PROJECTION', 'volume: the carried month averaged over the past years as a share of each', () => {
+    const pastSqft = { '2023-07': 500, '2023-12': 1500, '2024-07': 3000, '2024-12': 1000 };
+    const row = (historyYears) => {
+        const [r] = projectVolume({ months: ['2025-07'], scheduled: {}, pastSqft }, { ...DEFAULT_PROJECTION_SETTINGS, historyYears }).rows;
+        return [r.pastSqft, r.seasonalSqft, r.seasonalYears, r.multiplier, r.projectedSqft];
+    };
+    assertEqual(row(2), [3000, 2000, 2, 1.5, 3000], 'July at half a year, not three quarters: 2000 × 1.5, not 3000 × 1.5');
+    assertEqual(row(3), [3000, 2000, 2, 1.5, 3000], 'a year before the first show is left out');
+    assertEqual(row(1), [3000, 3000, 1, 1, 3000], 'one year: last July as it was');
+});
+
+// An item's use: share of learned shows that packed it × coefficient × sqft^scale. The scale is the
+// median log-log slope over pairs of sizes a fifth or more apart (at least 3 pairs), within 0–2,
+// pulled toward 1 by n / (n + 3); brief: [shows that packed it, scale, quantity at 1000 sq ft]
+test('INVENTORY PROJECTION', 'item use: share of shows × typical quantity, scale learned per item', () => {
+    const brief = (use) => [use.usedIn, Math.round(use.scale * 1000) / 1000, Math.round(itemQuantity(use, 1000) * 1000) / 1000];
+    assertEqual(brief(itemUse([{ qty: 10, sqft: 1000 }, { qty: 60, sqft: 1000 }, { qty: 5, sqft: 500 }], 6)), [3, 1, 5],
+        'two pairs of differing sizes: in step; 3 of 6 shows at the median 10 per 1000 sq ft, × ½ = 5 (the mean would give 15)');
+    assertEqual(brief(itemUse([{ qty: 2, sqft: 1000 }, { qty: 4, sqft: 1000 }], 2)), [2, 1, 3], 'one size: in step, the middle two averaged');
+    assertEqual([itemUse([], 5), itemUse([{ qty: 0, sqft: 100 }, { qty: 3, sqft: 0 }], 5), itemUse([{ qty: 3, sqft: 100 }], 0)].map(brief), [[0, 1, 0], [0, 1, 0], [0, 1, 0]],
+        'nothing packed, no size or no shows learned: no use');
+    const sizes = [500, 1000, 2000, 4000];
+    assertEqual(brief(itemUse(sizes.map(sqft => ({ qty: 2, sqft })), 4)), [4, 0.429, 1.743],
+        'two at any size: fitted 0, 4/7 of the way from 1 (3/7); at 1000 sq ft, the middle two shows: 1 + 2^-3/7');
+    assertEqual(brief(itemUse([400, 900, 1600, 2500].map(sqft => ({ qty: 0.2 * Math.sqrt(sqft), sqft })), 4)), [4, 0.714, 6.094],
+        'with the square root of size: fitted 0.5, 4/7 of the way from 1 (5/7)');
+    assertEqual(brief(itemUse([500, 1000, 2000, 4000, 8000].map(sqft => ({ qty: sqft === 2000 ? 20 : 2, sqft })), 5)), [5, 0.375, 2],
+        'one show packing 20 moves neither: 6 of 10 slopes are 0, fitted 0, 5/8 of the way (3/8); the median show packs 2');
+    assertEqual(brief(itemUse([{ qty: 2, sqft: 500 }, { qty: 4, sqft: 1000 }], 2)), [2, 1, 4], 'one pair: too few to learn a scale; 4 per 1000 sq ft in both');
+});
+
+// Unusual shows: each show against its size's typical quantity (as logarithms); above the curve by
+// more than 3 × 1.4826 × the median absolute deviation, and at least double, it is left out of the
+// curve but still counts as packing the item. brief: [shows, scale, at 1000 sq ft, unusual]
+test('INVENTORY PROJECTION', 'item use: shows packing far more than their size typically does are left out', () => {
+    const brief = (use) => [use.usedIn, Math.round(use.scale * 1000) / 1000, Math.round(itemQuantity(use, 1000) * 1000) / 1000, use.unusual];
+    // One size, 10–12 per show and three at 60–80: first fit 12 (the median); the three are 5–6.7
+    // times it, beyond a limit of 0.81 (spread 0.182 × 1.4826 × 3): the curve is 10.5
+    assertEqual(brief(itemUse([10, 10, 11, 12, 60, 70, 80].map(qty => ({ qty, sqft: 1000 })), 7)), [7, 1, 10.5, 3], 'three of seven far above: 10.5, not 12');
+    // 1 per 100 sq ft from 500 to 2000 sq ft, and two 4000 sq ft shows packing 200 (40 would be in
+    // step): they tilt the first scale to 1.281 (the median slope 1.387, 8/11 of the way); against
+    // that curve they lie 1.12 above the middle (limit 0.86): without them, in step again
+    assertEqual(brief(itemUse([500, 500, 1000, 1000, 2000, 2000].map(sqft => ({ qty: sqft / 100, sqft }))
+        .concat([{ qty: 200, sqft: 4000 }, { qty: 200, sqft: 4000 }]), 8)), [8, 1, 10, 2], 'two big shows far above: scale 1, not 1.28');
+    assertEqual(brief(itemUse([10, 12, 11, 30].map(qty => ({ qty, sqft: 1000 })), 4)), [4, 1, 11, 1], '30 against 11.5: 2.6 times, beyond the limit (0.69): left out, 11');
+    assertEqual(brief(itemUse([10, 12, 11, 20].map(qty => ({ qty, sqft: 1000 })), 4)), [4, 1, 11.5, 0], '20 against 11.5: under double, kept');
+});
+
+test('INVENTORY PROJECTION', 'shows not booked yet: the past month\'s shows a year on, sized to the gap', () => {
+    const pastShows = [
+        { ship: '2024-07-10', end: '2024-07-20', month: '2024-07', sqft: 1000 },
+        { ship: '2024-07-25', end: '2024-08-10', month: '2024-07', sqft: 500 },
+        { ship: '2024-07-30', end: '2024-08-02', month: '2024-07', sqft: 0 },
+        { ship: '2024-06-28', end: '2024-07-15', month: '2024-06', sqft: 300 },
+        { ship: '2023-08-05', end: '2023-08-15', month: '2023-08', sqft: 400 }
+    ];
+    assertEqual(fillShows([
+        { month: '2025-06', pastMonth: '2024-06', scheduledSqft: 900, projectedSqft: 900 },
+        { month: '2025-07', pastMonth: '2024-07', scheduledSqft: 500, projectedSqft: 3500 },
+        { month: '2025-08', pastMonth: '2024-08', scheduledSqft: 0, projectedSqft: 800 }
+    ], pastShows), [
+        { month: '2025-07', from: '2024-07', start: '2025-07-10', end: '2025-07-20', sqft: 1000, weight: 2 },
+        { month: '2025-07', from: '2024-07', start: '2025-07-25', end: '2025-08-10', sqft: 500, weight: 2 },
+        { month: '2025-08', from: '2023-08', start: '2025-08-05', end: '2025-08-15', sqft: 400, weight: 2 }
+    ], 'July: a 3000 sq ft gap over 1500 sq ft of past shows, each counted twice; June is booked above its past; August 2024 had no shows: August 2023\'s, two years on');
+    assertEqual(fillShows([{ month: '2025-07', pastMonth: '2024-07', scheduledSqft: 1, projectedSqft: 4 }], pastShows, 0).map(show => [show.sqft, show.weight]), [[1000, 1.5], [500, 1.5]],
+        'scale 0 counts booths: a gap of 3 over last July\'s 2 sized shows');
+});
+
+// June: booked 1000 sq ft; one show without a pack list (600 sq ft, Jun 10–20), and one with (400
+// sq ft, Jun 12–18) packing 5 A. July: none booked, last July 2000 sq ft: its two shows a year on,
+// overlapping Jul 20–25. Two shows learned from: A packed in both, 60 and 40 per 1000 sq ft (50),
+// stock 20; B in one, 4 per 1000 (2), stock 3; C in one, 20 per 1000 (10), no stock figures.
+test('INVENTORY PROJECTION', 'projectInventory: pack lists, use per sq ft and filled shows, out at once against stock', () => {
+    const { months, items, filled } = projectInventory({
+        months: ['2025-06', '2025-07'],
+        from: '2025-06-01',
+        scheduledShows: [{ month: '2025-06', sqft: 400 }, { month: '2025-06', sqft: 600 }],
+        pastShows: [
+            { ship: '2024-06-10', end: '2024-06-15', month: '2024-06', sqft: 800 },
+            { ship: '2024-07-05', end: '2024-07-25', month: '2024-07', sqft: 1000 },
+            { ship: '2024-07-20', end: '2024-08-05', month: '2024-07', sqft: 1000 }
+        ],
+        packedShows: [{ start: '2025-06-12', end: '2025-06-18', sqft: 400 }],
+        unpackedShows: [{ start: '2025-06-10', end: '2025-06-20', sqft: 600 }],
+        learned: 2,
+        items: [
+            { itemId: 'A', used: [{ qty: 30, sqft: 500 }, { qty: 20, sqft: 500 }], packed: [{ start: '2025-06-12', end: '2025-06-18', qty: 5 }], stock: { '2025-06': 20, '2025-07': 20 } },
+            { itemId: 'B', used: [{ qty: 2, sqft: 500 }], packed: [], stock: { '2025-06': 3, '2025-07': 3 } },
+            { itemId: 'C', used: [{ qty: 10, sqft: 500 }], packed: [], stock: {} }
+        ]
+    }, DEFAULT_PROJECTION_SETTINGS);
+    assertEqual(months.map(m => [m.month, m.projectedSqft, m.shortages]), [
+        ['2025-06', 1000, [{ itemId: 'A', peak: 35, stock: 20, short: -15, usedIn: 2, unusual: 0, learned: 2, scale: 1, at1000: 50, multiplier: 1 }]],
+        ['2025-07', 2000, [{ itemId: 'A', peak: 100, stock: 20, short: -80, usedIn: 2, unusual: 0, learned: 2, scale: 1, at1000: 50, multiplier: 1 }, { itemId: 'B', peak: 4, stock: 3, short: -1, usedIn: 1, unusual: 0, learned: 2, scale: 1, at1000: 4, multiplier: 1 }]]
+    ], 'June: A 30 + 5 out together, B 1.2 within 3; July: two filled shows overlap, B short by exactly the minimum');
+    assertEqual([filled, items.map(i => [i.itemId, i.usedIn, i.scale, i.at1000])], [2, [['A', 2, 1, 50], ['B', 1, 1, 4], ['C', 1, 1, 20]]], 'filled shows; each item\'s use');
+    assertEqual(months.map(m => [m.month, m.filledShows, m.filledSqft, m.filledFrom, m.sqftOut]), [['2025-06', 0, 0, null, 1000], ['2025-07', 2, 2000, '2024-07', 2000]],
+        'June: both booked shows out Jun 12–18; July: the two filled shows overlap');
+    assertEqual(itemShortages(months), [
+        { itemId: 'A', month: '2025-06', shortage: -80, proposed: null, months: [{ month: '2025-06', shortage: -15, proposed: null }, { month: '2025-07', shortage: -80, proposed: null }] },
+        { itemId: 'B', month: '2025-07', shortage: -1, proposed: null, months: [{ month: '2025-07', shortage: -1, proposed: null }] }
+    ], 'one row per item: its first short month, its deepest shortage; each short month on its own');
+    assertEqual(itemShortages(months, { A: 85, B: 0.5 }).map(r => [r.itemId, r.proposed, r.months.map(m => m.proposed)]), [['A', 5, [70, 5]], ['B', -1, [-1]]],
+        'proposed: the shortage after the changes, rounded down, overall and in each month');
+});
+
+// D packed 2 at each of four sizes (scale 3/7, 1.743 at 1000 sq ft); July's two filled 1000 sq ft
+// shows overlap Jul 20–25: 3.486 out against 1 in stock
+test('INVENTORY PROJECTION', 'projectInventory: an item with its own scale', () => {
+    const { months } = projectInventory({
+        months: ['2025-07'],
+        from: '2025-07-01',
+        scheduledShows: [],
+        pastShows: [
+            { ship: '2024-07-05', end: '2024-07-25', month: '2024-07', sqft: 1000 },
+            { ship: '2024-07-20', end: '2024-08-05', month: '2024-07', sqft: 1000 }
+        ],
+        unpackedShows: [],
+        learned: 4,
+        items: [{ itemId: 'D', used: [500, 1000, 2000, 4000].map(sqft => ({ qty: 2, sqft })), packed: [], stock: { '2025-07': 1 } }]
+    }, DEFAULT_PROJECTION_SETTINGS);
+    assertEqual(months[0].shortages, [{ itemId: 'D', peak: 3.5, stock: 1, short: -2.486, usedIn: 4, unusual: 0, learned: 4, scale: 0.429, at1000: 1.7, multiplier: 1 }],
+        'two at 1000 sq ft each, not twice its share of a 2000 sq ft show');
+});
+
+// Booth mix: July 2023 one 4000 sq ft booth; July 2024 four 1000 sq ft booths, out Jul 10–20 together.
+// Square feet stay 4000: F (in step, 10 per 1000 sq ft) is carried forward × 1, 40 out. G (scale 3/7,
+// 1.743 at 1000 sq ft) is carried on the sum of size^(3/7): 4000^(3/7) then 4 × 1000^(3/7), a line
+// 2 − 4^(−4/7) = 1.547 a year on: 4 × 1.743 × 1.547 = 10.787 out, not 6.972
+test('INVENTORY PROJECTION', 'booth mix: more small booths raise items by their own scale', () => {
+    const { months, items } = projectInventory({
+        months: ['2025-07'],
+        from: '2025-07-01',
+        scheduledShows: [],
+        pastShows: [
+            { ship: '2023-07-10', end: '2023-07-20', month: '2023-07', sqft: 4000 },
+            ...[1, 2, 3, 4].map(() => ({ ship: '2024-07-10', end: '2024-07-20', month: '2024-07', sqft: 1000 }))
+        ],
+        unpackedShows: [],
+        learned: 4,
+        items: [
+            { itemId: 'F', used: [500, 1000, 2000, 4000].map(sqft => ({ qty: sqft / 100, sqft })), packed: [], stock: { '2025-07': 0 } },
+            { itemId: 'G', used: [500, 1000, 2000, 4000].map(sqft => ({ qty: 2, sqft })), packed: [], stock: { '2025-07': 0 } }
+        ]
+    }, { ...DEFAULT_PROJECTION_SETTINGS, historyYears: 2 });
+    assertEqual([months[0].projectedSqft, months[0].multiplier, months[0].filledShows, months[0].filledSqft], [4000, 1, 4, 4000], 'square feet: flat, last July\'s four booths');
+    assertEqual(months[0].shortages.map(s => [s.itemId, s.short, s.multiplier]), [['F', -40, 1], ['G', -10.787, 1.547]], 'F with square feet, G with its own measure');
+    assertEqual(items.map(i => [i.itemId, i.multipliers]), [['F', [1]], ['G', [1.547]]], 'each item\'s trend a year ahead');
+});
+
+async function _withProjectionToday(fn) {
+    try {
+        pinToday(PROJECTION_TODAY);
+        await fn();
+    } finally {
+        pinToday(null);
+    }
+}
+
+test('INVENTORY PROJECTION', 'show square feet: rows of one show add up', async () => {
+    const sqft = await ProductionUtils.getShowSquareFeet();
+    assertEqual([sqft['ALLEN ARMS 2025 SHOT'], sqft['MOJO 2025 SHOT'], sqft['MULTIBOOTHCO 2026 MULTI BOOTH']], [500, 900, 1200], 'two booths in one Size; two rows of one show');
+});
+
+test('INVENTORY PROJECTION', 'what the CABINETS projection is based on', () => _withProjectionToday(async () => {
+    const [basis] = await Requests.getInventoryProjectionBasis('CABINETS');
+    assertEqual({ usageMonths: basis.usageMonths, usageShows: basis.usageShows, learnedFrom: basis.learnedFrom, usageSqft: basis.usageSqft, filledShows: basis.filledShows },
+        { usageMonths: ['2025-01', '2025-02', '2025-03'], usageShows: 18, learnedFrom: 2, usageSqft: 1200, filledShows: 18 }, 'usage window; its 18 shows fill Jan–Mar 2026');
+    assertEqual(basis.items.map(i => [i.itemId, i.usedIn, i.scale, i.at1000]), [['CAB-004', 2, 1, 18.333], ['CAB-005', 2, 1, 1.667]],
+        'items: both learned shows packed each, 22 and 2 over their 1200 sq ft; two shows learn no scale');
+    assertEqual(await Requests.getInventoryProjection(''), [], 'no category, no projection');
+}));
+
+test('INVENTORY PROJECTION', 'CABINETS months: the most out at once, ship to return', () => _withProjectionToday(async () => {
+    const { months } = await Requests.getInventoryProjectionModel('CABINETS');
+    assertEqual(months.map(m => m.month), monthRange('2025-04', 12), 'the next 12 months');
+    const brief = (m) => ({ shows: m.shows, scheduledSqft: m.scheduledSqft, pastSqft: m.pastSqft, projectedSqft: m.projectedSqft, short: m.shortages.map(s => [s.itemId, s.peak, s.stock]) });
+    const byMonth = Object.fromEntries(months.map(m => [m.month, brief(m)]));
+    assertEqual(byMonth['2025-08'], { shows: 6, scheduledSqft: 2600, pastSqft: 0, projectedSqft: 2600, short: [['CAB-004', 37.7, 10]] }, 'August: all six out at once, NGAUS at its pack lists');
+    assertEqual(byMonth['2025-09'], { shows: 8, scheduledSqft: 2800, pastSqft: 0, projectedSqft: 2800, short: [['CAB-004', 67, 10]] }, 'September: the most out on Sep 5, August shows among them');
+    assertEqual(byMonth['2025-10'], { shows: 0, scheduledSqft: 0, pastSqft: 0, projectedSqft: 0, short: [['CAB-004', 23.8, 10]] }, 'October: nothing ships, September shows still out');
+    assertEqual(byMonth['2026-01'], { shows: 2, scheduledSqft: 300, pastSqft: 5700, projectedSqft: 5700, short: [['CAB-004', 104.5, 10], ['CAB-005', 9.5, 6]] }, 'January: last January\'s shows a year on, with the booked two');
+}));
+
+// The month rows (View Months): Oct 2025, 1400 sq ft out on Oct 1 (the 1300 above, and Test Client
+// 2025 HIMSS, 100, packed); Jan 2026, Jan 2025's 7 shows fill 5400 sq ft, and all 5700 overlap
+test('INVENTORY PROJECTION', 'CABINETS month rows: how each month is reached', () => _withProjectionToday(async () => {
+    const months = await Requests.getInventoryProjectionMonths('CABINETS');
+    const brief = (month) => { const m = months.find(row => row.month === month); return [m.pastMonth, m.multiplier, m.filledShows, m.filledSqft, m.filledFrom, m.sqftOut, m.shortCount, m.shortages.map(s => s.itemId)]; };
+    assertEqual(brief('2025-10'), ['2024-10', 1, 0, 0, null, 1400, 1, ['CAB-004']], 'October: nothing ships, September shows out');
+    assertEqual(brief('2026-01'), ['2025-01', 1, 7, 5400, '2025-01', 5700, 2, ['CAB-004', 'CAB-005']], 'January: last January fills the gap');
+    assertEqual(await Requests.getInventoryProjectionMonths(''), [], 'no category, no months');
+}));
+
+// CAB-004 short each month but November, against 10 in stock: Aug 37.7, Sep 67, Oct 23.8, Dec 29.3,
+// Jan 104.5, Feb 68.04 (shown 68), Mar 40.2 out; CAB-005 only in January (9.5 against 6)
+test('INVENTORY PROJECTION', 'CABINETS report rows, with and without a proposal', () => _withProjectionToday(async () => {
+    const shortMonths = (entries) => entries.map(m => [m.month, m.shortage]);
+    const rows = await Requests.getInventoryProjection('CABINETS');
+    assertEqual(rows.map(({ months, ...row }) => row), [
+        { itemId: 'CAB-004', month: '2025-08', shortage: -95, proposed: null },
+        { itemId: 'CAB-005', month: '2026-01', shortage: -4, proposed: null }
+    ], 'soonest first; the deepest shortage, rounded down');
+    assertEqual(rows.map(row => shortMonths(row.months)), [
+        [['2025-08', -28], ['2025-09', -57], ['2025-10', -14], ['2025-12', -20], ['2026-01', -95], ['2026-02', -59], ['2026-03', -31]],
+        [['2026-01', -4]]
+    ], 'every short month, each rounded down');
+    const name = 'Projection test';
+    const proposed = async () => (await Requests.getInventoryProjection('CABINETS', name)).map(r => [r.itemId, r.shortage, r.proposed]);
+    try {
+        await _asUser(() => Requests.saveInventoryProposalTable([
+            { category: 'CABINETS', itemNumber: 'CAB-004', quantityChange: '100' },
+            { category: 'CABINETS', itemNumber: 'CAB-005', quantityChange: '2' },
+            { category: 'FURNITURE', itemNumber: 'CAB-005', quantityChange: '50' }
+        ], name));
+        assertEqual(await proposed(), [['CAB-004', -95, 5], ['CAB-005', -4, -2]], 'shortage after the proposal; its other tabs ignored');
+        const [cab004] = await Requests.getInventoryProjection('CABINETS', name);
+        assertEqual(cab004.months.map(m => [m.month, m.proposed]), [['2025-08', 72], ['2025-09', 43], ['2025-10', 86], ['2025-12', 80], ['2026-01', 5], ['2026-02', 41], ['2026-03', 69]],
+            'each month after the proposal: 100 more, rounded down (72.3, 43, 86.2, 80.7, 5.5, 41.96, 69.8)');
+        await _asUser(() => Requests.saveInventoryProposalTable([{ category: 'CABINETS', itemNumber: 'CAB-005', quantityChange: '10' }], name));
+        assertEqual(await proposed(), [['CAB-004', -95, -95], ['CAB-005', -4, 6]], 'an edit to the proposal reaches the report');
+    } finally {
+        await _asUser(() => Requests.saveInventoryProposalTable([], name));
+    }
+}));
+
+// FURNITURE is projected nowhere else, so its model is computed here and reports its steps
+test('INVENTORY PROJECTION', 'progress: the four model steps reach the method a store loads', () => _withProjectionToday(async () => {
+    const seen = [];
+    const listen = ({ current, total, message }) => seen.push([message.slice(0, 8), current >= 0 && current <= total && total === 4]);
+    ProgressBus.on('api:getInventoryProjectionMonths', listen);
+    try {
+        await Requests.getInventoryProjectionMonths('FURNITURE');
+    } finally {
+        ProgressBus.off('api:getInventoryProjectionMonths', listen);
+    }
+    assertEqual([...new Set(seen.map(([step]) => step))], ['Step 1/4', 'Step 2/4', 'Step 3/4', 'Step 4/4'], 'each step, in order');
+    assertEqual(seen.every(([, inRange]) => inRange), true, 'progress within 0–4 of 4');
+}));
+
+test('INVENTORY PROJECTION', 'proposal quantity changes by item, active entries of one tab', () => {
+    const entries = ProposalUtils.parseRows([
+        { proposal: 'Buy', category: 'CABINETS', itemNumber: 'A', changes: '[{"n":"quantity","ne":"+3"},{"n":"notes","ne":"x"}]' },
+        { proposal: 'Buy', category: 'CABINETS', itemNumber: 'B', changes: '[{"n":"notes","ne":"y"}]' },
+        { proposal: 'Buy', category: 'FURNITURE', itemNumber: 'C', changes: '[{"n":"quantity","ne":"+5"}]' },
+        { proposal: 'Old', category: 'CABINETS', itemNumber: 'A', changes: '[{"n":"quantity","ne":"-2"}]', committed: '17890000000' }
+    ]);
+    assertEqual([
+        ProposalUtils.quantityDeltas(entries, 'BUY', 'CABINETS'),
+        ProposalUtils.quantityDeltas(entries, 'Old', 'CABINETS')
+    ], [{ A: 3 }, {}], 'names match ignoring case; no quantity change, other tabs and committed rows left out');
+});
+
+test('INVENTORY PROJECTION', 'preference rows tune the projection', () => _withProjectionToday(async () => {
+    const january = async () => (await Requests.getInventoryProjectionModel('CABINETS')).months.find(m => m.month === '2026-01');
+    try {
+        await setPreference('ProjectionGrowthFactor', '2');
+        const grown = await january();
+        assertEqual([grown.projectedSqft, grown.shortages[0].peak], [11400, 209], 'growth 2: twice last January');
+        await setPreference('ProjectionGrowthFactor', '1');
+        await setPreference('ProjectionMinShortfall', '5');
+        assertEqual((await january()).shortages.map(s => s.itemId), ['CAB-004'], 'min shortfall 5: CAB-005, 3.5 short, no longer listed');
+        await setPreference('ProjectionMinShortfall', '1');
+        const trend = async () => {
+            const model = await Requests.getInventoryProjectionModel('CABINETS');
+            const [cab004] = await Requests.getInventoryProjection('CABINETS');
+            return [model.trend, model.months.find(m => m.month === '2026-01').projectedSqft, cab004.shortage];
+        };
+        await setPreference('ProjectionHistoryYears', '2');
+        // January: 1000 of 2300 sq ft (Jan 2024), 5700 of 9300 (Jan 2025): averaged 4872 at 9300, × 1.753
+        assertEqual(await trend(), [{ years: [2300, 9300], multipliers: [1.753] }, 8539, -147], 'history years 2: the trend through two years, January averaged over both');
+        await setPreference('ProjectionHistoryYears', '3');
+        assertEqual(await trend(), [{ years: [0, 2300, 9300], multipliers: [1.753] }, 8539, -147], 'history years 3: the empty first year left out');
+        await setPreference('ProjectionHistoryYears', '1');
+        await setPreference('ProjectionFutureYears', '2');
+        const model = await Requests.getInventoryProjectionModel('CABINETS');
+        assertEqual([model.months.map(m => m.month), model.months.find(m => m.month === '2027-01').projectedSqft], [monthRange('2025-04', 24), 5700], 'future years 2: 24 months; Jan 2027 carries Jan 2025 two years (no trend)');
+    } finally {
+        await setPreference('ProjectionGrowthFactor', '1');
+        await setPreference('ProjectionMinShortfall', '1');
+        await setPreference('ProjectionHistoryYears', '1');
+        await setPreference('ProjectionFutureYears', '1');
+    }
+}));
 
 // ── App update: an out-of-date session refuses data writes ───────────────────
 // A newer deploy is simulated by changing the version this session loaded (window.__deployedVersion),
