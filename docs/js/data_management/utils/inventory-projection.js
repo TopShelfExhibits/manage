@@ -20,16 +20,22 @@
  *   12 months before this one, the 12 before those, …); the multiplier k years ahead is the line's
  *   value k years past its last year over its last year (growthMultiplier). Years before the first
  *   show (0 square feet) are left out, and one year makes no line: the multiplier is 1.
- * - Rate: learned from the shows of the last `usageMonths` full months that have a pack list and a
- *   size: the share of them that packed the item, times the median quantity per square foot among
- *   those that did, so one show packing far more than usual moves it little (itemRate).
+ * - Use: learned per item from the shows of the last `usageMonths` full months that have a pack
+ *   list and a size (itemUse). A show of S square feet takes the share of them that packed the item,
+ *   times its typical quantity at S: coefficient × S^scale. The scale says how the item grows with
+ *   size: 1 in step with square feet, 0 the same at any size. It is the median slope of quantity
+ *   against size (both as logarithms) over the pairs of shows that packed it whose sizes differ by
+ *   at least a fifth, kept within 0–2 and pulled toward 1 when few shows packed it (n shows: n / (n
+ *   + 3) of the way); with fewer than 3 such pairs it is 1. The coefficient is the median of
+ *   quantity / S^scale over those shows. Medians throughout, so one show packing far more than
+ *   usual moves neither much.
  * - Shows out in the projected months:
  *   - booked, with a pack list: its quantities;
- *   - booked, without one: rate × its square feet;
+ *   - booked, without one: each item's use at its square feet;
  *   - expected but not booked yet (a month's projected square feet above its booked square feet):
  *     the shows of that same past month (or, without any, of the latest earlier year's), moved
  *     forward the years between, their square feet scaled to fill the gap (fillShows), each at
- *     rate × its square feet.
+ *     its use at its square feet.
  * - Out at once: per item, the most out on any day of each month (peakByMonth).
  * - Shortage: that peak above the month's stock (at its start, scheduled changes applied) by at
  *   least `minShortfall` items. Its size in items is stock less the peak.
@@ -154,21 +160,60 @@ export function peakByMonth(uses, months, from = null) {
     return peaks;
 }
 
+// The scale fit (itemUse): pairs of sizes closer than this ratio are left out; fewer pairs than
+// the minimum keep the scale at 1; the fitted scale is kept within the range and pulled toward 1
+// as if this many more shows had packed the item in step with square feet
+const SCALE_PAIR_RATIO = 1.2;
+const SCALE_MIN_PAIRS = 3;
+const SCALE_RANGE = [0, 2];
+const SCALE_PRIOR_SHOWS = 3;
+
+/** The median of numbers (of an even count, the mean of the middle two) */
+function median(values) {
+    const sorted = [...values].sort((a, b) => a - b);
+    const mid = sorted.length >> 1;
+    return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
 /**
- * An item's use per square foot (see the model above): the share of the learned shows that packed
- * it, times the median quantity per square foot among those that did (of an even count, the mean of
- * the middle two).
+ * An item's use, learned from the shows that packed it (see the model above): how often it is
+ * packed, and its typical quantity at a size, coefficient × sqft^scale. itemQuantity applies it.
  * @param {Array<{qty: number, sqft: number}>} used - The learned shows that packed the item
  * @param {number} learned - How many shows were learned from
- * @returns {{ rate: number, usedIn: number, perSqft: number }} usedIn: the shows that packed it;
- *          perSqft: their median quantity per square foot
+ * @returns {{ usedIn: number, share: number, coefficient: number, scale: number }} usedIn: the
+ *          shows that packed it; share: usedIn of learned
  */
-export function itemRate(used, learned) {
-    const values = used.filter(use => use.qty > 0 && use.sqft > 0).map(use => use.qty / use.sqft).sort((a, b) => a - b);
-    if (!values.length || !(learned > 0)) return { rate: 0, usedIn: 0, perSqft: 0 };
-    const mid = values.length >> 1;
-    const perSqft = values.length % 2 ? values[mid] : (values[mid - 1] + values[mid]) / 2;
-    return { rate: perSqft * values.length / learned, usedIn: values.length, perSqft };
+export function itemUse(used, learned) {
+    const shows = used.filter(use => use.qty > 0 && use.sqft > 0);
+    if (!shows.length || !(learned > 0)) return { usedIn: 0, share: 0, coefficient: 0, scale: 1 };
+    const slopes = [];
+    for (let i = 0; i < shows.length; i++) {
+        for (let j = i + 1; j < shows.length; j++) {
+            const sizes = Math.log(shows[j].sqft / shows[i].sqft);
+            if (Math.abs(sizes) >= Math.log(SCALE_PAIR_RATIO)) slopes.push(Math.log(shows[j].qty / shows[i].qty) / sizes);
+        }
+    }
+    let scale = 1;
+    if (slopes.length >= SCALE_MIN_PAIRS) {
+        const fitted = Math.min(SCALE_RANGE[1], Math.max(SCALE_RANGE[0], median(slopes)));
+        scale = 1 + (fitted - 1) * shows.length / (shows.length + SCALE_PRIOR_SHOWS);
+    }
+    return {
+        usedIn: shows.length,
+        share: shows.length / learned,
+        coefficient: median(shows.map(show => show.qty / show.sqft ** scale)),
+        scale
+    };
+}
+
+/**
+ * The quantity of an item a show of `sqft` square feet is expected to take (itemUse).
+ * @param {{share: number, coefficient: number, scale: number}} use
+ * @param {number} sqft
+ * @returns {number}
+ */
+export function itemQuantity(use, sqft) {
+    return use.share * use.coefficient * sqft ** use.scale;
 }
 
 /**
@@ -299,11 +344,11 @@ export function fillShows(rows, pastShows) {
  *        stock: Object<string, number|null>}>} input.items - The learned shows that packed it, the
  *        booked pack list quantities out in the projected months, stock at each month's start
  * @param {Object} settings - resolveProjectionSettings
- * @returns {{ months: Array<Object>, items: Array<{itemId, usedIn, perSqft, rate}>, trend: Object, filled: number }}
+ * @returns {{ months: Array<Object>, items: Array<{itemId, usedIn, scale, at1000}>, trend: Object, filled: number }}
  *          Each month: projectVolume's row, the shows filled in (filledShows, filledSqft, filledFrom:
  *          the past month they came from), the most square feet out on one day (sqftOut) and the
- *          items short ({ itemId, peak, stock, short, usedIn, learned, per1000: the median use per
- *          1000 sq ft })
+ *          items short ({ itemId, peak, stock, short, usedIn, learned, scale, at1000: its typical
+ *          quantity at 1000 sq ft when packed })
  */
 export function projectInventory({ months, from, scheduled, pastSqft, pastShows, packedShows = [], unpackedShows, learned, items }, settings) {
     const { rows, trend } = projectVolume({ months, scheduled, pastSqft }, settings);
@@ -311,9 +356,9 @@ export function projectInventory({ months, from, scheduled, pastSqft, pastShows,
     const modelled = [...unpackedShows, ...filled];
     const sqftOut = peakByMonth([...packedShows, ...modelled].map(show => ({ start: show.start, end: show.end, qty: show.sqft })), months, from);
     const rated = items.map(item => {
-        const { rate, usedIn, perSqft } = itemRate(item.used, learned);
-        const uses = [...item.packed, ...(rate > 0 ? modelled.map(show => ({ start: show.start, end: show.end, qty: rate * show.sqft })) : [])];
-        return { ...item, rate, usedIn, perSqft, peaks: peakByMonth(uses, months, from) };
+        const use = itemUse(item.used, learned);
+        const uses = [...item.packed, ...(use.share > 0 ? modelled.map(show => ({ start: show.start, end: show.end, qty: itemQuantity(use, show.sqft) })) : [])];
+        return { ...item, usedIn: use.usedIn, scale: use.scale, at1000: use.coefficient * 1000 ** use.scale, peaks: peakByMonth(uses, months, from) };
     });
     return {
         months: rows.map(row => {
@@ -324,7 +369,7 @@ export function projectInventory({ months, from, scheduled, pastSqft, pastShows,
                 if (stock === null || stock === undefined) continue;
                 const peak = item.peaks[row.month];
                 if (peak > 0 && peak - stock >= settings.minShortfall) {
-                    shortages.push({ itemId: item.itemId, peak: round1(peak), stock, short: round3(stock - peak), usedIn: item.usedIn, learned, per1000: round1(item.perSqft * 1000) });
+                    shortages.push({ itemId: item.itemId, peak: round1(peak), stock, short: round3(stock - peak), usedIn: item.usedIn, learned, scale: round3(item.scale), at1000: round1(item.at1000) });
                 }
             }
             shortages.sort((a, b) => (a.short - b.short) || (a.itemId < b.itemId ? -1 : 1));
@@ -337,7 +382,7 @@ export function projectInventory({ months, from, scheduled, pastSqft, pastShows,
                 shortages
             };
         }),
-        items: rated.map(({ itemId, usedIn, perSqft, rate }) => ({ itemId, usedIn, perSqft: round3(perSqft), rate })),
+        items: rated.map(({ itemId, usedIn, scale, at1000 }) => ({ itemId, usedIn, scale: round3(scale), at1000: round3(at1000) })),
         trend,
         filled: filled.length
     };

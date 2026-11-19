@@ -49,7 +49,7 @@ import { applyColorRule, colorFor, rowColorFor } from '../application/utils/view
 import { containerTier, BREAKPOINTS } from '../application/utils/useContainerSize.js';
 import { createScrollHider } from '../application/utils/scrollHider.js';
 import { DEFAULT_DASHBOARD } from '../application/utils/dashboardLayout.js';
-import { parseBoothSquareFeet, monthOf, addMonths, monthRange, shiftYears, peakByMonth, itemRate, resolveProjectionSettings, growthMultiplier, projectVolume, fillShows, projectInventory, itemShortages } from '../data_management/utils/inventory-projection.js';
+import { parseBoothSquareFeet, monthOf, addMonths, monthRange, shiftYears, peakByMonth, itemUse, itemQuantity, resolveProjectionSettings, growthMultiplier, projectVolume, fillShows, projectInventory, itemShortages } from '../data_management/utils/inventory-projection.js';
 import { redirectPath } from '../application/utils/urlRouter.js';
 import { todayISOString, setTestToday, startOfTodayMs, resolveShortageAlertDays, shortageAlertDateFilters, INVENTORY_TAB_PREFERENCES, resolveInventoryTabList, itemVariantBase, resolveItemVariant, itemVariantFamilies, itemVariantKey, parseItemVariants, searchFilter, textFiltersToSearchParams, parseSearchParameters } from '../data_management/utils/helpers.js';
 import { instantWriteEntry, identityKey, cellKey, joinKey } from '../data_management/utils/instant-write-config.js';
@@ -6455,14 +6455,24 @@ test('INVENTORY PROJECTION', 'volume: the carried month averaged over the past y
     assertEqual(row(1), [3000, 3000, 1, 1, 3000], 'one year: last July as it was');
 });
 
-// Use per sq ft: share of learned shows that packed it × their median quantity per sq ft
-test('INVENTORY PROJECTION', 'item rate: share of shows × median use, so one big show moves it little', () => {
-    const brief = ({ rate, usedIn, perSqft }) => [usedIn, Math.round(perSqft * 1e6) / 1e3, Math.round(rate * 1e6) / 1e3];
-    assertEqual(brief(itemRate([{ qty: 10, sqft: 1000 }, { qty: 60, sqft: 1000 }, { qty: 5, sqft: 500 }], 6)), [3, 10, 5],
-        '3 of 6 shows, per 1000 sq ft 10, 60 and 10: median 10, × ½ = 5 (the mean would give 15)');
-    assertEqual(brief(itemRate([{ qty: 2, sqft: 1000 }, { qty: 4, sqft: 1000 }], 2)), [2, 3, 3], 'an even count: the middle two averaged');
-    assertEqual([itemRate([], 5), itemRate([{ qty: 0, sqft: 100 }, { qty: 3, sqft: 0 }], 5), itemRate([{ qty: 3, sqft: 100 }], 0)].map(brief), [[0, 0, 0], [0, 0, 0], [0, 0, 0]],
-        'nothing packed, no size or no shows learned: no rate');
+// An item's use: share of learned shows that packed it × coefficient × sqft^scale. The scale is the
+// median log-log slope over pairs of sizes a fifth or more apart (at least 3 pairs), within 0–2,
+// pulled toward 1 by n / (n + 3); brief: [shows that packed it, scale, quantity at 1000 sq ft]
+test('INVENTORY PROJECTION', 'item use: share of shows × typical quantity, scale learned per item', () => {
+    const brief = (use) => [use.usedIn, Math.round(use.scale * 1000) / 1000, Math.round(itemQuantity(use, 1000) * 1000) / 1000];
+    assertEqual(brief(itemUse([{ qty: 10, sqft: 1000 }, { qty: 60, sqft: 1000 }, { qty: 5, sqft: 500 }], 6)), [3, 1, 5],
+        'two pairs of differing sizes: in step; 3 of 6 shows at the median 10 per 1000 sq ft, × ½ = 5 (the mean would give 15)');
+    assertEqual(brief(itemUse([{ qty: 2, sqft: 1000 }, { qty: 4, sqft: 1000 }], 2)), [2, 1, 3], 'one size: in step, the middle two averaged');
+    assertEqual([itemUse([], 5), itemUse([{ qty: 0, sqft: 100 }, { qty: 3, sqft: 0 }], 5), itemUse([{ qty: 3, sqft: 100 }], 0)].map(brief), [[0, 1, 0], [0, 1, 0], [0, 1, 0]],
+        'nothing packed, no size or no shows learned: no use');
+    const sizes = [500, 1000, 2000, 4000];
+    assertEqual(brief(itemUse(sizes.map(sqft => ({ qty: 2, sqft })), 4)), [4, 0.429, 1.743],
+        'two at any size: fitted 0, 4/7 of the way from 1 (3/7); at 1000 sq ft, the middle two shows: 1 + 2^-3/7');
+    assertEqual(brief(itemUse([400, 900, 1600, 2500].map(sqft => ({ qty: 0.2 * Math.sqrt(sqft), sqft })), 4)), [4, 0.714, 6.094],
+        'with the square root of size: fitted 0.5, 4/7 of the way from 1 (5/7)');
+    assertEqual(brief(itemUse([500, 1000, 2000, 4000, 8000].map(sqft => ({ qty: sqft === 2000 ? 20 : 2, sqft })), 5)), [5, 0.375, 2],
+        'one show packing 20 moves neither: 6 of 10 slopes are 0, fitted 0, 5/8 of the way (3/8); the median show packs 2');
+    assertEqual(brief(itemUse([{ qty: 2, sqft: 500 }, { qty: 4, sqft: 1000 }], 2)), [2, 1, 4], 'one pair: too few to learn a scale; 4 per 1000 sq ft in both');
 });
 
 test('INVENTORY PROJECTION', 'shows not booked yet: the past month\'s shows a year on, sized to the gap', () => {
@@ -6508,10 +6518,10 @@ test('INVENTORY PROJECTION', 'projectInventory: pack lists, use per sq ft and fi
         ]
     }, DEFAULT_PROJECTION_SETTINGS);
     assertEqual(months.map(m => [m.month, m.projectedSqft, m.shortages]), [
-        ['2025-06', 1000, [{ itemId: 'A', peak: 35, stock: 20, short: -15, usedIn: 2, learned: 2, per1000: 50 }]],
-        ['2025-07', 2000, [{ itemId: 'A', peak: 100, stock: 20, short: -80, usedIn: 2, learned: 2, per1000: 50 }, { itemId: 'B', peak: 4, stock: 3, short: -1, usedIn: 1, learned: 2, per1000: 4 }]]
+        ['2025-06', 1000, [{ itemId: 'A', peak: 35, stock: 20, short: -15, usedIn: 2, learned: 2, scale: 1, at1000: 50 }]],
+        ['2025-07', 2000, [{ itemId: 'A', peak: 100, stock: 20, short: -80, usedIn: 2, learned: 2, scale: 1, at1000: 50 }, { itemId: 'B', peak: 4, stock: 3, short: -1, usedIn: 1, learned: 2, scale: 1, at1000: 4 }]]
     ], 'June: A 30 + 5 out together, B 1.2 within 3; July: two filled shows overlap, B short by exactly the minimum');
-    assertEqual([filled, items.map(i => [i.itemId, i.usedIn, i.rate])], [2, [['A', 2, 0.05], ['B', 1, 0.002], ['C', 1, 0.01]]], 'filled shows; use per sq ft');
+    assertEqual([filled, items.map(i => [i.itemId, i.usedIn, i.scale, i.at1000])], [2, [['A', 2, 1, 50], ['B', 1, 1, 4], ['C', 1, 1, 20]]], 'filled shows; each item\'s use');
     assertEqual(months.map(m => [m.month, m.filledShows, m.filledSqft, m.filledFrom, m.sqftOut]), [['2025-06', 0, 0, null, 1000], ['2025-07', 2, 2000, '2024-07', 2000]],
         'June: both booked shows out Jun 12–18; July: the two filled shows overlap');
     assertEqual(itemShortages(months), [
@@ -6519,6 +6529,26 @@ test('INVENTORY PROJECTION', 'projectInventory: pack lists, use per sq ft and fi
         { itemId: 'B', month: '2025-07', shortage: -1, proposed: null }
     ], 'one row per item: its first short month, its deepest shortage');
     assertEqual(itemShortages(months, { A: 85, B: 0.5 }).map(r => [r.itemId, r.proposed]), [['A', 5], ['B', -1]], 'proposed: the shortage after the changes, rounded down');
+});
+
+// D packed 2 at each of four sizes (scale 3/7, 1.743 at 1000 sq ft); July's two filled 1000 sq ft
+// shows overlap Jul 20–25: 3.486 out against 1 in stock
+test('INVENTORY PROJECTION', 'projectInventory: an item with its own scale', () => {
+    const { months } = projectInventory({
+        months: ['2025-07'],
+        from: '2025-07-01',
+        scheduled: {},
+        pastSqft: { '2024-07': 2000 },
+        pastShows: [
+            { ship: '2024-07-05', end: '2024-07-25', month: '2024-07', sqft: 1000 },
+            { ship: '2024-07-20', end: '2024-08-05', month: '2024-07', sqft: 1000 }
+        ],
+        unpackedShows: [],
+        learned: 4,
+        items: [{ itemId: 'D', used: [500, 1000, 2000, 4000].map(sqft => ({ qty: 2, sqft })), packed: [], stock: { '2025-07': 1 } }]
+    }, DEFAULT_PROJECTION_SETTINGS);
+    assertEqual(months[0].shortages, [{ itemId: 'D', peak: 3.5, stock: 1, short: -2.486, usedIn: 4, learned: 4, scale: 0.429, at1000: 1.7 }],
+        'two at 1000 sq ft each, not twice its share of a 2000 sq ft show');
 });
 
 async function _withProjectionToday(fn) {
@@ -6539,8 +6569,8 @@ test('INVENTORY PROJECTION', 'what the CABINETS projection is based on', () => _
     const [basis] = await Requests.getInventoryProjectionBasis('CABINETS');
     assertEqual({ usageMonths: basis.usageMonths, usageShows: basis.usageShows, learnedFrom: basis.learnedFrom, usageSqft: basis.usageSqft, filledShows: basis.filledShows },
         { usageMonths: ['2025-01', '2025-02', '2025-03'], usageShows: 18, learnedFrom: 2, usageSqft: 1200, filledShows: 18 }, 'usage window; its 18 shows fill Jan–Mar 2026');
-    assertEqual(basis.items.map(i => [i.itemId, i.usedIn, i.perSqft, Math.round(i.rate * 1e6) / 1e6]), [['CAB-004', 2, 0.018, 0.018333], ['CAB-005', 2, 0.002, 0.001667]],
-        'items: both learned shows packed each, 22 and 2 over their 1200 sq ft, the same per sq ft in each');
+    assertEqual(basis.items.map(i => [i.itemId, i.usedIn, i.scale, i.at1000]), [['CAB-004', 2, 1, 18.333], ['CAB-005', 2, 1, 1.667]],
+        'items: both learned shows packed each, 22 and 2 over their 1200 sq ft; two shows learn no scale');
     assertEqual(await Requests.getInventoryProjection(''), [], 'no category, no projection');
 }));
 

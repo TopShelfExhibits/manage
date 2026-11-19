@@ -1518,8 +1518,8 @@ class Requests_uncached {
     /**
      * What the inventory projection is based on (getInventoryProjectionModel), as one row: the
      * usage window and the shows learned from, shows without a readable size, the trend, the
-     * settings, and each item's rate (the learned shows that packed it, their median use per square
-     * foot). Persisted.
+     * settings, and each item's use (the learned shows that packed it, its scale with square feet,
+     * its typical quantity at 1000 sq ft). Persisted.
      * @param {Object} deps
      * @param {string} category - Inventory tab name
      * @returns {Promise<Array<Object>>} One row; empty without a category

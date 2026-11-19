@@ -109,7 +109,9 @@ const InventoryProjectionMonths = {
             fill the gap. Out in one day counts every show from ship to return, so shows still out from
             earlier months count too; an item is short when the most of it out in one day passes its
             stock. A show without a pack list takes each item at its share of the learned shows that
-            packed it, times their median use per square foot.
+            packed it, times its typical quantity at the show's size. Each item learns its own scale
+            with size: 1 grows in step with square feet, 0 is the same at any size, learned from shows
+            of differing sizes and kept near 1 when few shows packed it.
         </p>
         <DataView
             :fields="MONTH_FIELDS"
@@ -125,7 +127,7 @@ const InventoryProjectionMonths = {
                 <ul v-else-if="field.key === 'short'">
                     <li v-for="shortage in row.shortages" :key="shortage.itemId">
                         <strong>{{ shortage.itemId }}</strong>: {{ shortage.peak }} out, {{ shortage.stock }} in stock
-                        <span v-if="shortage.usedIn">(in {{ shortage.usedIn }} of {{ shortage.learned }} shows, {{ shortage.per1000 }} per 1,000 sq ft)</span>
+                        <span v-if="shortage.usedIn">(in {{ shortage.usedIn }} of {{ shortage.learned }} shows, {{ shortage.at1000 }} at 1,000 sq ft<template v-if="shortage.scale !== 1">, scale {{ shortage.scale }}</template>)</span>
                         <span v-else>(pack lists only)</span>
                     </li>
                     <li v-if="row.shortCount > row.shortages.length">and {{ row.shortCount - row.shortages.length }} more</li>
@@ -201,7 +203,7 @@ export const InventoryProjectionReport = {
             const window = `${monthLabel(basis.usageMonths[0])} – ${monthLabel(basis.usageMonths[basis.usageMonths.length - 1])}`;
             return [
                 { label: 'Projected', value: `the next ${12 * settings.futureYears} months: the most of each item out at once, ship to return, against stock` },
-                { label: 'Use per sq ft', value: `learned from ${basis.learnedFrom} of ${basis.usageShows} shows shipping ${window} (those with a pack list and a size, ${basis.usageSqft.toLocaleString()} sq ft): each item's share of them that packed it × the median use per sq ft among those` },
+                { label: 'Use per sq ft', value: `learned from ${basis.learnedFrom} of ${basis.usageShows} shows shipping ${window} (those with a pack list and a size, ${basis.usageSqft.toLocaleString()} sq ft): each item's share of them that packed it × its typical quantity at a show's size, with a scale learned per item (1: in step with sq ft, 0: the same at any size)` },
                 { label: 'Booked', value: `${basis.outShows} shows out from today, ${basis.packedShows} at their pack lists, the rest at use per sq ft` },
                 { label: 'Not booked yet', value: `${basis.filledShows} past shows a year on, sized to fill each month's expected sq ft` },
                 { label: 'Expected sq ft', value: `the larger of booked and the same month last year${this.basis.trend.years.length > 1 ? ' (averaged over the past years as a share of each, at last year\'s total)' : ''} × ${this.trendText} × ${settings.growthFactor} (Growth Factor${settings.futureYears > 1 ? ', once per year ahead' : ''})` },
