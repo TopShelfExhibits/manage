@@ -67,23 +67,51 @@ const sqftText = (n) => `${Math.round(n || 0).toLocaleString()} sq ft`;
 const showsText = (n) => `${n} show${n === 1 ? '' : 's'}`;
 
 /**
- * The inventory projection month by month, in words (Requests.getInventoryProjectionMonths): how
- * each month's expected square feet are reached and what is out at once. A modal component: open
- * it with $modal.custom(InventoryProjectionMonths, { category }).
+ * The inventory projection's details: what it rests on (Requests.getInventoryProjectionBasis), then
+ * month by month in words (Requests.getInventoryProjectionMonths): how each month's expected square
+ * feet are reached and what is out at once. A modal component: open it with
+ * $modal.custom(InventoryProjectionDetails, { category }).
  */
-const InventoryProjectionMonths = {
+const InventoryProjectionDetails = {
     components: { DataView },
     props: {
         category: { type: String, required: true }
     },
     data() {
         return {
+            basisStore: getReactiveStore(Requests.getInventoryProjectionBasis, null, [this.category]),
             monthsStore: getReactiveStore(Requests.getInventoryProjectionMonths, null, [this.category]),
             MONTH_FIELDS,
             MONTH_VIEWS
         };
     },
     computed: {
+        basis() {
+            return this.basisStore?.data?.[0] || null;
+        },
+        // What the numbers rest on, so thin data is visible
+        basisItems() {
+            const basis = this.basis;
+            if (!basis) return [];
+            const { settings } = basis;
+            const window = `${monthLabel(basis.usageMonths[0])} – ${monthLabel(basis.usageMonths[basis.usageMonths.length - 1])}`;
+            return [
+                { label: 'Projected', value: `the next ${12 * settings.futureYears} months: the most of each item out at once, ship to return, against stock` },
+                { label: 'Use per sq ft', value: `learned from ${basis.learnedFrom} of ${basis.usageShows} shows shipping ${window} (those with a pack list and a size, ${basis.usageSqft.toLocaleString()} sq ft): each item's share of them that packed it × its typical quantity at a show's size, with a scale learned per item (1: in step with sq ft, 0: the same at any size)` },
+                { label: 'Booked', value: `${basis.outShows} shows out from today, ${basis.packedShows} at their pack lists, the rest at use per sq ft` },
+                { label: 'Not booked yet', value: `${basis.filledShows} past shows a year on, sized to fill each month's expected sq ft` },
+                { label: 'Expected sq ft', value: `the larger of booked and the same month last year${this.basis.trend.years.length > 1 ? ' (averaged over the past years as a share of each, at last year\'s total)' : ''} × ${this.trendText} × ${settings.growthFactor} (Growth Factor${settings.futureYears > 1 ? ', once per year ahead' : ''})` },
+                { label: 'Months below', value: 'most out in one day counts every show from ship to return, so shows still out from earlier months count too; an item is short when the most of it out in one day passes its stock' },
+                { label: 'Shows without a size', value: `${basis.unsized} of ${basis.shows}${settings.defaultSquareFeet ? `, counted as ${settings.defaultSquareFeet} sq ft` : ', left out'}` }
+            ];
+        },
+        // The trend multipliers and the yearly square feet they are drawn through
+        trendText() {
+            const { years, multipliers } = this.basis.trend;
+            if (years.length < 2) return '1 (no trend: History Years is 1)';
+            const ahead = multipliers.length > 1 ? `${multipliers.join(', ')} for 1–${multipliers.length} years ahead` : `${multipliers[0]}`;
+            return `${ahead} (the trend through the past ${years.length} years: ${years.map(sqft => sqft.toLocaleString()).join(', ')} sq ft)`;
+        },
         rows() {
             return (this.monthsStore.data || []).map(month => {
                 const past = monthLabel(month.pastMonth);
@@ -103,17 +131,12 @@ const InventoryProjectionMonths = {
         }
     },
     template: html`
-        <p>
-            Expected is the larger of booked and the same month before (with more than one History
-            Year, averaged over them as a share of each year), carried forward by the trend and Growth
-            Factor. The shows not booked yet are that month's past shows, moved forward and sized to
-            fill the gap. Out in one day counts every show from ship to return, so shows still out from
-            earlier months count too; an item is short when the most of it out in one day passes its
-            stock. A show without a pack list takes each item at its share of the learned shows that
-            packed it, times its typical quantity at the show's size. Each item learns its own scale
-            with size: 1 grows in step with square feet, 0 is the same at any size, learned from shows
-            of differing sizes and kept near 1 when few shows packed it.
-        </p>
+        <div v-if="basis" class="card details-grid">
+            <div v-for="item in basisItems" :key="item.label" class="detail-item">
+                <label>{{ item.label }}</label>
+                <span>{{ item.value }}</span>
+            </div>
+        </div>
         <DataView
             :fields="MONTH_FIELDS"
             :rows="rows"
@@ -160,7 +183,6 @@ export const InventoryProjectionReport = {
         return {
             category: null,
             projectionStore: null,
-            basisStore: null,
             proposalsStore: getProposalsStore(),
             itemThumbnailsStore: getItemThumbnailsStore(),
             PROJECTION_FIELDS,
@@ -214,48 +236,18 @@ export const InventoryProjectionReport = {
                 title: 'View item'
             };
         },
-        basis() {
-            return this.basisStore?.data?.[0] || null;
-        },
-        // What the numbers rest on, so thin data is visible
-        basisItems() {
-            const basis = this.basis;
-            if (!basis) return [];
-            const { settings } = basis;
-            const window = `${monthLabel(basis.usageMonths[0])} – ${monthLabel(basis.usageMonths[basis.usageMonths.length - 1])}`;
-            return [
-                { label: 'Projected', value: `the next ${12 * settings.futureYears} months: the most of each item out at once, ship to return, against stock` },
-                { label: 'Use per sq ft', value: `learned from ${basis.learnedFrom} of ${basis.usageShows} shows shipping ${window} (those with a pack list and a size, ${basis.usageSqft.toLocaleString()} sq ft): each item's share of them that packed it × its typical quantity at a show's size, with a scale learned per item (1: in step with sq ft, 0: the same at any size)` },
-                { label: 'Booked', value: `${basis.outShows} shows out from today, ${basis.packedShows} at their pack lists, the rest at use per sq ft` },
-                { label: 'Not booked yet', value: `${basis.filledShows} past shows a year on, sized to fill each month's expected sq ft` },
-                { label: 'Expected sq ft', value: `the larger of booked and the same month last year${this.basis.trend.years.length > 1 ? ' (averaged over the past years as a share of each, at last year\'s total)' : ''} × ${this.trendText} × ${settings.growthFactor} (Growth Factor${settings.futureYears > 1 ? ', once per year ahead' : ''})` },
-                { label: 'Shows without a size', value: `${basis.unsized} of ${basis.shows}${settings.defaultSquareFeet ? `, counted as ${settings.defaultSquareFeet} sq ft` : ', left out'}` }
-            ];
-        },
-        // The trend multipliers and the yearly square feet they are drawn through
-        trendText() {
-            const { years, multipliers } = this.basis.trend;
-            if (years.length < 2) return '1 (no trend: History Years is 1)';
-            const ahead = multipliers.length > 1 ? `${multipliers.join(', ')} for 1–${multipliers.length} years ahead` : `${multipliers[0]}`;
-            return `${ahead} (the trend through the past ${years.length} years: ${years.map(sqft => sqft.toLocaleString()).join(', ')} sq ft)`;
-        },
         isLoading() {
-            return !!(this.projectionStore?.isLoading || this.basisStore?.isLoading);
+            return !!this.projectionStore?.isLoading;
         },
-        // The model's steps (Requests.getInventoryProjectionModel), from whichever store is loading
-        loadingStore() {
-            return [this.projectionStore, this.basisStore].find(store => store?.isLoading) || null;
-        },
+        // The model's steps (Requests.getInventoryProjectionModel)
         loadingMessage() {
-            return this.loadingStore?.loadingMessage || 'Projecting inventory...';
+            return this.projectionStore?.loadingMessage || 'Projecting inventory...';
         },
         loadingProgress() {
-            return this.loadingStore?.loadingProgress ?? -1;
+            return this.projectionStore?.loadingProgress ?? -1;
         },
         emptyMessage() {
-            if (!this.category) return 'Choose an inventory category to project.';
-            const months = 12 * (this.basis?.settings.futureYears || 1);
-            return `No likely shortages in the next ${months} months.`;
+            return this.category ? 'No likely shortages in the projected months.' : 'Choose an inventory category to project.';
         }
     },
     watch: {
@@ -269,10 +261,9 @@ export const InventoryProjectionReport = {
     methods: {
         handleCategorySelected(category) {
             this.category = category || null;
-            this.basisStore = this.category ? getReactiveStore(Requests.getInventoryProjectionBasis, null, [this.category]) : null;
         },
-        openMonths() {
-            this.$modal.custom(InventoryProjectionMonths, { category: this.category, size: 'page' }, `${this.category}: projection by month`);
+        openDetails() {
+            this.$modal.custom(InventoryProjectionDetails, { category: this.category, size: 'page' }, `${this.category}: projection details`);
         },
         selectProposal(name) {
             NavigationRegistry.updateContainerParams(this.containerPath, this.appContext?.currentPath, { proposal: name || undefined }, this.navigateToPath);
@@ -287,12 +278,6 @@ export const InventoryProjectionReport = {
         }
     },
     template: html`
-        <div v-if="basis" class="card details-grid">
-            <div v-for="item in basisItems" :key="item.label" class="detail-item">
-                <label>{{ item.label }}</label>
-                <span>{{ item.value }}</span>
-            </div>
-        </div>
         <DataView
             :fields="PROJECTION_FIELDS"
             :rows="rows"
@@ -321,7 +306,7 @@ export const InventoryProjectionReport = {
                         <option value="">Select Proposal</option>
                         <option v-for="name in proposalNames" :key="name" :value="name">{{ name }}</option>
                     </select>
-                    <button :disabled="!category" title="How the projection reaches each month" @click="openMonths">View Months</button>
+                    <button class="button-symbol" :disabled="!category" title="Projection details" @click="openDetails">☷</button>
                 </ButtonBar>
             </template>
         </DataView>
