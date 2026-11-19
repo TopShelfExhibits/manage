@@ -14,18 +14,22 @@
  * - Volume: a future month's projected square feet is the larger of what is already booked and the
  *   same month in the last past year, times the trend multiplier and `growthFactor` for each year it
  *   lies ahead of that month (a month 18 months out: the same month last year, two years ahead).
+ *   With more than one past year, that month is averaged over them as a share of each year's square
+ *   feet, at the last year's total, so one unusual month weighs less (projectVolume).
  * - Trend: a straight line through the square feet of each of the past `historyYears` years (the
  *   12 months before this one, the 12 before those, …); the multiplier k years ahead is the line's
  *   value k years past its last year over its last year (growthMultiplier). Years before the first
  *   show (0 square feet) are left out, and one year makes no line: the multiplier is 1.
- * - Rate: each item's pack list quantity over the last `usageMonths` full months, per square foot
- *   of the shows in those months that have a pack list and a size.
+ * - Rate: learned from the shows of the last `usageMonths` full months that have a pack list and a
+ *   size: the share of them that packed the item, times the median quantity per square foot among
+ *   those that did, so one show packing far more than usual moves it little (itemRate).
  * - Shows out in the projected months:
  *   - booked, with a pack list: its quantities;
  *   - booked, without one: rate × its square feet;
  *   - expected but not booked yet (a month's projected square feet above its booked square feet):
- *     the shows of that same past month, moved forward the years between, their square feet scaled
- *     to fill the gap (fillShows), each at rate × its square feet.
+ *     the shows of that same past month (or, without any, of the latest earlier year's), moved
+ *     forward the years between, their square feet scaled to fill the gap (fillShows), each at
+ *     rate × its square feet.
  * - Out at once: per item, the most out on any day of each month (peakByMonth).
  * - Shortage: that peak above the month's stock (at its start, scheduled changes applied) by at
  *   least `minShortfall` items. Its size in items is stock less the peak.
@@ -151,6 +155,23 @@ export function peakByMonth(uses, months, from = null) {
 }
 
 /**
+ * An item's use per square foot (see the model above): the share of the learned shows that packed
+ * it, times the median quantity per square foot among those that did (of an even count, the mean of
+ * the middle two).
+ * @param {Array<{qty: number, sqft: number}>} used - The learned shows that packed the item
+ * @param {number} learned - How many shows were learned from
+ * @returns {{ rate: number, usedIn: number, perSqft: number }} usedIn: the shows that packed it;
+ *          perSqft: their median quantity per square foot
+ */
+export function itemRate(used, learned) {
+    const values = used.filter(use => use.qty > 0 && use.sqft > 0).map(use => use.qty / use.sqft).sort((a, b) => a - b);
+    if (!values.length || !(learned > 0)) return { rate: 0, usedIn: 0, perSqft: 0 };
+    const mid = values.length >> 1;
+    const perSqft = values.length % 2 ? values[mid] : (values[mid - 1] + values[mid]) / 2;
+    return { rate: perSqft * values.length / learned, usedIn: values.length, perSqft };
+}
+
+/**
  * The growth multiplier of yearly totals: the least-squares line through them, its value
  * `yearsAhead` years past the last total over its value at the last total. Leading zero years
  * (before records began) are left out. 1 with fewer than two years or a line at or below 0 at the
@@ -182,10 +203,12 @@ export function growthMultiplier(yearTotals, yearsAhead = 1) {
  * @param {Object<string, {sqft: number, shows: number}>} input.scheduled - Booked, by month
  * @param {Object<string, number>} input.pastSqft - Square feet by past month
  * @param {Object} settings - resolveProjectionSettings
- * @returns {{ rows: Array<{month, shows, scheduledSqft, pastMonth, pastSqft, multiplier, projectedSqft}>,
- *            trend: {years: number[], multipliers: number[]} }} pastMonth: the past month it carries
- *          forward, multiplier: the trend and growth factor it is carried forward by; trend.years:
- *          each past year's square feet, oldest first; trend.multipliers: 1, 2, … years ahead
+ * @returns {{ rows: Array<{month, shows, scheduledSqft, pastMonth, pastSqft, seasonalSqft, seasonalYears,
+ *            multiplier, projectedSqft}>, trend: {years: number[], multipliers: number[]} }}
+ *          pastMonth: the past month it carries forward; seasonalSqft: that month averaged over the
+ *          past years with square feet (seasonalYears of them), at the last year's total; multiplier:
+ *          the trend and growth factor it is carried forward by; trend.years: each past year's square
+ *          feet, oldest first; trend.multipliers: 1, 2, … years ahead
  */
 export function projectVolume({ months, scheduled, pastSqft }, settings) {
     // Year k back: the 12 months starting 12k months before the first future month
@@ -197,20 +220,31 @@ export function projectVolume({ months, scheduled, pastSqft }, settings) {
         return k;
     };
     const multipliers = Array.from({ length: yearsAheadOf(months[months.length - 1]) }, (_, i) => growthMultiplier(years, i + 1));
+    // The carried month lies in the last year; the same month of year i is (last − i) years earlier
+    const last = years[years.length - 1];
+    const seasonal = (pastMonth) => {
+        const shares = years
+            .map((total, i) => total > 0 ? (pastSqft[addMonths(pastMonth, -12 * (years.length - 1 - i))] || 0) / total : null)
+            .filter(share => share !== null);
+        if (shares.length < 2 || !(last > 0)) return { sqft: pastSqft[pastMonth] || 0, years: 1 };
+        return { sqft: last * shares.reduce((sum, share) => sum + share, 0) / shares.length, years: shares.length };
+    };
     const rows = months.map(month => {
         const booked = scheduled[month] || { sqft: 0, shows: 0 };
         const k = yearsAheadOf(month);
         const pastMonth = addMonths(month, -12 * k);
-        const past = pastSqft[pastMonth] || 0;
+        const average = seasonal(pastMonth);
         const multiplier = multipliers[k - 1] * settings.growthFactor ** k;
         return {
             month,
             shows: booked.shows,
             scheduledSqft: booked.sqft,
             pastMonth,
-            pastSqft: past,
+            pastSqft: pastSqft[pastMonth] || 0,
+            seasonalSqft: Math.round(average.sqft),
+            seasonalYears: average.years,
             multiplier: round3(multiplier),
-            projectedSqft: Math.round(Math.max(booked.sqft, past * multiplier))
+            projectedSqft: Math.round(Math.max(booked.sqft, average.sqft * multiplier))
         };
     });
     return { rows, trend: { years, multipliers: multipliers.map(round3) } };
@@ -218,22 +252,32 @@ export function projectVolume({ months, scheduled, pastSqft }, settings) {
 
 /**
  * The shows expected but not booked yet: for each month projected above its booked square feet,
- * the shows of the past month it carries forward, moved forward the years between, their square
- * feet scaled so they add up to the gap.
+ * the shows of the past month it carries forward (or, if it had none, of the same month in the
+ * latest earlier year that had some), moved forward the years between, their square feet scaled so
+ * they add up to the gap.
  * @param {Array<{month, pastMonth, scheduledSqft, projectedSqft}>} rows - projectVolume rows
  * @param {Array<{ship: string, end: string, month: string, sqft: number}>} pastShows
- * @returns {Array<{month: string, start: string, end: string, sqft: number}>} month: the month it fills
+ * @returns {Array<{month: string, from: string, start: string, end: string, sqft: number}>} month:
+ *          the month it fills; from: the past month it was moved from
  */
 export function fillShows(rows, pastShows) {
+    const sized = pastShows.filter(show => show.sqft > 0);
+    const earliest = sized.reduce((min, show) => (show.month < min ? show.month : min), '9999-99');
     const filled = [];
     for (const { month, pastMonth, scheduledSqft, projectedSqft } of rows) {
         const gap = projectedSqft - scheduledSqft;
-        const models = pastShows.filter(show => show.month === pastMonth && show.sqft > 0);
+        if (!(gap > 0)) continue;
+        let from = pastMonth;
+        let models = sized.filter(show => show.month === from);
+        while (!models.length && from > earliest) {
+            from = addMonths(from, -12);
+            models = sized.filter(show => show.month === from);
+        }
+        if (!models.length) continue;
         const modelSqft = models.reduce((sum, show) => sum + show.sqft, 0);
-        if (!(gap > 0) || !(modelSqft > 0)) continue;
-        const years = Number(month.slice(0, 4)) - Number(pastMonth.slice(0, 4));
+        const years = Number(month.slice(0, 4)) - Number(from.slice(0, 4));
         for (const show of models) {
-            filled.push({ month, start: shiftYears(show.ship, years), end: shiftYears(show.end, years), sqft: show.sqft * gap / modelSqft });
+            filled.push({ month, from, start: shiftYears(show.ship, years), end: shiftYears(show.end, years), sqft: show.sqft * gap / modelSqft });
         }
     }
     return filled;
@@ -250,24 +294,26 @@ export function fillShows(rows, pastShows) {
  * @param {Array<{start, end, sqft}>} input.packedShows - Booked shows out in the projected months
  *        with a pack list
  * @param {Array<{start, end, sqft}>} input.unpackedShows - The same without a pack list
- * @param {number} input.usageSqft - Square feet of the usage window's shows learned from
- * @param {Array<{itemId: string, usage: number, packed: Array<{start, end, qty}>,
- *        stock: Object<string, number|null>}>} input.items - Window use, the booked pack list
- *        quantities out in the projected months, stock at each month's start
+ * @param {number} input.learned - How many shows the rates are learned from
+ * @param {Array<{itemId: string, used: Array<{qty, sqft}>, packed: Array<{start, end, qty}>,
+ *        stock: Object<string, number|null>}>} input.items - The learned shows that packed it, the
+ *        booked pack list quantities out in the projected months, stock at each month's start
  * @param {Object} settings - resolveProjectionSettings
- * @returns {{ months: Array<Object>, items: Array<{itemId, usage, rate}>, trend: Object, filled: number }}
- *          Each month: projectVolume's row, the shows filled in (filledShows, filledSqft), the most
- *          square feet out on one day (sqftOut) and the items short ({ itemId, peak, stock, short })
+ * @returns {{ months: Array<Object>, items: Array<{itemId, usedIn, perSqft, rate}>, trend: Object, filled: number }}
+ *          Each month: projectVolume's row, the shows filled in (filledShows, filledSqft, filledFrom:
+ *          the past month they came from), the most square feet out on one day (sqftOut) and the
+ *          items short ({ itemId, peak, stock, short, usedIn, learned, per1000: the median use per
+ *          1000 sq ft })
  */
-export function projectInventory({ months, from, scheduled, pastSqft, pastShows, packedShows = [], unpackedShows, usageSqft, items }, settings) {
+export function projectInventory({ months, from, scheduled, pastSqft, pastShows, packedShows = [], unpackedShows, learned, items }, settings) {
     const { rows, trend } = projectVolume({ months, scheduled, pastSqft }, settings);
     const filled = fillShows(rows, pastShows);
     const modelled = [...unpackedShows, ...filled];
     const sqftOut = peakByMonth([...packedShows, ...modelled].map(show => ({ start: show.start, end: show.end, qty: show.sqft })), months, from);
     const rated = items.map(item => {
-        const rate = usageSqft > 0 ? item.usage / usageSqft : 0;
+        const { rate, usedIn, perSqft } = itemRate(item.used, learned);
         const uses = [...item.packed, ...(rate > 0 ? modelled.map(show => ({ start: show.start, end: show.end, qty: rate * show.sqft })) : [])];
-        return { ...item, rate, peaks: peakByMonth(uses, months, from) };
+        return { ...item, rate, usedIn, perSqft, peaks: peakByMonth(uses, months, from) };
     });
     return {
         months: rows.map(row => {
@@ -278,7 +324,7 @@ export function projectInventory({ months, from, scheduled, pastSqft, pastShows,
                 if (stock === null || stock === undefined) continue;
                 const peak = item.peaks[row.month];
                 if (peak > 0 && peak - stock >= settings.minShortfall) {
-                    shortages.push({ itemId: item.itemId, peak: round1(peak), stock, short: round3(stock - peak) });
+                    shortages.push({ itemId: item.itemId, peak: round1(peak), stock, short: round3(stock - peak), usedIn: item.usedIn, learned, per1000: round1(item.perSqft * 1000) });
                 }
             }
             shortages.sort((a, b) => (a.short - b.short) || (a.itemId < b.itemId ? -1 : 1));
@@ -286,11 +332,12 @@ export function projectInventory({ months, from, scheduled, pastSqft, pastShows,
                 ...row,
                 filledShows: filledHere.length,
                 filledSqft: Math.round(filledHere.reduce((sum, show) => sum + show.sqft, 0)),
+                filledFrom: filledHere[0]?.from || null,
                 sqftOut: Math.round(sqftOut[row.month]),
                 shortages
             };
         }),
-        items: rated.map(({ itemId, usage, rate }) => ({ itemId, usage, rate })),
+        items: rated.map(({ itemId, usedIn, perSqft, rate }) => ({ itemId, usedIn, perSqft: round3(perSqft), rate })),
         trend,
         filled: filled.length
     };

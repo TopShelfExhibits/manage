@@ -1422,11 +1422,15 @@ class Requests_uncached {
             learnedFrom.length ? deps.call(PackListUtils.extractItemsFromMultipleShows, learnedFrom.map(show => show.id), [category], false) : [],
             packedShows.length ? deps.call(PackListUtils.extractItemsFromMultipleShows, packedShows.map(show => show.id), [category], false) : []
         ]);
-        const usageByItem = new Map(usageRows.map(row => [row.itemId, row.totalQuantity || 0]));
+        // Each item's quantity in each learned show that packed it, with the show's square feet
+        const learnedById = new Map(learnedFrom.map(show => [show.id, show]));
+        const usedByItem = new Map(usageRows.map(row => [row.itemId, Object.entries(row.shows || {})
+            .filter(([id, qty]) => qty > 0 && learnedById.has(id))
+            .map(([id, qty]) => ({ qty: Number(qty), sqft: learnedById.get(id).sqft }))]));
         const packedByItem = new Map(packedRows.map(row => [row.itemId, Object.entries(row.shows || {})
             .filter(([id, qty]) => qty > 0 && showById.has(id))
             .map(([id, qty]) => ({ start: showById.get(id).ship, end: showById.get(id).end, qty: Number(qty) }))]));
-        const itemIds = [...new Set([...usageByItem.keys(), ...packedByItem.keys()])].sort();
+        const itemIds = [...new Set([...usedByItem.keys(), ...packedByItem.keys()])].sort();
 
         // Stock at each month's start (the first: today), scheduled changes applied
         const stockOn = async (date) => {
@@ -1439,7 +1443,7 @@ class Requests_uncached {
         const monthStock = await Promise.all(futureMonths.map((month, i) => stockOn(i === 0 ? today : `${month}-01`)));
         const items = itemIds.map(itemId => ({
             itemId,
-            usage: usageByItem.get(itemId) || 0,
+            used: usedByItem.get(itemId) || [],
             packed: packedByItem.get(itemId) || [],
             stock: Object.fromEntries(futureMonths.map((month, i) => [month, monthStock[i].get(itemId) ?? null]))
         }));
@@ -1459,7 +1463,7 @@ class Requests_uncached {
         const packedWindows = packedShows.filter(show => show.sqft > 0).map(asWindow);
         const unpackedShows = outShows.filter(show => !show.hasPackList && show.sqft > 0).map(asWindow);
 
-        const projection = projectInventory({ months: futureMonths, from: today, scheduled, pastSqft, pastShows, packedShows: packedWindows, unpackedShows, usageSqft, items }, settings);
+        const projection = projectInventory({ months: futureMonths, from: today, scheduled, pastSqft, pastShows, packedShows: packedWindows, unpackedShows, learned: learnedFrom.length, items }, settings);
         return {
             ...projection,
             settings,
@@ -1513,8 +1517,9 @@ class Requests_uncached {
 
     /**
      * What the inventory projection is based on (getInventoryProjectionModel), as one row: the
-     * usage window and the shows learned from, shows without a readable size, items learned and at
-     * the fallback reuse, the settings, and each item's use, peak, rate and reuse. Persisted.
+     * usage window and the shows learned from, shows without a readable size, the trend, the
+     * settings, and each item's rate (the learned shows that packed it, their median use per square
+     * foot). Persisted.
      * @param {Object} deps
      * @param {string} category - Inventory tab name
      * @returns {Promise<Array<Object>>} One row; empty without a category

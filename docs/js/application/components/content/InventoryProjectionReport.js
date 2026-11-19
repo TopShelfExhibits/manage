@@ -58,7 +58,7 @@ const MONTH_VIEWS = {
         name: 'Months',
         layout: 'table',
         columns: MONTH_FIELDS.map(field => field.key),
-        style: { monthLabel: { width: 90 }, short: { cell: 'slot', width: 240 } }
+        style: { monthLabel: { width: 90 }, short: { cell: 'slot', width: 320 } }
     }]
 };
 
@@ -87,14 +87,15 @@ const InventoryProjectionMonths = {
             return (this.monthsStore.data || []).map(month => {
                 const past = monthLabel(month.pastMonth);
                 const fromPast = month.projectedSqft > month.scheduledSqft;
+                const averaged = month.seasonalYears > 1;
                 return {
                     ...month,
                     monthLabel: monthLabel(month.month),
                     bookedText: month.shows ? `${showsText(month.shows)}, ${sqftText(month.scheduledSqft)}` : 'none',
-                    pastText: `${past}: ${sqftText(month.pastSqft)}`,
+                    pastText: `${past}: ${sqftText(month.pastSqft)}${averaged ? `; ${month.seasonalYears} years averaged: ${sqftText(month.seasonalSqft)}` : ''}`,
                     multiplierText: `× ${month.multiplier}`,
-                    expectedText: !month.projectedSqft ? sqftText(0) : `${sqftText(month.projectedSqft)}, ${fromPast ? `${past} × ${month.multiplier}` : 'booked'}`,
-                    filledText: month.filledShows ? `${showsText(month.filledShows)} from ${past}, ${sqftText(month.filledSqft)}` : '—',
+                    expectedText: !month.projectedSqft ? sqftText(0) : `${sqftText(month.projectedSqft)}, ${fromPast ? `${averaged ? 'average' : past} × ${month.multiplier}` : 'booked'}`,
+                    filledText: month.filledShows ? `${showsText(month.filledShows)} from ${monthLabel(month.filledFrom)}, ${sqftText(month.filledSqft)}` : '—',
                     sqftOutText: sqftText(month.sqftOut)
                 };
             });
@@ -102,10 +103,13 @@ const InventoryProjectionMonths = {
     },
     template: html`
         <p>
-            Expected is the larger of booked and the same month before, carried forward by the trend
-            and Growth Factor. The shows not booked yet are that month's past shows, moved forward and
-            sized to fill the gap. Out in one day counts every show from ship to return; an item is short
-            when the most of it out in one day passes its stock.
+            Expected is the larger of booked and the same month before (with more than one History
+            Year, averaged over them as a share of each year), carried forward by the trend and Growth
+            Factor. The shows not booked yet are that month's past shows, moved forward and sized to
+            fill the gap. Out in one day counts every show from ship to return, so shows still out from
+            earlier months count too; an item is short when the most of it out in one day passes its
+            stock. A show without a pack list takes each item at its share of the learned shows that
+            packed it, times their median use per square foot.
         </p>
         <DataView
             :fields="MONTH_FIELDS"
@@ -121,6 +125,8 @@ const InventoryProjectionMonths = {
                 <ul v-else-if="field.key === 'short'">
                     <li v-for="shortage in row.shortages" :key="shortage.itemId">
                         <strong>{{ shortage.itemId }}</strong>: {{ shortage.peak }} out, {{ shortage.stock }} in stock
+                        <span v-if="shortage.usedIn">(in {{ shortage.usedIn }} of {{ shortage.learned }} shows, {{ shortage.per1000 }} per 1,000 sq ft)</span>
+                        <span v-else>(pack lists only)</span>
                     </li>
                     <li v-if="row.shortCount > row.shortages.length">and {{ row.shortCount - row.shortages.length }} more</li>
                 </ul>
@@ -195,10 +201,10 @@ export const InventoryProjectionReport = {
             const window = `${monthLabel(basis.usageMonths[0])} – ${monthLabel(basis.usageMonths[basis.usageMonths.length - 1])}`;
             return [
                 { label: 'Projected', value: `the next ${12 * settings.futureYears} months: the most of each item out at once, ship to return, against stock` },
-                { label: 'Use per sq ft', value: `learned from ${basis.learnedFrom} of ${basis.usageShows} shows shipping ${window} (those with a pack list and a size): ${basis.usageSqft.toLocaleString()} sq ft` },
+                { label: 'Use per sq ft', value: `learned from ${basis.learnedFrom} of ${basis.usageShows} shows shipping ${window} (those with a pack list and a size, ${basis.usageSqft.toLocaleString()} sq ft): each item's share of them that packed it × the median use per sq ft among those` },
                 { label: 'Booked', value: `${basis.outShows} shows out from today, ${basis.packedShows} at their pack lists, the rest at use per sq ft` },
                 { label: 'Not booked yet', value: `${basis.filledShows} past shows a year on, sized to fill each month's expected sq ft` },
-                { label: 'Expected sq ft', value: `the larger of booked and the same month last year × ${this.trendText} × ${settings.growthFactor} (Growth Factor${settings.futureYears > 1 ? ', once per year ahead' : ''})` },
+                { label: 'Expected sq ft', value: `the larger of booked and the same month last year${this.basis.trend.years.length > 1 ? ' (averaged over the past years as a share of each, at last year\'s total)' : ''} × ${this.trendText} × ${settings.growthFactor} (Growth Factor${settings.futureYears > 1 ? ', once per year ahead' : ''})` },
                 { label: 'Shows without a size', value: `${basis.unsized} of ${basis.shows}${settings.defaultSquareFeet ? `, counted as ${settings.defaultSquareFeet} sq ft` : ', left out'}` }
             ];
         },
