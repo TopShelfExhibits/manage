@@ -97,7 +97,7 @@ const InventoryProjectionDetails = {
             const window = `${monthLabel(basis.usageMonths[0])} – ${monthLabel(basis.usageMonths[basis.usageMonths.length - 1])}`;
             return [
                 { label: 'Projected', value: `the next ${12 * settings.futureYears} months: the most of each item out at once, ship to return, against stock` },
-                { label: 'Use per sq ft', value: `learned from ${basis.learnedFrom} of ${basis.usageShows} shows shipping ${window} (those with a pack list and a size, ${basis.usageSqft.toLocaleString()} sq ft): each item's share of them that packed it × its typical quantity at a show's size, with a scale learned per item (1: in step with sq ft, 0: the same at any size)` },
+                { label: 'Use per sq ft', value: `learned from ${basis.learnedFrom} of ${basis.usageShows} shows shipping ${window} (those with a pack list and a size, ${basis.usageSqft.toLocaleString()} sq ft): each item's share of them that packed it × its typical quantity at a show's size, with a scale learned per item (1: in step with sq ft, 0: the same at any size). Shows packing far more than a show of their size typically does are left out of the typical quantity` },
                 { label: 'Booked', value: `${basis.outShows} shows out from today, ${basis.packedShows} at their pack lists, the rest at use per sq ft` },
                 { label: 'Not booked yet', value: `${basis.filledShows} past shows a year on, sized to fill each month's expected sq ft` },
                 { label: 'Expected sq ft', value: `the larger of booked and the same month last year${this.basis.trend.years.length > 1 ? ' (averaged over the past years as a share of each, at last year\'s total)' : ''} × ${this.trendText} × ${settings.growthFactor} (Growth Factor${settings.futureYears > 1 ? ', once per year ahead' : ''})` },
@@ -153,7 +153,7 @@ const InventoryProjectionDetails = {
                 <ul v-else-if="field.key === 'short'">
                     <li v-for="shortage in row.shortages" :key="shortage.itemId">
                         <strong>{{ shortage.itemId }}</strong>: {{ shortage.peak }} out, {{ shortage.stock }} in stock
-                        <span v-if="shortage.usedIn">(in {{ shortage.usedIn }} of {{ shortage.learned }} shows, {{ shortage.at1000 }} at 1,000 sq ft<template v-if="shortage.scale !== 1">, scale {{ shortage.scale }}</template><template v-if="shortage.multiplier !== row.multiplier">, carried forward × {{ shortage.multiplier }}</template>)</span>
+                        <span v-if="shortage.usedIn">(in {{ shortage.usedIn }} of {{ shortage.learned }} shows<template v-if="shortage.unusual">, {{ shortage.unusual }} unusual left out</template>, {{ shortage.at1000 }} at 1,000 sq ft<template v-if="shortage.scale !== 1">, scale {{ shortage.scale }}</template><template v-if="shortage.multiplier !== row.multiplier">, carried forward × {{ shortage.multiplier }}</template>)</span>
                         <span v-else>(pack lists only)</span>
                     </li>
                     <li v-if="row.shortCount > row.shortages.length">and {{ row.shortCount - row.shortages.length }} more</li>

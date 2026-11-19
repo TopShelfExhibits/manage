@@ -28,7 +28,11 @@
  *   at least a fifth, kept within 0–2 and pulled toward 1 when few shows packed it (n shows: n / (n
  *   + 3) of the way); with fewer than 3 such pairs it is 1. The coefficient is the median of
  *   quantity / S^scale over those shows. Medians throughout, so one show packing far more than
- *   usual moves neither much.
+ *   usual moves neither much. With 4 or more shows, a few that pack far more than a show of their
+ *   size typically does could still tilt the curve, so each show is compared with the curve: one
+ *   above it by more than 3 robust spreads of the shows around it (1.4826 × the median absolute
+ *   deviation, as logarithms), and at least double, is unusual. The curve is fitted again
+ *   without the unusual shows; they still count as shows that packed the item.
  * - Shows out in the projected months:
  *   - booked, with a pack list: its quantities;
  *   - booked, without one: each item's use at its square feet;
@@ -173,6 +177,11 @@ const SCALE_PAIR_RATIO = 1.2;
 const SCALE_MIN_PAIRS = 3;
 const SCALE_RANGE = [0, 2];
 const SCALE_PRIOR_SHOWS = 3;
+// The unusual-show check (itemUse): from this many shows; a show this many robust spreads above
+// the curve, and at least this many times its typical quantity, is left out of the fit
+const OUTLIER_MIN_SHOWS = 4;
+const OUTLIER_SPREADS = 3;
+const OUTLIER_MIN_RATIO = 2;
 
 /** The median of numbers (of an even count, the mean of the middle two) */
 function median(values) {
@@ -182,16 +191,12 @@ function median(values) {
 }
 
 /**
- * An item's use, learned from the shows that packed it (see the model above): how often it is
- * packed, and its typical quantity at a size, coefficient × sqft^scale. itemQuantity applies it.
- * @param {Array<{qty: number, sqft: number}>} used - The learned shows that packed the item
- * @param {number} learned - How many shows were learned from
- * @returns {{ usedIn: number, share: number, coefficient: number, scale: number }} usedIn: the
- *          shows that packed it; share: usedIn of learned
+ * The typical quantity curve, coefficient × sqft^scale, through shows that packed an item (see the
+ * model above: the scale, then the coefficient).
+ * @param {Array<{qty: number, sqft: number}>} shows
+ * @returns {{ coefficient: number, scale: number }}
  */
-export function itemUse(used, learned) {
-    const shows = used.filter(use => use.qty > 0 && use.sqft > 0);
-    if (!shows.length || !(learned > 0)) return { usedIn: 0, share: 0, coefficient: 0, scale: 1 };
+function fitCurve(shows) {
     const slopes = [];
     for (let i = 0; i < shows.length; i++) {
         for (let j = i + 1; j < shows.length; j++) {
@@ -204,12 +209,35 @@ export function itemUse(used, learned) {
         const fitted = Math.min(SCALE_RANGE[1], Math.max(SCALE_RANGE[0], median(slopes)));
         scale = 1 + (fitted - 1) * shows.length / (shows.length + SCALE_PRIOR_SHOWS);
     }
-    return {
-        usedIn: shows.length,
-        share: shows.length / learned,
-        coefficient: median(shows.map(show => show.qty / show.sqft ** scale)),
-        scale
-    };
+    return { coefficient: median(shows.map(show => show.qty / show.sqft ** scale)), scale };
+}
+
+/**
+ * An item's use, learned from the shows that packed it (see the model above): how often it is
+ * packed, and its typical quantity at a size, coefficient × sqft^scale, fitted without the shows
+ * that pack far more than a show of their size typically does. itemQuantity applies it.
+ * @param {Array<{qty: number, sqft: number}>} used - The learned shows that packed the item
+ * @param {number} learned - How many shows were learned from
+ * @returns {{ usedIn: number, share: number, coefficient: number, scale: number, unusual: number }}
+ *          usedIn: the shows that packed it; share: usedIn of learned; unusual: the shows left out
+ *          of the curve
+ */
+export function itemUse(used, learned) {
+    const shows = used.filter(use => use.qty > 0 && use.sqft > 0);
+    if (!shows.length || !(learned > 0)) return { usedIn: 0, share: 0, coefficient: 0, scale: 1, unusual: 0 };
+    let curve = fitCurve(shows);
+    let unusual = 0;
+    if (shows.length >= OUTLIER_MIN_SHOWS) {
+        // Each show against its size's typical quantity, as a logarithm
+        const above = shows.map(show => Math.log(show.qty / (curve.coefficient * show.sqft ** curve.scale)));
+        const middle = median(above);
+        const spread = 1.4826 * median(above.map(value => Math.abs(value - middle)));
+        const limit = middle + Math.max(OUTLIER_SPREADS * spread, Math.log(OUTLIER_MIN_RATIO));
+        const usual = shows.filter((show, i) => above[i] <= limit);
+        unusual = shows.length - usual.length;
+        if (unusual) curve = fitCurve(usual);
+    }
+    return { usedIn: shows.length, share: shows.length / learned, ...curve, unusual };
 }
 
 /**
@@ -354,10 +382,10 @@ export function fillShows(rows, pastShows, scale = 1) {
  *        stock: Object<string, number|null>}>} input.items - The learned shows that packed it, the
  *        booked pack list quantities out in the projected months, stock at each month's start
  * @param {Object} settings - resolveProjectionSettings
- * @returns {{ months: Array<Object>, items: Array<{itemId, usedIn, scale, at1000, multipliers}>, trend: Object, filled: number }}
+ * @returns {{ months: Array<Object>, items: Array<{itemId, usedIn, unusual, scale, at1000, multipliers}>, trend: Object, filled: number }}
  *          Each month: projectVolume's row in square feet, the shows filled in (filledShows,
  *          filledSqft, filledFrom: the past month they came from), the most square feet out on one
- *          day (sqftOut) and the items short ({ itemId, peak, stock, short, usedIn, learned, scale,
+ *          day (sqftOut) and the items short ({ itemId, peak, stock, short, usedIn, unusual, learned, scale,
  *          at1000: its typical quantity at 1000 sq ft when packed, multiplier: its own trend that
  *          month }). Each item's multipliers: its own trend 1, 2, … years ahead.
  */
@@ -395,6 +423,7 @@ export function projectInventory({ months, from, scheduledShows, pastShows, pack
         return {
             ...item,
             usedIn: use.usedIn,
+            unusual: use.unusual,
             scale: use.scale,
             at1000: use.coefficient * 1000 ** use.scale,
             monthMultiplier: Object.fromEntries(own.rows.map(row => [row.month, row.multiplier])),
@@ -411,7 +440,7 @@ export function projectInventory({ months, from, scheduledShows, pastShows, pack
                 if (stock === null || stock === undefined) continue;
                 const peak = item.peaks[row.month];
                 if (peak > 0 && peak - stock >= settings.minShortfall) {
-                    shortages.push({ itemId: item.itemId, peak: round1(peak), stock, short: round3(stock - peak), usedIn: item.usedIn, learned, scale: round3(item.scale), at1000: round1(item.at1000), multiplier: item.monthMultiplier[row.month] });
+                    shortages.push({ itemId: item.itemId, peak: round1(peak), stock, short: round3(stock - peak), usedIn: item.usedIn, unusual: item.unusual, learned, scale: round3(item.scale), at1000: round1(item.at1000), multiplier: item.monthMultiplier[row.month] });
                 }
             }
             shortages.sort((a, b) => (a.short - b.short) || (a.itemId < b.itemId ? -1 : 1));
@@ -424,7 +453,7 @@ export function projectInventory({ months, from, scheduledShows, pastShows, pack
                 shortages
             };
         }),
-        items: rated.map(({ itemId, usedIn, scale, at1000, multipliers }) => ({ itemId, usedIn, scale: round3(scale), at1000: round3(at1000), multipliers })),
+        items: rated.map(({ itemId, usedIn, unusual, scale, at1000, multipliers }) => ({ itemId, usedIn, unusual, scale: round3(scale), at1000: round3(at1000), multipliers })),
         trend,
         filled: filled.length
     };

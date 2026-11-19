@@ -6489,6 +6489,23 @@ test('INVENTORY PROJECTION', 'item use: share of shows × typical quantity, scal
     assertEqual(brief(itemUse([{ qty: 2, sqft: 500 }, { qty: 4, sqft: 1000 }], 2)), [2, 1, 4], 'one pair: too few to learn a scale; 4 per 1000 sq ft in both');
 });
 
+// Unusual shows: each show against its size's typical quantity (as logarithms); above the curve by
+// more than 3 × 1.4826 × the median absolute deviation, and at least double, it is left out of the
+// curve but still counts as packing the item. brief: [shows, scale, at 1000 sq ft, unusual]
+test('INVENTORY PROJECTION', 'item use: shows packing far more than their size typically does are left out', () => {
+    const brief = (use) => [use.usedIn, Math.round(use.scale * 1000) / 1000, Math.round(itemQuantity(use, 1000) * 1000) / 1000, use.unusual];
+    // One size, 10–12 per show and three at 60–80: first fit 12 (the median); the three are 5–6.7
+    // times it, beyond a limit of 0.81 (spread 0.182 × 1.4826 × 3): the curve is 10.5
+    assertEqual(brief(itemUse([10, 10, 11, 12, 60, 70, 80].map(qty => ({ qty, sqft: 1000 })), 7)), [7, 1, 10.5, 3], 'three of seven far above: 10.5, not 12');
+    // 1 per 100 sq ft from 500 to 2000 sq ft, and two 4000 sq ft shows packing 200 (40 would be in
+    // step): they tilt the first scale to 1.281 (the median slope 1.387, 8/11 of the way); against
+    // that curve they lie 1.12 above the middle (limit 0.86): without them, in step again
+    assertEqual(brief(itemUse([500, 500, 1000, 1000, 2000, 2000].map(sqft => ({ qty: sqft / 100, sqft }))
+        .concat([{ qty: 200, sqft: 4000 }, { qty: 200, sqft: 4000 }]), 8)), [8, 1, 10, 2], 'two big shows far above: scale 1, not 1.28');
+    assertEqual(brief(itemUse([10, 12, 11, 30].map(qty => ({ qty, sqft: 1000 })), 4)), [4, 1, 11, 1], '30 against 11.5: 2.6 times, beyond the limit (0.69): left out, 11');
+    assertEqual(brief(itemUse([10, 12, 11, 20].map(qty => ({ qty, sqft: 1000 })), 4)), [4, 1, 11.5, 0], '20 against 11.5: under double, kept');
+});
+
 test('INVENTORY PROJECTION', 'shows not booked yet: the past month\'s shows a year on, sized to the gap', () => {
     const pastShows = [
         { ship: '2024-07-10', end: '2024-07-20', month: '2024-07', sqft: 1000 },
@@ -6534,8 +6551,8 @@ test('INVENTORY PROJECTION', 'projectInventory: pack lists, use per sq ft and fi
         ]
     }, DEFAULT_PROJECTION_SETTINGS);
     assertEqual(months.map(m => [m.month, m.projectedSqft, m.shortages]), [
-        ['2025-06', 1000, [{ itemId: 'A', peak: 35, stock: 20, short: -15, usedIn: 2, learned: 2, scale: 1, at1000: 50, multiplier: 1 }]],
-        ['2025-07', 2000, [{ itemId: 'A', peak: 100, stock: 20, short: -80, usedIn: 2, learned: 2, scale: 1, at1000: 50, multiplier: 1 }, { itemId: 'B', peak: 4, stock: 3, short: -1, usedIn: 1, learned: 2, scale: 1, at1000: 4, multiplier: 1 }]]
+        ['2025-06', 1000, [{ itemId: 'A', peak: 35, stock: 20, short: -15, usedIn: 2, unusual: 0, learned: 2, scale: 1, at1000: 50, multiplier: 1 }]],
+        ['2025-07', 2000, [{ itemId: 'A', peak: 100, stock: 20, short: -80, usedIn: 2, unusual: 0, learned: 2, scale: 1, at1000: 50, multiplier: 1 }, { itemId: 'B', peak: 4, stock: 3, short: -1, usedIn: 1, unusual: 0, learned: 2, scale: 1, at1000: 4, multiplier: 1 }]]
     ], 'June: A 30 + 5 out together, B 1.2 within 3; July: two filled shows overlap, B short by exactly the minimum');
     assertEqual([filled, items.map(i => [i.itemId, i.usedIn, i.scale, i.at1000])], [2, [['A', 2, 1, 50], ['B', 1, 1, 4], ['C', 1, 1, 20]]], 'filled shows; each item\'s use');
     assertEqual(months.map(m => [m.month, m.filledShows, m.filledSqft, m.filledFrom, m.sqftOut]), [['2025-06', 0, 0, null, 1000], ['2025-07', 2, 2000, '2024-07', 2000]],
@@ -6563,7 +6580,7 @@ test('INVENTORY PROJECTION', 'projectInventory: an item with its own scale', () 
         learned: 4,
         items: [{ itemId: 'D', used: [500, 1000, 2000, 4000].map(sqft => ({ qty: 2, sqft })), packed: [], stock: { '2025-07': 1 } }]
     }, DEFAULT_PROJECTION_SETTINGS);
-    assertEqual(months[0].shortages, [{ itemId: 'D', peak: 3.5, stock: 1, short: -2.486, usedIn: 4, learned: 4, scale: 0.429, at1000: 1.7, multiplier: 1 }],
+    assertEqual(months[0].shortages, [{ itemId: 'D', peak: 3.5, stock: 1, short: -2.486, usedIn: 4, unusual: 0, learned: 4, scale: 0.429, at1000: 1.7, multiplier: 1 }],
         'two at 1000 sq ft each, not twice its share of a 2000 sq ft show');
 });
 
