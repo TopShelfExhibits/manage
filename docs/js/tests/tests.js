@@ -6502,10 +6502,12 @@ test('INVENTORY PROJECTION', 'shows not booked yet: the past month\'s shows a ye
         { month: '2025-07', pastMonth: '2024-07', scheduledSqft: 500, projectedSqft: 3500 },
         { month: '2025-08', pastMonth: '2024-08', scheduledSqft: 0, projectedSqft: 800 }
     ], pastShows), [
-        { month: '2025-07', from: '2024-07', start: '2025-07-10', end: '2025-07-20', sqft: 2000 },
-        { month: '2025-07', from: '2024-07', start: '2025-07-25', end: '2025-08-10', sqft: 1000 },
-        { month: '2025-08', from: '2023-08', start: '2025-08-05', end: '2025-08-15', sqft: 800 }
-    ], 'July: a 3000 sq ft gap over 1500 sq ft of past shows, each doubled; June is booked above its past; August 2024 had no shows: August 2023\'s, two years on');
+        { month: '2025-07', from: '2024-07', start: '2025-07-10', end: '2025-07-20', sqft: 1000, weight: 2 },
+        { month: '2025-07', from: '2024-07', start: '2025-07-25', end: '2025-08-10', sqft: 500, weight: 2 },
+        { month: '2025-08', from: '2023-08', start: '2025-08-05', end: '2025-08-15', sqft: 400, weight: 2 }
+    ], 'July: a 3000 sq ft gap over 1500 sq ft of past shows, each counted twice; June is booked above its past; August 2024 had no shows: August 2023\'s, two years on');
+    assertEqual(fillShows([{ month: '2025-07', pastMonth: '2024-07', scheduledSqft: 1, projectedSqft: 4 }], pastShows, 0).map(show => [show.sqft, show.weight]), [[1000, 1.5], [500, 1.5]],
+        'scale 0 counts booths: a gap of 3 over last July\'s 2 sized shows');
 });
 
 // June: booked 1000 sq ft; one show without a pack list (600 sq ft, Jun 10–20), and one with (400
@@ -6516,9 +6518,9 @@ test('INVENTORY PROJECTION', 'projectInventory: pack lists, use per sq ft and fi
     const { months, items, filled } = projectInventory({
         months: ['2025-06', '2025-07'],
         from: '2025-06-01',
-        scheduled: { '2025-06': { sqft: 1000, shows: 2 } },
-        pastSqft: { '2024-06': 800, '2024-07': 2000 },
+        scheduledShows: [{ month: '2025-06', sqft: 400 }, { month: '2025-06', sqft: 600 }],
         pastShows: [
+            { ship: '2024-06-10', end: '2024-06-15', month: '2024-06', sqft: 800 },
             { ship: '2024-07-05', end: '2024-07-25', month: '2024-07', sqft: 1000 },
             { ship: '2024-07-20', end: '2024-08-05', month: '2024-07', sqft: 1000 }
         ],
@@ -6532,8 +6534,8 @@ test('INVENTORY PROJECTION', 'projectInventory: pack lists, use per sq ft and fi
         ]
     }, DEFAULT_PROJECTION_SETTINGS);
     assertEqual(months.map(m => [m.month, m.projectedSqft, m.shortages]), [
-        ['2025-06', 1000, [{ itemId: 'A', peak: 35, stock: 20, short: -15, usedIn: 2, learned: 2, scale: 1, at1000: 50 }]],
-        ['2025-07', 2000, [{ itemId: 'A', peak: 100, stock: 20, short: -80, usedIn: 2, learned: 2, scale: 1, at1000: 50 }, { itemId: 'B', peak: 4, stock: 3, short: -1, usedIn: 1, learned: 2, scale: 1, at1000: 4 }]]
+        ['2025-06', 1000, [{ itemId: 'A', peak: 35, stock: 20, short: -15, usedIn: 2, learned: 2, scale: 1, at1000: 50, multiplier: 1 }]],
+        ['2025-07', 2000, [{ itemId: 'A', peak: 100, stock: 20, short: -80, usedIn: 2, learned: 2, scale: 1, at1000: 50, multiplier: 1 }, { itemId: 'B', peak: 4, stock: 3, short: -1, usedIn: 1, learned: 2, scale: 1, at1000: 4, multiplier: 1 }]]
     ], 'June: A 30 + 5 out together, B 1.2 within 3; July: two filled shows overlap, B short by exactly the minimum');
     assertEqual([filled, items.map(i => [i.itemId, i.usedIn, i.scale, i.at1000])], [2, [['A', 2, 1, 50], ['B', 1, 1, 4], ['C', 1, 1, 20]]], 'filled shows; each item\'s use');
     assertEqual(months.map(m => [m.month, m.filledShows, m.filledSqft, m.filledFrom, m.sqftOut]), [['2025-06', 0, 0, null, 1000], ['2025-07', 2, 2000, '2024-07', 2000]],
@@ -6552,8 +6554,7 @@ test('INVENTORY PROJECTION', 'projectInventory: an item with its own scale', () 
     const { months } = projectInventory({
         months: ['2025-07'],
         from: '2025-07-01',
-        scheduled: {},
-        pastSqft: { '2024-07': 2000 },
+        scheduledShows: [],
         pastShows: [
             { ship: '2024-07-05', end: '2024-07-25', month: '2024-07', sqft: 1000 },
             { ship: '2024-07-20', end: '2024-08-05', month: '2024-07', sqft: 1000 }
@@ -6562,8 +6563,33 @@ test('INVENTORY PROJECTION', 'projectInventory: an item with its own scale', () 
         learned: 4,
         items: [{ itemId: 'D', used: [500, 1000, 2000, 4000].map(sqft => ({ qty: 2, sqft })), packed: [], stock: { '2025-07': 1 } }]
     }, DEFAULT_PROJECTION_SETTINGS);
-    assertEqual(months[0].shortages, [{ itemId: 'D', peak: 3.5, stock: 1, short: -2.486, usedIn: 4, learned: 4, scale: 0.429, at1000: 1.7 }],
+    assertEqual(months[0].shortages, [{ itemId: 'D', peak: 3.5, stock: 1, short: -2.486, usedIn: 4, learned: 4, scale: 0.429, at1000: 1.7, multiplier: 1 }],
         'two at 1000 sq ft each, not twice its share of a 2000 sq ft show');
+});
+
+// Booth mix: July 2023 one 4000 sq ft booth; July 2024 four 1000 sq ft booths, out Jul 10–20 together.
+// Square feet stay 4000: F (in step, 10 per 1000 sq ft) is carried forward × 1, 40 out. G (scale 3/7,
+// 1.743 at 1000 sq ft) is carried on the sum of size^(3/7): 4000^(3/7) then 4 × 1000^(3/7), a line
+// 2 − 4^(−4/7) = 1.547 a year on: 4 × 1.743 × 1.547 = 10.787 out, not 6.972
+test('INVENTORY PROJECTION', 'booth mix: more small booths raise items by their own scale', () => {
+    const { months, items } = projectInventory({
+        months: ['2025-07'],
+        from: '2025-07-01',
+        scheduledShows: [],
+        pastShows: [
+            { ship: '2023-07-10', end: '2023-07-20', month: '2023-07', sqft: 4000 },
+            ...[1, 2, 3, 4].map(() => ({ ship: '2024-07-10', end: '2024-07-20', month: '2024-07', sqft: 1000 }))
+        ],
+        unpackedShows: [],
+        learned: 4,
+        items: [
+            { itemId: 'F', used: [500, 1000, 2000, 4000].map(sqft => ({ qty: sqft / 100, sqft })), packed: [], stock: { '2025-07': 0 } },
+            { itemId: 'G', used: [500, 1000, 2000, 4000].map(sqft => ({ qty: 2, sqft })), packed: [], stock: { '2025-07': 0 } }
+        ]
+    }, { ...DEFAULT_PROJECTION_SETTINGS, historyYears: 2 });
+    assertEqual([months[0].projectedSqft, months[0].multiplier, months[0].filledShows, months[0].filledSqft], [4000, 1, 4, 4000], 'square feet: flat, last July\'s four booths');
+    assertEqual(months[0].shortages.map(s => [s.itemId, s.short, s.multiplier]), [['F', -40, 1], ['G', -10.787, 1.547]], 'F with square feet, G with its own measure');
+    assertEqual(items.map(i => [i.itemId, i.multipliers]), [['F', [1]], ['G', [1.547]]], 'each item\'s trend a year ahead');
 });
 
 async function _withProjectionToday(fn) {

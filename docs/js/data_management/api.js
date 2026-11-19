@@ -1475,23 +1475,14 @@ class Requests_uncached {
             stock: Object.fromEntries(futureMonths.map((month, i) => [month, monthStock[i].get(itemId) ?? null]))
         }));
 
-        const scheduled = Object.fromEntries(futureMonths.map(month => [month, { sqft: 0, shows: 0 }]));
-        const pastSqft = {};
-        for (const show of shows) {
-            if (show.month >= thisMonth) {
-                scheduled[show.month].shows++;
-                scheduled[show.month].sqft += show.sqft;
-            } else {
-                pastSqft[show.month] = (pastSqft[show.month] || 0) + show.sqft;
-            }
-        }
+        const scheduledShows = shows.filter(show => show.month >= thisMonth);
         const pastShows = shows.filter(show => show.month < thisMonth);
         const asWindow = (show) => ({ start: show.ship, end: show.end, sqft: show.sqft });
         const packedWindows = packedShows.filter(show => show.sqft > 0).map(asWindow);
         const unpackedShows = outShows.filter(show => !show.hasPackList && show.sqft > 0).map(asWindow);
 
         progress(4, 'Projecting...');
-        const projection = projectInventory({ months: futureMonths, from: today, scheduled, pastSqft, pastShows, packedShows: packedWindows, unpackedShows, learned: learnedFrom.length, items }, settings);
+        const projection = projectInventory({ months: futureMonths, from: today, scheduledShows, pastShows, packedShows: packedWindows, unpackedShows, learned: learnedFrom.length, items }, settings);
         return {
             ...projection,
             settings,
