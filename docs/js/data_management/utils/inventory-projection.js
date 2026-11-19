@@ -392,23 +392,34 @@ export function projectInventory({ months, from, scheduled, pastSqft, pastShows,
  * One row per item that runs short (projectInventory months): the first month it does, and its
  * shortage, the most it falls short by in that month or a later one, so adding that many covers
  * the whole projection. Rounded down (short by 27.3 is -28). With quantity changes (a proposal's),
- * `proposed` is the shortage after them; null without. Soonest month first, then the largest
- * shortage.
+ * `proposed` is the shortage after them; null without. `months` lists every month it runs short,
+ * each with its own shortage and proposed. Soonest month first, then the largest shortage.
  * @param {Array<{month: string, shortages: Array<{itemId: string, short: number}>}>} months
  * @param {Object<string, number>|null} [deltas] - Quantity change by item number
- * @returns {Array<{itemId: string, month: string, shortage: number, proposed: number|null}>}
+ * @returns {Array<{itemId: string, month: string, shortage: number, proposed: number|null,
+ *          months: Array<{month: string, shortage: number, proposed: number|null}>}>}
  */
 export function itemShortages(months, deltas = null) {
     const byItem = new Map();
     for (const { month, shortages } of months) {
         for (const { itemId, short } of shortages) {
             const row = byItem.get(itemId);
-            if (row) row.short = Math.min(row.short, short);
-            else byItem.set(itemId, { itemId, month, short });
+            if (row) {
+                row.short = Math.min(row.short, short);
+                row.months.push({ month, short });
+            } else {
+                byItem.set(itemId, { itemId, month, short, months: [{ month, short }] });
+            }
         }
     }
     const down = (n) => Math.floor(n + 1e-9);
+    const amounts = (itemId, short) => ({ shortage: down(short), proposed: deltas ? down(short + (deltas[itemId] || 0)) : null });
     return [...byItem.values()]
-        .map(({ itemId, month, short }) => ({ itemId, month, shortage: down(short), proposed: deltas ? down(short + (deltas[itemId] || 0)) : null }))
+        .map(({ itemId, month, short, months: shortMonths }) => ({
+            itemId,
+            month,
+            ...amounts(itemId, short),
+            months: shortMonths.map(entry => ({ month: entry.month, ...amounts(itemId, entry.short) }))
+        }))
         .sort((a, b) => (a.month < b.month ? -1 : a.month > b.month ? 1 : (a.shortage - b.shortage) || (a.itemId < b.itemId ? -1 : 1)));
 }

@@ -1,9 +1,10 @@
-import { html, DataView, ButtonBar, Requests, getReactiveStore, InventoryCategoryFilter, invalidateCache, NavigationRegistry, ProposalUtils, THUMBNAIL_FIELD, getItemThumbnailsStore, itemThumbnailMap, withItemThumbnails } from '../../index.js';
+import { html, DataView, ButtonBar, readRowMetadata, Requests, getReactiveStore, InventoryCategoryFilter, invalidateCache, NavigationRegistry, ProposalUtils, THUMBNAIL_FIELD, getItemThumbnailsStore, itemThumbnailMap, withItemThumbnails } from '../../index.js';
 import { thumbnailStyle } from '../../utils/views/viewStyles.js';
 import { getProposalsStore } from '../../utils/inventoryProposals.js';
 
 // What each projection row key is (Requests.getInventoryProjection): one item that runs short.
-// monthLabel is derived on a computed copy; thumbnail is the item's, joined by item number.
+// monthLabel is derived on a computed copy; thumbnail is the item's, joined by item number. An item
+// short in more than one month gets a collapsed group under its row: one row per short month.
 const PROJECTION_FIELDS = [
     { key: 'monthLabel', label: 'Month' },
     THUMBNAIL_FIELD,
@@ -177,9 +178,29 @@ export const InventoryProjectionReport = {
         projectionKey() {
             return this.category ? JSON.stringify([this.category, this.proposal]) : '';
         },
+        // Each item's row; short in more than one month, it heads a group (MetaData grouping, as
+        // the item shortage report draws its periods) of one row per short month, collapsed
         rows() {
-            const rows = (this.projectionStore?.data || []).map(row => ({ ...row, monthLabel: monthLabel(row.month) }));
-            return withItemThumbnails(rows, 'itemId', itemThumbnailMap(this.itemThumbnailsStore?.data));
+            const thumbnails = itemThumbnailMap(this.itemThumbnailsStore?.data);
+            const rows = [];
+            for (const { months, ...item } of this.projectionStore?.data || []) {
+                const [head] = withItemThumbnails([{ ...item, monthLabel: monthLabel(item.month) }], 'itemId', thumbnails);
+                if (!months || months.length < 2) {
+                    rows.push(head);
+                    continue;
+                }
+                const groupId = `projection-${item.itemId}`;
+                rows.push({ ...head, metadata: JSON.stringify({ ...readRowMetadata(head), grouping: { groupId, isGroupMaster: true } }) });
+                for (const entry of months) {
+                    rows.push({
+                        itemId: item.itemId,
+                        ...entry,
+                        monthLabel: monthLabel(entry.month),
+                        metadata: JSON.stringify({ grouping: { groupId, isGroupMaster: false } })
+                    });
+                }
+            }
+            return rows;
         },
         // Proposed shows only with a proposal selected
         viewPatches() {
@@ -281,6 +302,7 @@ export const InventoryProjectionReport = {
             :container-path="containerPath"
             :navigate-to-path="navigateToPath"
             title="Inventory Projection"
+            :hide-group-members="true"
             :is-loading="isLoading"
             :loading-message="loadingMessage"
             :loading-progress="loadingProgress"

@@ -6525,10 +6525,11 @@ test('INVENTORY PROJECTION', 'projectInventory: pack lists, use per sq ft and fi
     assertEqual(months.map(m => [m.month, m.filledShows, m.filledSqft, m.filledFrom, m.sqftOut]), [['2025-06', 0, 0, null, 1000], ['2025-07', 2, 2000, '2024-07', 2000]],
         'June: both booked shows out Jun 12–18; July: the two filled shows overlap');
     assertEqual(itemShortages(months), [
-        { itemId: 'A', month: '2025-06', shortage: -80, proposed: null },
-        { itemId: 'B', month: '2025-07', shortage: -1, proposed: null }
-    ], 'one row per item: its first short month, its deepest shortage');
-    assertEqual(itemShortages(months, { A: 85, B: 0.5 }).map(r => [r.itemId, r.proposed]), [['A', 5], ['B', -1]], 'proposed: the shortage after the changes, rounded down');
+        { itemId: 'A', month: '2025-06', shortage: -80, proposed: null, months: [{ month: '2025-06', shortage: -15, proposed: null }, { month: '2025-07', shortage: -80, proposed: null }] },
+        { itemId: 'B', month: '2025-07', shortage: -1, proposed: null, months: [{ month: '2025-07', shortage: -1, proposed: null }] }
+    ], 'one row per item: its first short month, its deepest shortage; each short month on its own');
+    assertEqual(itemShortages(months, { A: 85, B: 0.5 }).map(r => [r.itemId, r.proposed, r.months.map(m => m.proposed)]), [['A', 5, [70, 5]], ['B', -1, [-1]]],
+        'proposed: the shortage after the changes, rounded down, overall and in each month');
 });
 
 // D packed 2 at each of four sizes (scale 3/7, 1.743 at 1000 sq ft); July's two filled 1000 sq ft
@@ -6595,11 +6596,19 @@ test('INVENTORY PROJECTION', 'CABINETS month rows: how each month is reached', (
     assertEqual(await Requests.getInventoryProjectionMonths(''), [], 'no category, no months');
 }));
 
+// CAB-004 short each month but November, against 10 in stock: Aug 37.7, Sep 67, Oct 23.8, Dec 29.3,
+// Jan 104.5, Feb 68.04 (shown 68), Mar 40.2 out; CAB-005 only in January (9.5 against 6)
 test('INVENTORY PROJECTION', 'CABINETS report rows, with and without a proposal', () => _withProjectionToday(async () => {
-    assertEqual(await Requests.getInventoryProjection('CABINETS'), [
+    const shortMonths = (entries) => entries.map(m => [m.month, m.shortage]);
+    const rows = await Requests.getInventoryProjection('CABINETS');
+    assertEqual(rows.map(({ months, ...row }) => row), [
         { itemId: 'CAB-004', month: '2025-08', shortage: -95, proposed: null },
         { itemId: 'CAB-005', month: '2026-01', shortage: -4, proposed: null }
     ], 'soonest first; the deepest shortage, rounded down');
+    assertEqual(rows.map(row => shortMonths(row.months)), [
+        [['2025-08', -28], ['2025-09', -57], ['2025-10', -14], ['2025-12', -20], ['2026-01', -95], ['2026-02', -59], ['2026-03', -31]],
+        [['2026-01', -4]]
+    ], 'every short month, each rounded down');
     const name = 'Projection test';
     const proposed = async () => (await Requests.getInventoryProjection('CABINETS', name)).map(r => [r.itemId, r.shortage, r.proposed]);
     try {
@@ -6609,6 +6618,9 @@ test('INVENTORY PROJECTION', 'CABINETS report rows, with and without a proposal'
             { category: 'FURNITURE', itemNumber: 'CAB-005', quantityChange: '50' }
         ], name));
         assertEqual(await proposed(), [['CAB-004', -95, 5], ['CAB-005', -4, -2]], 'shortage after the proposal; its other tabs ignored');
+        const [cab004] = await Requests.getInventoryProjection('CABINETS', name);
+        assertEqual(cab004.months.map(m => [m.month, m.proposed]), [['2025-08', 72], ['2025-09', 43], ['2025-10', 86], ['2025-12', 80], ['2026-01', 5], ['2026-02', 41], ['2026-03', 69]],
+            'each month after the proposal: 100 more, rounded down (72.3, 43, 86.2, 80.7, 5.5, 41.96, 69.8)');
         await _asUser(() => Requests.saveInventoryProposalTable([{ category: 'CABINETS', itemNumber: 'CAB-005', quantityChange: '10' }], name));
         assertEqual(await proposed(), [['CAB-004', -95, -95], ['CAB-005', -4, 6]], 'an edit to the proposal reaches the report');
     } finally {
