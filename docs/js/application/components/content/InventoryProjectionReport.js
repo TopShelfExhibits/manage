@@ -1,4 +1,4 @@
-import { html, DataView, Requests, getReactiveStore, InventoryCategoryFilter, invalidateCache, NavigationRegistry, ProposalUtils, THUMBNAIL_FIELD, getItemThumbnailsStore, itemThumbnailMap, withItemThumbnails } from '../../index.js';
+import { html, DataView, ButtonBar, Requests, getReactiveStore, InventoryCategoryFilter, invalidateCache, NavigationRegistry, ProposalUtils, THUMBNAIL_FIELD, getItemThumbnailsStore, itemThumbnailMap, withItemThumbnails } from '../../index.js';
 import { thumbnailStyle } from '../../utils/views/viewStyles.js';
 import { getProposalsStore } from '../../utils/inventoryProposals.js';
 
@@ -36,6 +36,100 @@ const PROJECTION_VIEWS = {
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const monthLabel = (month) => `${MONTH_NAMES[Number(month.slice(5, 7)) - 1]} ${month.slice(0, 4)}`;
 
+// What each month row key is (Requests.getInventoryProjectionMonths), as readable text; derived on
+// a computed copy. short is drawn by the modal (#cell).
+const MONTH_FIELDS = [
+    { key: 'monthLabel', label: 'Month' },
+    { key: 'bookedText', label: 'Booked' },
+    { key: 'pastText', label: 'Same month before' },
+    { key: 'multiplierText', label: 'Carried forward' },
+    { key: 'expectedText', label: 'Expected' },
+    { key: 'filledText', label: 'Not booked yet' },
+    { key: 'sqftOutText', label: 'Most out in one day' },
+    { key: 'short', label: 'Items short' }
+];
+
+const MONTH_VIEWS = {
+    id: 'inventory-projection-months',
+    default: 'table',
+    theme: 'blue',
+    views: [{
+        id: 'table',
+        name: 'Months',
+        layout: 'table',
+        columns: MONTH_FIELDS.map(field => field.key),
+        style: { monthLabel: { width: 90 }, short: { cell: 'slot', width: 240 } }
+    }]
+};
+
+const sqftText = (n) => `${Math.round(n || 0).toLocaleString()} sq ft`;
+const showsText = (n) => `${n} show${n === 1 ? '' : 's'}`;
+
+/**
+ * The inventory projection month by month, in words (Requests.getInventoryProjectionMonths): how
+ * each month's expected square feet are reached and what is out at once. A modal component: open
+ * it with $modal.custom(InventoryProjectionMonths, { category }).
+ */
+const InventoryProjectionMonths = {
+    components: { DataView },
+    props: {
+        category: { type: String, required: true }
+    },
+    data() {
+        return {
+            monthsStore: getReactiveStore(Requests.getInventoryProjectionMonths, null, [this.category]),
+            MONTH_FIELDS,
+            MONTH_VIEWS
+        };
+    },
+    computed: {
+        rows() {
+            return (this.monthsStore.data || []).map(month => {
+                const past = monthLabel(month.pastMonth);
+                const fromPast = month.projectedSqft > month.scheduledSqft;
+                return {
+                    ...month,
+                    monthLabel: monthLabel(month.month),
+                    bookedText: month.shows ? `${showsText(month.shows)}, ${sqftText(month.scheduledSqft)}` : 'none',
+                    pastText: `${past}: ${sqftText(month.pastSqft)}`,
+                    multiplierText: `× ${month.multiplier}`,
+                    expectedText: !month.projectedSqft ? sqftText(0) : `${sqftText(month.projectedSqft)}, ${fromPast ? `${past} × ${month.multiplier}` : 'booked'}`,
+                    filledText: month.filledShows ? `${showsText(month.filledShows)} from ${past}, ${sqftText(month.filledSqft)}` : '—',
+                    sqftOutText: sqftText(month.sqftOut)
+                };
+            });
+        }
+    },
+    template: html`
+        <p>
+            Expected is the larger of booked and the same month before, carried forward by the trend
+            and Growth Factor. The shows not booked yet are that month's past shows, moved forward and
+            sized to fill the gap. Out in one day counts every show from ship to return; an item is short
+            when the most of it out in one day passes its stock.
+        </p>
+        <DataView
+            :fields="MONTH_FIELDS"
+            :rows="rows"
+            :registry="MONTH_VIEWS"
+            :is-loading="monthsStore.isLoading"
+            loading-message="Projecting inventory..."
+            :show-refresh="false"
+            empty-message="No months to show."
+        >
+            <template #cell="{ row, field }">
+                <span v-if="field.key === 'short' && !row.shortCount">—</span>
+                <ul v-else-if="field.key === 'short'">
+                    <li v-for="shortage in row.shortages" :key="shortage.itemId">
+                        <strong>{{ shortage.itemId }}</strong>: {{ shortage.peak }} out, {{ shortage.stock }} in stock
+                    </li>
+                    <li v-if="row.shortCount > row.shortages.length">and {{ row.shortCount - row.shortages.length }} more</li>
+                </ul>
+            </template>
+        </DataView>
+    `,
+    inheritAttrs: false
+};
+
 /**
  * Inventory projection report (reports/inventory-projection): for one inventory category, the
  * items likely to have more out at once than in stock over the coming years (ProjectionFutureYears),
@@ -46,8 +140,8 @@ const monthLabel = (month) => `${MONTH_NAMES[Number(month.slice(5, 7)) - 1]} ${m
  * page menu (View Parameters).
  */
 export const InventoryProjectionReport = {
-    components: { DataView, InventoryCategoryFilter },
-    inject: ['appContext'],
+    components: { DataView, ButtonBar, InventoryCategoryFilter },
+    inject: ['appContext', '$modal'],
     props: {
         containerPath: { type: String, default: 'reports/inventory-projection' },
         navigateToPath: Function
@@ -137,6 +231,9 @@ export const InventoryProjectionReport = {
             this.category = category || null;
             this.basisStore = this.category ? getReactiveStore(Requests.getInventoryProjectionBasis, null, [this.category]) : null;
         },
+        openMonths() {
+            this.$modal.custom(InventoryProjectionMonths, { category: this.category, size: 'page' }, `${this.category}: projection by month`);
+        },
         selectProposal(name) {
             NavigationRegistry.updateContainerParams(this.containerPath, this.appContext?.currentPath, { proposal: name || undefined }, this.navigateToPath);
         },
@@ -172,7 +269,7 @@ export const InventoryProjectionReport = {
             @refresh="handleRefresh"
         >
             <template #header-area>
-                <div class="button-bar">
+                <ButtonBar>
                     <InventoryCategoryFilter
                         :container-path="containerPath"
                         :navigate-to-path="navigateToPath"
@@ -182,7 +279,8 @@ export const InventoryProjectionReport = {
                         <option value="">Select Proposal</option>
                         <option v-for="name in proposalNames" :key="name" :value="name">{{ name }}</option>
                     </select>
-                </div>
+                    <button :disabled="!category" title="How the projection reaches each month" @click="openMonths">View Months</button>
+                </ButtonBar>
             </template>
         </DataView>
     `,

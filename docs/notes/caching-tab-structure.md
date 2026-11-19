@@ -142,7 +142,7 @@ Set up at the bottom of `database.js` (`watchSpreadsheets`) and run by the polle
 
 # Analytics Tab: Persisted Results
 
-Some cached API results take long enough to compute that a new session should start from the last saved copy. A method opts in through `wrapMethods`' last argument, `persistentMethods` (see the bottom of `api.js`). The persisted methods are `getInventoryShortageAlerts`, `getItemThumbnails` (item thumbnails for report pages; it reads every inventory tab), and `getInventoryProjection` with `getInventoryProjectionBasis` (the inventory projection report: the items likely to run short, one entry per category and selected proposal, and what the projection learned from, one per category; the model is in `utils/inventory-projection.js`).
+Some cached API results take long enough to compute that a new session should start from the last saved copy. A method opts in through `wrapMethods`' last argument, `persistentMethods` (see the bottom of `api.js`). The persisted methods are `getInventoryShortageAlerts`, `getItemThumbnails` (item thumbnails for report pages; it reads every inventory tab), and `getInventoryProjection` with `getInventoryProjectionBasis` and `getInventoryProjectionMonths` (the inventory projection report: the items likely to run short, one entry per category and selected proposal; what the projection learned from, and its months in words, one each per category; the model is in `utils/inventory-projection.js`).
 
 ## Tab location and layout
 

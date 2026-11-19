@@ -1455,9 +1455,11 @@ class Requests_uncached {
             }
         }
         const pastShows = shows.filter(show => show.month < thisMonth);
-        const unpackedShows = outShows.filter(show => !show.hasPackList && show.sqft > 0).map(show => ({ start: show.ship, end: show.end, sqft: show.sqft }));
+        const asWindow = (show) => ({ start: show.ship, end: show.end, sqft: show.sqft });
+        const packedWindows = packedShows.filter(show => show.sqft > 0).map(asWindow);
+        const unpackedShows = outShows.filter(show => !show.hasPackList && show.sqft > 0).map(asWindow);
 
-        const projection = projectInventory({ months: futureMonths, from: today, scheduled, pastSqft, pastShows, unpackedShows, usageSqft, items }, settings);
+        const projection = projectInventory({ months: futureMonths, from: today, scheduled, pastSqft, pastShows, packedShows: packedWindows, unpackedShows, usageSqft, items }, settings);
         return {
             ...projection,
             settings,
@@ -1493,6 +1495,20 @@ class Requests_uncached {
         if (!model) return [];
         const deltas = proposal ? ProposalUtils.quantityDeltas(await deps.call(Requests.getInventoryProposals), proposal, category) : null;
         return itemShortages(model.months, deltas);
+    }
+
+    /**
+     * The inventory projection month by month (getInventoryProjectionModel), to show how it works:
+     * shows and square feet booked, the past month carried forward and its multiplier, projected
+     * square feet, the shows filled in, the most square feet out on one day, and the items short
+     * (shortCount, and the largest shortages, at most 5). Persisted.
+     * @param {Object} deps
+     * @param {string} category - Inventory tab name
+     * @returns {Promise<Array<Object>>} Empty without a category
+     */
+    static async getInventoryProjectionMonths(deps, category) {
+        const model = await deps.call(Requests.getInventoryProjectionModel, category);
+        return (model?.months || []).map(({ shortages, ...month }) => ({ ...month, shortCount: shortages.length, shortages: shortages.slice(0, 5) }));
     }
 
     /**
@@ -2019,5 +2035,5 @@ export const Requests = wrapMethods(
     ], // Mutation methods (and fresh reads that must not be cached)
     ['computeIdentifier'], // Infinite cache methods
     {}, // No custom cache durations needed - lock methods delegate to ApplicationUtils caching
-    ['getInventoryShortageAlerts', 'getItemThumbnails', 'getInventoryProjection', 'getInventoryProjectionBasis'] // Persisted methods (CACHE/Analytics)
+    ['getInventoryShortageAlerts', 'getItemThumbnails', 'getInventoryProjection', 'getInventoryProjectionBasis', 'getInventoryProjectionMonths'] // Persisted methods (CACHE/Analytics)
 );

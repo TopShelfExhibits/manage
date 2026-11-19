@@ -6428,8 +6428,8 @@ test('INVENTORY PROJECTION', 'settings: defaults, preference values, minimums', 
 test('INVENTORY PROJECTION', 'volume: booked or the past month carried forward, with the trend', () => {
     const { rows, trend } = projectVolume({ months: ['2025-06', '2025-07'], scheduled: { '2025-06': { sqft: 1000, shows: 2 } }, pastSqft: { '2024-06': 800, '2024-07': 2000 } }, DEFAULT_PROJECTION_SETTINGS);
     assertEqual(rows, [
-        { month: '2025-06', shows: 2, scheduledSqft: 1000, pastMonth: '2024-06', pastSqft: 800, projectedSqft: 1000 },
-        { month: '2025-07', shows: 0, scheduledSqft: 0, pastMonth: '2024-07', pastSqft: 2000, projectedSqft: 2000 }
+        { month: '2025-06', shows: 2, scheduledSqft: 1000, pastMonth: '2024-06', pastSqft: 800, multiplier: 1, projectedSqft: 1000 },
+        { month: '2025-07', shows: 0, scheduledSqft: 0, pastMonth: '2024-07', pastSqft: 2000, multiplier: 1, projectedSqft: 2000 }
     ], 'booked when larger, else last year');
     assertEqual(trend, { years: [2800], multipliers: [1] }, 'one year: no trend');
     const twoYears = projectVolume({ months: ['2025-07'], scheduled: {}, pastSqft: { '2024-07': 2000, '2024-12': 500, '2023-07': 1000 } }, { ...DEFAULT_PROJECTION_SETTINGS, historyYears: 2, growthFactor: 1.2 });
@@ -6437,7 +6437,7 @@ test('INVENTORY PROJECTION', 'volume: booked or the past month carried forward, 
     // Two years ahead: years 1000 (Jul 2023 – Jun 2024), 2000; line → 3000, 4000: 1.5, 2
     const ahead = projectVolume({ months: ['2025-07', '2026-06', '2026-07'], scheduled: {}, pastSqft: { '2024-07': 2000, '2023-07': 1000 } }, { ...DEFAULT_PROJECTION_SETTINGS, historyYears: 2, growthFactor: 1.1 });
     assertEqual(ahead.trend.multipliers, [1.5, 2], 'the trend one and two years ahead');
-    assertEqual(ahead.rows.map(r => [r.month, r.pastMonth, r.projectedSqft]), [['2025-07', '2024-07', 3300], ['2026-06', '2025-06', 0], ['2026-07', '2024-07', 4840]],
+    assertEqual(ahead.rows.map(r => [r.month, r.pastMonth, r.multiplier, r.projectedSqft]), [['2025-07', '2024-07', 1.65, 3300], ['2026-06', '2025-06', 1.65, 0], ['2026-07', '2024-07', 2.42, 4840]],
         'Jul 2026 carries Jul 2024 two years: 2000 × 2 × 1.1²; Jun 2026 is a year past Jun 2025');
 });
 
@@ -6452,14 +6452,15 @@ test('INVENTORY PROJECTION', 'shows not booked yet: the past month\'s shows a ye
         { month: '2025-06', pastMonth: '2024-06', scheduledSqft: 900, projectedSqft: 900 },
         { month: '2025-07', pastMonth: '2024-07', scheduledSqft: 500, projectedSqft: 3500 }
     ], pastShows), [
-        { start: '2025-07-10', end: '2025-07-20', sqft: 2000 },
-        { start: '2025-07-25', end: '2025-08-10', sqft: 1000 }
+        { month: '2025-07', start: '2025-07-10', end: '2025-07-20', sqft: 2000 },
+        { month: '2025-07', start: '2025-07-25', end: '2025-08-10', sqft: 1000 }
     ], 'July: a 3000 sq ft gap over 1500 sq ft of past shows, each doubled; June is booked above its past');
 });
 
-// June: booked 1000 sq ft; one show without a pack list (600 sq ft, Jun 10–20), and A packed 5 on
-// Jun 12–18. July: none booked, last July 2000 sq ft: its two shows a year on, overlapping Jul
-// 20–25. A: 50 per 1000 sq ft, stock 20. B: 2 per 1000 sq ft, stock 3. C has no stock figures.
+// June: booked 1000 sq ft; one show without a pack list (600 sq ft, Jun 10–20), and one with (400
+// sq ft, Jun 12–18) packing 5 A. July: none booked, last July 2000 sq ft: its two shows a year on,
+// overlapping Jul 20–25. A: 50 per 1000 sq ft, stock 20. B: 2 per 1000 sq ft, stock 3. C has no
+// stock figures.
 test('INVENTORY PROJECTION', 'projectInventory: pack lists, use per sq ft and filled shows, out at once against stock', () => {
     const { months, items, filled } = projectInventory({
         months: ['2025-06', '2025-07'],
@@ -6470,6 +6471,7 @@ test('INVENTORY PROJECTION', 'projectInventory: pack lists, use per sq ft and fi
             { ship: '2024-07-05', end: '2024-07-25', month: '2024-07', sqft: 1000 },
             { ship: '2024-07-20', end: '2024-08-05', month: '2024-07', sqft: 1000 }
         ],
+        packedShows: [{ start: '2025-06-12', end: '2025-06-18', sqft: 400 }],
         unpackedShows: [{ start: '2025-06-10', end: '2025-06-20', sqft: 600 }],
         usageSqft: 1000,
         items: [
@@ -6483,6 +6485,8 @@ test('INVENTORY PROJECTION', 'projectInventory: pack lists, use per sq ft and fi
         ['2025-07', 2000, [{ itemId: 'A', peak: 100, stock: 20, short: -80 }, { itemId: 'B', peak: 4, stock: 3, short: -1 }]]
     ], 'June: A 30 + 5 out together, B 1.2 within 3; July: two filled shows overlap, B short by exactly the minimum');
     assertEqual([filled, items.map(i => [i.itemId, i.rate])], [2, [['A', 0.05], ['B', 0.002], ['C', 0.01]]], 'filled shows; use per sq ft');
+    assertEqual(months.map(m => [m.month, m.filledShows, m.filledSqft, m.sqftOut]), [['2025-06', 0, 0, 1000], ['2025-07', 2, 2000, 2000]],
+        'June: both booked shows out Jun 12–18; July: the two filled shows overlap');
     assertEqual(itemShortages(months), [
         { itemId: 'A', month: '2025-06', shortage: -80, proposed: null },
         { itemId: 'B', month: '2025-07', shortage: -1, proposed: null }
@@ -6521,6 +6525,16 @@ test('INVENTORY PROJECTION', 'CABINETS months: the most out at once, ship to ret
     assertEqual(byMonth['2025-09'], { shows: 8, scheduledSqft: 2800, pastSqft: 0, projectedSqft: 2800, short: [['CAB-004', 67, 10]] }, 'September: the most out on Sep 5, August shows among them');
     assertEqual(byMonth['2025-10'], { shows: 0, scheduledSqft: 0, pastSqft: 0, projectedSqft: 0, short: [['CAB-004', 23.8, 10]] }, 'October: nothing ships, September shows still out');
     assertEqual(byMonth['2026-01'], { shows: 2, scheduledSqft: 300, pastSqft: 5700, projectedSqft: 5700, short: [['CAB-004', 104.5, 10], ['CAB-005', 9.5, 6]] }, 'January: last January\'s shows a year on, with the booked two');
+}));
+
+// The month rows (View Months): Oct 2025, 1400 sq ft out on Oct 1 (the 1300 above, and Test Client
+// 2025 HIMSS, 100, packed); Jan 2026, Jan 2025's 7 shows fill 5400 sq ft, and all 5700 overlap
+test('INVENTORY PROJECTION', 'CABINETS month rows: how each month is reached', () => _withProjectionToday(async () => {
+    const months = await Requests.getInventoryProjectionMonths('CABINETS');
+    const brief = (month) => { const m = months.find(row => row.month === month); return [m.pastMonth, m.multiplier, m.filledShows, m.filledSqft, m.sqftOut, m.shortCount, m.shortages.map(s => s.itemId)]; };
+    assertEqual(brief('2025-10'), ['2024-10', 1, 0, 0, 1400, 1, ['CAB-004']], 'October: nothing ships, September shows out');
+    assertEqual(brief('2026-01'), ['2025-01', 1, 7, 5400, 5700, 2, ['CAB-004', 'CAB-005']], 'January: last January fills the gap');
+    assertEqual(await Requests.getInventoryProjectionMonths(''), [], 'no category, no months');
 }));
 
 test('INVENTORY PROJECTION', 'CABINETS report rows, with and without a proposal', () => _withProjectionToday(async () => {
